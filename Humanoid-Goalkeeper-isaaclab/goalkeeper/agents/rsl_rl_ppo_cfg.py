@@ -1,16 +1,12 @@
 """RSL-RL OnPolicyRunner configuration for the Goalkeeper environment.
 
-Updated for rsl_rl 5.0.1 / isaaclab_rl 0.5.0 (Isaac Sim 5.1.0).
-Key API changes vs the original (rsl_rl 1.0.2 / Isaac Sim 5.0.0):
-  - RslRlPpoActorCriticCfg replaced by RslRlMLPModelCfg (separate actor + critic)
-  - obs_groups key renamed from "policy" to "actor"
-  - empirical_normalization field now required
-  - distribution_cfg replaces init_noise_std / noise_std_type on the actor model
+Uses Isaac Lab's rsl_rl wrapper with standard PPO hyperparameters
+matching the original G1 HIM-PPO configuration.
 """
 from isaaclab.utils import configclass
 from isaaclab_rl.rsl_rl import (
     RslRlOnPolicyRunnerCfg,
-    RslRlMLPModelCfg,
+    RslRlPpoActorCriticCfg,
     RslRlPpoAlgorithmCfg,
 )
 
@@ -27,44 +23,25 @@ class GoalkeeperPPORunnerCfg(RslRlOnPolicyRunnerCfg):
     logger: str = "tensorboard"
     wandb_project: str = "goalkeeper"
 
-    # rsl_rl 5.x: map env observation dict keys to algorithm observation sets
-    # "actor" receives the rolling history obs (960-dim), "critic" the privileged obs (113-dim)
-    obs_groups: dict = {
-        "actor": ["policy"],
-        "critic": ["critic"],
-    }
-
-    # Required by RslRlBaseRunnerCfg in rsl_rl 5.x
-    empirical_normalization: bool = False
-
     clip_actions: float = 100.0
 
     resume: bool = False
     load_run: str = ".*"
     load_checkpoint: str = "model_.*.pt"
 
-    # Actor: stochastic MLP with Gaussian output
-    actor: RslRlMLPModelCfg = RslRlMLPModelCfg(
-        class_name="MLPModel",
-        hidden_dims=[512, 256, 256],
+    # Policy network: stochastic actor + deterministic critic
+    policy: RslRlPpoActorCriticCfg = RslRlPpoActorCriticCfg(
+        init_noise_std=1.0,
+        noise_std_type="scalar",
+        actor_obs_normalization=False,
+        critic_obs_normalization=False,
+        actor_hidden_dims=[512, 256, 256],
+        critic_hidden_dims=[512, 256, 256],
         activation="elu",
-        obs_normalization=False,
-        distribution_cfg=RslRlMLPModelCfg.GaussianDistributionCfg(
-            init_std=1.0,
-            std_type="scalar",
-        ),
     )
 
-    # Critic: deterministic MLP
-    critic: RslRlMLPModelCfg = RslRlMLPModelCfg(
-        class_name="MLPModel",
-        hidden_dims=[512, 256, 256],
-        activation="elu",
-        obs_normalization=False,
-    )
-
+    # PPO algorithm configuration
     algorithm: RslRlPpoAlgorithmCfg = RslRlPpoAlgorithmCfg(
-        class_name="PPO",
         value_loss_coef=1.0,
         use_clipped_value_loss=True,
         clip_param=0.2,

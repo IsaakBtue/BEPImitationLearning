@@ -1,1 +1,0 @@
-cd /home/isaak/BEPImitationlearning/Humanoid-Goalkeeper-isaaclab && conda activate /home/isaak/miniconda3/envs/env_isaaclab && python -u scripts/play.py --num_envs=4 --checkpoint=logs/rsl_rl/goalkeeper/2026-04-27_18-33-53_g1_isaaclab/model_24800.pt

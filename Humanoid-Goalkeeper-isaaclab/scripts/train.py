@@ -8,7 +8,6 @@ Note: Isaac Sim must be launched via AppLauncher BEFORE any other imports.
 Environment: isaak_isaaclab (Isaac Sim 5.1.0 / Isaac Lab 0.54.3 / rsl_rl 5.0.1)
 """
 import argparse
-import importlib.metadata
 import sys
 import os
 
@@ -30,7 +29,7 @@ import gymnasium as gym
 from datetime import datetime
 from rsl_rl.runners import OnPolicyRunner
 
-from isaaclab_rl.rsl_rl import RslRlVecEnvWrapper, handle_deprecated_rsl_rl_cfg
+from isaaclab_rl.rsl_rl import RslRlVecEnvWrapper
 
 # Add parent dir so `goalkeeper` package is importable
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -56,10 +55,6 @@ def main():
     agent_cfg.device = args_cli.device
     if args_cli.max_iterations is not None:
         agent_cfg.max_iterations = args_cli.max_iterations
-
-    # Convert deprecated rsl_rl config fields for the installed rsl_rl version
-    rsl_rl_version = importlib.metadata.version("rsl_rl_lib")
-    agent_cfg = handle_deprecated_rsl_rl_cfg(agent_cfg, rsl_rl_version)
 
     # Logging directory
     log_root = os.path.join(

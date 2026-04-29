@@ -765,8 +765,7 @@ class GoalkeeperEnv(DirectRLEnv):
         drag += torch.empty_like(drag).uniform_(-0.5, 0.5)
         forces = drag.unsqueeze(1)  # (N, 1, 3)
         torques_zero = torch.zeros_like(forces)
-        # Isaac Lab 0.54+ renamed this API
-        self._ball.permanent_wrench_composer.set_forces_and_torques(forces, torques_zero, is_global=True)
+        self._ball.set_external_force_and_torque(forces, torques_zero, is_global=True)
 
     def _update_ball_target(self):
         """Update end_target based on ball approach."""
