@@ -5,7 +5,6 @@ Usage:
     python scripts/play.py --headless --num_envs=4 --checkpoint=logs/rsl_rl/goalkeeper/.../model_*.pt
 """
 import argparse
-import importlib.metadata
 import sys
 import os
 
@@ -22,7 +21,7 @@ simulation_app = app_launcher.app
 import torch
 import gymnasium as gym
 from rsl_rl.runners import OnPolicyRunner
-from isaaclab_rl.rsl_rl import RslRlVecEnvWrapper, handle_deprecated_rsl_rl_cfg
+from isaaclab_rl.rsl_rl import RslRlVecEnvWrapper
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import goalkeeper  # noqa: F401
@@ -39,10 +38,6 @@ def main():
 
     agent_cfg = GoalkeeperPPORunnerCfg()
     agent_cfg.device = args_cli.device
-
-    # Convert deprecated rsl_rl config fields for the installed rsl_rl version
-    rsl_rl_version = importlib.metadata.version("rsl_rl_lib")
-    agent_cfg = handle_deprecated_rsl_rl_cfg(agent_cfg, rsl_rl_version)
 
     env = gym.make("Isaac-Goalkeeper-Direct-v0", cfg=env_cfg)
     env = RslRlVecEnvWrapper(env, clip_actions=agent_cfg.clip_actions)
