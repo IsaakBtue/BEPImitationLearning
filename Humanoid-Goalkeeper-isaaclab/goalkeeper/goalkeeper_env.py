@@ -507,7 +507,28 @@ class GoalkeeperEnv(DirectRLEnv):
             self.default_dof_pos[i] = angle
         self.default_dof_pos = self.default_dof_pos.unsqueeze(0)
         self.default_dof_poses = self.default_dof_pos.repeat(N, 1)
-        self.standpos = torch.tensor([self.cfg.init_pos], dtype=torch.float32, device=self.device)
+
+        # cfg.init_pos is in IsaacGym DFS order; reorder to IsaacLab BFS order by name lookup
+        _G1_DFS_ORDER = [
+            "left_hip_pitch_joint", "left_hip_roll_joint", "left_hip_yaw_joint",
+            "left_knee_joint", "left_ankle_pitch_joint", "left_ankle_roll_joint",
+            "right_hip_pitch_joint", "right_hip_roll_joint", "right_hip_yaw_joint",
+            "right_knee_joint", "right_ankle_pitch_joint", "right_ankle_roll_joint",
+            "waist_yaw_joint", "waist_roll_joint", "waist_pitch_joint",
+            "left_shoulder_pitch_joint", "left_shoulder_roll_joint", "left_shoulder_yaw_joint",
+            "left_elbow_joint", "left_wrist_roll_joint", "left_wrist_pitch_joint", "left_wrist_yaw_joint",
+            "right_shoulder_pitch_joint", "right_shoulder_roll_joint", "right_shoulder_yaw_joint",
+            "right_elbow_joint", "right_wrist_roll_joint", "right_wrist_pitch_joint", "right_wrist_yaw_joint",
+        ]
+        _init_pos_dfs = self.cfg.init_pos
+        _standpos_arr = torch.zeros(nd, device=self.device)
+        for bfs_idx, name in enumerate(self.dof_names):
+            if name in _G1_DFS_ORDER:
+                dfs_idx = _G1_DFS_ORDER.index(name)
+                if dfs_idx < len(_init_pos_dfs):
+                    _standpos_arr[bfs_idx] = _init_pos_dfs[dfs_idx]
+        self.standpos = _standpos_arr.unsqueeze(0)
+
         if self.standpos.shape[1] != nd:
             print(f"[GoalkeeperEnv] init_pos length mismatch ({self.standpos.shape[1]} vs {nd}), using zeros")
             self.standpos = self.default_dof_pos.clone()
@@ -780,7 +801,7 @@ class GoalkeeperEnv(DirectRLEnv):
         dof_upper = self.dof_pos_limits[:, 1].view(1, -1)
         dof_lower = self.dof_pos_limits[:, 0].view(1, -1)
 
-        if self.cfg.continue_keep and torch.rand(1).item() > 0.2:
+        if self.cfg.continue_keep and torch.rand(1).item() > 0.2 and not self.play:
             random_env_ids = torch.randint(0, self.num_envs, (len(env_ids),), device=self.device)
             joint_pos = self._robot.data.joint_pos[random_env_ids].clone()
         elif self.cfg.randomize_initial_joint_pos:
@@ -807,10 +828,15 @@ class GoalkeeperEnv(DirectRLEnv):
         # Robot pose: position + identity quaternion wxyz
         robot_pos = env_origins[env_ids].clone()
         robot_pos[:, 2] += 0.8
-        robot_pos[:, :2] += torch_rand_float(-0.3, 0.3, (len(env_ids), 2), self.device)
+        if not self.play:
+            robot_pos[:, :2] += torch_rand_float(-0.3, 0.3, (len(env_ids), 2), self.device)
         robot_quat = torch.tensor([1.0, 0.0, 0.0, 0.0], device=self.device).repeat(len(env_ids), 1)
-        robot_lin_vel = torch_rand_float(-0.3, 0.3, (len(env_ids), 3), self.device)
-        robot_ang_vel = torch_rand_float(-0.3, 0.3, (len(env_ids), 3), self.device)
+        if self.play:
+            robot_lin_vel = torch.zeros(len(env_ids), 3, device=self.device)
+            robot_ang_vel = torch.zeros(len(env_ids), 3, device=self.device)
+        else:
+            robot_lin_vel = torch_rand_float(-0.3, 0.3, (len(env_ids), 3), self.device)
+            robot_ang_vel = torch_rand_float(-0.3, 0.3, (len(env_ids), 3), self.device)
         robot_state = torch.cat([robot_pos, robot_quat, robot_lin_vel, robot_ang_vel], dim=-1)
         self._robot.write_root_state_to_sim(robot_state, env_ids)
 

@@ -1,7 +1,1 @@
-===== PLAY (EVALUATION) COMMAND =====
-
-# Test play.py with an existing checkpoint (16 envs, small test)
-source activate isaak_isaaclab && python -u scripts/play.py --headless --num_envs=4 --checkpoint=logs/rsl_rl/goalkeeper/2026-04-25_09-39-18_g1_isaaclab/model_4.pt
-
-# Play with larger environment count for real-time visualization
-source activate isaak_isaaclab && python -u scripts/play.py --headless --num_envs=16 --checkpoint=logs/rsl_rl/goalkeeper/2026-04-25_09-39-18_g1_isaaclab/model_4.pt
+cd /home/isaak/BEPImitationlearning/Humanoid-Goalkeeper-isaaclab && conda activate /home/isaak/miniconda3/envs/env_isaaclab && python -u scripts/play.py --num_envs=4 --checkpoint=logs/rsl_rl/goalkeeper/2026-04-27_18-33-53_g1_isaaclab/model_24800.pt
