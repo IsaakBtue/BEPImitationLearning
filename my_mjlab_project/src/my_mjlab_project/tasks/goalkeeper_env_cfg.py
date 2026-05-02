@@ -229,6 +229,11 @@ def goalkeeper_play_env_cfg() -> ManagerBasedRlEnvCfg:
     cfg = goalkeeper_env_cfg(play=True)
     cfg.scene.num_envs = 1
     # Remove motion command so play script doesn't require --motion-file.
-    # Obs are already clean (motion refs removed in goalkeeper_env_cfg).
+    # Also remove tracking observations that depend on the command.
     cfg.commands.pop("motion", None)
+    # Remove tracking observations that require the motion command
+    _tracking_obs = ["robot_body_pos_b", "robot_body_ori_b", "robot_body_lin_vel_b", "robot_body_ang_vel_b"]
+    for _obs in _tracking_obs:
+        cfg.observations["actor"].terms.pop(_obs, None)
+        cfg.observations["critic"].terms.pop(_obs, None)
     return cfg
