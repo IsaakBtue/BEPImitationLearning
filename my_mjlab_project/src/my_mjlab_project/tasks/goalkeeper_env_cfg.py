@@ -216,6 +216,10 @@ def goalkeeper_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
         "left_wrist_yaw_link",
         "right_wrist_yaw_link",
     )
+    # Remove anchor terminations (incompatible with -0.39m z-correction applied to motion data)
+    # Rely on goalkeeper rewards instead
+    cfg.terminations.pop("anchor_pos", None)
+    cfg.terminations.pop("anchor_ori", None)
     cfg.viewer.body_name = "torso_link"
 
     if play:
