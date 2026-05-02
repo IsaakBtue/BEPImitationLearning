@@ -231,8 +231,9 @@ def goalkeeper_play_env_cfg() -> ManagerBasedRlEnvCfg:
     # Remove motion command so play script doesn't require --motion-file.
     # Also remove tracking observations that depend on the command.
     cfg.commands.pop("motion", None)
-    # Remove tracking observations that require the motion command
-    _tracking_obs = ["robot_body_pos_b", "robot_body_ori_b", "robot_body_lin_vel_b", "robot_body_ang_vel_b"]
+    # Remove all tracking observations (depend on motion command)
+    _tracking_obs = ["robot_body_pos_b", "robot_body_ori_b", "robot_body_lin_vel_b", "robot_body_ang_vel_b",
+                     "body_pos", "body_ori"]
     for _obs in _tracking_obs:
         cfg.observations["actor"].terms.pop(_obs, None)
         cfg.observations["critic"].terms.pop(_obs, None)
