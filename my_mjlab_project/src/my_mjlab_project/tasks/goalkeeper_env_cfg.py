@@ -228,14 +228,7 @@ def goalkeeper_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
 def goalkeeper_play_env_cfg() -> ManagerBasedRlEnvCfg:
     cfg = goalkeeper_env_cfg(play=True)
     cfg.scene.num_envs = 1
-    # Autonomous play: remove motion command and all command-dependent observations
-    # Policy infers best response to ball without tracking reference motion
+    # Remove motion command so play script doesn't require --motion-file.
+    # Obs are already clean (motion refs removed in goalkeeper_env_cfg).
     cfg.commands.pop("motion", None)
-    # Remove all observation terms that depend on the motion command
-    obs_to_remove = [
-        "command", "motion_anchor_pos_b", "motion_anchor_ori_b"
-    ]
-    for obs_name in obs_to_remove:
-        cfg.observations["actor"].terms.pop(obs_name, None)
-        cfg.observations["critic"].terms.pop(obs_name, None)
     return cfg
