@@ -40,6 +40,13 @@ def goalkeeper_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
     """Goalkeeper task: G1 humanoid blocks a soccer ball using pose-tracking rewards."""
     cfg = unitree_g1_flat_tracking_env_cfg(play=play)
 
+    # Remove motion-reference observations so the policy trains and infers
+    # from ball + joint state only — no motion file needed at play time.
+    _motion_obs = ["command", "motion_anchor_pos_b", "motion_anchor_ori_b"]
+    for _obs in _motion_obs:
+        cfg.observations["actor"].terms.pop(_obs, None)
+        cfg.observations["critic"].terms.pop(_obs, None)
+
     # ------------------------------------------------------------------ #
     # MuJoCo model parameters (for ball collisions)
     # ------------------------------------------------------------------ #
@@ -221,4 +228,14 @@ def goalkeeper_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
 def goalkeeper_play_env_cfg() -> ManagerBasedRlEnvCfg:
     cfg = goalkeeper_env_cfg(play=True)
     cfg.scene.num_envs = 1
+    # Autonomous play: remove motion command and all command-dependent observations
+    # Policy infers best response to ball without tracking reference motion
+    cfg.commands.pop("motion", None)
+    # Remove all observation terms that depend on the motion command
+    obs_to_remove = [
+        "command", "motion_anchor_pos_b", "motion_anchor_ori_b"
+    ]
+    for obs_name in obs_to_remove:
+        cfg.observations["actor"].terms.pop(obs_name, None)
+        cfg.observations["critic"].terms.pop(obs_name, None)
     return cfg
