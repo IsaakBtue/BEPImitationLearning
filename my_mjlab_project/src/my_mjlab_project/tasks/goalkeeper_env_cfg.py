@@ -242,7 +242,8 @@ def goalkeeper_play_env_cfg() -> ManagerBasedRlEnvCfg:
         cfg.observations["actor"].terms.pop(_obs, None)
         cfg.observations["critic"].terms.pop(_obs, None)
     # Remove all motion-dependent terminations (anchor tracking, body position bounds, etc)
-    _motion_terminations = ["anchor_pos", "anchor_ori", "bad_motion_body_pos_z_only", "bad_motion_body_pos_xy_only"]
+    # Note: keys in cfg.terminations dict may differ from function names
+    _motion_terminations = ["anchor_pos", "anchor_ori", "ee_body_pos"]
     for _term in _motion_terminations:
         cfg.terminations.pop(_term, None)
     return cfg
