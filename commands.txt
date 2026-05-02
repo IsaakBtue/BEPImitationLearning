@@ -15,7 +15,7 @@ cd /home/isaak/BEPImitationlearning/my_mjlab_project && uv run python -m mjlab.s
 # ========== PLAY COMMANDS ==========
 # No --motion-file needed — policy infers autonomously from ball + joint state
 
-cd /home/isaak/BEPImitationlearning/my_mjlab_project && uv run python -m mjlab.scripts.play goalkeeper --checkpoint-file logs/rsl_rl/g1_goalkeeper/<run_id>/model_<iter>.pt
+cd /home/isaak/BEPImitationlearning/my_mjlab_project && uv run python -m mjlab.scripts.play goalkeeper --checkpoint-file logs/rsl_rl/g1_goalkeeper/2026-05-03_00-02-38/model_0.pt
 
 # ========== WHAT WAS FIXED ==========
 # BUG 1 (CRITICAL): convert.py
@@ -33,6 +33,17 @@ cd /home/isaak/BEPImitationlearning/my_mjlab_project && uv run python -m mjlab.s
 #     forced --motion-file argument at play time
 #   FIX: Removed all 3 terms from training obs in goalkeeper_env_cfg()
 #        Play cfg removes motion command; no --motion-file needed at inference
+#
+# BUG 4 (CRITICAL): goalkeeper_env_cfg.py terminations
+#   - anchor_pos/anchor_ori terminations checked if robot within 0.25m of reference pose
+#   - But -0.39m z-correction in commands.py moved robot 0.39m below reference
+#   - Result: all envs terminated immediately in training
+#   FIX: Removed anchor_pos and anchor_ori terminations from training config
+#
+# BUG 5 (CRITICAL): ee_body_pos termination in play config
+#   - ee_body_pos termination (function: bad_motion_body_pos_z_only) requires motion command
+#   - Play environment has no motion command, causing crash on first step
+#   FIX: Pop ee_body_pos from play terminations (key name in dict, not function name)
 #
 # TRANSFORM: commands.py
 #   - Motion data lowered 0.39m (feet to z=0 ground level)
