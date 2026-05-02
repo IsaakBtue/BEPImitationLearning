@@ -18,6 +18,13 @@ args_cli = parser.parse_args()
 app_launcher = AppLauncher(args_cli)
 simulation_app = app_launcher.app
 
+# Suppress noisy log channels that clutter terminal output
+try:
+    import omni.log
+    omni.log.get_log().set_channel_level("omni.usd", omni.log.Level.ERROR, omni.log.SettingBehavior.OVERRIDE)
+except Exception:
+    pass
+
 import torch
 import gymnasium as gym
 

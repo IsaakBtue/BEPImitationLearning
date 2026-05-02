@@ -11,6 +11,7 @@ API changes vs Isaac Gym:
 from __future__ import annotations
 
 import math
+import os
 import random
 from typing import Sequence
 
@@ -25,7 +26,9 @@ from isaaclab.terrains import TerrainImporter
 from isaaclab.utils.math import quat_apply_inverse, convert_quat
 
 from .goalkeeper_env_cfg import GoalkeeperEnvCfg
-from .goalkeeper_utils import load_imitation_dataset, MotionLib, torch_rand_float
+from .goalkeeper_utils import (
+    load_single_motion, MotionLib, torch_rand_float,
+)
 
 
 class GoalkeeperEnv(DirectRLEnv):
@@ -46,8 +49,9 @@ class GoalkeeperEnv(DirectRLEnv):
         # Allocate buffers
         self._init_buffers()
 
-        # Load AMP motion dataset
+        # Load AMP motion datasets (one per motion type) and set up discriminators
         self._load_motions()
+        self._setup_amp()
 
         self.play = self.cfg.play
         self.add_noise = self.cfg.add_noise
@@ -154,7 +158,7 @@ class GoalkeeperEnv(DirectRLEnv):
         return terminated, timed_out
 
     def _get_rewards(self) -> torch.Tensor:
-        """Compute and return total reward."""
+        """Compute and return total reward (task + AMP blend)."""
         # Update curriculum reward scales
         if "eereach" in self._reward_scales:
             self._reward_scales["eereach"] = self._eereach_init * (1 + 0.5 * self.curriculumupdate)
@@ -169,15 +173,31 @@ class GoalkeeperEnv(DirectRLEnv):
             self._reward_scales["dof_pos_limits"] = self._dof_pos_init * 3.0
             self._reward_scales["torque_limits"] = self._torque_init * 3.0
 
-        rew_buf = torch.zeros(self.num_envs, device=self.device)
+        task_rew = torch.zeros(self.num_envs, device=self.device)
         for name, scale in self._reward_scales.items():
             fn = getattr(self, f"_reward_{name}", None)
             if fn is not None:
                 rew = fn() * scale
-                rew_buf += rew
+                task_rew += rew
                 self.episode_sums[name] += rew
 
-        return rew_buf
+        # Pure task reward — AMP blending is handled by HIMOnPolicyRunner
+        return task_rew
+
+    def get_amp_observations(self) -> torch.Tensor:
+        """Return current per-frame AMP obs: all 29 robot dof_pos (N, 29).
+
+        Matches original legged_robot.py get_amp_observations() which returns self.dof_pos.clone()
+        (all joints).  Expert data from MotionLib is also 29-wide with 8 non-motion joints
+        zero-padded, so the discriminator learns to penalise movement in those joints too.
+        Runner concatenates two consecutive frames → 58-dim AMP observation.
+        """
+        return self._robot.data.joint_pos.clone()  # (N, 29) BFS order
+
+    @property
+    def motions(self):
+        """Dict of MotionLib objects — one per motion type — for HIMOnPolicyRunner."""
+        return self.motion_libs
 
     def _reset_idx(self, env_ids: Sequence[int] | None):
         """Reset selected environments."""
@@ -215,6 +235,11 @@ class GoalkeeperEnv(DirectRLEnv):
                 (len(env_ids), self.num_dof), self.device,
             ) * self.torque_limits.unsqueeze(0)
             self.actuation_offset[env_ids[:, None], self.curriculum_dof_indices] = 0.0
+
+        # Apply friction / restitution DR to physics
+        self._randomize_materials(env_ids)
+        # Apply payload / COM / link-mass DR to physics
+        self._randomize_mass_props(env_ids)
 
         # Reset buffers
         self.last_actions[env_ids] = 0.0
@@ -555,8 +580,15 @@ class GoalkeeperEnv(DirectRLEnv):
         # Domain rand
         self.payload = torch.zeros(N, 1, device=self.device)
         self.com_displacement = torch.zeros(N, 3, device=self.device)
+        self.link_mass_scale = torch.ones(N, 1, device=self.device)
         self.friction_coeffs = torch.ones(N, 1, device=self.device)
         self.restitution_coeffs = torch.zeros(N, 1, device=self.device)
+        # Default masses fetched lazily on first reset (physx view may not be ready yet)
+        self.default_body_masses: torch.Tensor | None = None
+
+        # AMP: number of joints per frame (= 29 after fix to match original 58-dim obs)
+        _n_amp_joints = self.cfg.amp_num_obs // self.cfg.amp_num_steps
+        self._n_amp_joints = _n_amp_joints
 
         # Command ranges (6 regions)
         six = N // 6
@@ -639,20 +671,60 @@ class GoalkeeperEnv(DirectRLEnv):
             self.torque_limits == 0, torch.full_like(self.torque_limits, 400.0), self.torque_limits
         )
 
+    # Motion type → region id mapping (matches HIM-PPO runner order)
+    _MOTION_KEYS = ["lefthand", "righthand", "leftjump", "rightjump", "leftstep", "rightstep"]
+
     def _load_motions(self):
-        """Load AMP motion dataset."""
+        """Load one MotionLib per motion type for region-matched AMP discriminators."""
+        # Build motion-joint → BFS-index mapping using joint_id.txt ordering.
+        # The .pt files have `joint_position` shaped (T, 21) — 21 joints as listed in joint_id.txt.
+        # We need to extract those same joints from the robot's 29-joint BFS state in the same order.
         try:
-            multidataset, mapping = load_imitation_dataset(
-                self.cfg.dataset_folder, self.cfg.dataset_joint_mapping
-            )
-            self.motion_lib = MotionLib(
-                multidataset, mapping, self.dof_names, self.keyframe_names,
-                self.cfg.dataset_frame_rate, self.cfg.dataset_min_time,
-                self.device, self.cfg.amp_obs_type, self.cfg.amp_num_steps,
-            )
+            with open(self.cfg.dataset_joint_mapping, "r") as f:
+                lines = [l.strip().split(" ") for l in f.readlines() if l.strip()]
+            # lines: [[idx, name], ...] sorted by index
+            motion_joint_names = [name for _, name in sorted(lines, key=lambda x: int(x[0]))]
         except Exception as e:
-            print(f"[GoalkeeperEnv] Warning: motion dataset load failed: {e}")
-            self.motion_lib = None
+            print(f"[GoalkeeperEnv] Warning: could not read joint mapping: {e}")
+            motion_joint_names = []
+
+        bfs_name_to_idx = {name: i for i, name in enumerate(self.dof_names)}
+        motion_to_bfs = []
+        for name in motion_joint_names:
+            if name in bfs_name_to_idx:
+                motion_to_bfs.append(bfs_name_to_idx[name])
+            else:
+                print(f"[GoalkeeperEnv] Warning: motion joint '{name}' not found in robot BFS joints")
+                motion_to_bfs.append(0)
+        self._amp_motion_bfs_idx = torch.tensor(motion_to_bfs, dtype=torch.long, device=self.device)
+        print(f"[GoalkeeperEnv] AMP motion joints: {len(motion_to_bfs)} of {len(self.dof_names)} robot joints")
+
+        self.motion_libs: dict[str, MotionLib] = {}
+        for key in self._MOTION_KEYS:
+            pt_path = os.path.join(self.cfg.dataset_folder, f"{key}.pt")
+            if not os.path.exists(pt_path):
+                continue
+            raw = load_single_motion(pt_path)
+            if raw is None:
+                continue
+            try:
+                lib = MotionLib(
+                    {key: [raw]}, self.cfg.dataset_joint_mapping,
+                    self.dof_names, self.keyframe_names,
+                    self.cfg.dataset_frame_rate, self.cfg.dataset_min_time,
+                    self.device, self.cfg.amp_obs_type, self.cfg.amp_num_steps,
+                )
+                self.motion_libs[key] = lib
+                print(f"[GoalkeeperEnv] Loaded motion '{key}'")
+            except Exception as e:
+                print(f"[GoalkeeperEnv] Warning: motion '{key}' failed: {e}")
+
+        # Backward-compat single lib (used if only one loaded)
+        self.motion_lib = next(iter(self.motion_libs.values())) if self.motion_libs else None
+
+    def _setup_amp(self):
+        """No-op: AMP discriminators are now owned by HIMOnPolicyRunner/HIMPPO, not the env."""
+        pass
 
     def _build_reward_scales(self):
         """Build reward scale dict from config fields, multiplied by dt."""
@@ -765,7 +837,91 @@ class GoalkeeperEnv(DirectRLEnv):
         drag += torch.empty_like(drag).uniform_(-0.5, 0.5)
         forces = drag.unsqueeze(1)  # (N, 1, 3)
         torques_zero = torch.zeros_like(forces)
-        self._ball.set_external_force_and_torque(forces, torques_zero, is_global=True)
+        self._ball.permanent_wrench_composer.set_forces_and_torques(forces, torques_zero, is_global=True)
+
+    def _randomize_materials(self, env_ids: torch.Tensor):
+        """Apply per-reset friction and restitution randomization to robot links."""
+        if not (self.cfg.randomize_friction or self.cfg.randomize_restitution):
+            return
+        try:
+            # root_physx_view exposes PhysX material tensor API
+            physx_view = self._robot.root_physx_view
+            materials = physx_view.get_material_properties()  # CPU (num_envs, num_shapes, 3)
+            n = len(env_ids)
+            num_shapes = materials.shape[1]
+            env_ids_cpu = env_ids.cpu()
+
+            if self.cfg.randomize_friction:
+                sf = torch_rand_float(
+                    self.cfg.friction_range[0], self.cfg.friction_range[1],
+                    (n, num_shapes), self.device,
+                ).cpu()
+                materials[env_ids_cpu, :, 0] = sf
+                materials[env_ids_cpu, :, 1] = sf * 0.9  # dynamic ≈ 0.9 × static
+
+            if self.cfg.randomize_restitution:
+                rs = torch_rand_float(
+                    self.cfg.restitution_range[0], self.cfg.restitution_range[1],
+                    (n, num_shapes), self.device,
+                ).cpu()
+                materials[env_ids_cpu, :, 2] = rs
+
+            all_ids = torch.arange(self._robot.num_instances, dtype=torch.int32)
+            physx_view.set_material_properties(materials, all_ids)
+        except Exception:
+            # API may differ across Isaac Lab versions — skip silently on first failure
+            pass
+
+    def _randomize_mass_props(self, env_ids: torch.Tensor):
+        """Apply per-reset payload, link-mass, and COM randomization (matches legged_robot.py)."""
+        if not (self.cfg.randomize_payload_mass or self.cfg.randomize_link_mass
+                or self.cfg.randomize_com_displacement):
+            return
+        try:
+            physx_view = self._robot.root_physx_view
+            n = len(env_ids)
+            env_ids_cpu = env_ids.cpu()
+
+            # Lazy-init: store unmodified default masses on first call
+            if self.default_body_masses is None:
+                self.default_body_masses = physx_view.get_masses().clone()  # (num_envs, num_bodies)
+
+            # Re-randomize per-env scales
+            if self.cfg.randomize_payload_mass:
+                self.payload[env_ids] = torch_rand_float(
+                    self.cfg.payload_mass_range[0], self.cfg.payload_mass_range[1],
+                    (n, 1), self.device,
+                )
+            if self.cfg.randomize_link_mass:
+                self.link_mass_scale[env_ids] = torch_rand_float(
+                    self.cfg.link_mass_range[0], self.cfg.link_mass_range[1],
+                    (n, 1), self.device,
+                )
+            if self.cfg.randomize_com_displacement:
+                self.com_displacement[env_ids] = torch_rand_float(
+                    self.cfg.com_displacement_range[0], self.cfg.com_displacement_range[1],
+                    (n, 3), self.device,
+                )
+
+            # Build new mass tensor from defaults, then apply payload + link-mass scale
+            masses = self.default_body_masses.clone()  # (num_envs, num_bodies), CPU
+            if self.cfg.randomize_link_mass:
+                # Scale all bodies (matches original: for i in range(len(props)): props[i].mass *= scale)
+                masses[env_ids_cpu, :] *= self.link_mass_scale[env_ids].squeeze(-1).cpu().unsqueeze(-1)
+            if self.cfg.randomize_payload_mass:
+                # Add payload to root body only (body 0)
+                masses[env_ids_cpu, 0] += self.payload[env_ids].squeeze(-1).cpu()
+
+            # Clamp: PhysX requires strictly positive mass on every body
+            masses.clamp_(min=0.01)
+
+            all_ids = torch.arange(self._robot.num_instances, dtype=torch.int32)
+            physx_view.set_masses(masses, all_ids)
+
+        except Exception as e:
+            if not hasattr(self, '_mass_dr_warned'):
+                print(f"[GoalkeeperEnv] Mass DR skipped (API unavailable): {e}")
+                self._mass_dr_warned = True
 
     def _update_ball_target(self):
         """Update end_target based on ball approach."""
@@ -1115,6 +1271,3 @@ class GoalkeeperEnv(DirectRLEnv):
             return torch.zeros(self.num_envs, device=self.device)
         return torch.sum(torch.square(joint_pos - self.default_dof_pos)[:, self.waist_joint_indices[2]], dim=-1)
 
-    # AMP observation accessor (for external use)
-    def get_amp_observations(self) -> torch.Tensor:
-        return self._robot.data.joint_pos.clone()

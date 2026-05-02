@@ -23,7 +23,7 @@ _REPO_ROOT = os.path.dirname(_THIS_DIR)
 _GK_ROOT = os.path.join(os.path.dirname(_REPO_ROOT), "Humanoid-Goalkeeper")
 _LEGGED_GYM_ROOT = os.path.join(_GK_ROOT, "legged_gym")
 _G1_URDF = os.path.join(_LEGGED_GYM_ROOT, "resources", "robots", "g1", "urdf", "g1_29.urdf")
-_DATASETS_DIR = os.path.join(_REPO_ROOT, "resources", "datasets", "goalkeeper")
+_DATASETS_DIR = os.path.join(_GK_ROOT, "legged_gym", "resources", "datasets", "goalkeeper")
 
 # ---------------------------------------------------------------------------
 # G1 Robot ArticulationCfg (manual PD — effort control)
@@ -379,9 +379,17 @@ class GoalkeeperEnvCfg(DirectRLEnvCfg):
     dataset_frame_rate: int = 30
     dataset_min_time: float = 0.1
     amp_obs_type: str = "dof"
-    amp_num_obs: int = 58  # 29 * 2
+    amp_num_obs: int = 58  # 29 robot joints * 2 frames — matches original g1_29_config num_obs=29*2
     amp_coef: float = 0.4
     amp_num_steps: int = 2
+
+    # AMP discriminator training
+    amp_enabled: bool = True          # Enable AMP motion priors
+    disc_hidden_dims: list = [512, 256]
+    disc_lr: float = 1e-4
+    disc_grad_penalty: float = 5.0
+    disc_update_interval: int = 16    # Train discriminators every N policy steps
+    disc_buffer_size: int = 2048      # Max policy obs for discriminator training batch
 
     # Initial pose (from g1_29_config)
     init_pos: list = [

@@ -13,3 +13,16 @@
   ▎  dont know. only stop the loop when you tested everything and ran the training without any errors, run it 
   ▎ headless to see if you dont have any errors. Plan first to make sure u have a good structure so you dont
   ▎ miss out any details."
+
+
+  I have a original repo to make a unitreeg1 do goalkeeping in this folder Humanoid-Goalkeeper, i gave codex 
+  the task to convert this repo into isaaclab instead of isaacgym. Be critical how he has done that. use      
+  the isaacgym and isaaclab mcp server. especially look into                                                  
+  https://isaac-sim.github.io/IsaacLab/main/source/migration/migrating_from_isaacgymenvs.html. Also i look    
+  into this repository for an example of unitreeg1 walking using AMP, because there are two parts to this     
+  conversion the amp and the succesful isaaclab integration. https://github.com/linden713/humanoid_amp.git.   
+  use conda environment isaak_isaaclab for this conversion check. Please make sure you understand every       
+  single bit of the original code of the isaacgym. Make an .md file of the understanding and update the       
+  claude.md to point to that if in future the ai want more context. So in short, convert this goalkeeping     
+  isaacgym code into isaaclab, use mcp documentations and the specific links i send to you.                   
+  '/home/isaak/BEPImitationlearning/humanoid_amp' i cloned the repo for you already.      

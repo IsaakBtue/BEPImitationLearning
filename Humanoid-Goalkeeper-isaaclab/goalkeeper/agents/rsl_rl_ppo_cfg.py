@@ -2,12 +2,15 @@
 
 Uses Isaac Lab's rsl_rl wrapper with standard PPO hyperparameters
 matching the original G1 HIM-PPO configuration.
+
+Compatible with rsl_rl 5.0.1 (RslRlMLPModelCfg actor/critic + distribution_cfg API).
+The deprecated RslRlPpoActorCriticCfg / policy field is NOT used — those are rsl_rl < 4.x.
 """
 from isaaclab.utils import configclass
 from isaaclab_rl.rsl_rl import (
     RslRlOnPolicyRunnerCfg,
-    RslRlPpoActorCriticCfg,
     RslRlPpoAlgorithmCfg,
+    RslRlMLPModelCfg,
 )
 
 
@@ -23,25 +26,44 @@ class GoalkeeperPPORunnerCfg(RslRlOnPolicyRunnerCfg):
     logger: str = "tensorboard"
     wandb_project: str = "goalkeeper"
 
+    # rsl_rl 5.x requires explicit mapping of env obs dict keys to algorithm sets.
+    # "policy" → 960-dim rolling actor history; "critic" → 113-dim privileged obs.
+    obs_groups: dict = {
+        "actor": ["policy"],
+        "critic": ["critic"],
+    }
+
+    empirical_normalization: bool = False
+
     clip_actions: float = 100.0
 
     resume: bool = False
     load_run: str = ".*"
     load_checkpoint: str = "model_.*.pt"
 
-    # Policy network: stochastic actor + deterministic critic
-    policy: RslRlPpoActorCriticCfg = RslRlPpoActorCriticCfg(
-        init_noise_std=1.0,
-        noise_std_type="scalar",
-        actor_obs_normalization=False,
-        critic_obs_normalization=False,
-        actor_hidden_dims=[512, 256, 256],
-        critic_hidden_dims=[512, 256, 256],
+    # Actor: stochastic MLP with Gaussian output (matches g1_29 hidden dims)
+    actor: RslRlMLPModelCfg = RslRlMLPModelCfg(
+        class_name="MLPModel",
+        hidden_dims=[512, 256, 256],
         activation="elu",
+        obs_normalization=False,
+        distribution_cfg=RslRlMLPModelCfg.GaussianDistributionCfg(
+            init_std=1.0,
+            std_type="scalar",
+        ),
     )
 
-    # PPO algorithm configuration
+    # Critic: deterministic MLP (no distribution_cfg → None → deterministic)
+    critic: RslRlMLPModelCfg = RslRlMLPModelCfg(
+        class_name="MLPModel",
+        hidden_dims=[512, 256, 256],
+        activation="elu",
+        obs_normalization=False,
+    )
+
+    # PPO algorithm configuration (matches g1_29 HIM-PPO settings)
     algorithm: RslRlPpoAlgorithmCfg = RslRlPpoAlgorithmCfg(
+        class_name="PPO",
         value_loss_coef=1.0,
         use_clipped_value_loss=True,
         clip_param=0.2,

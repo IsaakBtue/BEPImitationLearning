@@ -1,0 +1,7 @@
+# Smoke test — verify env steps without error
+# Run from: /home/isaak/BEPImitationlearning/Humanoid-Goalkeeper-isaaclab/
+
+cd /home/isaak/BEPImitationlearning/Humanoid-Goalkeeper-isaaclab && /home/isaak/miniforge3/envs/isaak_isaaclab/bin/python -u scripts/test_env.py --headless --num_envs=16 --steps=50
+
+# Full HIM-PPO training (headless)
+# cd /home/isaak/BEPImitationlearning/Humanoid-Goalkeeper-isaaclab && /home/isaak/miniforge3/envs/isaak_isaaclab/bin/python -u scripts/train.py --headless --num_envs=512 --max_iterations=200000
