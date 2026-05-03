@@ -233,10 +233,11 @@ def goalkeeper_play_env_cfg() -> ManagerBasedRlEnvCfg:
     cfg = goalkeeper_env_cfg(play=True)
     cfg.scene.num_envs = 1
     # Keep motion command for ball reset, but disable motion file loading (set empty tuple).
-    # This ensures _reset_ball() is called without requiring motion files at inference.
+    # Set motion_file to first file to satisfy play.py's tracking task check (it won't be loaded).
     motion_cmd = cfg.commands["motion"]
-    motion_cmd.motion_files = ()  # Empty tuple: no motion files loaded
-    motion_cmd.motion_file = ""    # Upstream uses motion_file[0] if motion_files is empty
+    first_motion_file = motion_cmd.motion_files[0] if motion_cmd.motion_files else ""
+    motion_cmd.motion_files = ()  # Empty tuple: no motion files loaded by MultiMotionCommand
+    motion_cmd.motion_file = first_motion_file  # Keep reference for play.py check
     motion_cmd.sampling_mode = "start"  # No resampling needed in play
 
     # Remove all tracking observations (depend on motion data)

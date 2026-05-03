@@ -13,9 +13,10 @@ cd /home/isaak/BEPImitationlearning/my_mjlab_project && uv run python -m mjlab.s
 cd /home/isaak/BEPImitationlearning/my_mjlab_project && uv run python -m mjlab.scripts.train goalkeeper --env.scene.num-envs 64 --gpu-ids '[0]'
 
 # ========== PLAY COMMANDS ==========
-# No --motion-file needed — policy infers autonomously from ball + joint state
+# --motion-file required by play.py for tracking task validation (not actually used by policy)
+# Policy infers autonomously from ball + joint state only
 
-cd /home/isaak/BEPImitationlearning/my_mjlab_project && uv run python -m mjlab.scripts.play goalkeeper --checkpoint-file logs/rsl_rl/g1_goalkeeper/2026-05-03_00-28-48/model_200.pt
+cd /home/isaak/BEPImitationlearning/my_mjlab_project && uv run python -m mjlab.scripts.play goalkeeper --checkpoint-file logs/rsl_rl/g1_goalkeeper/2026-05-03_00-28-48/model_200.pt --motion-file src/my_mjlab_project/motions/data/lefthand.npz
 
 # ========== WHAT WAS FIXED ==========
 # BUG 1 (CRITICAL): convert.py
