@@ -237,11 +237,11 @@ def goalkeeper_play_env_cfg() -> ManagerBasedRlEnvCfg:
     # Remove motion command entirely — policy is 100% autonomous
     cfg.commands.pop("motion", None)
 
-    # Add autonomous ball reset (no motion tracking required)
+    # Add autonomous ball reset (runs on every episode reset)
     from mjlab.managers.event_manager import EventTermCfg
     cfg.events["reset_ball_autonomous"] = EventTermCfg(
         func=gk_resets.reset_ball_autonomous,
-        mode="startup",
+        mode="reset",
         params={"ball_name": "ball"},
     )
 
