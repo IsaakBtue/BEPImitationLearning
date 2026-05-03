@@ -18,9 +18,9 @@ cd /home/isaak/BEPImitationlearning/my_mjlab_project && uv run python -m mjlab.s
 # ========== PLAY COMMANDS ==========
 # Fully autonomous - no motion input required
 # Policy trained on all 6 motions, chooses best response autonomously
-# Ball resets with random trajectory on every episode reset (5 second timeout or manual reset)
+# Ball auto-resets with random trajectory every 10 seconds
 
-cd /home/isaak/BEPImitationlearning/my_mjlab_project && uv run python -m mjlab.scripts.play goalkeeper --checkpoint-file logs/rsl_rl/g1_goalkeeper/2026-05-03_10-47-38/model_400.pt
+cd /home/isaak/BEPImitationlearning/my_mjlab_project && uv run python -m mjlab.scripts.play goalkeeper --checkpoint-file logs/rsl_rl/g1_goalkeeper/2026-05-03_10-47-38/model_200.pt
 
 # ========== WHAT WAS FIXED ==========
 # BUG 1 (CRITICAL): convert.py
