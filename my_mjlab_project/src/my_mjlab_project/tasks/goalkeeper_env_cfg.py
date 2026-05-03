@@ -16,6 +16,7 @@ from mjlab.utils.noise import UniformNoiseCfg as Unoise
 from my_mjlab_project.mdp import MultiMotionCommandCfg
 import my_mjlab_project.mdp.observations as gk_obs
 import my_mjlab_project.mdp.rewards as gk_rew
+import my_mjlab_project.mdp.resets as gk_resets
 
 _HAND_CFG = SceneEntityCfg("robot", body_names=("left_wrist_yaw_link", "right_wrist_yaw_link"))
 _FEET_CFG = SceneEntityCfg("robot", body_names=("left_ankle_roll_link", "right_ankle_roll_link"))
@@ -232,13 +233,17 @@ def goalkeeper_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
 def goalkeeper_play_env_cfg() -> ManagerBasedRlEnvCfg:
     cfg = goalkeeper_env_cfg(play=True)
     cfg.scene.num_envs = 1
-    # Keep motion command for ball reset, but disable motion file loading (set empty tuple).
-    # Set motion_file to first file to satisfy play.py's tracking task check (it won't be loaded).
-    motion_cmd = cfg.commands["motion"]
-    first_motion_file = motion_cmd.motion_files[0] if motion_cmd.motion_files else ""
-    motion_cmd.motion_files = ()  # Empty tuple: no motion files loaded by MultiMotionCommand
-    motion_cmd.motion_file = first_motion_file  # Keep reference for play.py check
-    motion_cmd.sampling_mode = "start"  # No resampling needed in play
+
+    # Remove motion command entirely — policy is 100% autonomous
+    cfg.commands.pop("motion", None)
+
+    # Add autonomous ball reset (no motion tracking required)
+    from mjlab.managers.event_manager import EventTermCfg
+    cfg.events["reset_ball_autonomous"] = EventTermCfg(
+        func=gk_resets.reset_ball_autonomous,
+        mode="startup",
+        params={"ball_name": "ball"},
+    )
 
     # Remove all tracking observations (depend on motion data)
     _tracking_obs = ["robot_body_pos_b", "robot_body_ori_b", "robot_body_lin_vel_b", "robot_body_ang_vel_b",
