@@ -24,7 +24,8 @@ By removing the motion command, the policy receives no motion input at inference
 **Impact:** 
 - Policy trained on diverse motion examples but is **completely autonomous at play time**
 - No `--motion-file` argument needed
-- Ball spawns with proper random trajectory (3-5m away, random y/z, timed arc)
+- Ball resets with random trajectory **on every episode reset** (3-5m away, random y/z, timed arc)
+- Ball respawns when episode times out (5 seconds) or manual reset (press 'r' in viewer)
 - Play command: `uv run python -m mjlab.scripts.play goalkeeper --checkpoint-file logs/.../model_N.pt`
 - Play mode runs stably, policy reacts autonomously to ball motion
 
