@@ -1,4 +1,0 @@
-mcp[cli]
-httpx
-beautifulsoup4
-pydantic
