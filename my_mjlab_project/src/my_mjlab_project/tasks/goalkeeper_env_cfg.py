@@ -34,10 +34,9 @@ def get_ball_spec(radius: float = 0.11, mass: float = 0.42) -> mujoco.MjSpec:
         mass=mass,
         rgba=(1.0, 0.5, 0.0, 1.0),
     )
-    # Set physics properties for bounce
+    # Set physics properties for bounce (high damping ratio for bouncy contact)
     geom.friction = (0.4, 0.005, 0.0001)  # slide, roll, spin friction
-    geom.elasticity = 0.8  # bounciness (0=no bounce, 1=perfectly elastic)
-    geom.solref = [0.01, 0.99]  # contact stiffness/damping
+    geom.solref = [0.02, 1.0]  # contact stiffness & damping (1.0=bouncy, 0=no bounce)
     return spec
 
 
