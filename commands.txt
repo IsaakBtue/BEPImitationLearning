@@ -45,10 +45,12 @@ cd /home/isaak/BEPImitationlearning/my_mjlab_project && uv run python -m mjlab.s
 #   - Play environment has no motion command, causing crash on first step
 #   FIX: Pop ee_body_pos from play terminations (key name in dict, not function name)
 #
-# BUG 6 (CRITICAL): Motion-dependent reward terms in play config
-#   - motion_global_root_pos, motion_global_root_ori, motion_body_pos, etc. depend on command
-#   - Play environment has no motion command (set to None), causing AttributeError crash
-#   - FIX: Remove all 6 motion-dependent rewards in goalkeeper_play_env_cfg()
+# BUG 6 (CRITICAL): Motion-dependent rewards + ball spawn in play config
+#   - motion_global_root_pos, etc. depend on command attributes (anchor_pos_w)
+#   - Removed motion command entirely → ball never reset, spawns at feet
+#   FIX: Keep motion command with empty motion_files for _reset_ball() to work
+#        Remove only the 6 motion-dependent reward terms that access attributes
+#   Result: Ball properly randomized on reset; no motion files required; no crashes
 #
 # TRANSFORM: commands.py
 #   - Motion data lowered 0.39m (feet to z=0 ground level)
