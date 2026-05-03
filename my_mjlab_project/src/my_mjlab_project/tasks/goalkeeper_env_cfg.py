@@ -234,6 +234,10 @@ def goalkeeper_play_env_cfg() -> ManagerBasedRlEnvCfg:
     cfg = goalkeeper_env_cfg(play=True)
     cfg.scene.num_envs = 1
 
+    # Play mode settings: allow viewer to reset and re-randomize ball
+    cfg.auto_reset = True
+    cfg.episode_length_s = 10.0  # Reset every 10 seconds for new ball trajectory
+
     # Remove motion command entirely — policy is 100% autonomous
     cfg.commands.pop("motion", None)
 
