@@ -32,13 +32,16 @@ def get_ball_spec(radius: float = 0.11, mass: float = 0.42) -> mujoco.MjSpec:
         type=mujoco.mjtGeom.mjGEOM_SPHERE,
         size=(radius, 0.0, 0.0),
         mass=mass,
-        rgba=(1.0, 0.5, 0.0, 1.0),
+        rgba=(1.0, 1.0, 0.0, 1.0),  # Yellow
     )
-    # Set physics properties for bounce
     geom.friction = (0.4, 0.005, 0.0001)  # slide, roll, spin friction
-    # solimp: [dmin, dmax, dref, width, midpoint]
-    # Lower dmax = more bouncy (less energy dissipation)
-    geom.solimp = [0.01, 0.1, 0.001, 0.5, 2.0]  # Low damping for bounce
+    # solref = [timeconst, dampratio]: stiff contact with zero damping for maximum elasticity
+    geom.solref = [0.002, 0.0001]  # Stiff contact (0.002s), near-zero damping (0.0001) for extreme bounce
+    # solimp = [dmin, dmax, dref, width, midpoint]: implicit contact damping
+    geom.solimp = [0.0001, 0.001, 0.0001, 0.5, 2.0]
+    # margin/gap control when contacts are generated and included
+    geom.margin = 0.001  # Detect contacts at 1mm distance
+    geom.gap = 0.0001   # Include contacts when dist < margin - gap
     return spec
 
 

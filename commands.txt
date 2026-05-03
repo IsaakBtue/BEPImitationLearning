@@ -23,41 +23,16 @@ cd /home/isaak/BEPImitationlearning/my_mjlab_project && uv run python -m mjlab.s
 
 cd /home/isaak/BEPImitationlearning/my_mjlab_project && uv run python -m mjlab.scripts.play goalkeeper --checkpoint-file logs/rsl_rl/g1_goalkeeper/2026-05-03_10-47-38/model_200.pt
 
-# ========== WHAT WAS FIXED ==========
-# BUG 1 (CRITICAL): convert.py
-#   - body_pos_w saved worldbody (index 0) instead of robot bodies (index 1+)
-#   - RSI placed robot at z=0 instead of z~1.15m; all 1020 envs terminated on step 1
-#   FIX: Skip worldbody, save xpos[1:] and xquat[1:], num_bodies=30
-#   Result: mean_episode_length went from 1.0 to ~7.6
+# ========== BALL PHYSICS FIX (2026-05-03) ==========
+# PROBLEM: Ball was not bouncing in viewer
+# CAUSE: MuJoCo contact behavior requires BOTH solref and solimp parameters
+#        - solref = [timeconst, dampratio] controls contact stiffness & damping
+#        - solimp = [dmin, dmax, dref, width, midpoint] controls implicit damping
+#        Previous code only set solimp, missing the critical solref parameter
 #
-# BUG 2 (MINOR): commands.py _reset_ball
-#   - Ball z_start did not include env_origins[:,2] offset
-#   FIX: ball_pos_w z now uses origins[:,2] + z_start
+# FIX: Added solref = [0.1, 0.15] to ball geometry
+#      - timeconst=0.1: soft compliant contact (more bouncy)
+#      - dampratio=0.15: low damping (less energy loss, more bounce)
 #
-# BUG 3 (DESIGN): goalkeeper_env_cfg.py
-#   - Motion-reference obs (command, motion_anchor_pos_b, motion_anchor_ori_b) in actor
-#     forced --motion-file argument at play time
-#   FIX: Removed all 3 terms from training obs in goalkeeper_env_cfg()
-#        Play cfg removes motion command; no --motion-file needed at inference
-#
-# BUG 4 (CRITICAL): goalkeeper_env_cfg.py terminations
-#   - anchor_pos/anchor_ori terminations checked if robot within 0.25m of reference pose
-#   - But -0.39m z-correction in commands.py moved robot 0.39m below reference
-#   - Result: all envs terminated immediately in training
-#   FIX: Removed anchor_pos and anchor_ori terminations from training config
-#
-# BUG 5 (CRITICAL): ee_body_pos termination in play config
-#   - ee_body_pos termination (function: bad_motion_body_pos_z_only) requires motion command
-#   - Play environment has no motion command, causing crash on first step
-#   FIX: Pop ee_body_pos from play terminations (key name in dict, not function name)
-#
-# BUG 6 (CRITICAL): Motion-dependent rewards + ball spawn in play config
-#   - motion_global_root_pos, etc. depend on command attributes (anchor_pos_w)
-#   - Removed motion command entirely → ball never reset, spawns at feet
-#   FIX: Keep motion command with empty motion_files for _reset_ball() to work
-#        Remove only the 6 motion-dependent reward terms that access attributes
-#   Result: Ball properly randomized on reset; no motion files required; no crashes
-#
-# TRANSFORM: commands.py
-#   - Motion data lowered 0.39m (feet to z=0 ground level)
-#   - All motions rotated -90 deg yaw (goalkeeper faces ball-throwing direction)
+# TESTING: Run play command above and press ENTER to reset environment
+#          Ball should now visibly bounce when hitting the ground
