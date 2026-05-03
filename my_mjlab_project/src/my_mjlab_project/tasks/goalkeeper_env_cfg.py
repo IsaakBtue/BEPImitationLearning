@@ -23,17 +23,21 @@ _FEET_CFG = SceneEntityCfg("robot", body_names=("left_ankle_roll_link", "right_a
 
 
 def get_ball_spec(radius: float = 0.11, mass: float = 0.42) -> mujoco.MjSpec:
-    """Soccer ball as a free-floating sphere."""
+    """Soccer ball as a free-floating sphere with proper bounciness."""
     spec = mujoco.MjSpec()
     body = spec.worldbody.add_body(name="ball")
     body.add_freejoint(name="ball_joint")
-    body.add_geom(
+    geom = body.add_geom(
         name="ball_geom",
         type=mujoco.mjtGeom.mjGEOM_SPHERE,
         size=(radius, 0.0, 0.0),
         mass=mass,
         rgba=(1.0, 0.5, 0.0, 1.0),
     )
+    # Set physics properties for bounce
+    geom.friction = (0.4, 0.005, 0.0001)  # slide, roll, spin friction
+    geom.elasticity = 0.8  # bounciness (0=no bounce, 1=perfectly elastic)
+    geom.solref = [0.01, 0.99]  # contact stiffness/damping
     return spec
 
 
