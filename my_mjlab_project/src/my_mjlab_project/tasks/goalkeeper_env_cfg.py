@@ -233,7 +233,7 @@ def goalkeeper_play_env_cfg() -> ManagerBasedRlEnvCfg:
     cfg = goalkeeper_env_cfg(play=True)
     cfg.scene.num_envs = 1
     # Remove motion command so play script doesn't require --motion-file.
-    # Also remove tracking observations and terminations that depend on the command.
+    # Also remove tracking observations, rewards, and terminations that depend on the command.
     cfg.commands.pop("motion", None)
     # Remove all tracking observations (depend on motion command)
     _tracking_obs = ["robot_body_pos_b", "robot_body_ori_b", "robot_body_lin_vel_b", "robot_body_ang_vel_b",
@@ -241,6 +241,11 @@ def goalkeeper_play_env_cfg() -> ManagerBasedRlEnvCfg:
     for _obs in _tracking_obs:
         cfg.observations["actor"].terms.pop(_obs, None)
         cfg.observations["critic"].terms.pop(_obs, None)
+    # Remove all motion-dependent rewards (require command object)
+    _motion_rewards = ["motion_global_root_pos", "motion_global_root_ori", "motion_body_pos",
+                       "motion_body_ori", "motion_body_lin_vel", "motion_body_ang_vel"]
+    for _rew in _motion_rewards:
+        cfg.rewards.pop(_rew, None)
     # Remove all motion-dependent terminations (anchor tracking, body position bounds, etc)
     # Note: keys in cfg.terminations dict may differ from function names
     _motion_terminations = ["anchor_pos", "anchor_ori", "ee_body_pos"]

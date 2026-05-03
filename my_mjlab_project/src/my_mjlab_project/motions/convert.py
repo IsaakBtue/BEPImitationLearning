@@ -3,10 +3,10 @@
 NPZ keys expected by mjlab's MotionLoader (tasks/tracking/mdp/commands.py):
   joint_pos:       (N, 29)     actuated joint positions in MuJoCo order
   joint_vel:       (N, 29)     actuated joint velocities
-  body_pos_w:      (N, 31, 3)  all-body world-frame positions
-  body_quat_w:     (N, 31, 4)  all-body quaternions (wxyz)
-  body_lin_vel_w:  (N, 31, 3)  all-body linear velocities
-  body_ang_vel_w:  (N, 31, 3)  all-body angular velocities
+  body_pos_w:      (N, 30, 3)  robot-body world-frame positions (skip worldbody)
+  body_quat_w:     (N, 30, 4)  robot-body quaternions (wxyz, skip worldbody)
+  body_lin_vel_w:  (N, 30, 3)  robot-body linear velocities
+  body_ang_vel_w:  (N, 30, 3)  robot-body angular velocities
 """
 
 from __future__ import annotations
@@ -149,7 +149,7 @@ def convert_pt_to_npz(pt_path: Path, npz_path: Path) -> None:
 
     model = mujoco.MjModel.from_xml_path(str(G1_XML))
     data = mujoco.MjData(model)
-    num_bodies = model.nbody  # 31
+    num_bodies = model.nbody - 1  # 30 (skip MuJoCo worldbody at index 0)
 
     body_pos_w = np.zeros((n, num_bodies, 3), dtype=np.float32)
     body_quat_wxyz = np.zeros((n, num_bodies, 4), dtype=np.float32)
@@ -161,8 +161,8 @@ def convert_pt_to_npz(pt_path: Path, npz_path: Path) -> None:
         data.qpos[3:7] = [xyzw[3], xyzw[0], xyzw[1], xyzw[2]]  # → wxyz
         data.qpos[7:36] = joint_pos_29[t]
         mujoco.mj_kinematics(model, data)
-        body_pos_w[t] = data.xpos.copy()   # (nbody, 3)
-        body_quat_wxyz[t] = data.xquat.copy()  # (nbody, 4) already wxyz
+        body_pos_w[t] = data.xpos[1:].copy()   # skip worldbody at index 0 (30 bodies)
+        body_quat_wxyz[t] = data.xquat[1:].copy()  # skip worldbody at index 0 (30 bodies)
 
     dt = 1.0 / 30.0  # source fps
     body_lin_vel_w = np.gradient(body_pos_w, dt, axis=0).astype(np.float32)

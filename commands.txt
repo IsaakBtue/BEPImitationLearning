@@ -15,7 +15,7 @@ cd /home/isaak/BEPImitationlearning/my_mjlab_project && uv run python -m mjlab.s
 # ========== PLAY COMMANDS ==========
 # No --motion-file needed — policy infers autonomously from ball + joint state
 
-cd /home/isaak/BEPImitationlearning/my_mjlab_project && uv run python -m mjlab.scripts.play goalkeeper --checkpoint-file logs/rsl_rl/g1_goalkeeper/2026-05-03_00-02-38/model_0.pt
+cd /home/isaak/BEPImitationlearning/my_mjlab_project && uv run python -m mjlab.scripts.play goalkeeper --checkpoint-file logs/rsl_rl/g1_goalkeeper/2026-05-03_00-28-48/model_200.pt
 
 # ========== WHAT WAS FIXED ==========
 # BUG 1 (CRITICAL): convert.py
@@ -44,6 +44,11 @@ cd /home/isaak/BEPImitationlearning/my_mjlab_project && uv run python -m mjlab.s
 #   - ee_body_pos termination (function: bad_motion_body_pos_z_only) requires motion command
 #   - Play environment has no motion command, causing crash on first step
 #   FIX: Pop ee_body_pos from play terminations (key name in dict, not function name)
+#
+# BUG 6 (CRITICAL): Motion-dependent reward terms in play config
+#   - motion_global_root_pos, motion_global_root_ori, motion_body_pos, etc. depend on command
+#   - Play environment has no motion command (set to None), causing AttributeError crash
+#   - FIX: Remove all 6 motion-dependent rewards in goalkeeper_play_env_cfg()
 #
 # TRANSFORM: commands.py
 #   - Motion data lowered 0.39m (feet to z=0 ground level)

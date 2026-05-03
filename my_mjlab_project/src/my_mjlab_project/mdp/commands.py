@@ -101,11 +101,25 @@ class MultiMotionCommand(MotionCommand):
 
     @property
     def body_pos_w(self) -> torch.Tensor:
-        return self._gather("body_pos_w") + self._env.scene.env_origins[:, None, :]
+        pos = self._gather("body_pos_w")
+        # Lower motion data by 0.39m to bring feet to ground level (z=0)
+        pos[:, :, 2] -= 0.39
+        return pos + self._env.scene.env_origins[:, None, :]
 
     @property
     def body_quat_w(self) -> torch.Tensor:
-        return self._gather("body_quat_w")
+        quats = self._gather("body_quat_w")
+        # Apply -90° yaw rotation to all body quaternions for goalkeeper alignment
+        import math
+        yaw_offset = torch.full((quats.shape[0],), -math.pi / 2, device=self.device)
+        yaw_quat = quat_from_euler_xyz(
+            torch.zeros_like(yaw_offset),
+            torch.zeros_like(yaw_offset),
+            yaw_offset
+        )
+        # Rotate each body's quaternion
+        rotated = quat_mul(yaw_quat.unsqueeze(1).expand_as(quats), quats)
+        return rotated
 
     @property
     def body_lin_vel_w(self) -> torch.Tensor:
@@ -121,7 +135,16 @@ class MultiMotionCommand(MotionCommand):
 
     @property
     def anchor_quat_w(self) -> torch.Tensor:
-        return self._gather_anchor("body_quat_w")
+        quat = self._gather_anchor("body_quat_w")
+        # Apply -90° yaw rotation to anchor quaternion for goalkeeper alignment
+        import math
+        yaw_offset = torch.full((quat.shape[0],), -math.pi / 2, device=self.device)
+        yaw_quat = quat_from_euler_xyz(
+            torch.zeros_like(yaw_offset),
+            torch.zeros_like(yaw_offset),
+            yaw_offset
+        )
+        return quat_mul(yaw_quat, quat)
 
     @property
     def anchor_lin_vel_w(self) -> torch.Tensor:
@@ -235,7 +258,7 @@ class MultiMotionCommand(MotionCommand):
         ball_pos_w = torch.stack([
             origins[:, 0] + x_start,
             origins[:, 1] + y_start,
-            z_start,
+            origins[:, 2] + z_start,
         ], dim=1)
         ball_quat_w = torch.zeros((n, 4), device=self.device)
         ball_quat_w[:, 0] = 1.0  # identity wxyz
