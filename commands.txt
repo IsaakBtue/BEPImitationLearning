@@ -12,6 +12,9 @@ cd /home/isaak/BEPImitationlearning/my_mjlab_project && uv run python -m mjlab.s
 # Reduced-env training for faster iteration
 cd /home/isaak/BEPImitationlearning/my_mjlab_project && uv run python -m mjlab.scripts.train goalkeeper --env.scene.num-envs 64 --gpu-ids '[0]'
 
+# Training with video recording (see what's happening every 500 steps)
+cd /home/isaak/BEPImitationlearning/my_mjlab_project && uv run python -m mjlab.scripts.train goalkeeper --video True --video-interval 500 --video-length 200 --gpu-ids '[0]'
+
 # ========== PLAY COMMANDS ==========
 # --motion-file required by play.py for tracking task validation (not actually used by policy)
 # Policy infers autonomously from ball + joint state only
