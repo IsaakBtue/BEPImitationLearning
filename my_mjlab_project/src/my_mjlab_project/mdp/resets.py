@@ -8,15 +8,23 @@ from mjlab.envs import ManagerBasedRlEnv
 from mjlab.utils.lab_api.math import sample_uniform
 
 
-def reset_ball_autonomous(env: ManagerBasedRlEnv, ball_name: str = "ball") -> None:
+def reset_ball_autonomous(env: ManagerBasedRlEnv, env_ids: torch.Tensor, ball_name: str = "ball") -> None:
     """Reset ball with random trajectory independent of motion type.
 
     Ball spawns 3-5m away with random y/z position and computed velocity
     to reach a random end target. This is suitable for autonomous play
     where the policy learns to react to any incoming ball.
+
+    Args:
+        env: The environment instance
+        env_ids: Tensor of environment indices to reset
+        ball_name: Name of the ball entity in the scene
     """
     ball: Entity = env.scene[ball_name]
-    env_ids = torch.arange(env.num_envs, device=env.device)
+
+    # Handle startup mode (env_ids=None means all envs)
+    if env_ids is None:
+        env_ids = torch.arange(env.num_envs, device=env.device)
 
     g = 9.81
     n = len(env_ids)
