@@ -1,0 +1,45 @@
+{
+  "os":  "Linux-6.8.0-110-generic-x86_64-with-glibc2.35",
+  "python":  "CPython 3.12.11",
+  "startedAt":  "2026-05-06T08:25:44.896906Z",
+  "args":  [
+    "goalkeeper_booster_t1",
+    "--env.scene.num-envs",
+    "64",
+    "--gpu-ids",
+    "[0]"
+  ],
+  "program":  "-m mjlab.scripts.train",
+  "git":  {
+    "remote":  "https://github.com/IsaakBtue/BEPImitationLearning.git",
+    "commit":  "fa788f4fe180d340185a5dd5d39d8e0cc7136edd"
+  },
+  "email":  "i.p.b.bouwmeester@student.tue.nl",
+  "root":  "/home/isaak/BEPImitationlearning/my_mjlab_project_booster_t1",
+  "host":  "isaak-Legion-5-Pro-16IAH7H",
+  "executable":  "/home/isaak/BEPImitationlearning/my_mjlab_project_booster_t1/.venv/bin/python3",
+  "cpu_count":  14,
+  "cpu_count_logical":  20,
+  "gpu":  "NVIDIA GeForce RTX 3070 Laptop GPU",
+  "gpu_count":  1,
+  "disk":  {
+    "/":  {
+      "total":  "1006450962432",
+      "used":  "588763365376"
+    }
+  },
+  "memory":  {
+    "total":  "33364414464"
+  },
+  "gpu_nvidia":  [
+    {
+      "name":  "NVIDIA GeForce RTX 3070 Laptop GPU",
+      "memoryTotal":  "8589934592",
+      "cudaCores":  5120,
+      "architecture":  "Ampere",
+      "uuid":  "GPU-32c84d06-9db6-928c-2950-3c78830243b3"
+    }
+  ],
+  "cudaVersion":  "13.0",
+  "writerId":  "85ms0l5s8bbal1qxsap9p5h2yslm91vc"
+}

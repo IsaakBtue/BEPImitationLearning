@@ -1,0 +1,36 @@
+  ## Comparison Task: AMP (isaacgym) vs Motion Tracking (mjlab)
+
+  Compare the reward shaping and architecture between:
+  - **Original:** `/home/isaak/BEPImitationlearning/Humanoid-Goalkeeper/` (isaacgym + AMP)
+  - **New:** `/home/isaak/BEPImitationlearning/my_mjlab_project_booster_t1/` (mjlab + motion tracking)
+
+  ### Comparison Focus
+
+  1. **Reward Philosophy**
+     - In isaacgym: How does AMP work? What rewards guide motion learning?
+     - In mjlab: What are the explicit motion tracking rewards (motion_global_root_pos, motion_body_pos,
+  etc.)?
+     - Key question: Are the weights equivalent or fundamentally different?
+
+  2. **Essential Differences**
+     - AMP: Adversarial motion priors (discriminator + privileged observations during training)
+     - Motion tracking: Explicit reward penalties on pose/velocity/position errors
+     - Which is "easier" for the robot to optimize?
+
+  3. **Reward Shaping Details**
+     - List all motion-related rewards in isaacgym (look for "amp" or motion references)
+     - List all motion-related rewards in mjlab goalkeeper_env_cfg.py
+     - Compare weights and purposes side-by-side
+     - Identify any rewards in isaacgym that have no equivalent in mjlab (or vice versa)
+
+  4. **Observations During Training**
+     - What "privileged" observations does isaacgym use during training that play doesn't see?
+     - What observations does mjlab training use that play doesn't see?
+     - Are they the same or different?
+
+  5. **Output** (write to a new file: `REWARD_COMPARISON_AMP_vs_TRACKING.md`)
+     - Side-by-side table of all motion/tracking related rewards
+     - Summary of architectural differences
+     - Hypothesis: What might explain if one approach learns faster/better than the other?
+
+  Start by reading isaacgym goalkeeper config, then compare to mjlab config systematically.

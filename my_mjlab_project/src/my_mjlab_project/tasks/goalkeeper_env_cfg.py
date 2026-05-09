@@ -16,45 +16,29 @@ from mjlab.utils.noise import UniformNoiseCfg as Unoise
 from my_mjlab_project.mdp import MultiMotionCommandCfg
 import my_mjlab_project.mdp.observations as gk_obs
 import my_mjlab_project.mdp.rewards as gk_rew
-import my_mjlab_project.mdp.resets as gk_resets
 
 _HAND_CFG = SceneEntityCfg("robot", body_names=("left_wrist_yaw_link", "right_wrist_yaw_link"))
 _FEET_CFG = SceneEntityCfg("robot", body_names=("left_ankle_roll_link", "right_ankle_roll_link"))
 
 
 def get_ball_spec(radius: float = 0.11, mass: float = 0.42) -> mujoco.MjSpec:
-    """Soccer ball as a free-floating sphere with proper bounciness."""
+    """Soccer ball as a free-floating sphere."""
     spec = mujoco.MjSpec()
     body = spec.worldbody.add_body(name="ball")
     body.add_freejoint(name="ball_joint")
-    geom = body.add_geom(
+    body.add_geom(
         name="ball_geom",
         type=mujoco.mjtGeom.mjGEOM_SPHERE,
         size=(radius, 0.0, 0.0),
         mass=mass,
-        rgba=(1.0, 1.0, 0.0, 1.0),  # Yellow
+        rgba=(1.0, 0.5, 0.0, 1.0),
     )
-    geom.friction = (0.4, 0.005, 0.0001)  # slide, roll, spin friction
-    # solref = [timeconst, dampratio]: stiff contact with zero damping for maximum elasticity
-    geom.solref = [0.002, 0.0001]  # Stiff contact (0.002s), near-zero damping (0.0001) for extreme bounce
-    # solimp = [dmin, dmax, dref, width, midpoint]: implicit contact damping
-    geom.solimp = [0.0001, 0.001, 0.0001, 0.5, 2.0]
-    # margin/gap control when contacts are generated and included
-    geom.margin = 0.001  # Detect contacts at 1mm distance
-    geom.gap = 0.0001   # Include contacts when dist < margin - gap
     return spec
 
 
 def goalkeeper_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
     """Goalkeeper task: G1 humanoid blocks a soccer ball using pose-tracking rewards."""
     cfg = unitree_g1_flat_tracking_env_cfg(play=play)
-
-    # Remove motion-reference observations so the policy trains and infers
-    # from ball + joint state only — no motion file needed at play time.
-    _motion_obs = ["command", "motion_anchor_pos_b", "motion_anchor_ori_b"]
-    for _obs in _motion_obs:
-        cfg.observations["actor"].terms.pop(_obs, None)
-        cfg.observations["critic"].terms.pop(_obs, None)
 
     # ------------------------------------------------------------------ #
     # MuJoCo model parameters (for ball collisions)
@@ -225,10 +209,6 @@ def goalkeeper_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
         "left_wrist_yaw_link",
         "right_wrist_yaw_link",
     )
-    # Remove anchor terminations (incompatible with -0.39m z-correction applied to motion data)
-    # Rely on goalkeeper rewards instead
-    cfg.terminations.pop("anchor_pos", None)
-    cfg.terminations.pop("anchor_ori", None)
     cfg.viewer.body_name = "torso_link"
 
     if play:
@@ -241,35 +221,4 @@ def goalkeeper_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
 def goalkeeper_play_env_cfg() -> ManagerBasedRlEnvCfg:
     cfg = goalkeeper_env_cfg(play=True)
     cfg.scene.num_envs = 1
-
-    # Play mode settings: allow viewer to reset and re-randomize ball
-    cfg.auto_reset = True
-    cfg.episode_length_s = 10.0  # Reset every 10 seconds for new ball trajectory
-
-    # Remove motion command entirely — policy is 100% autonomous
-    cfg.commands.pop("motion", None)
-
-    # Add autonomous ball reset (runs on every episode reset)
-    from mjlab.managers.event_manager import EventTermCfg
-    cfg.events["reset_ball_autonomous"] = EventTermCfg(
-        func=gk_resets.reset_ball_autonomous,
-        mode="reset",
-        params={"ball_name": "ball"},
-    )
-
-    # Remove all tracking observations (depend on motion data)
-    _tracking_obs = ["robot_body_pos_b", "robot_body_ori_b", "robot_body_lin_vel_b", "robot_body_ang_vel_b",
-                     "body_pos", "body_ori"]
-    for _obs in _tracking_obs:
-        cfg.observations["actor"].terms.pop(_obs, None)
-        cfg.observations["critic"].terms.pop(_obs, None)
-    # Remove all motion-dependent rewards (require command attributes that won't exist)
-    _motion_rewards = ["motion_global_root_pos", "motion_global_root_ori", "motion_body_pos",
-                       "motion_body_ori", "motion_body_lin_vel", "motion_body_ang_vel"]
-    for _rew in _motion_rewards:
-        cfg.rewards.pop(_rew, None)
-    # Remove all motion-dependent terminations (anchor tracking, body position bounds, etc)
-    _motion_terminations = ["anchor_pos", "anchor_ori", "ee_body_pos"]
-    for _term in _motion_terminations:
-        cfg.terminations.pop(_term, None)
     return cfg

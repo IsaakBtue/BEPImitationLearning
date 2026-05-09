@@ -1,38 +1,17 @@
-# ========== TRAINING COMMANDS ==========
-# Obs space: joint_pos/vel (58), base_lin/ang_vel (6), ball_pos/vel (6), hand_pos L+R (6), actions (29) = 105 total
-# Motion files used for RSI + style reward only — NOT in observations
-# Old checkpoints (before 2026-05-02) are incompatible — full retrain required
+# ⚠️ All existing checkpoints have 87-dim obs, current config has 142-dim.
+# Existing checkpoints CANNOT be loaded into the current config.
+# Must train a new model.
 
-# Smoke test (2 envs, 3 iterations — quick validation)
-cd /home/isaak/BEPImitationlearning/my_mjlab_project && uv run python -m mjlab.scripts.train goalkeeper --env.scene.num-envs 2 --runner.max-iterations 3 --gpu-ids '[0]'
+# Train (64 envs, smoke test — verifies config works)
+CUDA_VISIBLE_DEVICES=0 uv run python -m mjlab.scripts.train goalkeeper_booster_t1 --env.scene.num-envs 64
 
-# Full GPU training (1020 envs on RTX 3070 Laptop)
-cd /home/isaak/BEPImitationlearning/my_mjlab_project && uv run python -m mjlab.scripts.train goalkeeper --gpu-ids '[0]'
+# Train (full 1020 envs)
+cd /home/isaak/BEPImitationlearning/my_mjlab_project_booster_t1 && uv run python -m mjlab.scripts.train goalkeeper_booster_t1 --env.scene.num-envs 1020
 
-# Reduced-env training for faster iteration
-cd /home/isaak/BEPImitationlearning/my_mjlab_project && uv run python -m mjlab.scripts.train goalkeeper --env.scene.num-envs 64 --gpu-ids '[0]'
+# Play (once a new checkpoint exists from the training above)
+cd /home/isaak/BEPImitationlearning/my_mjlab_project_booster_t1 && uv run python -m mjlab.scripts.play goalkeeper_booster_t1_withoverlay \
+  --checkpoint-file logs/rsl_rl/g1_goalkeeper/<NEW_RUN_TIMESTAMP>/model_200.pt \
+  --motion-file src/my_mjlab_project_booster_t1/motions/data/lefthand_t1.npz
 
-# Training with video recording (see what's happening every 500 steps)
-cd /home/isaak/BEPImitationlearning/my_mjlab_project && uv run python -m mjlab.scripts.train goalkeeper --video True --video-interval 500 --video-length 200 --gpu-ids '[0]'
-
-# ========== PLAY COMMANDS ==========
-# Fully autonomous - no motion input required
-# Policy trained on all 6 motions, chooses best response autonomously
-# Ball auto-resets with random trajectory every 10 seconds
-# Press ENTER in viewer to manually reset (not 'r' - that toggles debug vis)
-
-cd /home/isaak/BEPImitationlearning/my_mjlab_project && uv run python -m mjlab.scripts.play goalkeeper --checkpoint-file logs/rsl_rl/g1_goalkeeper/2026-05-03_10-47-38/model_200.pt
-
-# ========== BALL PHYSICS FIX (2026-05-03) ==========
-# PROBLEM: Ball was not bouncing in viewer
-# CAUSE: MuJoCo contact behavior requires BOTH solref and solimp parameters
-#        - solref = [timeconst, dampratio] controls contact stiffness & damping
-#        - solimp = [dmin, dmax, dref, width, midpoint] controls implicit damping
-#        Previous code only set solimp, missing the critical solref parameter
-#
-# FIX: Added solref = [0.1, 0.15] to ball geometry
-#      - timeconst=0.1: soft compliant contact (more bouncy)
-#      - dampratio=0.15: low damping (less energy loss, more bounce)
-#
-# TESTING: Run play command above and press ENTER to reset environment
-#          Ball should now visibly bounce when hitting the ground
+# Reconvert motion data if ever needed
+cd /home/isaak/BEPImitationlearning/my_mjlab_project_booster_t1 && uv run python src/my_mjlab_project_booster_t1/motions/convert_booster.py
