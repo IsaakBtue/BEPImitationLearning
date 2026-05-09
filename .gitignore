@@ -39,6 +39,9 @@ logs/
 runs/
 *.log
 
+# Model checkpoints (wandb training runs)
+**/wandb/
+
 # Local overrides
 .local/
 .env.local
