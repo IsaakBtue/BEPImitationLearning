@@ -13,10 +13,11 @@ from mjlab.utils.lab_api.math import quat_from_euler_xyz, quat_mul, sample_unifo
 if TYPE_CHECKING:
     from mjlab.envs import ManagerBasedRlEnv
 
-# Ball end-target ranges per motion type (y_min, y_max, z_min, z_max) in env-local frame.
+# Ball end-target ranges per motion type (x_min, x_max, z_min, z_max) in env-local frame.
+# Ball approaches from +Y; robot faces +Y so left hand is at -X.
 # T1 only uses lefthand motion.
 _BALL_END_RANGES = [
-    (0.2, 1.2, 0.4, 1.2),  # 0 lefthand
+    (-1.2, -0.2, 0.4, 1.2),  # 0 lefthand — arrives at robot's left side (-X)
 ]
 
 
@@ -179,20 +180,21 @@ class MultiMotionCommand(MotionCommand):
         origins = self._env.scene.env_origins[env_ids]
         motion_types = self.motion_type_ids[env_ids]
 
-        x_start = sample_uniform(3.0, 5.0, (n,), device=self.device)
+        # Ball approaches from +Y (rotated 90° clockwise vs original +X approach).
+        y_start = sample_uniform(3.0, 5.0, (n,), device=self.device)
 
         end_ranges = torch.tensor(_BALL_END_RANGES, device=self.device)
         per_env_ranges = end_ranges[motion_types]
 
-        y_end = sample_uniform(per_env_ranges[:, 0], per_env_ranges[:, 1], (n,), device=self.device)
+        x_end = sample_uniform(per_env_ranges[:, 0], per_env_ranges[:, 1], (n,), device=self.device)
         z_end = sample_uniform(per_env_ranges[:, 2], per_env_ranges[:, 3], (n,), device=self.device)
-        y_start = sample_uniform(-1.8, 1.8, (n,), device=self.device)
+        x_start = sample_uniform(-1.8, 1.8, (n,), device=self.device)
         z_start = sample_uniform(0.3, 1.8, (n,), device=self.device)
 
         t_flight = sample_uniform(0.5, 1.0, (n,), device=self.device)
 
-        dx = -x_start - 0.3
-        dy = y_end - y_start
+        dx = x_end - x_start
+        dy = -y_start - 0.3
         dz = z_end - z_start
 
         vx = dx / t_flight

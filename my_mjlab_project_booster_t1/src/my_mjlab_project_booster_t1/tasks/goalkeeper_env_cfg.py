@@ -117,9 +117,12 @@ def goalkeeper_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
     )
 
     # Remove tracking observations: they're not available at play time,
-    # so remove them from training to avoid distribution shift
+    # so remove them from training to avoid distribution shift.
+    # Also remove motion-command reference obs (command, motion_anchor_pos/ori_b)
+    # since the real robot won't have motion reference data at inference time.
     _tracking_obs = ["robot_body_pos_b", "robot_body_ori_b", "robot_body_lin_vel_b",
-                     "robot_body_ang_vel_b", "body_pos", "body_ori"]
+                     "robot_body_ang_vel_b", "body_pos", "body_ori",
+                     "command", "motion_anchor_pos_b", "motion_anchor_ori_b"]
     for _obs in _tracking_obs:
         cfg.observations["actor"].terms.pop(_obs, None)
         cfg.observations["critic"].terms.pop(_obs, None)
@@ -237,7 +240,6 @@ def goalkeeper_play_env_cfg() -> ManagerBasedRlEnvCfg:
     cfg.scene.num_envs = 1
     cfg.auto_reset = True
     cfg.episode_length_s = 10.0
-    cfg.commands.pop("motion", None)
 
     from mjlab.managers.event_manager import EventTermCfg
     cfg.events["reset_ball_autonomous"] = EventTermCfg(
@@ -251,10 +253,6 @@ def goalkeeper_play_env_cfg() -> ManagerBasedRlEnvCfg:
     for _obs in _tracking_obs:
         cfg.observations["actor"].terms.pop(_obs, None)
         cfg.observations["critic"].terms.pop(_obs, None)
-
-    for _rew in ["motion_global_root_pos", "motion_global_root_ori", "motion_body_pos",
-                 "motion_body_ori", "motion_body_lin_vel", "motion_body_ang_vel"]:
-        cfg.rewards.pop(_rew, None)
 
     for _term in ["anchor_pos", "anchor_ori", "ee_body_pos"]:
         cfg.terminations.pop(_term, None)

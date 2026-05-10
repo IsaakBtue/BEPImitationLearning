@@ -19,16 +19,17 @@ def reset_ball_autonomous(env: ManagerBasedRlEnv, env_ids: torch.Tensor, ball_na
     n = len(env_ids)
     origins = env.scene.env_origins[env_ids]
 
-    x_start = sample_uniform(3.0, 5.0, (n,), device=env.device)
-    y_end = sample_uniform(-1.2, 1.2, (n,), device=env.device)
+    # Ball spawn rotated 90° clockwise: comes from +Y direction instead of +X
+    y_start = sample_uniform(3.0, 5.0, (n,), device=env.device)
+    x_end = sample_uniform(-1.2, -0.2, (n,), device=env.device)
     z_end = sample_uniform(0.1, 1.6, (n,), device=env.device)
-    y_start = sample_uniform(-1.8, 1.8, (n,), device=env.device)
+    x_start = sample_uniform(-1.8, 1.8, (n,), device=env.device)
     z_start = sample_uniform(0.3, 1.8, (n,), device=env.device)
 
     t_flight = sample_uniform(0.5, 1.0, (n,), device=env.device)
 
-    dx = -x_start - 0.3
-    dy = y_end - y_start
+    dx = x_end - x_start
+    dy = -y_start - 0.3
     dz = z_end - z_start
 
     vx = dx / t_flight
