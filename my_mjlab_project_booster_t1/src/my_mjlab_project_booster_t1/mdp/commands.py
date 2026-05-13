@@ -84,7 +84,7 @@ class MultiMotionCommand(MotionCommand):
 
     @property
     def body_pos_w(self) -> torch.Tensor:
-        # convert_booster.py already shifted z to ground level — no additional offset needed
+        # npz already has corrected foot heights (see fix_motion_foot.py): no extra z shift here.
         pos = self._gather("body_pos_w")
         return pos + self._env.scene.env_origins[:, None, :]
 
