@@ -6,7 +6,9 @@ import mujoco
 from mjlab.entity import EntityCfg
 from mjlab.envs import ManagerBasedRlEnvCfg
 from mjlab.envs.mdp.actions import JointPositionActionCfg
+import mjlab.envs.mdp as mjlab_mdp
 import mjlab.envs.mdp.observations as mjlab_obs
+from mjlab.managers.curriculum_manager import CurriculumTermCfg
 from mjlab.managers.observation_manager import ObservationGroupCfg, ObservationTermCfg
 from mjlab.managers.reward_manager import RewardTermCfg
 from mjlab.managers.scene_entity_config import SceneEntityCfg
@@ -242,6 +244,50 @@ def goalkeeper_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
     cfg.rewards["motion_body_ori"].weight = 3.0           # was 1.0
     cfg.rewards["motion_body_lin_vel"].weight = 3.0       # was 1.0
     cfg.rewards["motion_body_ang_vel"].weight = 3.0       # was 1.0
+
+    # Replace first-order action rate penalty with second-order jerk penalty.
+    # G1 reference uses (a_t - 2*a_{t-1} + a_{t-2})^2 which penalises oscillation
+    # harder than smooth fast movement. Weight -0.01 keeps it from dominating task rewards.
+    cfg.rewards["action_rate_l2"] = RewardTermCfg(func=mjlab_mdp.action_acc_l2, weight=-0.01)
+
+    # Scale task rewards up as training progresses, matching G1 curriculum strategy.
+    # Steps computed as: 1020 envs × 24 steps/iter × target_iter.
+    # Stage 1 at ~600 iters (~15M steps), Stage 2 at ~1200 iters (~30M steps).
+    cfg.curriculum = {
+        "stopball_curriculum": CurriculumTermCfg(
+            func=mjlab_mdp.reward_curriculum,
+            params={
+                "reward_name": "stopball",
+                "stages": [
+                    {"step": 0,          "weight": 100.0},
+                    {"step": 15_000_000, "weight": 150.0},
+                    {"step": 30_000_000, "weight": 200.0},
+                ],
+            },
+        ),
+        "eereach_curriculum": CurriculumTermCfg(
+            func=mjlab_mdp.reward_curriculum,
+            params={
+                "reward_name": "eereach",
+                "stages": [
+                    {"step": 0,          "weight": 10.0},
+                    {"step": 15_000_000, "weight": 15.0},
+                    {"step": 30_000_000, "weight": 20.0},
+                ],
+            },
+        ),
+        "catch_success_curriculum": CurriculumTermCfg(
+            func=mjlab_mdp.reward_curriculum,
+            params={
+                "reward_name": "catch_success",
+                "stages": [
+                    {"step": 0,          "weight": 5.0},
+                    {"step": 15_000_000, "weight": 7.5},
+                    {"step": 30_000_000, "weight": 10.0},
+                ],
+            },
+        ),
+    }
 
     cfg.events["foot_friction"].params["asset_cfg"].geom_names = r"^(left|right)_foot_[12]$"
     cfg.events["base_com"].params["asset_cfg"].body_names = ("Trunk",)
