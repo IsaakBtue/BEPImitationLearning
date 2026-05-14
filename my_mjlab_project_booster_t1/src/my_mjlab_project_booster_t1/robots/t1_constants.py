@@ -50,16 +50,17 @@ T1_ARTICULATION = EntityArticulationInfoCfg(
 
 T1_ACTION_SCALE = {
     r"(AAHead_yaw|Head_pitch)": 7.0 / 20.0,
-    # Arms: use 0.25 factor (same as G1) so motor saturates at 4x action_scale, not 1x.
-    # Without this, 32% of N(0,1) policy outputs saturate the arm → arms appear locked.
+    # All joints use the 0.25 factor (same as G1) so motors saturate at 4x action_scale,
+    # not 1x. Without this, any N(0,1) policy output above ±1 pegs the joint at max
+    # torque, producing bang-bang control → jitter and oscillation.
     r"(Left_Shoulder_Pitch|Left_Shoulder_Roll|Left_Elbow_Pitch|Left_Elbow_Yaw"
     r"|Right_Shoulder_Pitch|Right_Shoulder_Roll|Right_Elbow_Pitch|Right_Elbow_Yaw)": 0.25 * 18.0 / 15.0,
-    r"Waist": 30.0 / 80.0,
-    r"(Left_Hip_Pitch|Right_Hip_Pitch)": 45.0 / 120.0,
-    r"(Left_Hip_Roll|Left_Hip_Yaw|Right_Hip_Roll|Right_Hip_Yaw)": 30.0 / 80.0,
-    r"(Left_Knee_Pitch|Right_Knee_Pitch)": 60.0 / 200.0,
-    r"(Left_Ankle_Pitch|Right_Ankle_Pitch)": 20.0 / 50.0,
-    r"(Left_Ankle_Roll|Right_Ankle_Roll)": 15.0 / 40.0,
+    r"Waist": 0.25 * 30.0 / 80.0,
+    r"(Left_Hip_Pitch|Right_Hip_Pitch)": 0.25 * 45.0 / 120.0,
+    r"(Left_Hip_Roll|Left_Hip_Yaw|Right_Hip_Roll|Right_Hip_Yaw)": 0.25 * 30.0 / 80.0,
+    r"(Left_Knee_Pitch|Right_Knee_Pitch)": 0.25 * 60.0 / 200.0,
+    r"(Left_Ankle_Pitch|Right_Ankle_Pitch)": 0.25 * 20.0 / 50.0,
+    r"(Left_Ankle_Roll|Right_Ankle_Roll)": 0.25 * 15.0 / 40.0,
 }
 
 T1_STANDING_KEYFRAME = EntityCfg.InitialStateCfg(

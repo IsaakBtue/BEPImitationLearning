@@ -17,12 +17,15 @@ _FEET_CFG = SceneEntityCfg("robot", body_names=("left_foot_link", "right_foot_li
 
 
 def _ball_is_behind(env: ManagerBasedRlEnv, ball_name: str = "ball") -> torch.Tensor:
-    """Boolean mask (N,): ball has passed the goal line (y=0) or is moving away.
-    T1 faces +Y, ball approaches from +Y, so the goal line is y=0."""
+    """Boolean mask (N,): ball has passed the goal line or is moving away.
+
+    Ball approaches from +Y; 'behind' means ball_y < 0 (passed the robot)
+    or ball moving strongly back in +Y (was deflected toward attacker).
+    """
     ball: Entity = env.scene[ball_name]
     ball_y_local = ball.data.root_link_pos_w[:, 1] - env.scene.env_origins[:, 1]
     ball_y_vel = ball.data.root_link_lin_vel_w[:, 1]
-    return (ball_y_local < 0.0) | (ball_y_vel < -1.0)
+    return (ball_y_local < 0.0) | (ball_y_vel > 1.0)
 
 
 def eereach(
@@ -64,8 +67,12 @@ def stopball(
     env: ManagerBasedRlEnv,
     ball_name: str = "ball",
 ) -> torch.Tensor:
-    """Reward when ball in front of goal line (y>0) has slowed or reversed.
-    T1 faces +Y: ball approaches in -Y, so in_front = ball_y_local > 0."""
+    """Reward when ball in front of goal line has slowed or reversed.
+
+    Ball approaches from +Y; 'in front' means ball_y > 0 (still on the
+    attacker's side), 'deflected' means Y velocity not strongly negative
+    (ball slowed, stopped, or bounced back toward attacker).
+    """
     ball: Entity = env.scene[ball_name]
     ball_y_local = ball.data.root_link_pos_w[:, 1] - env.scene.env_origins[:, 1]
     ball_y_vel = ball.data.root_link_lin_vel_w[:, 1]
@@ -79,8 +86,11 @@ def stayonline(
     line_offset: float = 0.2,
     max_offset: float = 1.2,
 ) -> torch.Tensor:
-    """Penalty for robot retreating from the goal line (y=0).
-    T1 faces +Y: lateral X movement is the dive direction and must NOT be penalized here."""
+    """Penalty for robot retreating/advancing away from the goal line.
+
+    Ball approaches from +Y so the goal line is Y = env_origin_Y.
+    The robot slides laterally in X to intercept; this penalises Y deviation.
+    """
     robot: Entity = env.scene["robot"]
     y_local = robot.data.root_link_pos_w[:, 1] - env.scene.env_origins[:, 1]
     dist = torch.clamp(y_local.abs(), line_offset, max_offset) - line_offset
@@ -88,8 +98,7 @@ def stayonline(
 
 
 def noretreat(env: ManagerBasedRlEnv) -> torch.Tensor:
-    """Penalty for retreating away from the incoming ball (negative Y velocity).
-    T1 faces +Y, ball comes from +Y, so retreating is moving in -Y."""
+    """Penalty for retreating (negative Y velocity away from the ball)."""
     robot: Entity = env.scene["robot"]
     y_vel = robot.data.root_link_lin_vel_w[:, 1]
     return -torch.clamp(y_vel, -1.0, 0.0)
@@ -120,7 +129,9 @@ def postorientation(env: ManagerBasedRlEnv, ball_name: str = "ball") -> torch.Te
 
 def postangvel(env: ManagerBasedRlEnv, ball_name: str = "ball") -> torch.Tensor:
     """Low angular velocity reward — active when ball is behind or passed.
-    All 3 axes (including yaw/Z) are penalized to prevent spinning."""
+
+    All 3 axes (including yaw/Z) are penalised to prevent spinning.
+    """
     behind = _ball_is_behind(env, ball_name)
     ang_vel = env.scene["robot"].data.root_link_ang_vel_b
     err = torch.sum(ang_vel ** 2, dim=1)
