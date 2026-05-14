@@ -5,7 +5,7 @@ description = "Goalkeeper task for Booster T1 with MuJoCo Lab"
 authors = [
     { name = "Isaak Bouwmeester", email = "i.p.b.bouwmeester@student.tue.nl" }
 ]
-requires-python = ">=3.12"
+requires-python = ">=3.12,<3.13"
 dependencies = [
     "mjlab>=1.3.0",
     "torch==2.11.0",

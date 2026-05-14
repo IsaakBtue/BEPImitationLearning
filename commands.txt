@@ -1,8 +1,5 @@
-# Option 1: activate venv directly (always works)
-cd /home/isaak/BEPImitationlearning/my_mjlab_project_booster_t1 && source .venv/bin/activate && python -m mjlab.scripts.play goalkeeper_booster_t1_withoverlay --checkpoint-file logs/rsl_rl/g1_goalkeeper/2026-05-14_13-17-57/model_200.pt --motion-file src/my_mjlab_project_booster_t1/motions/data/lefthand_t1.npz
+# Train — entropy_coef fixed (0.001), curriculum thresholds fixed, num_steps=100, retrain from scratch
+cd /home/isaak/BEPImitationlearning/my_mjlab_project_booster_t1 && source .venv/bin/activate && python -m mjlab.scripts.train goalkeeper_booster_t1 --env.scene.num-envs 2048 --gpu-ids '[0]'
 
-# Option 2: uv run (works after pyproject.toml torch URL fix)
-cd /home/isaak/BEPImitationlearning/my_mjlab_project_booster_t1 && uv run python -m mjlab.scripts.play goalkeeper_booster_t1_withoverlay --checkpoint-file logs/rsl_rl/g1_goalkeeper/2026-05-14_13-17-57/model_200.pt --motion-file src/my_mjlab_project_booster_t1/motions/data/lefthand_t1.npz
-
-# Train (retrain from scratch — old checkpoints incompatible due to action scale change)
-cd /home/isaak/BEPImitationlearning/my_mjlab_project_booster_t1 && source .venv/bin/activate && python -m mjlab.scripts.train goalkeeper_booster_t1
+# Play with overlay
+cd /home/isaak/BEPImitationlearning/my_mjlab_project_booster_t1 && source .venv/bin/activate && python -m mjlab.scripts.play goalkeeper_booster_t1_withoverlay --checkpoint-file logs/rsl_rl/g1_goalkeeper/CHECKPOINT_FOLDER/model_N.pt --motion-file src/my_mjlab_project_booster_t1/motions/data/lefthand_t1.npz
