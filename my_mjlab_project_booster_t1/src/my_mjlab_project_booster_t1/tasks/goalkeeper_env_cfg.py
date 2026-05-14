@@ -259,9 +259,9 @@ def goalkeeper_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
             params={
                 "reward_name": "stopball",
                 "stages": [
-                    {"step": 0,       "weight": 100.0},
-                    {"step": 60_000,  "weight": 150.0},
-                    {"step": 120_000, "weight": 200.0},
+                    {"step": 0,      "weight": 100.0},
+                    {"step": 30_000, "weight": 150.0},
+                    {"step": 60_000, "weight": 200.0},
                 ],
             },
         ),
@@ -270,9 +270,9 @@ def goalkeeper_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
             params={
                 "reward_name": "eereach",
                 "stages": [
-                    {"step": 0,       "weight": 10.0},
-                    {"step": 60_000,  "weight": 15.0},
-                    {"step": 120_000, "weight": 20.0},
+                    {"step": 0,      "weight": 10.0},
+                    {"step": 30_000, "weight": 15.0},
+                    {"step": 60_000, "weight": 20.0},
                 ],
             },
         ),
@@ -281,9 +281,9 @@ def goalkeeper_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
             params={
                 "reward_name": "catch_success",
                 "stages": [
-                    {"step": 0,       "weight": 5.0},
-                    {"step": 60_000,  "weight": 7.5},
-                    {"step": 120_000, "weight": 10.0},
+                    {"step": 0,      "weight": 5.0},
+                    {"step": 30_000, "weight": 7.5},
+                    {"step": 60_000, "weight": 10.0},
                 ],
             },
         ),
