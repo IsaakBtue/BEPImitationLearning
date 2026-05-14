@@ -1,5 +1,23 @@
 # Divergence from Upstream (Humanoid-Goalkeeper)
 
+## 2026-05-14 — entropy_coef 0.01 → 0.001 (IsaacGym value causes std runaway without AMP)
+
+**File:** `my_mjlab_project_booster_t1/src/my_mjlab_project_booster_t1/tasks/goalkeeper_ppo_cfg.py`
+
+**What:** `entropy_coef` set to `0.001` instead of the IsaacGym Humanoid-Goalkeeper value of `0.01`.
+
+**Why:** The IsaacGym reference uses `entropy_coef=0.01`, but this value only works there because: (1) AMP discriminator provides stabilising counter-gradients, (2) 6144 parallel environments give 3× larger batch size. Without AMP, `0.01` triggers a self-reinforcing positive feedback loop in mjlab:
+
+- Entropy gradient continuously pushes `mean_std` upward
+- Larger std → more saturated actions → noisier advantages → std grows further
+- Observed in training run `2026-05-14_17-04-22`: std grew 1.0 → 5.3 over 1000 iters
+- At std=5.3, ~42% of actions exceed ±4.0 (saturation point after the 0.25 action scale fix)
+- Robot fell in <15 steps; reward collapsed from 42 → 1
+
+The mjlab G1 tracking reference (`mjlab/tasks/tracking/config/g1/rl_cfg.py`) uses `entropy_coef=0.005`. With 100 steps/env and no AMP, `0.001` is the safe value.
+
+**Evidence:** TensorBoard `Policy/mean_std` monotonically increasing every iteration with no stabilisation. `Episode_Termination/ee_body_pos` exploded from 7 → 70 falls/episode.
+
 ## 2026-05-14 — Action jerk penalty + reward curriculum (mirroring G1 training strategy)
 
 **File:** `my_mjlab_project_booster_t1/src/my_mjlab_project_booster_t1/tasks/goalkeeper_env_cfg.py`

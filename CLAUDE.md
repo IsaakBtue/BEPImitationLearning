@@ -20,6 +20,7 @@ Adapt the **InternRobotics Humanoid-Goalkeeper** pipeline (originally targeting 
 3. **Document every divergence** — append a dated entry to `Imitationlearningbooster/DIVERGENCE_FROM_UPSTREAM.md` for every substantive change.
 4. **Log changes inside `Humanoid-Goalkeeper/`** — if upstream context must be noted, append "what" and "why" to `Humanoid-Goalkeeper/changes.md`.
 5. **License is CC BY-NC-SA 4.0** — non-commercial research only.
+6. **Document every fix immediately** — after every bug fix, reward change, or config change, update `Imitationlearningbooster/DIVERGENCE_FROM_UPSTREAM.md` in the same commit. Include: what changed, why it was wrong, what the correct value is, and what evidence (training data, error messages) confirmed the fix was needed.
 
 ## Installation
 
