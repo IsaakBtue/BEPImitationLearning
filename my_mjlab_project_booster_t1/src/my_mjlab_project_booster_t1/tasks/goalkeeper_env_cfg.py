@@ -24,6 +24,36 @@ _HAND_CFG = SceneEntityCfg("robot", body_names=("left_hand_link", "right_hand_li
 _FEET_CFG = SceneEntityCfg("robot", body_names=("left_foot_link", "right_foot_link"))
 
 
+def get_axes_spec() -> mujoco.MjSpec:
+    """World-frame axis markers for play-mode orientation reference.
+
+    Red  = +X (robot slides laterally in this direction to intercept)
+    Green = +Y (ball approaches FROM here — robot faces +Y)
+    Blue  = +Z (up)
+
+    Purely visual: contype=0, conaffinity=0, no physics.
+    """
+    spec = mujoco.MjSpec()
+    body = spec.worldbody.add_body(name="world_axes")
+    body.pos = [0.0, 0.0, 0.0]
+
+    def _arrow(name: str, end: list[float], rgba: tuple) -> None:
+        g = body.add_geom(name=name)
+        g.type = mujoco.mjtGeom.mjGEOM_CAPSULE
+        g.fromto = [0.0, 0.0, 0.02] + end
+        g.size = [0.03, 0.0, 0.0]
+        g.rgba = rgba
+        g.contype = 0
+        g.conaffinity = 0
+        g.group = 1
+
+    _arrow("axis_x", [1.5, 0.0, 0.02], (1.0, 0.2, 0.2, 0.9))   # red  → +X
+    _arrow("axis_y", [0.0, 2.0, 0.02], (0.2, 1.0, 0.2, 0.9))   # green → +Y (ball)
+    _arrow("axis_z", [0.0, 0.0, 0.52], (0.2, 0.4, 1.0, 0.9))   # blue  → +Z
+
+    return spec
+
+
 def get_ball_spec(radius: float = 0.11, mass: float = 0.42) -> mujoco.MjSpec:
     spec = mujoco.MjSpec()
     body = spec.worldbody.add_body(name="ball")
@@ -240,6 +270,7 @@ def goalkeeper_play_env_cfg() -> ManagerBasedRlEnvCfg:
     cfg.scene.num_envs = 1
     cfg.auto_reset = True
     cfg.episode_length_s = 10.0
+    cfg.scene.entities["axes"] = EntityCfg(spec_fn=get_axes_spec)
 
     from mjlab.managers.event_manager import EventTermCfg
     cfg.events["reset_ball_autonomous"] = EventTermCfg(
@@ -265,6 +296,7 @@ def goalkeeper_play_withoverlay_env_cfg() -> ManagerBasedRlEnvCfg:
     cfg.scene.num_envs = 1
     cfg.auto_reset = True
     cfg.episode_length_s = 10.0
+    cfg.scene.entities["axes"] = EntityCfg(spec_fn=get_axes_spec)
 
     from mjlab.managers.event_manager import EventTermCfg
     cfg.events["reset_ball_autonomous"] = EventTermCfg(

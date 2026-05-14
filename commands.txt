@@ -1,5 +1,8 @@
-# Retrain from scratch (reward axis fix + action scale fix — old checkpoints incompatible)
-cd /home/isaak/BEPImitationlearning/my_mjlab_project_booster_t1 && uv run python -m mjlab.scripts.train goalkeeper_booster_t1
+# Option 1: activate venv directly (always works)
+cd /home/isaak/BEPImitationlearning/my_mjlab_project_booster_t1 && source .venv/bin/activate && python -m mjlab.scripts.play goalkeeper_booster_t1_withoverlay --checkpoint-file logs/rsl_rl/g1_goalkeeper/2026-05-14_13-17-57/model_200.pt --motion-file src/my_mjlab_project_booster_t1/motions/data/lefthand_t1.npz
 
-# Play with overlay to verify orientation matches reference motion
-cd /home/isaak/BEPImitationlearning/my_mjlab_project_booster_t1 && uv run python -m mjlab.scripts.play goalkeeper_booster_t1_withoverlay --checkpoint-file logs/rsl_rl/g1_goalkeeper/2026-05-14_12-51-34/model_800.pt --motion-file src/my_mjlab_project_booster_t1/motions/data/lefthand_t1.npz
+# Option 2: uv run (works after pyproject.toml torch URL fix)
+cd /home/isaak/BEPImitationlearning/my_mjlab_project_booster_t1 && uv run python -m mjlab.scripts.play goalkeeper_booster_t1_withoverlay --checkpoint-file logs/rsl_rl/g1_goalkeeper/2026-05-14_13-17-57/model_200.pt --motion-file src/my_mjlab_project_booster_t1/motions/data/lefthand_t1.npz
+
+# Train (retrain from scratch — old checkpoints incompatible due to action scale change)
+cd /home/isaak/BEPImitationlearning/my_mjlab_project_booster_t1 && source .venv/bin/activate && python -m mjlab.scripts.train goalkeeper_booster_t1
