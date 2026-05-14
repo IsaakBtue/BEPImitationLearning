@@ -48,12 +48,8 @@ Without the 0.25 factor, every non-arm joint saturated at max torque when the po
 **Why — gamma:**
 0.998 was an unexplained deviation from both the original Humanoid-Goalkeeper (0.99) and the G1 mjlab config (0.99). Reverted to 0.99.
 
-**Why — num_steps_per_env=24 (tradeoff, may need revisiting):**
-The original upstream used 100, which equals 2 seconds of experience per rollout at 50 Hz. 24 steps = 0.48 seconds. Using 24 makes each training iteration ~4× faster in wall-clock time (fewer simulation steps per gradient update cycle), which is valuable for experimentation.
-
-The risk: a 5-second episode spans ~10 rollouts at 24 steps. The dominant reward (`stopball`, weight=100) only fires near the end. The value function must propagate that credit backward through 10 rollout boundaries using bootstrapped estimates. With `gamma=0.99`, early-episode value estimates are already discounted to ~0.37 of the final reward — so the signal is diluted. In practice this may cause the policy to react late to the ball rather than pre-positioning early.
-
-**Switch back to `num_steps_per_env=100` if:** after a solid training run (5000+ iterations) the robot only dives at the last second and never anticipates the ball's trajectory early.
+**Why — num_steps_per_env=100:**
+Matches upstream G1 exactly. 100 steps = 2 seconds of experience per rollout at 50 Hz, giving 204,800 samples per gradient update (2048 envs × 100 steps). Empirically, reducing to 24 steps caused the policy std to grow unchecked (1.26 → 3.55 over 2800 iters), because 4× fewer samples per update produced noisier advantage estimates and larger policy steps. Keeping 100 steps provides stable gradient estimates matching G1's training regime.
 
 **Impact:**
 - Ankle pitch: action=1 now produces 5 Nm (was 20 Nm = full saturation). Control stays in PD linear regime.
