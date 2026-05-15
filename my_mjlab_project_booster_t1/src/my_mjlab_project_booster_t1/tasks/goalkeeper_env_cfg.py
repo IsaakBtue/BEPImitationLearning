@@ -1,17 +1,21 @@
 """Goalkeeper environment configuration for Booster T1."""
 from __future__ import annotations
 
+import math
 import mujoco
 
 from mjlab.entity import EntityCfg
 from mjlab.envs import ManagerBasedRlEnvCfg
 from mjlab.envs.mdp.actions import JointPositionActionCfg
 import mjlab.envs.mdp as mjlab_mdp
+import mjlab.envs.mdp.dr as mjlab_dr
 import mjlab.envs.mdp.observations as mjlab_obs
 from mjlab.managers.curriculum_manager import CurriculumTermCfg
+from mjlab.managers.event_manager import EventTermCfg
 from mjlab.managers.observation_manager import ObservationGroupCfg, ObservationTermCfg
 from mjlab.managers.reward_manager import RewardTermCfg
 from mjlab.managers.scene_entity_config import SceneEntityCfg
+from mjlab.managers.termination_manager import TerminationTermCfg
 from mjlab.sensor import ContactMatch, ContactSensorCfg
 from mjlab.tasks.tracking.tracking_env_cfg import make_tracking_env_cfg
 from mjlab.utils.noise import UniformNoiseCfg as Unoise
@@ -24,6 +28,16 @@ from my_mjlab_project_booster_t1.robots.t1_constants import get_t1_robot_cfg, T1
 
 _HAND_CFG = SceneEntityCfg("robot", body_names=("left_hand_link", "right_hand_link"))
 _FEET_CFG = SceneEntityCfg("robot", body_names=("left_foot_link", "right_foot_link"))
+_KNEE_BODY_CFG = SceneEntityCfg("robot", body_names=("Shank_Left", "Shank_Right"))
+_ARM_JOINT_CFG = SceneEntityCfg(
+    "robot",
+    joint_names=(
+        "Left_Shoulder_Pitch", "Left_Shoulder_Roll", "Left_Elbow_Pitch", "Left_Elbow_Yaw",
+        "Right_Shoulder_Pitch", "Right_Shoulder_Roll", "Right_Elbow_Pitch", "Right_Elbow_Yaw",
+    ),
+)
+_WAIST_JOINT_CFG = SceneEntityCfg("robot", joint_names=("Waist",))
+_ALL_JOINT_CFG = SceneEntityCfg("robot")
 
 
 def get_axes_spec() -> mujoco.MjSpec:
@@ -145,7 +159,7 @@ def goalkeeper_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
             "yaw": (-0.78, 0.78),
         },
         joint_position_range=(0.0, 0.0) if play else (-0.1, 0.1),
-        sampling_mode="start" if play else "uniform",
+        sampling_mode="start",
     )
 
     # Remove tracking observations: they're not available at play time,
@@ -201,12 +215,17 @@ def goalkeeper_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
         "eereach": RewardTermCfg(
             func=gk_rew.eereach,
             weight=10.0,
-            params={"ball_name": "ball", "asset_cfg": _HAND_CFG, "reach_th": 0.3},
+            params={"ball_name": "ball", "asset_cfg": _HAND_CFG, "reach_th": 0.2},
         ),
         "catch_success": RewardTermCfg(
             func=gk_rew.catch_success,
             weight=5.0,
-            params={"ball_name": "ball", "asset_cfg": _HAND_CFG, "catch_th": 0.3},
+            params={"ball_name": "ball", "asset_cfg": _HAND_CFG, "catch_th": 0.5},
+        ),
+        "hand_proximity_strict": RewardTermCfg(
+            func=gk_rew.hand_proximity_strict,
+            weight=5.0,
+            params={"ball_name": "ball", "asset_cfg": _HAND_CFG, "strict_th": 0.15},
         ),
         "stopball": RewardTermCfg(
             func=gk_rew.stopball,
@@ -245,23 +264,123 @@ def goalkeeper_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
     cfg.rewards["motion_body_lin_vel"].weight = 3.0       # was 1.0
     cfg.rewards["motion_body_ang_vel"].weight = 3.0       # was 1.0
 
-    # Replace first-order action rate penalty with second-order jerk penalty.
-    # G1 reference uses (a_t - 2*a_{t-1} + a_{t-2})^2 which penalises oscillation
-    # harder than smooth fast movement. Weight -0.01 keeps it from dominating task rewards.
-    cfg.rewards["action_rate_l2"] = RewardTermCfg(func=mjlab_mdp.action_acc_l2, weight=-0.01)
+    # Second-order smoothness (jerk) penalty — matches original's _reward_smoothness.
+    # Original weight is -0.1; our earlier -0.01 was 10x too weak, allowing jerk to balloon.
+    cfg.rewards["action_rate_l2"] = RewardTermCfg(func=mjlab_mdp.action_acc_l2, weight=-0.1)
+
+    # Regularization terms ported from original Humanoid-Goalkeeper.
+    # These were all absent in our port; original used all of them for smooth stable motion.
+    _robot_cfg_all = SceneEntityCfg("robot")
+    cfg.rewards["dof_acc"] = RewardTermCfg(
+        func=mjlab_mdp.joint_acc_l2, weight=-2.5e-7,
+        params={"asset_cfg": _robot_cfg_all},
+    )
+    cfg.rewards["torques"] = RewardTermCfg(
+        func=mjlab_mdp.joint_torques_l2, weight=-1e-5,
+        params={"asset_cfg": _robot_cfg_all},
+    )
+    cfg.rewards["dof_vel"] = RewardTermCfg(
+        func=mjlab_mdp.joint_vel_l2, weight=-5e-4,
+        params={"asset_cfg": _robot_cfg_all},
+    )
+    cfg.rewards["ang_vel_xy"] = RewardTermCfg(
+        func=gk_rew.base_ang_vel_xy_l2, weight=-0.1,
+    )
+
+    # ====================================================================
+    # Gap fixes: rewards present in upstream Humanoid-Goalkeeper but
+    # previously missing from this port.
+    # ====================================================================
+
+    # Gap 1 — Soft joint/torque/velocity limit penalties (-3.0 / -2.0 / -3.0)
+    cfg.rewards["dof_pos_limits"] = RewardTermCfg(
+        func=mjlab_mdp.joint_pos_limits, weight=-3.0,
+        params={"asset_cfg": _ALL_JOINT_CFG},
+    )
+    cfg.rewards["dof_vel_limits"] = RewardTermCfg(
+        func=gk_rew.dof_vel_limits, weight=-2.0,
+        params={"asset_cfg": _ALL_JOINT_CFG},
+    )
+    cfg.rewards["torque_limits"] = RewardTermCfg(
+        func=gk_rew.torque_limits, weight=-3.0,
+        params={"asset_cfg": _ALL_JOINT_CFG},
+    )
+
+    # Gap 2 — Safety: hard-contact / kneeling penalties (-100 each)
+    cfg.rewards["penalize_sharpcontact"] = RewardTermCfg(
+        func=gk_rew.penalize_sharpcontact, weight=-100.0,
+    )
+    cfg.rewards["penalize_kneeheight"] = RewardTermCfg(
+        func=gk_rew.penalize_kneeheight, weight=-100.0,
+        params={"asset_cfg": _KNEE_BODY_CFG},
+    )
+
+    # Gap 3 — Successland: reward safe landing after save (4.0)
+    cfg.rewards["successland"] = RewardTermCfg(
+        func=gk_rew.successland, weight=4.0,
+        params={"ball_name": "ball", "asset_cfg": _FEET_CFG},
+    )
+
+    # Gap 5 — Post-save recovery: arms and waist return to neutral (1.0 each)
+    cfg.rewards["postupperdofpos"] = RewardTermCfg(
+        func=gk_rew.postupperdofpos, weight=1.0,
+        params={"ball_name": "ball", "asset_cfg": _ARM_JOINT_CFG},
+    )
+    cfg.rewards["postwaistdofpos"] = RewardTermCfg(
+        func=gk_rew.postwaistdofpos, weight=1.0,
+        params={"ball_name": "ball", "asset_cfg": _WAIST_JOINT_CFG},
+    )
+
+    # Gap 6 — Feet slippage: penalise foot XY velocity while in ground contact (-3.0)
+    cfg.rewards["feet_slippage"] = RewardTermCfg(
+        func=gk_rew.feet_slippage, weight=-3.0,
+        params={"asset_cfg": _FEET_CFG},
+    )
+
+    # ====================================================================
+    # Domain randomization — MINIMAL for now (focus on getting policy to
+    # learn before adding sim2real robustness).
+    # Disabled: pd_gains, link_mass, reset_joints (re-enable after policy
+    # can stand and dive; they make early optimisation too hard).
+    # ====================================================================
+
+    # Ball reset is handled by MultiMotionCommand._reset_ball, which fires at every
+    # episode reset AND every motion loop via _resample_command. It uses _BALL_END_RANGES
+    # to bias the ball toward the lefthand intercept zone. No separate event needed.
+
+    # Push robot: keep but at original shorter interval so it fires occasionally.
+    # Episodes are currently <1 s so 15 s interval never fires — restore base default.
+    cfg.events["push_robot"].interval_range_s = (10.0, 15.0)
+    cfg.events["push_robot"].params["velocity_range"] = {
+        "x": (-0.5, 0.5), "y": (-0.5, 0.5), "z": (0.0, 0.0),
+    }
+
+    # Foot friction: keep base config range [0.3, 1.2] (don't extend to 0.1 yet)
+    # (leave foot_friction.params alone — base config value is fine)
+
+    # ====================================================================
+    # Observation delay: 0–2 steps = 0–40 ms at 50 Hz.
+    # Matches upstream delay=True. Not applied in play mode (real hardware
+    # already has its own latency; adding simulated delay in play is wrong).
+    # ====================================================================
+    if not play:
+        for term_cfg in cfg.observations["actor"].terms.values():
+            term_cfg.delay_min_lag = 0
+            term_cfg.delay_max_lag = 2
+            term_cfg.delay_per_env = True
 
     # Scale task rewards up as training progresses, matching G1 curriculum strategy.
-    # Steps computed as: 1020 envs × 24 steps/iter × target_iter.
-    # Stage 1 at ~600 iters (~15M steps), Stage 2 at ~1200 iters (~30M steps).
+    # common_step_counter increments by 1 per env.step() call.
+    # With 100 steps/env: stage 1 at 60K = 600 iters, stage 2 at 120K = 1200 iters.
     cfg.curriculum = {
         "stopball_curriculum": CurriculumTermCfg(
             func=mjlab_mdp.reward_curriculum,
             params={
                 "reward_name": "stopball",
                 "stages": [
-                    {"step": 0,      "weight": 100.0},
-                    {"step": 30_000, "weight": 150.0},
-                    {"step": 60_000, "weight": 200.0},
+                    {"step": 0,       "weight": 100.0},
+                    {"step": 60_000,  "weight": 150.0},
+                    {"step": 120_000, "weight": 200.0},
                 ],
             },
         ),
@@ -270,9 +389,9 @@ def goalkeeper_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
             params={
                 "reward_name": "eereach",
                 "stages": [
-                    {"step": 0,      "weight": 10.0},
-                    {"step": 30_000, "weight": 15.0},
-                    {"step": 60_000, "weight": 20.0},
+                    {"step": 0,       "weight": 10.0},
+                    {"step": 60_000,  "weight": 15.0},
+                    {"step": 120_000, "weight": 20.0},
                 ],
             },
         ),
@@ -281,9 +400,9 @@ def goalkeeper_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
             params={
                 "reward_name": "catch_success",
                 "stages": [
-                    {"step": 0,      "weight": 5.0},
-                    {"step": 30_000, "weight": 7.5},
-                    {"step": 60_000, "weight": 10.0},
+                    {"step": 0,       "weight": 5.0},
+                    {"step": 60_000,  "weight": 7.5},
+                    {"step": 120_000, "weight": 10.0},
                 ],
             },
         ),
@@ -292,16 +411,30 @@ def goalkeeper_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
     cfg.events["foot_friction"].params["asset_cfg"].geom_names = r"^(left|right)_foot_[12]$"
     cfg.events["base_com"].params["asset_cfg"].body_names = ("Trunk",)
 
+    # Remove all motion-tracking-specific terminations from the base config.
+    # These check deviation from reference motion pose, not relevant for goalkeeper.
     cfg.terminations.pop("anchor_pos", None)
     cfg.terminations.pop("anchor_ori", None)
-    cfg.terminations["ee_body_pos"].params["body_names"] = (
-        "left_foot_link",
-        "right_foot_link",
-        "left_hand_link",
-        "right_hand_link",
+    cfg.terminations.pop("ee_body_pos", None)
+
+    # Replace with the two G1-equivalent fall terminations:
+    # 1. Tipping: matches G1's gravity_termination_buf (proj_grav XY norm > 0.8).
+    #    XY norm > 0.8  →  |proj_grav_z| < 0.6  →  acos(0.6) ≈ 0.927 rad ≈ 53°.
+    #    Use 1.0 rad (57°) to give the diving motion a small extra margin.
+    cfg.terminations["bad_orientation"] = TerminationTermCfg(
+        func=mjlab_mdp.bad_orientation,
+        params={"limit_angle": 1.0, "asset_cfg": SceneEntityCfg("robot")},
+        time_out=False,
+    )
+    # 2. Collapse: terminate if trunk drops below 0.4 m (half standing height).
+    #    Catches kneeling/folding collapses not caught by tilt alone.
+    cfg.terminations["base_height"] = TerminationTermCfg(
+        func=mjlab_mdp.root_height_below_minimum,
+        params={"minimum_height": 0.4},
+        time_out=False,
     )
 
-    cfg.episode_length_s = 5.0 if not play else 1.0e9
+    cfg.episode_length_s = 3.0 if not play else 1.0e9
     cfg.viewer.body_name = "Trunk"
 
     if play:

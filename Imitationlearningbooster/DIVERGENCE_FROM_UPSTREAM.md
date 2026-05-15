@@ -1,5 +1,229 @@
 # Divergence from Upstream (Humanoid-Goalkeeper)
 
+## 2026-05-15 — Raise entropy_coef 0.002 → 0.005 to encourage arm exploration
+
+**File:** `my_mjlab_project_booster_t1/src/my_mjlab_project_booster_t1/tasks/goalkeeper_ppo_cfg.py`
+
+**What:** `entropy_coef` raised from 0.002 to 0.005.
+
+**Why it was wrong:** Original G1 uses `entropy_coef=0.01`. Port was set to 0.002 (5× lower) to prevent std runaway without AMP. By iter 1581, `mean_std` had stabilized at 0.50 — no runaway risk — but arm motion (`eereach`) was growing very slowly. The lower entropy was causing the policy to over-exploit its current (leg-dominant) strategy without sufficiently exploring arm trajectories toward the ball.
+
+**Correct value:** 0.005 — halfway between original (0.01) and previous (0.002). Provides more arm exploration gradient while staying well below the AMP-free runaway threshold. Resume training from an existing checkpoint is valid; entropy_coef only affects the PPO update step, not the collected rollouts.
+
+**Evidence:** At iter 1581, `stopball=0.317` and `eereach=0.600` were both still low despite stable locomotion (episode_length=146/150, bad_orientation=0.25 envs). Increasing entropy encourages the policy to explore different arm positions during the ball approach phase.
+
+---
+
+## 2026-05-15 — Match episode structure to original (3 s, one ball per episode)
+
+**Files:**
+- `my_mjlab_project_booster_t1/src/my_mjlab_project_booster_t1/tasks/goalkeeper_env_cfg.py`
+- `my_mjlab_project_booster_t1/src/my_mjlab_project_booster_t1/mdp/commands.py`
+
+**Bug 1 — Motion played at wrong speed (30 fps source, 50 Hz policy)**
+
+`convert_booster.py` wrote the npz with 123 frames as-is from the 30 fps pkl. mjlab plays npz frames at policy dt (0.02 s = 50 Hz), so the motion ran in 123 × 0.02 = 2.46 s — 1.37× too fast. The original G1 `lefthand.pt` is also 123 frames at 30 fps = 4.1 s; its 3 s episode covered the first 90 source frames. Fix: resample from 30 fps → 50 Hz and trim to 3.0 s → 150 frames. `convert_booster.py` now uses `TARGET_FPS=50`, `TARGET_DURATION=3.0`; the npz has shape (150, ...). `episode_length_s = 3.0` matches exactly.
+
+**Bug 2 — Ball relaunched every motion loop (multiple balls per episode)**
+
+`MultiMotionCommand._update_command` called `_resample_command` when the motion looped, which called `_reset_ball` — relaunching the ball mid-episode. The original launches the ball exactly once per episode at reset. Fix: added `reset_ball: bool = True` parameter to `_resample_command`; `_update_command` now passes `reset_ball=False` so only true episode resets launch the ball.
+
+---
+
+## 2026-05-15 — Fix training ball-reset and RSI desync
+
+**File:** `my_mjlab_project_booster_t1/src/my_mjlab_project_booster_t1/tasks/goalkeeper_env_cfg.py`
+
+**Bug 1 — Redundant event-based ball reset conflicted with MultiMotionCommand**
+
+`cfg.events["reset_ball"]` (training only) called `reset_ball_training` → `_shoot_ball` with `x_end = uniform(-1.2, 1.2)` (no bias). But `MultiMotionCommand._reset_ball` already fires at every episode reset AND every motion loop, using `_BALL_END_RANGES = [(-1.2, -0.2, ...)]` which correctly biases the ball toward the lefthand intercept zone. The two ball resets competed with unknown mjlab ordering; the event-based one injected uniform x_end that partially or fully clobbered the biased reset.
+
+Fix: Removed `cfg.events["reset_ball"]` from the training path. Ball reset is now solely handled by `MultiMotionCommand._reset_ball`.
+
+**Bug 2 — `sampling_mode="uniform"` (RSI) desynchronized motion phase from ball arrival**
+
+Training used RSI: the robot started at a random frame of the lefthand motion. The ball was launched 0.5–1.0 s later. If the robot started mid-dive (frame 50 of 100), the ball arrived as the robot was recovering — `stopball`/`eereach` could not fire. Play used `sampling_mode="start"` (always frame 0), so the robot always executed the full dive before the ball arrived. This created a systematic training/play gap.
+
+Fix: Changed `sampling_mode` to `"start"` for training as well. The robot now always starts at the standing pose (frame 0) both in training and play. The motion loops every ~2 s during the 5 s episode (robot resets to standing, ball relaunches), giving 2–3 clean dive attempts per episode.
+
+## 2026-05-15 — Fix 4 bugs from critical G1↔T1 comparison
+
+**Files:**
+- `my_mjlab_project_booster_t1/src/my_mjlab_project_booster_t1/mdp/resets.py`
+- `my_mjlab_project_booster_t1/src/my_mjlab_project_booster_t1/tasks/goalkeeper_env_cfg.py`
+- `my_mjlab_project_booster_t1/src/my_mjlab_project_booster_t1/mdp/rewards.py`
+
+**Bug 1 — Ball never moved during training (CRITICAL)**
+
+`reset_ball_autonomous` was only registered in play mode. Training used `reset_scene_to_default` which placed the ball at `env_origin + (0,0,0)` with zero velocity every episode. `stopball` (weight 100) never fired. `eereach` gradient was only on a stationary ball at the robot's feet.
+
+Fix: Added `reset_ball_training()` to `resets.py` and registered it as `cfg.events["reset_ball"]` (mode="reset") in the training path. Ball now spawns at Y∈[3,5] m with a random trajectory aimed at the goal line, matching the original's ball setup.
+
+**Bug 2 — `postupperdofpos` sigma 20× too sharp**
+
+Original `_reward_postupperdofpos` uses `exp(sum_sq_err × -1)` (sigma=1 on SUM). Booster used `exp(-20 × mean_sq_err)`. For 8 arm joints this is 2.5× too sharp per joint, giving near-zero reward unless arm is within ~0.1 rad of default — almost no gradient signal for arm recovery.
+
+Fix: Changed to `err = sum(square(delta)); exp(-1.0 * err)`. Matches original code exactly. The config value `target_dof_pos_sigma=-20` exists in the G1 config but is NOT used in the original's reward code; the code hardcodes -1.
+
+**Bug 3 — `postwaistdofpos` sigma 6.7× too sharp**
+
+Original `_reward_postwaistdofpos` uses `exp(-3 × sum_sq_err)` (sigma=3). Booster used `exp(-20 × mean_sq_err)` — same mistake as postupperdofpos.
+
+Fix: Changed to `err = sum(square(delta)); exp(-3.0 * err)`. Matches original code.
+
+**Bug 4 — `noretreat` used world-Y instead of body-frame forward**
+
+Original uses `base_lin_vel[:, 0]` (body-frame X = forward direction). Booster used `root_link_lin_vel_w[:, 1]` (world Y). These diverge at 30-45° yaw during a dive, applying the retreat penalty on the wrong axis.
+
+Fix: Changed to `root_link_lin_vel_b[:, 0]` (body-frame forward). Semantically: "don't move backward in the direction you're facing", which remains correct during dives regardless of yaw.
+
+**Addition — `hand_proximity_strict` reward (mirrors `_reward_success`)**
+
+Original has a `success` reward (weight 5) firing at `dist < 0.15m` (strict threshold). Booster only had `catch_success` at 0.5m — 3.3× too coarse, no precision gradient. Added `hand_proximity_strict` (weight 5, threshold 0.15m) to provide dense gradient signal for the final hand-to-ball approach.
+
+**Evidence:** From code comparison against `/home/isaak/BEPImitationlearning/Humanoid-Goalkeeper/legged_gym/legged_gym/envs/base/legged_robot.py`. Ball reset confirmed by tracing `make_tracking_env_cfg()` → `reset_scene_to_default` in mjlab venv source. Sigma values confirmed by reading original reward function code (not config).
+
+---
+
+## 2026-05-15 — Temporarily disable heavy DR to unblock early training
+
+**Files:**
+- `my_mjlab_project_booster_t1/src/my_mjlab_project_booster_t1/tasks/goalkeeper_env_cfg.py`
+
+**What:** Disabled `pd_gains`, `link_mass` (pseudo_inertia), and `reset_joints` DR terms. Reverted `foot_friction` range back to base config [0.3, 1.2]. Reduced push_robot to milder defaults.
+
+**Why:** After 38 iterations the policy was getting worse (base_height terminations 36→44, zero timeouts, motion errors increasing). The three heavy DR terms make the optimization landscape too difficult before the policy has learned to stand and balance. Will re-enable once the policy shows stable upright behaviour.
+
+---
+
+## 2026-05-14 — Fix feet_slippage sign + replace tracking terminations with G1-equivalent fall detection
+
+**Files:**
+- `my_mjlab_project_booster_t1/src/my_mjlab_project_booster_t1/tasks/goalkeeper_env_cfg.py`
+
+**What:**
+1. **`feet_slippage` weight corrected: +3.0 → -3.0.** The reward function returns positive squared foot velocities; the positive sign was rewarding slippage instead of penalizing it.
+2. **All three mjlab tracking terminations removed** (`anchor_pos`, `anchor_ori`, `ee_body_pos`). These check deviation from the reference motion pose — a tracking-framework concept not present in the G1 upstream.
+3. **Two G1-equivalent fall terminations added:**
+   - `bad_orientation` with `limit_angle=1.0 rad` (57°): matches G1's `gravity_termination_buf` which fires when `projected_gravity XY norm > 0.8` (≈ 53°). Slightly more permissive to allow diving tilts.
+   - `base_height` with `minimum_height=0.4 m`: catches kneeling/folding collapses where the trunk drops to half its standing height. Mirrors G1's `knee_height < 0.10 m` intent.
+
+**Why it was wrong:**
+- `feet_slippage` sign: oversight — upstream uses weight −3.0 on a positive-valued function. Confirmed by iter 0 showing +0.046 instead of −0.046.
+- Tracking terminations: `ee_body_pos` (`bad_motion_body_pos_z_only`, threshold 0.25 m) fired when any of the 4 specified bodies deviated > 0.25 m in Z from the motion reference. With random actions at iter 0, this killed 74% of episodes in ~0.25 s. Removing all three without adding replacements caused the robot to fall through its own legs indefinitely (no fall detection at all).
+- Correct approach from G1: terminate on tilt + trunk height, not on motion pose deviation.
+
+**Evidence:** Training log iter 0–1: `Episode_Termination/ee_body_pos: 70.1 → 74.9`, `time_out: 0.66 → 0.00`, mean episode length 14 → 13 steps (0.25 s).
+
+---
+
+## 2026-05-14 — Domain randomization, feet_slippage, observation delay
+
+**Files:**
+- `my_mjlab_project_booster_t1/src/my_mjlab_project_booster_t1/tasks/goalkeeper_env_cfg.py`
+- `my_mjlab_project_booster_t1/src/my_mjlab_project_booster_t1/mdp/rewards.py`
+
+**What — 3 items:**
+
+1. **Domain randomization expanded to match upstream G1 suite:**
+   - `push_robot`: interval 1–3 s → 15 s constant, max push velocity 1.5 m/s (upstream values).
+   - `foot_friction`: geom friction range [0.3, 1.2] → [0.1, 2.0] (matches upstream `randomize_friction`).
+   - `pd_gains` (new, `mode="reset"`): kp and kd scaled ∈ [0.8, 1.2] per episode. Matches upstream `randomize_kp/kd`. Uses `mjlab_dr.pd_gains`.
+   - `link_mass` (new, `mode="reset"`): `mjlab_dr.pseudo_inertia` with `alpha_range=(0.8, 1.2)`. Scales body mass and inertia jointly (physically consistent). Matches upstream `randomize_link_mass [0.8, 1.2]`.
+   - `reset_joints` (new, `mode="reset"`): initial joint position offset ±0.1 rad at episode start. Matches upstream `randomize_initial_joint_pos` with scale [0.5, 1.5] and offset [-0.1, 0.1].
+   - Note: `encoder_bias` (joint injection ±0.01 rad) was already in the base tracking config. Not duplicated.
+   - Not ported: `randomize_com_displacement`, `randomize_restitution`, `ball_interval_s` (ball perturbation) — these are secondary and can be added later.
+
+2. **`feet_slippage` reward added** (weight 3.0): custom `gk_rew.feet_slippage`. Penalises foot XY velocity while foot height < 0.05 m (contact proxy). Uses `body_link_lin_vel_w` for foot linear velocity. Matches upstream `_reward_feet_slippage`. Without this, the policy can slide sideways during saves without penalty.
+
+3. **Observation delay added** (training only): 0–2 step uniform random lag per env applied to all actor observation terms (`delay_min_lag=0`, `delay_max_lag=2`, `delay_per_env=True`). At 50 Hz, 2 steps = 40 ms — realistic sensor + communication latency for real hardware. Matches upstream `delay=True`. Not applied in play mode (real hardware already has its own latency).
+
+**Why — domain randomization:** Without kp/kd and mass randomization, the policy overfits to exact sim physics. Knees and hips have stiffness 80–200 Nm/rad; ±20% randomization spans the manufacturing tolerance and calibration uncertainty for real hardware. Observation delay models the loop latency between sensor reading and torque command execution (typically 20–60 ms on real robots).
+
+**Impact:** Full retrain required. Expect slower initial learning (harder optimization landscape) but more robust policy that transfers better to real hardware.
+
+## 2026-05-14 — Port 5 missing upstream reward terms + fix stopball threshold
+
+**Files:**
+- `my_mjlab_project_booster_t1/src/my_mjlab_project_booster_t1/mdp/rewards.py`
+- `my_mjlab_project_booster_t1/src/my_mjlab_project_booster_t1/tasks/goalkeeper_env_cfg.py`
+- `my_mjlab_project_booster_t1/src/my_mjlab_project_booster_t1/tasks/goalkeeper_ppo_cfg.py`
+
+**What — 5 gap fixes:**
+
+1. **Gap 1 — Soft limit penalties added** (`dof_pos_limits` -3.0, `dof_vel_limits` -2.0, `torque_limits` -3.0):
+   - `dof_pos_limits`: uses `mjlab_mdp.joint_pos_limits` (soft_joint_pos_limits from URDF). Prevents the policy from exploiting joint limits without penalty.
+   - `dof_vel_limits`: custom `gk_rew.dof_vel_limits` with `vel_limit=20 rad/s` universal cap (mjlab has no per-joint URDF velocity limits stored). Clips `max(0, |qd| - 18)` summed across joints.
+   - `torque_limits`: custom `gk_rew.torque_limits` using `qfrc_actuator` with `torque_limit=50 Nm` (median T1 effort; knees are 60 Nm so slightly under-penalised, arms 18 Nm so over-penalised but their torques are naturally small). Clips `max(0, |tau| - 47.5)` summed.
+
+2. **Gap 2 — Safety penalties added** (`penalize_sharpcontact` -100, `penalize_kneeheight` -100):
+   - `penalize_sharpcontact`: custom. mjlab does not expose `cfrc_ext` per body, so trunk height < 0.35 m is used as a proxy for hard body–ground contact (normal standing is ~0.7 m). Binary flag: fires once when trunk collapses.
+   - `penalize_kneeheight`: custom. Checks `Shank_Left` / `Shank_Right` body heights. If either shank drops below 0.12 m, the robot is kneeling — fires as a binary flag per step.
+
+3. **Gap 3 — Successland added** (`successland` 4.0): custom `gk_rew.successland`. Rewards both feet within 0.05 m of ground simultaneously when ball is behind. Mirrors upstream `_reward_successland` but uses foot height instead of contact sensor (no foot-ground contact sensor configured in this env). Without this, the policy has no incentive to land safely after a dive — it just falls over.
+
+4. **Gap 4 — `num_steps_per_env` 50 → 100**: Restores upstream value. `stopball` is a sparse, one-shot reward; with 50-step rollouts (1 second at 50 Hz) the save often falls outside the GAE credit-assignment window. 100 steps = 2 seconds, covering the full ball-approach and interception window. Curriculum thresholds restored to 60K / 120K (were 30K / 60K when at 50 steps) to keep stage transitions at ~600 and ~1200 training iterations.
+
+5. **Gap 5 — Post-save recovery rewards added** (`postupperdofpos` 1.0, `postwaistdofpos` 1.0): custom `gk_rew.postupperdofpos` / `postwaistdofpos`. Both use `exp(-20 * mean_sq_err)` matching upstream `target_dof_pos_sigma=-20`. Arms and waist are penalised for deviating from the standing-keyframe default after ball passes. Without these, the policy locks the diving arm out indefinitely and never recovers to a stable post-save posture.
+
+**Stopball threshold fix:** `delta_vel_threshold` lowered from 2.0 → 1.0 m/s. At 2.0, slow-ball saves (approaching at -1 m/s, deflected to +0.5 m/s → delta=1.5 m/s) never triggered the reward. 1.0 catches slow deflections while remaining above typical ball-bouncing noise (<0.5 m/s delta).
+
+**Why missing:** The original G1 version has all of these. They were never ported during the initial mjlab migration because the focus was on getting task rewards working. Without safety penalties and post-save recovery rewards, the optimizer finds degenerate strategies: hard falls, kneeling, and frozen diving poses.
+
+**Impact:** Full retrain required. Expect: (1) no kneeling/collapse postures during training, (2) active landing after saves, (3) arms return to neutral between saves, (4) slower std blowup from joint/torque limit gradients dampening aggressive motions.
+
+## 2026-05-14 — Full regularization alignment with original Humanoid-Goalkeeper
+
+**Files:**
+- `my_mjlab_project_booster_t1/src/my_mjlab_project_booster_t1/tasks/goalkeeper_env_cfg.py`
+- `my_mjlab_project_booster_t1/src/my_mjlab_project_booster_t1/tasks/goalkeeper_ppo_cfg.py`
+- `my_mjlab_project_booster_t1/src/my_mjlab_project_booster_t1/mdp/rewards.py`
+
+**What:** Ported 5 missing regularization terms from original and fixed 4 parameter mismatches:
+
+1. **smoothness weight -0.01 → -0.1**: Original `_reward_smoothness` uses second-order jerk at -0.1. Our weight was 10× too weak, causing jerk to balloon unchecked (saw `action_rate_l2` grow to -14 per episode).
+2. **Added `dof_acc` (-2.5e-7)**: `mjlab_mdp.joint_acc_l2` — penalises joint acceleration. Missing entirely from our port.
+3. **Added `torques` (-1e-5)**: `mjlab_mdp.joint_torques_l2` — penalises torque magnitude. Missing entirely.
+4. **Added `dof_vel` (-5e-4)**: `mjlab_mdp.joint_vel_l2` — penalises joint velocity. Missing entirely.
+5. **Added `ang_vel_xy` (-0.1)**: Custom `gk_rew.base_ang_vel_xy_l2` — penalises base roll/pitch rate (XY axes only). Missing entirely. Suppresses wobbling/tipping.
+6. **`eereach reach_th` 0.3 → 0.2**: Original uses 0.2 m sigmoid midpoint. Ours was 50% more generous.
+7. **`catch_success catch_th` 0.3 → 0.5**: Original uses 0.5 m catch threshold for continuous reward. Ours was tighter than original for this continuous term.
+8. **`postangvel` XY only**: Original penalises only roll/pitch rate after ball passes; we were penalising all 3 axes including yaw. Fixed to match.
+9. **`entropy_coef` 0.004 → 0.002**: Cannot safely use original's 0.01 without AMP (empirically confirmed collapse). 0.002 is a calibrated middle ground: above the over-converging 0.001 (gave std=0.43), below the runaway 0.004 (gave std=2.5+). The 5 new regularization terms provide additional implicit pressure against high-variance actions, backing the lower entropy target.
+
+**Why missing:** The original Humanoid-Goalkeeper runs in Isaac Gym which has AMP providing natural regularization via discriminator gradients. Without AMP, these explicit penalties are the primary mechanism for smooth, stable motion. Our initial port carried the task rewards but omitted the regularization layer.
+
+**Impact:** Full retrain required. Expect smoother joint motion, less jitter, and `mean_std` stabilizing in 1.0–2.0 range rather than drifting to 2.5+.
+
+## 2026-05-14 — stopball: continuous → event-based (port from original)
+
+**File:** `my_mjlab_project_booster_t1/src/my_mjlab_project_booster_t1/mdp/rewards.py`
+
+**What:** Rewrote `stopball` from a continuous per-step reward to a one-time event-based reward, matching the original Humanoid-Goalkeeper's `_reward_stopball()`.
+
+**Old behaviour (broken):**
+```python
+in_front = ball_y_local > 0.0
+deflected = ball_y_vel > -0.5
+return (in_front & deflected).float()  # fires every step
+```
+With weight 100, a stationary ball in front of the robot earned 100 pts × ~200 steps = **20,000 pts/episode**. The optimal policy was to stand still and let the ball roll into the body.
+
+**New behaviour (matches original):**
+```python
+delta_vy = ball_y_vel - prev_ball_y_vel
+fired = (delta_vy > 2.0) & in_front & ~stop_flag
+stop_flag |= fired  # fires exactly once per episode
+return fired.float()
+```
+Fires exactly once when the ball first decelerates by >2 m/s while still in front. After that, `stop_flag` blocks further firings. Cannot be gamed by passive blocking.
+
+**Why this was wrong:** The original `_reward_stopball` uses an explicit `stop_flag` per environment (reset in `reset_idx`) and only returns `1.0 * (stop_flag == 0) * changevel`. Our port mistakenly used a continuous velocity threshold, turning a one-time 100-point bonus into a massive continuous reward that dominated all other signals.
+
+**Evidence:** Comparison between run `15-18-21` (active interception) and `20-28-27` (passive blocking) showed the new run scoring 22 stopball vs 14, yet visually doing less work. Passive blocking was the cheaper strategy under continuous reward. Event-based reward removes this exploit entirely.
+
+**Impact:** Full retrain required. `eereach` and `catch_success` will now dominate — both require hand proximity to the ball, so the robot is incentivized to actively reach.
+
 ## 2026-05-14 — num_steps_per_env 100 → 50, entropy_coef 0.001 → 0.004 (encourage arm exploration)
 
 **File:** `my_mjlab_project_booster_t1/src/my_mjlab_project_booster_t1/tasks/goalkeeper_ppo_cfg.py`

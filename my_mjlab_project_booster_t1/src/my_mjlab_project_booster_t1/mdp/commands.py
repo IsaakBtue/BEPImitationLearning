@@ -117,7 +117,7 @@ class MultiMotionCommand(MotionCommand):
     def anchor_ang_vel_w(self) -> torch.Tensor:
         return self._gather_anchor("body_ang_vel_w")
 
-    def _resample_command(self, env_ids: torch.Tensor) -> None:
+    def _resample_command(self, env_ids: torch.Tensor, reset_ball: bool = True) -> None:
         self.motion_type_ids[env_ids] = torch.randint(
             0, len(self.loaders), (len(env_ids),), device=self.device
         )
@@ -167,7 +167,9 @@ class MultiMotionCommand(MotionCommand):
             env_ids, root_pos, root_ori, root_lin_vel, root_ang_vel, joint_pos, joint_vel
         )
 
-        if self.cfg.ball_name:
+        # Only reset the ball at true episode resets, not when the motion loops mid-episode.
+        # Matches original: one ball per episode. Caller passes reset_ball=False for loops.
+        if reset_ball and self.cfg.ball_name:
             try:
                 ball: Entity = self._env.scene[self.cfg.ball_name]
                 self._reset_ball(env_ids, ball)
@@ -222,7 +224,7 @@ class MultiMotionCommand(MotionCommand):
         per_env_totals = self._time_step_totals[self.motion_type_ids]
         env_ids = torch.where(self.time_steps >= per_env_totals)[0]
         if env_ids.numel() > 0:
-            self._resample_command(env_ids)
+            self._resample_command(env_ids, reset_ball=False)
         self.update_relative_body_poses()
 
         if self.cfg.sampling_mode == "adaptive":

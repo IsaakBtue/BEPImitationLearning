@@ -1,4 +1,15 @@
-"""Convert lefthand_booster_t1.pkl → lefthand_t1.npz for mjlab MotionLoader."""
+"""Convert lefthand_booster_t1.pkl → lefthand_t1.npz for mjlab MotionLoader.
+
+Resamples from source fps (30 Hz) to policy fps (50 Hz) and trims to 3.0 s
+(150 frames), matching the original G1 lefthand episode length exactly.
+
+Why: the pkl is 30 fps, 123 frames = 4.1 s of motion. mjlab plays npz frames
+at policy dt (0.02 s = 50 Hz), so without resampling the motion plays in
+123 × 0.02 = 2.46 s — 1.37× too fast. The original G1 lefthand.pt is also
+123 frames but was consumed by AMP at 30 fps (4.1 s), with a 3 s episode
+covering only the first 90 source frames. We resample to 50 Hz and keep the
+first 3 s → 150 frames so timing matches the original episode structure.
+"""
 from __future__ import annotations
 
 import pickle
@@ -11,9 +22,31 @@ _PKL = Path("/home/isaak/BEP/ConvertData/GMRTRY/output/lefthand_booster_t1.pkl")
 _XML = Path(__file__).parent.parent / "assets" / "booster_t1" / "T1_serial_clean.xml"
 _OUT = Path(__file__).parent / "data" / "lefthand_t1.npz"
 
+# Policy fps = 1 / (sim_dt × decimation) = 1 / (0.005 × 4) = 50 Hz
+TARGET_FPS: int = 50
+TARGET_DURATION: float = 3.0          # seconds — matches original G1 episode length
+TARGET_FRAMES: int = int(TARGET_DURATION * TARGET_FPS)  # 150
+
 
 def xyzw_to_wxyz(q: np.ndarray) -> np.ndarray:
     return np.concatenate([q[..., 3:4], q[..., :3]], axis=-1)
+
+
+def resample_linear(arr: np.ndarray, t_src: np.ndarray, t_tgt: np.ndarray) -> np.ndarray:
+    """Linearly resample a (T, ...) array from t_src timestamps to t_tgt."""
+    flat = arr.reshape(len(t_src), -1)
+    out = np.stack([np.interp(t_tgt, t_src, flat[:, i]) for i in range(flat.shape[1])], axis=-1)
+    return out.reshape(len(t_tgt), *arr.shape[1:])
+
+
+def resample_quat(q: np.ndarray, t_src: np.ndarray, t_tgt: np.ndarray) -> np.ndarray:
+    """Linearly resample (T, 4) WXYZ quaternions, keeping consistent hemisphere, then renormalize."""
+    q = q.copy()
+    for i in range(1, len(q)):
+        if np.dot(q[i], q[i - 1]) < 0:
+            q[i] = -q[i]
+    out = resample_linear(q, t_src, t_tgt)
+    return out / np.linalg.norm(out, axis=-1, keepdims=True)
 
 
 def finite_diff(arr: np.ndarray, dt: float) -> np.ndarray:
@@ -50,26 +83,38 @@ def convert():
     with open(_PKL, "rb") as f:
         data = pickle.load(f)
 
-    fps: int = data["fps"]
-    dt = 1.0 / fps
+    src_fps: int = data["fps"]
+    src_T: int = data["root_pos"].shape[0]
+    src_duration: float = src_T / src_fps
+    print(f"Source: {src_T} frames @ {src_fps} fps = {src_duration:.3f} s")
+    print(f"Target: {TARGET_FRAMES} frames @ {TARGET_FPS} fps = {TARGET_DURATION:.3f} s")
+
     root_pos = data["root_pos"].astype(np.float64)        # (T, 3)
     root_rot_xyzw = data["root_rot"].astype(np.float64)   # (T, 4) XYZW
     dof_pos = data["dof_pos"].astype(np.float64)          # (T, 23)
-    T = root_pos.shape[0]
 
-    # Shift root z up so that foot bottoms land slightly above ground level.
-    # 0.080 = 0.058 (body center offset) + 0.021 (geom local z=-0.01 + radius=0.02 + 2mm margin) + 0.001 (1mm clearance)
+    # ── Resample from source fps to policy fps, trim to TARGET_DURATION ──────
+    t_src = np.arange(src_T) / src_fps
+    # Clamp target timestamps to source range (no extrapolation).
+    t_tgt = np.clip(np.arange(TARGET_FRAMES) / TARGET_FPS, 0.0, t_src[-1])
+
+    root_pos      = resample_linear(root_pos, t_src, t_tgt)
+    root_rot_xyzw = resample_quat(root_rot_xyzw, t_src, t_tgt)
+    dof_pos       = resample_linear(dof_pos, t_src, t_tgt)
+    T = TARGET_FRAMES
+    dt = 1.0 / TARGET_FPS
+
+    # ── Root height correction ───────────────────────────────────────────────
+    # 0.080 = 0.058 (body center offset) + 0.021 (geom local z + margin) + 0.001 clearance
     root_pos[:, 2] += 0.080
 
-    # Rotate entire motion +90° around Z to match G1/mjlab orientation.
-    # Root positions: (x, y) -> (-y, x)
+    # ── Rotate entire motion +90° around Z (T1 faces +Y, original faces +X) ─
     xy = root_pos[:, :2].copy()
     root_pos[:, 0] = -xy[:, 1]
     root_pos[:, 1] =  xy[:, 0]
 
     root_rot_wxyz = xyzw_to_wxyz(root_rot_xyzw)  # (T, 4) WXYZ
 
-    # Rotate root quaternions: q_new = q_90 * q_original (wxyz convention)
     def quat_mul_wxyz(q1: np.ndarray, q2: np.ndarray) -> np.ndarray:
         w1, x1, y1, z1 = q1[..., 0], q1[..., 1], q1[..., 2], q1[..., 3]
         w2, x2, y2, z2 = q2[..., 0], q2[..., 1], q2[..., 2], q2[..., 3]
@@ -83,21 +128,21 @@ def convert():
     q_90 = np.array([[0.7071068, 0.0, 0.0, 0.7071068]])  # +90° around Z (wxyz)
     root_rot_wxyz = quat_mul_wxyz(q_90, root_rot_wxyz)
 
-    # The retargeted pkl has Left_Knee_Pitch (dof 14) and Right_Knee_Pitch (dof 20) near-zero
-    # (straight knees), but the robot needs ~0.5 rad bend to stand stably. Fix by clamping
-    # knees to a minimum before running kinematics so body_pos_w is consistent with bent legs.
+    # ── Knee clamping ────────────────────────────────────────────────────────
+    # Retargeted pkl has near-zero knee bend; robot needs ≥0.5 rad to stand stably.
     KNEE_INDICES = [14, 20]  # Left_Knee_Pitch, Right_Knee_Pitch in T1 joint order
-    MIN_KNEE_BEND = 0.5  # radians — matches stable standing pose
+    MIN_KNEE_BEND = 0.5
     for ki in KNEE_INDICES:
         dof_pos[:, ki] = np.maximum(dof_pos[:, ki], MIN_KNEE_BEND)
 
+    # ── Forward kinematics ───────────────────────────────────────────────────
     model = mujoco.MjModel.from_xml_path(str(_XML))
     mj_data = mujoco.MjData(model)
     assert model.nq == 30, f"nq mismatch: {model.nq}"
     assert model.nbody == 25, f"nbody mismatch: {model.nbody}"
 
     n_bodies = model.nbody - 1  # exclude world body
-    body_pos_w = np.zeros((T, n_bodies, 3), dtype=np.float32)
+    body_pos_w  = np.zeros((T, n_bodies, 3), dtype=np.float32)
     body_quat_w = np.zeros((T, n_bodies, 4), dtype=np.float32)
 
     for t in range(T):
@@ -105,11 +150,12 @@ def convert():
         mj_data.qpos[3:7] = root_rot_wxyz[t]
         mj_data.qpos[7:] = dof_pos[t]
         mujoco.mj_kinematics(model, mj_data)
-        body_pos_w[t] = mj_data.xpos[1:].astype(np.float32)
+        body_pos_w[t]  = mj_data.xpos[1:].astype(np.float32)
         body_quat_w[t] = mj_data.xquat[1:].astype(np.float32)
 
-    joint_pos = dof_pos.astype(np.float32)
-    joint_vel = finite_diff(joint_pos, dt)
+    # ── Velocities via finite differences at policy dt ───────────────────────
+    joint_pos      = dof_pos.astype(np.float32)
+    joint_vel      = finite_diff(joint_pos, dt)
     body_lin_vel_w = finite_diff(body_pos_w, dt)
     body_ang_vel_w = quat_ang_vel(body_quat_w.astype(np.float64), dt).astype(np.float32)
 

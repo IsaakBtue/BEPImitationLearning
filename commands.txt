@@ -1,5 +1,2 @@
-# Train — entropy_coef fixed (0.001), curriculum thresholds fixed, num_steps=100, retrain from scratch
-cd /home/isaak/BEPImitationlearning/my_mjlab_project_booster_t1 && source .venv/bin/activate && python -m mjlab.scripts.train goalkeeper_booster_t1 --env.scene.num-envs 2048 --gpu-ids '[0]'
-
-# Play with overlay
-cd /home/isaak/BEPImitationlearning/my_mjlab_project_booster_t1 && source .venv/bin/activate && python -m mjlab.scripts.play goalkeeper_booster_t1_withoverlay --checkpoint-file logs/rsl_rl/g1_goalkeeper/CHECKPOINT_FOLDER/model_N.pt --motion-file src/my_mjlab_project_booster_t1/motions/data/lefthand_t1.npz
+# Resume training with entropy_coef=0.005 (raised from 0.002 for more arm exploration)
+cd /home/isaak/BEPImitationlearning/my_mjlab_project_booster_t1 && uv run python -m mjlab.scripts.train goalkeeper_booster_t1 --env.scene.num-envs 1024 --gpu-ids '[0]'
