@@ -1,5 +1,82 @@
 # Divergence from Upstream (Humanoid-Goalkeeper)
 
+## 2026-05-15 — Fix `_ball_is_behind` inconsistency with `stopball`
+
+**File:** `mdp/rewards.py`
+
+**What:** Updated `_ball_is_behind` to use `_sb_init_vy` (initial ball velocity stored by `stopball`) and threshold `delta > 2.0`, matching the original G1 condition `(ball_x < 0) | (ball_vx - initial_vx > 2.0)`.
+
+**Why wrong:** After fixing `stopball` to use initial-velocity delta (2.0 m/s), `_ball_is_behind` still used an absolute `ball_vy > 1.0` threshold. This meant the 6 post-save rewards (postorientation, postangvel, postlinvel, postupperdofpos, postwaistdofpos, successland) would gate on a different condition than `stopball`, firing at inconsistent times.
+
+**Fix:** Reuses `env._sb_init_vy`; falls back to `ball_vy > 1.0` only on the first step before `stopball` has initialised state.
+
+## 2026-05-15 — G1 parity pass: 5 reward fixes + max_iterations
+
+**Files:** `mdp/rewards.py`, `tasks/goalkeeper_env_cfg.py`, `tasks/goalkeeper_ppo_cfg.py`
+
+### 1. `torques` — add gain normalization (`torques_normalized_l2`)
+**What:** Replaced `mjlab_mdp.joint_torques_l2` (raw Nm²) with custom `torques_normalized_l2` that divides by per-joint stiffness before squaring.
+**Why wrong:** Original uses `sum(sq(torques / p_gains))`. Without normalization, T1's knee joints (kp=200) produce ~sq(15)=225 per joint vs original's sq(75/300)=0.0625 — ~3600× too large. This over-penalises effort during the dive, suppressing arm and leg motion.
+**Fix:** `_T1_KP_MAP` maps joint names → stiffness; built into a `kp_inv` tensor on first call.
+
+### 2. `stopball` — compare against initial velocity, threshold 2.0 m/s
+**What:** Changed from per-step `delta_vy > 1.0` to cumulative `(current_vy - initial_vy) > 2.0`. Initial vy is stored at episode reset in `_sb_init_vy`.
+**Why wrong:** Per-step delta could fire on gradual ball deceleration (e.g. multiple contacts). Original stores initial ball vx at reset and fires when deceleration ≥ 2 m/s from that reference — robust against air resistance and normal flight oscillation.
+**Fix:** Store `_sb_init_vy` at reset (`episode_length_buf <= 1`), compare cumulatively. Removed per-step `_sb_prev_vy`.
+
+### 3. `eereach` — sigma 3.0 → 5.0
+**What:** Default `sigma` in `eereach` changed from `3.0` to `5.0`.
+**Why wrong:** Original initialises `curriculumsigma = catch_sigma = 5.0`. A smaller sigma makes the sigmoid shallower (weaker gradient near the reach threshold), slowing hand-approach learning.
+**Fix:** `sigma=5.0` in function signature.
+
+### 4. `hand_proximity_strict` — add stopped-ball multiplier
+**What:** Now returns `(dist < strict_th) * (1 + stopped)` where `stopped = _sb_flag`.
+**Why wrong:** Original `_reward_success` returns `(success_flag + 1.0) * (dist < strict_th)` — doubles to 2.0 after the ball is stopped, incentivising the robot to keep its hand on the ball post-save.
+**Fix:** Read `env._sb_flag` (set by `stopball`) and apply `1.0 + stopped.float()` multiplier.
+
+### 5. `deviation_waist_joint` — abs → squared
+**What:** `delta.abs().sum()` → `torch.sum(torch.square(delta))`.
+**Why wrong:** Original `_reward_deviation_waist_pitch_joint` uses `sum(square(delta))`. Absolute error gives a different gradient shape (constant outside zero, no quadratic suppression).
+**Fix:** Use `torch.square()` to match original exactly.
+
+### 6. `max_iterations` 20 000 → 40 000
+**What:** `goalkeeper_ppo_cfg.py` max_iterations raised from 20k to 40k.
+**Why:** 20k was a quick-test value. 40k provides ~2× more gradient updates at the same batch size, matching more of the original's 200k-iteration budget relative to episode-length.
+
+## 2026-05-15 — sampling_mode changed "uniform" → "start"
+
+**File:** `my_mjlab_project_booster_t1/src/my_mjlab_project_booster_t1/tasks/goalkeeper_env_cfg.py`
+
+**What:** `sampling_mode` set back to `"start"` (robot always begins at frame 0).
+
+**Why it was wrong (previous "uniform"):** RSI (random starting frame) causes training/play desync — the robot may start mid-dive while the ball arrives at the wrong phase, preventing `stopball`/`eereach` rewards from firing.
+
+**Correct value:** `"start"` — robot always starts at standing pose (frame 0) in both training and play.
+
+---
+
+## 2026-05-15 — Fix CUDA index-out-of-bounds crash when using 6 motion types
+
+**File:** `my_mjlab_project_booster_t1/src/my_mjlab_project_booster_t1/mdp/commands.py`
+
+**What:** Added 5 missing entries to `_BALL_END_RANGES` (was 1 entry, now 6).
+
+**Why it was wrong:** `_BALL_END_RANGES` had only 1 tuple (index 0, lefthand). When `motion_files` was expanded to 6 clips, `MultiMotionCommand._resample_command` assigned `motion_type_ids` values 0–5 randomly. `_reset_ball` then did `end_ranges[motion_types]` where `end_ranges` was a (1,4) tensor — any motion_type ≥ 1 caused a CUDA device-side assertion (index out of bounds), producing `warp error 710` without `CUDA_LAUNCH_BLOCKING=1`, and a clear traceback at `commands.py:189` with it.
+
+**New entries (x_min, x_max, z_min, z_max):**
+```python
+(-1.2, -0.2, 0.4, 1.2),  # 0 lefthand  — robot's left side (-X), mid height
+( 0.2,  1.2, 0.4, 1.2),  # 1 righthand — robot's right side (+X), mid height
+(-1.2,  0.0, 0.8, 1.6),  # 2 leftjump  — left + higher (jump dive)
+( 0.0,  1.2, 0.8, 1.6),  # 3 rightjump — right + higher (jump dive)
+(-0.8,  0.2, 0.2, 0.8),  # 4 leftstep  — left-center, low (step save)
+(-0.2,  0.8, 0.2, 0.8),  # 5 rightstep — right-center, low (step save)
+```
+
+**Evidence:** `CUDA_LAUNCH_BLOCKING=1` traceback pinpointed `per_env_ranges = end_ranges[motion_types]` as the crash line. `motion_type_ids` log showed values 2 and 4 triggering the assertion.
+
+---
+
 ## 2026-05-15 — num_envs restored from 1020 → 6144 (MuJoCo Warp vs Isaac Gym memory model)
 
 **File:** `my_mjlab_project_booster_t1/src/my_mjlab_project_booster_t1/tasks/goalkeeper_env_cfg.py`

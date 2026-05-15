@@ -26,3 +26,6 @@
   claude.md to point to that if in future the ai want more context. So in short, convert this goalkeeping     
   isaacgym code into isaaclab, use mcp documentations and the specific links i send to you.                   
   '/home/isaak/BEPImitationlearning/humanoid_amp' i cloned the repo for you already.      
+
+big task: i want you to rewrite the following folder from isaacgym to mjlab, from unitree to boostert1. I already started with a first version and got it almost working, but i
+  want to focus on amp now instead of one motion so use that as an example to learn about mjlab, use context7 if you have any questions how to integrate amp into mjlab. i want you to mimic as close as possible the original isaacgym folder, but look at the project_booster_t1 for the domain randomisation because i dont need all just yet because i want faster training. 

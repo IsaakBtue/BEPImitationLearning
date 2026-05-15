@@ -159,7 +159,7 @@ def goalkeeper_env_cfg(play: bool = False, num_steps_per_env: int = 24) -> Manag
             "yaw": (-0.78, 0.78),
         },
         joint_position_range=(0.0, 0.0) if play else (-0.1, 0.1),
-        sampling_mode="uniform",
+        sampling_mode="start",
     )
 
     # Remove tracking observations: they're not available at play time,
@@ -276,7 +276,7 @@ def goalkeeper_env_cfg(play: bool = False, num_steps_per_env: int = 24) -> Manag
         params={"asset_cfg": _robot_cfg_all},
     )
     cfg.rewards["torques"] = RewardTermCfg(
-        func=mjlab_mdp.joint_torques_l2, weight=-1e-5,
+        func=gk_rew.torques_normalized_l2, weight=-1e-5,
         params={"asset_cfg": _robot_cfg_all},
     )
     cfg.rewards["dof_vel"] = RewardTermCfg(
