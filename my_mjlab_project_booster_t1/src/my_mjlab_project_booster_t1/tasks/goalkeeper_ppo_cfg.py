@@ -36,5 +36,5 @@ def goalkeeper_ppo_runner_cfg() -> RslRlOnPolicyRunnerCfg:
         experiment_name="g1_goalkeeper",
         save_interval=200,
         num_steps_per_env=100,
-        max_iterations=200_000,
+        max_iterations=20_000,
     )

@@ -1,2 +1,1 @@
-# Resume training with entropy_coef=0.005 (raised from 0.002 for more arm exploration)
-cd /home/isaak/BEPImitationlearning/my_mjlab_project_booster_t1 && uv run python -m mjlab.scripts.train goalkeeper_booster_t1 --env.scene.num-envs 1024 --gpu-ids '[0]'
+cd /home/isaak/BEPImitationlearning/my_mjlab_project_booster_t1 && uv run python -m mjlab.scripts.train goalkeeper_booster_t1 --gpu-ids '[0]' --num-steps-per-env 24

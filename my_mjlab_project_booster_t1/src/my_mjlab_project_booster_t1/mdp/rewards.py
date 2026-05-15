@@ -332,22 +332,28 @@ def feet_slippage(
     asset_cfg: SceneEntityCfg = _FEET_CFG,
     contact_height_threshold: float = 0.05,
 ) -> torch.Tensor:
-    """Penalize foot XY velocity while feet are in ground contact.
+    """Reward feet not slipping while in ground contact.
 
-    Mirrors upstream _reward_feet_slippage. Uses foot height < threshold as
-    contact proxy (no foot contact sensor configured). Uses body_link_lin_vel_w
-    for foot linear velocity in world frame.
-    Weight: -3.0 (same as upstream).
+    Mirrors upstream _reward_feet_slippage exactly:
+        contactvel = sum(norm(foot_vel_3d) * in_contact, over feet)
+        return exp(-10 * contactvel)
+    Returns 1.0 when no contact or no slip; approaches 0 with high slip.
+    Weight: +3.0 (positive reward for not slipping — same as upstream).
+
+    Contact detection: upstream uses contact_forces > 1 N; mjlab has no
+    per-foot contact sensor here so foot height < threshold is used as proxy.
+    3D velocity (not just XY) matches upstream rigid_body_states[:, :, 7:10].
     """
     robot: Entity = env.scene[asset_cfg.name]
-    foot_lin_vel_w = robot.data.body_link_lin_vel_w[:, asset_cfg.body_ids, :]  # (N, 2, 3)
-    foot_xy_vel_sq = torch.sum(foot_lin_vel_w[:, :, :2] ** 2, dim=-1)  # (N, 2)
+    foot_vel_w = robot.data.body_link_lin_vel_w[:, asset_cfg.body_ids, :]  # (N, 2, 3)
+    foot_speed = torch.norm(foot_vel_w, dim=-1)  # (N, 2)
 
     foot_z = robot.data.body_link_pos_w[:, asset_cfg.body_ids, 2]
     env_z = env.scene.env_origins[:, 2:3]
     in_contact = (foot_z - env_z < contact_height_threshold).float()
 
-    return torch.sum(foot_xy_vel_sq * in_contact, dim=-1)
+    contactvel = torch.sum(foot_speed * in_contact, dim=-1)
+    return torch.exp(-10.0 * contactvel)
 
 
 def hand_proximity_strict(
@@ -368,3 +374,19 @@ def hand_proximity_strict(
     hand_pos_w = robot.data.body_link_pos_w[:, asset_cfg.body_ids, :]
     dist = torch.norm(hand_pos_w - ball.data.root_link_pos_w[:, None, :], dim=-1).min(dim=-1).values
     return (dist < strict_th).float()
+
+
+def deviation_waist_joint(
+    env: ManagerBasedRlEnv,
+    asset_cfg: SceneEntityCfg = _WAIST_JOINT_CFG,
+) -> torch.Tensor:
+    """Penalize waist joint deviation from default position at all times.
+
+    Mirrors upstream _reward_deviation_waist_pitch_joint. G1 had a dedicated
+    waist_pitch joint; T1 has a single Waist joint — same intent, same weight.
+    Always-active (not gated on ball position) to keep trunk upright throughout.
+    Weight: -0.001 (same as upstream).
+    """
+    robot: Entity = env.scene[asset_cfg.name]
+    delta = robot.data.joint_pos[:, asset_cfg.joint_ids] - robot.data.default_joint_pos[:, asset_cfg.joint_ids]
+    return delta.abs().sum(dim=-1)

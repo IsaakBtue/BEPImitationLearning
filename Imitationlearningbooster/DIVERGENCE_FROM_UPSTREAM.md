@@ -1,5 +1,105 @@
 # Divergence from Upstream (Humanoid-Goalkeeper)
 
+## 2026-05-15 — num_envs restored from 1020 → 6144 (MuJoCo Warp vs Isaac Gym memory model)
+
+**File:** `my_mjlab_project_booster_t1/src/my_mjlab_project_booster_t1/tasks/goalkeeper_env_cfg.py`
+
+**What:** `cfg.scene.num_envs` raised back to 6144 (original upstream value). Previously set to 1020 to fit in 8 GB VRAM.
+
+**Why this is now possible — Isaac Gym vs MuJoCo Warp memory model:**
+
+RL training is GPU-compute bound, not VRAM bound, once you understand how each simulator stores state.
+
+**Isaac Gym (original)** stored every environment's full physics state — joint positions, velocities, contact forces, rigid body transforms, jacobians — as separate GPU tensors, one slice per environment. For 6144 envs × a 29-DOF humanoid, this accumulated to ~10–15 GB just for simulation state, before counting the neural network, rollout buffers, and optimizer. Hence the reduction to 1020 envs.
+
+**MuJoCo Warp (mjlab)** uses a fundamentally different GPU memory layout. It batches all environments into a single contiguous MJX data structure using Warp kernels. The physics state per env is extremely compact: 23 DOF × (pos + vel + acc) ≈ ~70 floats = 280 bytes. For 6144 envs that is ~1.7 MB of simulation state. The neural network (87→512→256→128→23) is ~500K parameters = ~2 MB. The rollout buffer (6144 envs × 24 steps × ~200 values) is ~120 MB. Total: well under 1 GB for the core training data. The remaining VRAM headroom (the GPU has 8 GB) is used by CUDA kernels, warp compilation cache, and the MJX contact solver.
+
+**Training is GPU-compute bound, not VRAM bound:** The bottleneck is how fast the GPU can run physics steps and backpropagation. Adding more environments doesn't cost more compute-per-step — it just runs more environments in the same parallel kernel launch. This is why `steps_per_second` stays at ~48,000 whether running 1024 or 6144 envs.
+
+**Impact of restoring 6144 envs:**
+- Samples per gradient update: 1024 × 24 = **24,576** → 6144 × 24 = **147,456** (6× more)
+- Gradient estimates are 6× less noisy — fewer iterations needed for convergence
+- Curriculum fires at the same iteration numbers (600/1200) but after 6× more environment experience, matching the original's data scale more closely
+- Same wall-clock time per iteration (~3 s)
+
+**Evidence:** Empirically confirmed stable training at 6144 envs on RTX 3070 Laptop (8 GB VRAM) at 47,693 steps/sec, GPU memory usage within limits.
+
+---
+
+## 2026-05-15 — Fix feet_slippage to match original formula + sign
+
+**Files:**
+- `my_mjlab_project_booster_t1/src/my_mjlab_project_booster_t1/mdp/rewards.py`
+- `my_mjlab_project_booster_t1/src/my_mjlab_project_booster_t1/tasks/goalkeeper_env_cfg.py`
+
+**What:** Rewrote `feet_slippage` to match `_reward_feet_slippage` exactly.
+
+**Old (wrong):**
+```python
+foot_xy_vel_sq = sum(foot_vel[:, :2]**2)   # XY only, quadratic
+in_contact = foot_z < threshold             # height proxy
+return sum(foot_xy_vel_sq * in_contact)     # positive slippage value
+# weight: -3.0
+```
+
+**New (matches original):**
+```python
+foot_speed = norm(foot_vel_3d)              # 3D velocity, upstream uses 7:10
+contactvel = sum(foot_speed * in_contact)
+return exp(-10 * contactvel)                # 1.0 when no slip, ~0 when slipping
+# weight: +3.0
+```
+
+**Why it was wrong:**
+1. **Sign + formula**: Old returned raw slippage with weight -3.0 (penalty). Original returns `exp(-10*vel)` with weight +3.0 (reward for not slipping). Both push gradient in the same direction, but the exponential formulation provides non-zero gradient everywhere — even when slippage is small the policy is encouraged to reduce it further. The quadratic gives near-zero gradient when slip is already low.
+2. **XY-only vs 3D**: Original uses full 3D foot velocity (`rigid_body_states[:, :, 7:10]`). Port only used XY, missing vertical impact velocity at landing.
+
+**Contact detection:** Original uses `contact_forces > 1N`; port keeps height proxy (< 0.05 m) since no per-foot contact sensor is configured. Semantically equivalent at normal walking speeds.
+
+**Evidence:** Original config `g1_29_config.py`: `feet_slippage: 3.0`. Original function `_reward_feet_slippage` returns `torch.exp(contactvel * -10)`.
+
+---
+
+## 2026-05-15 — Restore sampling_mode="uniform" (RSI) + add deviation_waist_joint penalty
+
+**Files:**
+- `my_mjlab_project_booster_t1/src/my_mjlab_project_booster_t1/tasks/goalkeeper_env_cfg.py`
+- `my_mjlab_project_booster_t1/src/my_mjlab_project_booster_t1/mdp/rewards.py`
+
+**What:**
+1. **`sampling_mode` reverted `"start"` → `"uniform"` (training only).** Play mode keeps `"start"` so the robot always begins from the standing pose at inference time. See [[2026-05-15 RSI desync entry]] for the previous reversal that is now itself being reversed.
+2. **`deviation_waist_joint` penalty added** (weight -0.001). New function `gk_rew.deviation_waist_joint` returns `|waist_joint_pos - default|` summed across the single T1 Waist joint. Active continuously (not gated on ball position). Registered as `cfg.rewards["deviation_waist_joint"]`.
+
+**Why — sampling_mode:**
+Direct comparison of runs `2026-05-14_15-18-21` (RSI, hands moved) vs `2026-05-15_16-02-28` (start, hands stayed still) showed RSI was the dominant factor. With `"start"`, the policy must rediscover the full stand→lunge→reach sequence every episode; `eereach` gradient only arrives late in the sequence after the lunge is already working. With `"uniform"`, a fraction of episodes spawn the robot mid-dive with arms near the ball — direct, immediate gradient on hand positioning. The G1 original uses RSI and successfully learns arm movement.
+
+The 2026-05-15 "RSI desync" reason (ball arrives while robot is recovering) is now mitigated: episodes are 3 s (not 5 s), the ball is reset exactly once at episode start, and the ball travel time (1–2 s) means a robot spawning at frame 75+ of the 150-frame clip (mid-recovery) is the minority case. The majority of random spawn frames are before or at the interception window.
+
+**Why — deviation_waist_joint:**
+The original Humanoid-Goalkeeper has `_reward_deviation_waist_pitch_joint` (weight -0.001) penalising the waist pitch joint deviation from 0 at all times — an always-on trunk stability term. G1 has a dedicated waist pitch DOF; T1 has a single `Waist` joint which serves the same role. This term was missing from the port entirely. The `postwaistdofpos` term already existed but is gated on ball-behind, leaving the waist unpenalised during the approach and dive phases.
+
+**Evidence:** Codebase comparison against `Humanoid-Goalkeeper/legged_gym/legged_gym/envs/g1/g1_29_config.py` confirmed `deviation_waist_pitch_joint: -0.001` present in original, absent in port. Run comparison confirmed RSI loss as primary cause of hands-not-moving symptom.
+
+**Impact:** Retrain required. Expect `hand_proximity_strict` (currently ~0.003, near zero) to rise as the policy gets direct gradient on hand-to-ball distance from RSI spawn frames.
+
+---
+
+## 2026-05-15 — Curriculum timing made proportional to num_steps_per_env
+
+**Files:**
+- `my_mjlab_project_booster_t1/src/my_mjlab_project_booster_t1/tasks/goalkeeper_env_cfg.py`
+- `my_mjlab_project_booster_t1/src/my_mjlab_project_booster_t1/tasks/__init__.py`
+
+**What:** Curriculum step thresholds changed from hardcoded values (60,000 / 120,000) to `600 × num_steps_per_env` and `1200 × num_steps_per_env`. The `num_steps_per_env` value is now read from the PPO runner config at task registration time and passed through to `goalkeeper_env_cfg()` as a parameter.
+
+**Why it was wrong:** The thresholds 60K / 120K were calibrated for `num_steps_per_env=100` — they fire at iterations 600 and 1200 respectively (since `common_step_counter` counts individual `env.step()` calls, not rollout iterations). When `num_steps_per_env` was changed to 24, the same thresholds would only fire at iterations 2,500 and 5,000 — 4× too late. The policy trained through most of the budget at curriculum stage 0 weights, losing the staged reward scaling entirely.
+
+**Correct formula:** `stage1_step = 600 × num_steps_per_env`, `stage2_step = 1200 × num_steps_per_env`. At `num_steps_per_env=24`: 14,400 / 28,800 steps. At `num_steps_per_env=100`: 60,000 / 120,000 steps (original values exactly). Changing `num_steps_per_env` in `goalkeeper_ppo_cfg.py` is now the only file that needs editing; the curriculum and all other configs derive from it automatically.
+
+**Evidence:** With `num_steps_per_env=24` and hardcoded 60K threshold, training output at iter 6,495 showed `Curriculum/stopball_curriculum/weight: 200.0` — already maxed out, confirming the threshold had fired. With the formula fix and a fresh run, stages will fire at the intended training iterations.
+
+---
+
 ## 2026-05-15 — Raise entropy_coef 0.002 → 0.005 to encourage arm exploration
 
 **File:** `my_mjlab_project_booster_t1/src/my_mjlab_project_booster_t1/tasks/goalkeeper_ppo_cfg.py`

@@ -89,14 +89,14 @@ def get_ball_spec(radius: float = 0.11, mass: float = 0.42) -> mujoco.MjSpec:
     return spec
 
 
-def goalkeeper_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
+def goalkeeper_env_cfg(play: bool = False, num_steps_per_env: int = 24) -> ManagerBasedRlEnvCfg:
     cfg = make_tracking_env_cfg()
 
     cfg.scene.entities = {
         "robot": get_t1_robot_cfg(),
         "ball": EntityCfg(spec_fn=get_ball_spec),
     }
-    cfg.scene.num_envs = 1020
+    cfg.scene.num_envs = 6144
 
     cfg.scene.sensors = (ContactSensorCfg(
         name="self_collision",
@@ -159,7 +159,7 @@ def goalkeeper_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
             "yaw": (-0.78, 0.78),
         },
         joint_position_range=(0.0, 0.0) if play else (-0.1, 0.1),
-        sampling_mode="start",
+        sampling_mode="uniform",
     )
 
     # Remove tracking observations: they're not available at play time,
@@ -330,10 +330,14 @@ def goalkeeper_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
         func=gk_rew.postwaistdofpos, weight=1.0,
         params={"ball_name": "ball", "asset_cfg": _WAIST_JOINT_CFG},
     )
+    cfg.rewards["deviation_waist_joint"] = RewardTermCfg(
+        func=gk_rew.deviation_waist_joint, weight=-0.001,
+        params={"asset_cfg": _WAIST_JOINT_CFG},
+    )
 
-    # Gap 6 — Feet slippage: penalise foot XY velocity while in ground contact (-3.0)
+    # Gap 6 — Feet slippage: reward exp(-10*contactvel) matching upstream weight +3.0
     cfg.rewards["feet_slippage"] = RewardTermCfg(
-        func=gk_rew.feet_slippage, weight=-3.0,
+        func=gk_rew.feet_slippage, weight=3.0,
         params={"asset_cfg": _FEET_CFG},
     )
 
@@ -371,16 +375,20 @@ def goalkeeper_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
 
     # Scale task rewards up as training progresses, matching G1 curriculum strategy.
     # common_step_counter increments by 1 per env.step() call.
-    # With 100 steps/env: stage 1 at 60K = 600 iters, stage 2 at 120K = 1200 iters.
+    # Curriculum thresholds scale with num_steps_per_env:
+    # - stage 1 at iteration 600: 600 * num_steps_per_env
+    # - stage 2 at iteration 1200: 1200 * num_steps_per_env
+    stage1_step = 600 * num_steps_per_env
+    stage2_step = 1200 * num_steps_per_env
     cfg.curriculum = {
         "stopball_curriculum": CurriculumTermCfg(
             func=mjlab_mdp.reward_curriculum,
             params={
                 "reward_name": "stopball",
                 "stages": [
-                    {"step": 0,       "weight": 100.0},
-                    {"step": 60_000,  "weight": 150.0},
-                    {"step": 120_000, "weight": 200.0},
+                    {"step": 0,            "weight": 100.0},
+                    {"step": stage1_step,  "weight": 150.0},
+                    {"step": stage2_step,  "weight": 200.0},
                 ],
             },
         ),
@@ -389,9 +397,9 @@ def goalkeeper_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
             params={
                 "reward_name": "eereach",
                 "stages": [
-                    {"step": 0,       "weight": 10.0},
-                    {"step": 60_000,  "weight": 15.0},
-                    {"step": 120_000, "weight": 20.0},
+                    {"step": 0,            "weight": 10.0},
+                    {"step": stage1_step,  "weight": 15.0},
+                    {"step": stage2_step,  "weight": 20.0},
                 ],
             },
         ),
@@ -400,9 +408,9 @@ def goalkeeper_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
             params={
                 "reward_name": "catch_success",
                 "stages": [
-                    {"step": 0,       "weight": 5.0},
-                    {"step": 60_000,  "weight": 7.5},
-                    {"step": 120_000, "weight": 10.0},
+                    {"step": 0,            "weight": 5.0},
+                    {"step": stage1_step,  "weight": 7.5},
+                    {"step": stage2_step,  "weight": 10.0},
                 ],
             },
         ),
@@ -444,8 +452,8 @@ def goalkeeper_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
     return cfg
 
 
-def goalkeeper_play_env_cfg() -> ManagerBasedRlEnvCfg:
-    cfg = goalkeeper_env_cfg(play=True)
+def goalkeeper_play_env_cfg(num_steps_per_env: int = 24) -> ManagerBasedRlEnvCfg:
+    cfg = goalkeeper_env_cfg(play=True, num_steps_per_env=num_steps_per_env)
     cfg.scene.num_envs = 1
     cfg.auto_reset = True
     cfg.episode_length_s = 10.0
@@ -470,8 +478,8 @@ def goalkeeper_play_env_cfg() -> ManagerBasedRlEnvCfg:
     return cfg
 
 
-def goalkeeper_play_withoverlay_env_cfg() -> ManagerBasedRlEnvCfg:
-    cfg = goalkeeper_env_cfg(play=True)
+def goalkeeper_play_withoverlay_env_cfg(num_steps_per_env: int = 24) -> ManagerBasedRlEnvCfg:
+    cfg = goalkeeper_env_cfg(play=True, num_steps_per_env=num_steps_per_env)
     cfg.scene.num_envs = 1
     cfg.auto_reset = True
     cfg.episode_length_s = 10.0
