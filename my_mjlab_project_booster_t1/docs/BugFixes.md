@@ -1,5 +1,60 @@
 # Divergence from Upstream (Humanoid-Goalkeeper)
 
+## 2026-05-16 — Ball-specific DR from G1: observation vanish window + in-flight velocity perturbation
+
+**Files:** `mdp/observations.py`, `mdp/commands.py`
+
+### Ball observation vanish (ball_pos_b)
+**What:** `ball_pos_b` now returns zeros for the first 3–40 steps of each episode (sampled per env as 3–10 initial + 0–30 random steps). `ball_vel_b` is NOT zeroed — matches G1 exactly.
+**Why:** G1 hides `end_target_local` (ball position) at episode start via `initial_vanish × random_vanish`. This simulates camera detection latency — the real robot's vision system doesn't see the ball the instant it's launched. Without this the policy can trivially read the ball's trajectory from frame 0, which doesn't generalize to hardware where detection takes 60–800 ms.
+**Source:** `legged_robot.py` lines 397–428.
+
+### Ball in-flight velocity perturbation (MultiMotionCommand._update_command)
+**What:** Every 25 steps (= 0.5 s at 50 Hz), ±0.5 m/s linear velocity noise is added to the ball's world-frame velocity. Angular velocity is not perturbed (matches G1).
+**Why:** G1 applies `ball_states[:, 7:10] += rand(±0.5)` every `ball_interval_s=0.5 s`. Without this the policy trains on a perfectly deterministic ball trajectory, which doesn't transfer to real kicks that have spin, wobble, and wind effects.
+**Source:** `legged_robot.py` lines 756–758, `_randomize_balls()`.
+
+## 2026-05-16 — Domain randomization: encoder bias, PD gains, push upgrade, ball DR, obs noise, delay
+
+**Files:** `tasks/goalkeeper_env_cfg.py`
+
+### Robot DR (from KaydenKnapik/BoosterT1mjlab — proven sim2real on real T1)
+
+**encoder_bias (±0.015 rad, startup):** Simulates per-joint encoder offsets present in real T1 hardware. Not added earlier because the policy was in a body-blocking local optimum; added now that arm motion is expected to emerge.
+
+**pd_gains (scale 0.8–1.2, startup):** Simulates actuator calibration uncertainty. Matches G1's `randomize_kp/kd [0.8, 1.2]`. KaydenKnapik didn't use this but G1 did; included because T1 actuator gains have manufacturing spread.
+
+**push_robot upgrade:** Changed from (10–15 s, xy-only) to (3–8 s, 6-DOF). Previous interval never fired during 3 s episodes. KaydenKnapik used (1–3 s) for a running task; (3–8 s) is conservative for a dive task that needs stability during the save.
+
+**Obs noise (actor only):** Added KaydenKnapik-validated noise: ang_vel ±0.2, projected_gravity ±0.05, joint_pos ±0.01, joint_vel ±1.5. These match real IMU and encoder noise on the T1.
+
+**Obs delay (2–8 steps = 40–160 ms):** Increased from 0–2 steps. KaydenKnapik deployed with DELAY_MIN=2, DELAY_MAX=8 — matches real hardware sensor latency.
+
+### Ball DR (goalkeeper-specific)
+
+**ball_mass (scale 0.8–1.2, reset per episode):** FIFA soccer ball is 0.42 kg ± tolerance. Per-episode resample trains robustness to different ball inertia (slow grounders vs kicked crosses have different effective mass).
+
+**ball_friction (abs 0.2–0.8, startup):** Randomizes ball-robot surface contact friction. Covers wet/dry ball, gloves vs skin, different ball coatings. Prevents overfitting to one slip profile.
+
+## 2026-05-16 — G1 parity: observation history (10-step), remove extra catch_success, entropy 0.01
+
+**Files:** `tasks/goalkeeper_env_cfg.py`, `tasks/goalkeeper_ppo_cfg.py`
+
+### 1. Observation history — match G1's `num_actor_history=10`
+**What:** Added `cfg.observations["actor"].history_length = 10` and same for critic.
+**Why wrong:** G1 stacks 10 timesteps of all observations (870 inputs per actor step). Port had single-step only (90 inputs). Without history the policy cannot reconstruct ball trajectory from noisy single-step `ball_vel_b`, and cannot detect momentum — both critical for anticipating the dive timing.
+**Fix:** mjlab `ObservationGroupCfg.history_length` applies uniformly to all terms in the group. Set unconditionally (train + play) so the policy input format is consistent at inference. Observation size: 90 per step × 10 = 900.
+
+### 2. Remove `catch_success` — not present in G1
+**What:** Removed the `catch_success` reward term (weight 5.0, threshold 0.5 m) and its curriculum from `goalkeeper_env_cfg.py`.
+**Why wrong:** G1 has exactly ONE proximity reward: `_reward_success = (success_flag+1) * (dist < 0.15)` at weight 5.0. The port had that PLUS an extra `catch_success` binary at 0.5 m (weight 5.0 → 10.0 with curriculum), effectively doubling the hand-proximity budget vs G1. The `eereach` sigmoid (sigma=5, reach_th=0.2) already provides continuous gradient from 1.0 m down to 0.2 m, making the 0.5 m binary redundant.
+**Fix:** Removed `catch_success` from `cfg.rewards.update({...})` and removed `catch_success_curriculum` from `cfg.curriculum`.
+
+### 3. `entropy_coef` 0.005 → 0.01
+**What:** Matched G1's `entropy_coef = 0.01` in `goalkeeper_ppo_cfg.py`.
+**Why wrong:** Port was 0.005 (half of G1). Lower entropy causes the policy std to settle low early (~0.49 observed at iter 3000), trapping the policy in a body-blocking local optimum where it never explores arm reaching.
+**Fix:** Set to 0.01 to match G1 exactly, encouraging broader exploration.
+
 ## 2026-05-15 — Fix `_ball_is_behind` inconsistency with `stopball`
 
 **File:** `mdp/rewards.py`

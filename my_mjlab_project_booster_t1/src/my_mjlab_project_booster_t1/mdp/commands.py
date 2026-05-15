@@ -234,6 +234,25 @@ class MultiMotionCommand(MotionCommand):
             )
             self._current_bin_failed.zero_()
 
+        # Ball in-flight perturbation: ±0.5 m/s velocity noise every 25 steps (0.5 s at 50 Hz).
+        # Matches G1's domain_rand.ball_interval_s=0.5, max_ball_vel=0.5. Only linear
+        # velocity is perturbed (matches G1 line 758: ball_states[:, 7:10] += rand).
+        if not hasattr(self, "_ball_perturb_step"):
+            self._ball_perturb_step = 0
+        self._ball_perturb_step += 1
+        if self._ball_perturb_step % 25 == 0 and self.cfg.ball_name:
+            try:
+                ball = self._env.scene[self.cfg.ball_name]
+                all_ids = torch.arange(self.num_envs, device=self.device)
+                noise = torch.empty((self.num_envs, 3), device=self.device).uniform_(-0.5, 0.5)
+                new_lin_vel = ball.data.root_link_lin_vel_w + noise
+                new_ang_vel = ball.data.root_link_ang_vel_w
+                ball.write_root_link_velocity_to_sim(
+                    torch.cat([new_lin_vel, new_ang_vel], dim=-1), env_ids=all_ids
+                )
+            except (KeyError, AttributeError):
+                pass
+
 
 @dataclass(kw_only=True)
 class MultiMotionCommandCfg(MotionCommandCfg):

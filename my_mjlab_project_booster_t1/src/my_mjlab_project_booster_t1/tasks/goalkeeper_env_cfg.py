@@ -208,6 +208,18 @@ def goalkeeper_env_cfg(play: bool = False, num_steps_per_env: int = 24) -> Manag
     cfg.observations["actor"].terms.update(actor_extra)
     cfg.observations["critic"].terms.update(actor_extra)
 
+    # Proprioceptive obs noise — from KaydenKnapik's deployed T1 running task.
+    # Only applied to actor (critic gets clean state for better value estimates).
+    _actor_noise = {
+        "base_ang_vel":      Unoise(n_min=-0.2,  n_max=0.2),
+        "projected_gravity": Unoise(n_min=-0.05, n_max=0.05),
+        "joint_pos":         Unoise(n_min=-0.01, n_max=0.01),
+        "joint_vel":         Unoise(n_min=-1.5,  n_max=1.5),
+    }
+    for _term, _noise in _actor_noise.items():
+        if _term in cfg.observations["actor"].terms:
+            cfg.observations["actor"].terms[_term].noise = _noise
+
     cfg.rewards.update({
         # ================================================================
         # Task rewards (from original isaacgym Humanoid-Goalkeeper)
@@ -216,11 +228,6 @@ def goalkeeper_env_cfg(play: bool = False, num_steps_per_env: int = 24) -> Manag
             func=gk_rew.eereach,
             weight=10.0,
             params={"ball_name": "ball", "asset_cfg": _HAND_CFG, "reach_th": 0.2},
-        ),
-        "catch_success": RewardTermCfg(
-            func=gk_rew.catch_success,
-            weight=5.0,
-            params={"ball_name": "ball", "asset_cfg": _HAND_CFG, "catch_th": 0.5},
         ),
         "hand_proximity_strict": RewardTermCfg(
             func=gk_rew.hand_proximity_strict,
@@ -342,35 +349,82 @@ def goalkeeper_env_cfg(play: bool = False, num_steps_per_env: int = 24) -> Manag
     )
 
     # ====================================================================
-    # Domain randomization — MINIMAL for now (focus on getting policy to
-    # learn before adding sim2real robustness).
-    # Disabled: pd_gains, link_mass, reset_joints (re-enable after policy
-    # can stand and dive; they make early optimisation too hard).
+    # Domain randomization — matches KaydenKnapik's deployed T1 running task
+    # (proven sim2real) plus goalkeeper-specific ball randomisation.
     # ====================================================================
 
-    # Ball reset is handled by MultiMotionCommand._reset_ball, which fires at every
-    # episode reset AND every motion loop via _resample_command. It uses _BALL_END_RANGES
-    # to bias the ball toward the lefthand intercept zone. No separate event needed.
+    # Ball reset is handled by MultiMotionCommand._reset_ball — no separate event needed.
 
-    # Push robot: keep but at original shorter interval so it fires occasionally.
-    # Episodes are currently <1 s so 15 s interval never fires — restore base default.
-    cfg.events["push_robot"].interval_range_s = (10.0, 15.0)
+    # --- Robot DR (KaydenKnapik-validated, proven on real T1 hardware) ---
+
+    # Encoder bias: simulates per-joint encoder offsets in real T1 hardware.
+    cfg.events["encoder_bias"] = EventTermCfg(
+        mode="startup",
+        func=mjlab_dr.encoder_bias,
+        params={
+            "asset_cfg": SceneEntityCfg("robot"),
+            "bias_range": (-0.015, 0.015),
+        },
+    )
+
+    # PD gain scaling: simulates actuator calibration uncertainty (±20%).
+    # Matches G1's randomize_kp/kd [0.8, 1.2].
+    cfg.events["pd_gains"] = EventTermCfg(
+        mode="startup",
+        func=mjlab_dr.pd_gains,
+        params={
+            "asset_cfg": SceneEntityCfg("robot"),
+            "kp_range": (0.8, 1.2),
+            "kd_range": (0.8, 1.2),
+            "operation": "scale",
+        },
+    )
+
+    # Push robot: upgraded to 6-DOF matching KaydenKnapik's deployed config.
+    # Interval (3–8 s) fires occasionally within the 3 s episode.
+    cfg.events["push_robot"].interval_range_s = (3.0, 8.0)
     cfg.events["push_robot"].params["velocity_range"] = {
-        "x": (-0.5, 0.5), "y": (-0.5, 0.5), "z": (0.0, 0.0),
+        "x": (-0.5, 0.5), "y": (-0.5, 0.5), "z": (-0.4, 0.4),
+        "roll": (-0.52, 0.52), "pitch": (-0.52, 0.52), "yaw": (-0.78, 0.78),
     }
 
-    # Foot friction: keep base config range [0.3, 1.2] (don't extend to 0.1 yet)
-    # (leave foot_friction.params alone — base config value is fine)
+    # Foot friction: keep KaydenKnapik-validated [0.3, 1.2] — geom_names set below.
+
+    # --- Ball DR (goalkeeper-specific) ---
+
+    # Ball mass: ±20% around FIFA standard 0.42 kg, resampled each episode.
+    cfg.events["ball_mass"] = EventTermCfg(
+        mode="reset",
+        func=mjlab_dr.body_mass,
+        params={
+            "asset_cfg": SceneEntityCfg("ball"),
+            "ranges": (0.8, 1.2),
+            "operation": "scale",
+        },
+    )
+
+    # Ball friction: randomizes how ball slides off hands/body (0.2–0.8).
+    # Covers wet/dry ball, gloves vs bare skin, different ball coatings.
+    cfg.events["ball_friction"] = EventTermCfg(
+        mode="startup",
+        func=mjlab_dr.geom_friction,
+        params={
+            "asset_cfg": SceneEntityCfg("ball", geom_names=("ball_geom",)),
+            "operation": "abs",
+            "ranges": (0.2, 0.8),
+        },
+    )
 
     # ====================================================================
-    # Observation delay: 0–2 steps = 0–40 ms at 50 Hz.
-    # Matches upstream delay=True. Not applied in play mode (real hardware
-    # already has its own latency; adding simulated delay in play is wrong).
+    # Observation delay: 2–8 steps = 40–160 ms at 50 Hz.
+    # KaydenKnapik deployed T1 with DELAY_MIN=2, DELAY_MAX=8 — matches real
+    # hardware sensor latency. Not applied in play mode (hardware already has
+    # its own latency; simulating it on top would double-count).
     # ====================================================================
     if not play:
         for term_cfg in cfg.observations["actor"].terms.values():
-            term_cfg.delay_min_lag = 0
-            term_cfg.delay_max_lag = 2
+            term_cfg.delay_min_lag = 2
+            term_cfg.delay_max_lag = 8
             term_cfg.delay_per_env = True
 
     # Scale task rewards up as training progresses, matching G1 curriculum strategy.
@@ -403,17 +457,7 @@ def goalkeeper_env_cfg(play: bool = False, num_steps_per_env: int = 24) -> Manag
                 ],
             },
         ),
-        "catch_success_curriculum": CurriculumTermCfg(
-            func=mjlab_mdp.reward_curriculum,
-            params={
-                "reward_name": "catch_success",
-                "stages": [
-                    {"step": 0,            "weight": 5.0},
-                    {"step": stage1_step,  "weight": 7.5},
-                    {"step": stage2_step,  "weight": 10.0},
-                ],
-            },
-        ),
+
     }
 
     cfg.events["foot_friction"].params["asset_cfg"].geom_names = r"^(left|right)_foot_[12]$"
@@ -421,6 +465,12 @@ def goalkeeper_env_cfg(play: bool = False, num_steps_per_env: int = 24) -> Manag
 
     # Remove all motion-tracking-specific terminations from the base config.
     # These check deviation from reference motion pose, not relevant for goalkeeper.
+    # Observation history: G1 stacks 10 timesteps (num_actor_history=10).
+    # mjlab applies per-group history_length uniformly to all terms.
+    # Applied unconditionally (train + play) so the policy always sees the same input format.
+    cfg.observations["actor"].history_length = 10
+    cfg.observations["critic"].history_length = 10
+
     cfg.terminations.pop("anchor_pos", None)
     cfg.terminations.pop("anchor_ori", None)
     cfg.terminations.pop("ee_body_pos", None)

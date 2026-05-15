@@ -1,1 +1,1 @@
-cd /home/isaak/BEPImitationlearning/my_mjlab_project_booster_t1 && .venv/bin/python -m mjlab.scripts.play goalkeeper_booster_t1_withoverlay --checkpoint-file logs/rsl_rl/g1_goalkeeper/2026-05-15_11-46-11/model_600.pt --motion-file src/my_mjlab_project_booster_t1/motions/data/lefthand_t1.npz
+cd /home/isaak/BEPImitationlearning/my_mjlab_project_booster_t1 && .venv/bin/python -m mjlab.scripts.train goalkeeper_booster_t1
