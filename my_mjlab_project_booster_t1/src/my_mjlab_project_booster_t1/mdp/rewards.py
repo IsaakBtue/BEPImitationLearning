@@ -318,20 +318,27 @@ def dof_vel_limits(
 def torque_limits(
     env: ManagerBasedRlEnv,
     asset_cfg: SceneEntityCfg = _ALL_JOINT_CFG,
-    torque_limit: float = 50.0,
     soft_factor: float = 0.95,
 ) -> torch.Tensor:
-    """Penalize actuator torques exceeding the soft torque limit.
+    """Penalize actuator torques exceeding the per-joint soft torque limit.
 
-    Mirrors upstream _reward_torque_limits. Uses qfrc_actuator (joint-space
-    actuator force). torque_limit=50 Nm is the median T1 effort limit; knees
-    (60 Nm) are slightly under-penalised, arms (18 Nm) are over-penalised but
-    their torques are naturally small so the penalty rarely fires there.
+    Uses per-joint effort limits from _T1_EFFORT_MAP (mirrors t1_constants.py
+    T1_ARTICULATION values). Joints not in the map fall back to 50 Nm.
     Weight: -3.0 (same as upstream).
     """
     robot: Entity = env.scene[asset_cfg.name]
     torques = robot.data.qfrc_actuator[:, asset_cfg.joint_ids].abs()
-    out_of_limit = (torques - torque_limit * soft_factor).clamp(min=0.0)
+
+    if not hasattr(env, "_t1_effort_limit"):
+        all_names = robot.joint_names
+        effort_all = torch.full((len(all_names),), 50.0, device=env.device)
+        for i, name in enumerate(all_names):
+            if name in _T1_EFFORT_MAP:
+                effort_all[i] = _T1_EFFORT_MAP[name]
+        env._t1_effort_limit = effort_all
+
+    soft_limit = env._t1_effort_limit[asset_cfg.joint_ids] * soft_factor
+    out_of_limit = (torques - soft_limit).clamp(min=0.0)
     return out_of_limit.sum(dim=-1)
 
 
@@ -387,6 +394,21 @@ def hand_proximity_strict(
     return (dist < strict_th).float() * multiplier
 
 
+_T1_EFFORT_MAP: dict[str, float] = {
+    "AAHead_yaw": 7.0, "Head_pitch": 7.0,
+    "Left_Shoulder_Pitch": 18.0, "Left_Shoulder_Roll": 18.0,
+    "Left_Elbow_Pitch":    18.0, "Left_Elbow_Yaw":     18.0,
+    "Right_Shoulder_Pitch": 18.0, "Right_Shoulder_Roll": 18.0,
+    "Right_Elbow_Pitch":   18.0, "Right_Elbow_Yaw":    18.0,
+    "Waist":               30.0,
+    "Left_Hip_Pitch":      45.0, "Right_Hip_Pitch":     45.0,
+    "Left_Hip_Roll":       30.0, "Left_Hip_Yaw":        30.0,
+    "Right_Hip_Roll":      30.0, "Right_Hip_Yaw":       30.0,
+    "Left_Knee_Pitch":     60.0, "Right_Knee_Pitch":    60.0,
+    "Left_Ankle_Pitch":    20.0, "Right_Ankle_Pitch":   20.0,
+    "Left_Ankle_Roll":     15.0, "Right_Ankle_Roll":    15.0,
+}
+
 _T1_KP_MAP: dict[str, float] = {
     "Left_Shoulder_Pitch": 15.0, "Left_Shoulder_Roll": 15.0,
     "Left_Elbow_Pitch":    15.0, "Left_Elbow_Yaw":     15.0,
@@ -430,6 +452,57 @@ def torques_normalized_l2(
 
     kp_inv = env._t1_kp_inv[asset_cfg.joint_ids]
     return torch.sum(torch.square(torques * kp_inv), dim=-1)
+
+
+def eereach_velmod(
+    env: ManagerBasedRlEnv,
+    ball_name: str = "ball",
+    asset_cfg: SceneEntityCfg = _HAND_CFG,
+    reach_th: float = 0.3,
+    sigma: float = 5.0,
+    lateral_scale: float = 3.0,
+    vertical_scale: float = 3.0,
+    high_ball_z: float = 1.0,
+) -> torch.Tensor:
+    """ν(R) dynamics modulation — mirrors G1's vel_sigma multiplier on taskrew.
+
+    Computes eereach_sigmoid × ν where ν rewards body velocity toward the ball's
+    lateral intercept position and upward for high balls. Returned separately from
+    eereach so curriculum weights can be tuned independently.
+
+    Lateral: sign(ball_rel_x) × body_x_vel, clamped to [0, 3], scaled by lateral_scale.
+    Vertical: body_z_vel when ball is > high_ball_z above robot, scaled by vertical_scale.
+
+    For the single left-hand motion, ball_rel_x < 0 always, so this rewards -X
+    body velocity (diving left). Direction is computed dynamically so it
+    generalises to any ball trajectory.
+    """
+    robot: Entity = env.scene[asset_cfg.name]
+    ball: Entity = env.scene[ball_name]
+
+    ball_pos_w = ball.data.root_link_pos_w
+    hand_pos_w = robot.data.body_link_pos_w[:, asset_cfg.body_ids, :]
+    dist = torch.norm(hand_pos_w - ball_pos_w[:, None, :], dim=-1).min(dim=-1).values
+    eereach_sigmoid = 1.0 - 1.0 / (1.0 + torch.exp(-sigma * (dist - reach_th)))
+    upright = 1.0 - torch.clamp(
+        torch.sum(robot.data.projected_gravity_b[:, :2] ** 2, dim=1), 0.0, 1.0
+    )
+
+    robot_pos_w = robot.data.root_link_pos_w
+    lin_vel_w = robot.data.root_link_lin_vel_w
+
+    # Lateral: reward velocity toward ball's X position
+    ball_rel_x = ball_pos_w[:, 0] - robot_pos_w[:, 0]
+    lateral_sign = torch.sign(ball_rel_x)
+    lateral_vel_toward = lateral_sign * lin_vel_w[:, 0]
+    nu_lateral = lateral_scale * torch.clamp(lateral_vel_toward, 0.0, 3.0)
+
+    # Vertical: reward upward velocity for high balls
+    ball_rel_z = ball_pos_w[:, 2] - robot_pos_w[:, 2]
+    is_high = (ball_rel_z > high_ball_z).float()
+    nu_vertical = vertical_scale * torch.clamp(lin_vel_w[:, 2], 0.0, 3.0) * is_high
+
+    return eereach_sigmoid * upright * (nu_lateral + nu_vertical)
 
 
 def deviation_waist_joint(

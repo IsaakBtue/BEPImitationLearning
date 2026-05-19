@@ -75,3 +75,54 @@ def right_hand_pos_b(
     base_pos_w = robot.data.root_link_pos_w
     base_quat_w = robot.data.root_link_quat_w
     return quat_apply(quat_inv(base_quat_w), hand_pos_w - base_pos_w)
+
+
+def ball_intercept_pos_b(env: ManagerBasedRlEnv, ball_name: str = "ball") -> torch.Tensor:
+    """Predicted ball intercept position (where ball crosses goal line) in base frame. Shape (N, 3).
+
+    Mirrors G1's end_target privileged observation. Projects current ball position
+    and velocity forward in time (with gravity) to estimate where the ball will
+    reach the goal line (Y = env_origin_Y). Critic-only: gives the value network
+    the intercept target so it can accurately credit region-appropriate behaviour.
+    """
+    robot: Entity = env.scene["robot"]
+    ball: Entity = env.scene[ball_name]
+    ball_pos_w = ball.data.root_link_pos_w
+    ball_vel_w = ball.data.root_link_lin_vel_w
+
+    ball_y_local = ball_pos_w[:, 1] - env.scene.env_origins[:, 1]
+    ball_vy = ball_vel_w[:, 1]
+
+    # t = -y_local / vy, positive when ball is in front and approaching (vy < 0)
+    t = torch.where(ball_vy < -0.1, -ball_y_local / ball_vy, torch.zeros_like(ball_vy))
+    t = torch.clamp(t, 0.0, 2.0)
+
+    intercept_x = ball_pos_w[:, 0] + ball_vel_w[:, 0] * t
+    intercept_y = env.scene.env_origins[:, 1]
+    intercept_z = ball_pos_w[:, 2] + ball_vel_w[:, 2] * t - 0.5 * 9.81 * t * t
+
+    intercept_w = torch.stack([intercept_x, intercept_y, intercept_z], dim=-1)
+    base_pos_w = robot.data.root_link_pos_w
+    base_quat_w = robot.data.root_link_quat_w
+    return quat_apply(quat_inv(base_quat_w), intercept_w - base_pos_w)
+
+
+def reach_dist_to_intercept(
+    env: ManagerBasedRlEnv,
+    ball_name: str = "ball",
+    asset_cfg: SceneEntityCfg = _HAND_CFG,
+) -> torch.Tensor:
+    """Distance from nearest hand to predicted ball intercept point. Shape (N, 1).
+
+    Mirrors G1's reach_distance privileged observation (dist column in current_obs).
+    Critic-only: lets the value function see how far the hand is from the target
+    intercept, so it can properly credit approach behaviour before contact.
+    """
+    intercept_b = ball_intercept_pos_b(env, ball_name)
+    robot: Entity = env.scene[asset_cfg.name]
+    base_pos_w = robot.data.root_link_pos_w
+    base_quat_w = robot.data.root_link_quat_w
+    intercept_w = base_pos_w + quat_apply(base_quat_w, intercept_b)
+    hand_pos_w = robot.data.body_link_pos_w[:, asset_cfg.body_ids, :]
+    dist = torch.norm(hand_pos_w - intercept_w[:, None, :], dim=-1).min(dim=-1).values
+    return dist.unsqueeze(-1)

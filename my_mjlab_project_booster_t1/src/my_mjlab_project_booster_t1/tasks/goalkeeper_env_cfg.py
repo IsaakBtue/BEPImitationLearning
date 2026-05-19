@@ -174,27 +174,32 @@ def goalkeeper_env_cfg(play: bool = False, num_steps_per_env: int = 24) -> Manag
         cfg.observations["critic"].terms.pop(_obs, None)
 
     # Replace IMU-sensor-based observations with direct state reads.
-    # The base tracking config uses builtin_sensor (needs robot/imu_lin_vel sensor),
-    # but T1 has no IMU sensor — use direct simulation state instead.
+    # base_ang_vel: actor + critic (G1 includes in actor obs, before num_one_step_obs cutoff).
+    # base_lin_vel: critic-only (G1 places after cutoff — privileged_obs_buf only).
     _robot_cfg = SceneEntityCfg("robot")
     for group in cfg.observations.values():
-        group.terms["base_lin_vel"] = ObservationTermCfg(
-            func=mjlab_obs.base_lin_vel, params={"asset_cfg": _robot_cfg}
-        )
         group.terms["base_ang_vel"] = ObservationTermCfg(
             func=mjlab_obs.base_ang_vel, params={"asset_cfg": _robot_cfg}
         )
+    cfg.observations["actor"].terms.pop("base_lin_vel", None)
+    cfg.observations["critic"].terms["base_lin_vel"] = ObservationTermCfg(
+        func=mjlab_obs.base_lin_vel, params={"asset_cfg": _robot_cfg}
+    )
 
+    # Actor gets ball_pos only — must infer trajectory from 10-step position history.
+    # Matches G1: actor slice ends after actions (96 dims), ball_vel is after cutoff.
     actor_extra = {
         "ball_pos_b": ObservationTermCfg(
             func=gk_obs.ball_pos_b,
             params={"ball_name": "ball"},
             noise=Unoise(n_min=-0.05, n_max=0.05),
         ),
+    }
+    # Critic-only privileged observations — mirrors G1's privileged_obs_buf.
+    critic_extra = {
         "ball_vel_b": ObservationTermCfg(
             func=gk_obs.ball_vel_b,
             params={"ball_name": "ball"},
-            noise=Unoise(n_min=-0.1, n_max=0.1),
         ),
         "left_hand_pos_b": ObservationTermCfg(
             func=gk_obs.left_hand_pos_b,
@@ -204,9 +209,18 @@ def goalkeeper_env_cfg(play: bool = False, num_steps_per_env: int = 24) -> Manag
             func=gk_obs.right_hand_pos_b,
             params={"asset_cfg": _HAND_CFG},
         ),
+        "ball_intercept_pos_b": ObservationTermCfg(
+            func=gk_obs.ball_intercept_pos_b,
+            params={"ball_name": "ball"},
+        ),
+        "reach_dist_to_intercept": ObservationTermCfg(
+            func=gk_obs.reach_dist_to_intercept,
+            params={"ball_name": "ball", "asset_cfg": _HAND_CFG},
+        ),
     }
     cfg.observations["actor"].terms.update(actor_extra)
     cfg.observations["critic"].terms.update(actor_extra)
+    cfg.observations["critic"].terms.update(critic_extra)
 
     # Proprioceptive obs noise — from KaydenKnapik's deployed T1 running task.
     # Only applied to actor (critic gets clean state for better value estimates).
@@ -226,6 +240,11 @@ def goalkeeper_env_cfg(play: bool = False, num_steps_per_env: int = 24) -> Manag
         # ================================================================
         "eereach": RewardTermCfg(
             func=gk_rew.eereach,
+            weight=10.0,
+            params={"ball_name": "ball", "asset_cfg": _HAND_CFG, "reach_th": 0.2},
+        ),
+        "eereach_velmod": RewardTermCfg(
+            func=gk_rew.eereach_velmod,
             weight=10.0,
             params={"ball_name": "ball", "asset_cfg": _HAND_CFG, "reach_th": 0.2},
         ),
@@ -457,7 +476,17 @@ def goalkeeper_env_cfg(play: bool = False, num_steps_per_env: int = 24) -> Manag
                 ],
             },
         ),
-
+        "eereach_velmod_curriculum": CurriculumTermCfg(
+            func=mjlab_mdp.reward_curriculum,
+            params={
+                "reward_name": "eereach_velmod",
+                "stages": [
+                    {"step": 0,            "weight": 10.0},
+                    {"step": stage1_step,  "weight": 15.0},
+                    {"step": stage2_step,  "weight": 20.0},
+                ],
+            },
+        ),
     }
 
     cfg.events["foot_friction"].params["asset_cfg"].geom_names = r"^(left|right)_foot_[12]$"

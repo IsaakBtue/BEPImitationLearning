@@ -17,7 +17,7 @@ if TYPE_CHECKING:
 # Ball approaches from +Y; robot faces +Y so left hand is at -X.
 # T1 only uses lefthand motion.
 _BALL_END_RANGES = [
-    (-1.2, -0.2, 0.4, 1.2),  # 0 lefthand — arrives at robot's left side (-X)
+    (-0.85, -0.2, 0.4, 0.85),  # 0 lefthand — 70% lateral reach, no-jump height cap
 ]
 
 
@@ -191,7 +191,7 @@ class MultiMotionCommand(MotionCommand):
         x_end = sample_uniform(per_env_ranges[:, 0], per_env_ranges[:, 1], (n,), device=self.device)
         z_end = sample_uniform(per_env_ranges[:, 2], per_env_ranges[:, 3], (n,), device=self.device)
         x_start = sample_uniform(-1.8, 1.8, (n,), device=self.device)
-        z_start = sample_uniform(0.3, 1.8, (n,), device=self.device)
+        z_start = sample_uniform(0.3, 1.2, (n,), device=self.device)
 
         t_flight = sample_uniform(0.5, 1.0, (n,), device=self.device)
 

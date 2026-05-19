@@ -1,5 +1,100 @@
 # Divergence from Upstream (Humanoid-Goalkeeper)
 
+## 2026-05-16 — Fix `torque_limits` to use per-joint T1 effort limits
+
+**File:** `mdp/rewards.py`
+
+**What:** Added `_T1_EFFORT_MAP` (23 joints, matches `T1_ARTICULATION` in `t1_constants.py`) and updated `torque_limits` to build a per-joint soft-limit tensor from it, cached as `env._t1_effort_limit`. Removed the old `torque_limit=50.0` scalar parameter.
+
+**Why wrong:** With `torque_limit=50 Nm` universal cap and `soft_factor=0.95`, the threshold was 47.5 Nm. All joints with actual effort limits below 47.5 Nm — arms (18 Nm), ankles (15/20 Nm), waist (30 Nm), hip_roll/yaw (30 Nm) — could never reach the threshold and were never penalized. Only knee joints (60 Nm) fired. The comment in the old code ("arms are over-penalised") was backwards — arms were under-penalised (completely exempt).
+
+**Correct per-joint thresholds (effort × 0.95):**
+- Arms: 17.1 Nm | Waist: 28.5 Nm | Hip_Pitch: 42.75 Nm | Hip_Roll/Yaw: 28.5 Nm
+- Knee: 57 Nm | Ankle_Pitch: 19 Nm | Ankle_Roll: 14.25 Nm | Head: 6.65 Nm
+
+**Pattern:** Mirrors existing `_T1_KP_MAP` / `torques_normalized_l2` — build vector once, index by `joint_ids`.
+
+---
+
+## 2026-05-16 — G1 vs T1 full analysis: remaining 3 issues (low priority, not changed)
+
+Full 8-dimension analysis (rewards, coordinates, observations, ball trajectory, DR,
+training config, robot model, architecture). 10 priority items evaluated; 4 are real
+issues, 1 was already implemented, 5 are not applicable or intentional.
+
+### Verified real issues (no code change yet — pending implementation)
+
+**Issue A — `torque_limits` uses fixed 50 Nm: arms/ankles/waist/hips never penalized**
+With `torque_limit=50 Nm, soft_factor=0.95` → threshold = 47.5 Nm. From T1 actual limits:
+arms (18 Nm), ankle_roll (15 Nm), ankle_pitch (20 Nm), waist (30 Nm), hip_roll/yaw (30 Nm)
+all max out BELOW 47.5 Nm → penalty never fires on these joints. Only knees (60 Nm) fire.
+The comment in `rewards.py` ("arms are over-penalised") is backwards — arms are
+UNDER-penalised (never reach threshold). Fix: add `_T1_EFFORT_MAP` analogous to `_T1_KP_MAP`
+and compute per-joint soft thresholds from actual effort limits.
+
+**Issue B — `penalize_kneeheight` threshold 0.12 m should be 0.15 m**
+G1 uses 0.15 m for knee height threshold. T1 uses 0.12 m. Simple parameter fix.
+
+**Issue C — `pd_gains` mode="startup" should be mode="reset"**
+Currently PD gains are randomized once per training session (startup). All 40K iterations
+share the same gain offsets — effectively no DR after the first episode. G1 resamples
+kp/kd per-episode. Fix: change `EventTermCfg(mode="startup")` to `EventTermCfg(mode="reset")`.
+
+**Issue D — `link_mass` DR missing (was disabled 2026-05-15, never re-enabled)**
+G1 uses 0.8–1.2× body mass scaling per episode. This was disabled early to simplify the
+optimization landscape. Now that training is stable, should be re-enabled.
+Fix: add `mjlab_dr.pseudo_inertia` with `alpha_range=(0.8, 1.2)`, mode="reset".
+
+### Not real issues / already done
+
+**Ball in-flight nudge** — ALREADY IMPLEMENTED in `commands.py` lines 240–254:
+fires every 25 steps (0.5 s at 50 Hz), ±0.5 m/s linear velocity. Analysis table was wrong.
+
+**`dof_vel_limits` 20 rad/s** — T1 XML has NO per-joint velocity limits (`actuatorfrcrange`
+specifies force only). 20 rad/s universal cap is appropriate.
+
+**Ball vanish flying flag** — Time-based cutoff sufficient for our use case. Ball never
+goes out of bounds during normal operation.
+
+**Multiple motion files** — Intentional single-motion focus per project scope.
+
+**`eereach` target: ball vs intercept** — T1 targets current ball position; G1 targets
+projected goal-line intercept. For mid-trajectory saves, targeting current ball position
+is actually more correct (intercept is 2m forward when ball is still in flight).
+
+**Coordinate system (90° rotation)** — All axis-specific terms verified correct.
+
+---
+
+## 2026-05-16 — G1 parity: 5 missing items (obs split, ν(R) vel modulation, intercept obs)
+
+**Files:** `mdp/observations.py`, `mdp/rewards.py`, `tasks/goalkeeper_env_cfg.py`
+
+Five missing items identified vs G1 and implemented in one pass:
+
+| # | Item | Where |
+|---|------|--------|
+| 1 | `ball_vel_b` → critic-only | `goalkeeper_env_cfg.py` |
+| 2 | `left/right_hand_pos_b` → critic-only | `goalkeeper_env_cfg.py` |
+| 3 | `base_lin_vel` → critic-only | `goalkeeper_env_cfg.py` |
+| 4 | ν(R) velocity modulation reward (`eereach_velmod`) | `mdp/rewards.py` |
+| 5 | `ball_intercept_pos_b` + `reach_dist_to_intercept` → critic-only | `mdp/observations.py` |
+
+### Items 1–3: Actor/critic observation split
+**What:** Moved `ball_vel_b`, `left_hand_pos_b`, `right_hand_pos_b`, and `base_lin_vel` to critic-only. Actor now sees only: ball_pos_b (with vanish) + proprioceptive (ang_vel, gravity, joint_pos, joint_vel, actions).
+**Why wrong:** All four were being added to both actor and critic. G1's actor obs slice is exactly 96 dims (ball_pos + ang_vel + gravity + dof_pos + dof_vel + actions); everything else (ball_vel, hand_pos, lin_vel, end_target, reach_dist) is critic-only via `privileged_obs_buf`. Giving ball_vel to the actor removes the incentive to use the 10-step history to infer trajectory. Giving hand_pos to the actor is redundant (inferrable from joint states).
+**Fix:** `actor_extra` now contains only `ball_pos_b`. `critic_extra` contains `ball_vel_b`, `left_hand_pos_b`, `right_hand_pos_b`, `ball_intercept_pos_b`, `reach_dist_to_intercept`. `base_lin_vel` removed from actor group, kept only in critic.
+
+### Item 4: ν(R) dynamics modulation reward (`eereach_velmod`)
+**What:** Added new reward `eereach_velmod = eereach_sigmoid × upright × ν` where `ν = lateral_scale × clip(vel_toward_ball_x, 0, 3) + vertical_scale × clip(vel_z, 0, 3) × is_high_ball`. Weight 10.0, same curriculum stages as `eereach` (10→15→20).
+**Why wrong:** G1's `_reward_taskrew` multiplies the sigmoid by `vel_sigma` — a region-dependent body velocity bonus that rewards moving laterally toward the ball (and jumping for high balls). Without this the policy gets identical sigmoid reward whether stationary or diving — no incentive to initiate the lateral motion early. For our single left-hand motion (ball at -X), this rewards -X body velocity.
+**Source:** `legged_robot.py` lines 1379–1395. G1: `taskrew = sigmoid × vel_sigma × upright`. T1: `eereach + eereach_velmod = sigmoid×upright + sigmoid×upright×ν = sigmoid×upright×(1+ν)`. Structures are equivalent.
+
+### Item 5: Critic-only privileged observations (`ball_intercept_pos_b`, `reach_dist_to_intercept`)
+**What:** Added two new critic-only observation terms: `ball_intercept_pos_b` (kinematic projection of where ball crosses goal line, in base frame, 3-dim) and `reach_dist_to_intercept` (distance from nearest hand to that intercept point, 1-dim).
+**Why wrong:** G1 critic sees `end_target` (predicted intercept in base frame) and `dist` (reach distance). Without these the value network cannot distinguish "hand is far from intercept but moving correctly" from "hand is far and stationary", leading to worse credit assignment.
+**Fix:** `ball_intercept_pos_b` uses kinematic formula `pos + vel×t - 0.5g×t²` to find goal-line crossing. `reach_dist_to_intercept` distances nearest hand to that point.
+
 ## 2026-05-16 — Ball-specific DR from G1: observation vanish window + in-flight velocity perturbation
 
 **Files:** `mdp/observations.py`, `mdp/commands.py`

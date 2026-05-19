@@ -10,7 +10,12 @@
       "Bash(mkdir -p /home/isaak/.claude/mcp_servers/isaaclab_docs)",
       "Bash(pip install *)",
       "Bash(mkdir -p /home/isaak/.claude/mcp_servers/isaacgym_docs)",
-      "Bash(cp /home/isaak/BEPImitationlearning/isaacgym_mcp/server.py /home/isaak/.claude/mcp_servers/isaacgym_docs/server.py)"
+      "Bash(cp /home/isaak/BEPImitationlearning/isaacgym_mcp/server.py /home/isaak/.claude/mcp_servers/isaacgym_docs/server.py)",
+      "Bash(curl -fsSL -o ~/.claude/statusline-command.sh https://raw.githubusercontent.com/danielmackay/claude-code-statusline/main/statusline-command.sh)",
+      "Bash(chmod +x ~/.claude/statusline-command.sh)",
+      "Bash(jq --version)",
+      "Bash(sudo apt-get *)",
+      "Bash(.venv/bin/python -c ' *)"
     ]
   }
 }
