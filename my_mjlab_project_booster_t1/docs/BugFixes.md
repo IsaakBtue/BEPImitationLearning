@@ -1,5 +1,37 @@
 # Divergence from Upstream (Humanoid-Goalkeeper)
 
+## 2026-05-19 — Fix A: `eereach` targets predicted intercept, not live ball position
+
+**Files:** `mdp/rewards.py`
+
+**What:** Added `_ball_intercept_w` helper that projects ball pos+vel forward to the goal-line crossing point (Y = env_origin_Y), matching G1's `end_target`. Changed `eereach` and `eereach_velmod` to use this intercept instead of the live ball position. Also updated `eereach_velmod`'s lateral-direction and high-ball checks to use the intercept's X/Z instead of the current ball X/Z.
+
+**Why wrong:** G1's `_reward_taskrew` rewards reaching `end_target` (extrapolated intercept). T1 was rewarding distance to the current live ball position — when the ball is 3 m away the two targets differ by >1 m. This prevented anticipatory dives: the policy learned to track the ball in flight rather than commit to the interception point.
+
+**Correct formula:** `target_w = ball_pos + vel * t - [0, 0, 0.5*g*t²]` where `t = -y_local / vy`, clamped to [0, 2 s]. Falls back to live ball position (t=0) when `vy ≥ -0.1 m/s`.
+
+---
+
+## 2026-05-19 — Fix B: `pd_gains` DR mode="startup" → mode="reset"
+
+**Files:** `tasks/goalkeeper_env_cfg.py`
+
+**What:** Changed `cfg.events["pd_gains"]` from `mode="startup"` to `mode="reset"`.
+
+**Why wrong:** G1 re-randomizes kp/kd per-episode in `_post_physics_step_callback`. T1 was using startup mode, meaning all 40k training iterations shared the same gain offsets — effectively no PD gain DR after episode 0.
+
+---
+
+## 2026-05-19 — Fix D: `dof_vel_limits` uses per-joint velocity limits
+
+**Files:** `mdp/rewards.py`
+
+**What:** Added `_T1_VEL_LIMIT_MAP` with per-joint velocity limits (arms 6, waist 8, hips/knees 12, ankles 10 rad/s). Changed `dof_vel_limits` to build a cached per-joint limit tensor from this map (joints not in map fall back to 20 rad/s). Removed the `vel_limit` scalar parameter.
+
+**Why wrong:** G1 uses `self.dof_vel_limits` (per-joint tensor from URDF). T1 was using a universal 20 rad/s cap — most joints never reach 20 rad/s so the penalty effectively never fired. T1's XML has no `velrange`, so limits are defined by actuator class.
+
+---
+
 ## 2026-05-16 — Fix `torque_limits` to use per-joint T1 effort limits
 
 **File:** `mdp/rewards.py`

@@ -387,9 +387,10 @@ def goalkeeper_env_cfg(play: bool = False, num_steps_per_env: int = 24) -> Manag
     )
 
     # PD gain scaling: simulates actuator calibration uncertainty (±20%).
-    # Matches G1's randomize_kp/kd [0.8, 1.2].
+    # Matches G1's randomize_kp/kd [0.8, 1.2]. mode="reset" resamples per episode
+    # (G1 resamples per-reset in _post_physics_step_callback).
     cfg.events["pd_gains"] = EventTermCfg(
-        mode="startup",
+        mode="reset",
         func=mjlab_dr.pd_gains,
         params={
             "asset_cfg": SceneEntityCfg("robot"),

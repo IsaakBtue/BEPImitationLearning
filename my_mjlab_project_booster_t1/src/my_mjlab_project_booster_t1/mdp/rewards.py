@@ -49,6 +49,26 @@ def _ball_is_behind(env: ManagerBasedRlEnv, ball_name: str = "ball") -> torch.Te
     return (ball_y_local < 0.0) | (ball_y_vel > 1.0)
 
 
+def _ball_intercept_w(env: ManagerBasedRlEnv, ball_name: str = "ball") -> torch.Tensor:
+    """World-frame predicted goal-line intercept position. Shape (N, 3).
+
+    Mirrors G1's end_target: projects ball pos+vel forward to where the ball
+    crosses the goal line (Y = env_origin_Y). Falls back to current ball position
+    (t=0) when the ball is not approaching (vy >= -0.1) or has already passed.
+    """
+    ball: Entity = env.scene[ball_name]
+    ball_pos_w = ball.data.root_link_pos_w
+    ball_vel_w = ball.data.root_link_lin_vel_w
+    ball_y_local = ball_pos_w[:, 1] - env.scene.env_origins[:, 1]
+    ball_vy = ball_vel_w[:, 1]
+    t = torch.where(ball_vy < -0.1, -ball_y_local / ball_vy, torch.zeros_like(ball_vy))
+    t = torch.clamp(t, 0.0, 2.0)
+    target_x = ball_pos_w[:, 0] + ball_vel_w[:, 0] * t
+    target_y = env.scene.env_origins[:, 1]
+    target_z = (ball_pos_w[:, 2] + ball_vel_w[:, 2] * t - 0.5 * 9.81 * t * t).clamp(min=0.0)
+    return torch.stack([target_x, target_y, target_z], dim=-1)
+
+
 def eereach(
     env: ManagerBasedRlEnv,
     ball_name: str = "ball",
@@ -56,12 +76,16 @@ def eereach(
     reach_th: float = 0.3,
     sigma: float = 5.0,
 ) -> torch.Tensor:
-    """Sigmoid reward for nearest hand reaching the ball."""
+    """Sigmoid reward for nearest hand reaching the predicted ball intercept.
+
+    Mirrors G1's _reward_taskrew: rewards reaching end_target (extrapolated
+    goal-line crossing) rather than the current live ball position. This teaches
+    the policy to move toward where the ball will be, enabling anticipatory dives.
+    """
     robot: Entity = env.scene[asset_cfg.name]
-    ball: Entity = env.scene[ball_name]
-    ball_pos_w = ball.data.root_link_pos_w
+    target_w = _ball_intercept_w(env, ball_name)
     hand_pos_w = robot.data.body_link_pos_w[:, asset_cfg.body_ids, :]
-    dist = torch.norm(hand_pos_w - ball_pos_w[:, None, :], dim=-1)
+    dist = torch.norm(hand_pos_w - target_w[:, None, :], dim=-1)
     min_dist = dist.min(dim=-1).values
     rew = 1.0 - 1.0 / (1.0 + torch.exp(-sigma * (min_dist - reach_th)))
     projected_grav = env.scene["robot"].data.projected_gravity_b
@@ -296,22 +320,53 @@ def postwaistdofpos(
     return torch.exp(-3.0 * err) * behind.float()
 
 
+_T1_VEL_LIMIT_MAP: dict[str, float] = {
+    # T1 XML has no velrange — values estimated from actuator class and effort limits.
+    # Arms (18 Nm small servos): lower speed, ~6 rad/s.
+    "AAHead_yaw": 4.0,       "Head_pitch": 4.0,
+    "Left_Shoulder_Pitch": 6.0,  "Left_Shoulder_Roll": 6.0,
+    "Left_Elbow_Pitch":    6.0,  "Left_Elbow_Yaw":     6.0,
+    "Right_Shoulder_Pitch": 6.0, "Right_Shoulder_Roll": 6.0,
+    "Right_Elbow_Pitch":   6.0,  "Right_Elbow_Yaw":    6.0,
+    # Waist (30 Nm): moderate, ~8 rad/s.
+    "Waist": 8.0,
+    # Legs (45-60 Nm high-torque): faster, ~12 rad/s.
+    "Left_Hip_Pitch":  12.0, "Right_Hip_Pitch":  12.0,
+    "Left_Hip_Roll":   10.0, "Left_Hip_Yaw":     10.0,
+    "Right_Hip_Roll":  10.0, "Right_Hip_Yaw":    10.0,
+    "Left_Knee_Pitch": 12.0, "Right_Knee_Pitch": 12.0,
+    # Ankles (15-20 Nm): moderate, ~10 rad/s.
+    "Left_Ankle_Pitch": 10.0, "Right_Ankle_Pitch": 10.0,
+    "Left_Ankle_Roll":  10.0, "Right_Ankle_Roll":  10.0,
+}
+
+
 def dof_vel_limits(
     env: ManagerBasedRlEnv,
     asset_cfg: SceneEntityCfg = _ALL_JOINT_CFG,
-    vel_limit: float = 20.0,
     soft_factor: float = 0.9,
 ) -> torch.Tensor:
-    """Penalize joint velocities exceeding the soft velocity limit.
+    """Penalize joint velocities exceeding per-joint soft velocity limits.
 
-    Mirrors upstream _reward_dof_vel_limits. mjlab does not store per-joint
-    velocity limits from the URDF, so vel_limit=20 rad/s is used as a universal
-    soft cap (conservative for legs, generous for fast arm motions during a dive).
+    Mirrors G1's _reward_dof_vel_limits which uses per-joint dof_vel_limits from
+    the URDF. T1's XML specifies no velrange, so _T1_VEL_LIMIT_MAP defines limits
+    by actuator class (arms 6, waist 8, legs 10-12 rad/s). Joints not in the map
+    fall back to 20 rad/s. Cached on the env after the first call.
     Weight: -2.0 (same as upstream).
     """
     robot: Entity = env.scene[asset_cfg.name]
+
+    if not hasattr(env, "_t1_vel_limit"):
+        all_names = robot.joint_names
+        vel_all = torch.full((len(all_names),), 20.0, device=env.device)
+        for i, name in enumerate(all_names):
+            if name in _T1_VEL_LIMIT_MAP:
+                vel_all[i] = _T1_VEL_LIMIT_MAP[name]
+        env._t1_vel_limit = vel_all
+
     joint_vel = robot.data.joint_vel[:, asset_cfg.joint_ids]
-    out_of_limit = (joint_vel.abs() - vel_limit * soft_factor).clamp(min=0.0)
+    soft_limit = env._t1_vel_limit[asset_cfg.joint_ids] * soft_factor
+    out_of_limit = (joint_vel.abs() - soft_limit).clamp(min=0.0)
     return out_of_limit.sum(dim=-1)
 
 
@@ -478,11 +533,10 @@ def eereach_velmod(
     generalises to any ball trajectory.
     """
     robot: Entity = env.scene[asset_cfg.name]
-    ball: Entity = env.scene[ball_name]
 
-    ball_pos_w = ball.data.root_link_pos_w
+    target_w = _ball_intercept_w(env, ball_name)
     hand_pos_w = robot.data.body_link_pos_w[:, asset_cfg.body_ids, :]
-    dist = torch.norm(hand_pos_w - ball_pos_w[:, None, :], dim=-1).min(dim=-1).values
+    dist = torch.norm(hand_pos_w - target_w[:, None, :], dim=-1).min(dim=-1).values
     eereach_sigmoid = 1.0 - 1.0 / (1.0 + torch.exp(-sigma * (dist - reach_th)))
     upright = 1.0 - torch.clamp(
         torch.sum(robot.data.projected_gravity_b[:, :2] ** 2, dim=1), 0.0, 1.0
@@ -491,14 +545,14 @@ def eereach_velmod(
     robot_pos_w = robot.data.root_link_pos_w
     lin_vel_w = robot.data.root_link_lin_vel_w
 
-    # Lateral: reward velocity toward ball's X position
-    ball_rel_x = ball_pos_w[:, 0] - robot_pos_w[:, 0]
+    # Lateral: reward velocity toward intercept's X position
+    ball_rel_x = target_w[:, 0] - robot_pos_w[:, 0]
     lateral_sign = torch.sign(ball_rel_x)
     lateral_vel_toward = lateral_sign * lin_vel_w[:, 0]
     nu_lateral = lateral_scale * torch.clamp(lateral_vel_toward, 0.0, 3.0)
 
-    # Vertical: reward upward velocity for high balls
-    ball_rel_z = ball_pos_w[:, 2] - robot_pos_w[:, 2]
+    # Vertical: reward upward velocity for high intercepts
+    ball_rel_z = target_w[:, 2] - robot_pos_w[:, 2]
     is_high = (ball_rel_z > high_ball_z).float()
     nu_vertical = vertical_scale * torch.clamp(lin_vel_w[:, 2], 0.0, 3.0) * is_high
 
