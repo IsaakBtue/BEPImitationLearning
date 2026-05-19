@@ -290,9 +290,10 @@ def goalkeeper_env_cfg(play: bool = False, num_steps_per_env: int = 24) -> Manag
     cfg.rewards["motion_body_lin_vel"].weight = 3.0       # was 1.0
     cfg.rewards["motion_body_ang_vel"].weight = 3.0       # was 1.0
 
-    # Second-order smoothness (jerk) penalty — matches original's _reward_smoothness.
-    # Original weight is -0.1; our earlier -0.01 was 10x too weak, allowing jerk to balloon.
-    cfg.rewards["action_rate_l2"] = RewardTermCfg(func=mjlab_mdp.action_acc_l2, weight=-0.1)
+    # Second-order smoothness (jerk) penalty — matches original's _reward_smoothness formula.
+    # G1 weight -0.1 was on top of AMP's implicit smoothness; T1 has no AMP so -0.1 is
+    # disproportionately strong and discourages arm exploration. Reduced to -0.05.
+    cfg.rewards["action_rate_l2"] = RewardTermCfg(func=mjlab_mdp.action_acc_l2, weight=-0.05)
 
     # Regularization terms ported from original Humanoid-Goalkeeper.
     # These were all absent in our port; original used all of them for smooth stable motion.
