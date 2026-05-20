@@ -179,10 +179,12 @@ def goalkeeper_env_cfg(play: bool = False, num_steps_per_env: int = 24) -> Manag
     _robot_cfg = SceneEntityCfg("robot")
     for group in cfg.observations.values():
         group.terms["base_lin_vel"] = ObservationTermCfg(
-            func=mjlab_obs.base_lin_vel, params={"asset_cfg": _robot_cfg}
+            func=mjlab_obs.base_lin_vel, params={"asset_cfg": _robot_cfg},
+            noise=Unoise(n_min=-0.1, n_max=0.1),
         )
         group.terms["base_ang_vel"] = ObservationTermCfg(
-            func=mjlab_obs.base_ang_vel, params={"asset_cfg": _robot_cfg}
+            func=mjlab_obs.base_ang_vel, params={"asset_cfg": _robot_cfg},
+            noise=Unoise(n_min=-0.2, n_max=0.2),
         )
 
     actor_extra = {

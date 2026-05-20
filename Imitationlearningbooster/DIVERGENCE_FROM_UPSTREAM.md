@@ -1,5 +1,43 @@
 # Divergence from Upstream (Humanoid-Goalkeeper)
 
+## 2026-05-20 — IMU velocity noise added; torque_limits upgraded to per-joint map
+
+**Files:** `tasks/goalkeeper_env_cfg.py`, `mdp/rewards.py`
+
+### 1. IMU velocity observation noise
+
+**What:** Added `noise=Unoise(n_min=-0.1, n_max=0.1)` to `base_lin_vel` and `noise=Unoise(n_min=-0.2, n_max=0.2)` to `base_ang_vel`.
+
+**Why it was wrong:** Both obs were replaced with direct state reads (no IMU sensor on T1) but noise was not added. G1 explicitly applies `lin_vel=0.1` and `ang_vel=0.2` noise in `g1_29_config.py`. The absence of any noise created a training/real gap — policy learned with perfect velocity knowledge which real hardware cannot provide.
+
+**Evidence:** Cross-reference with G1 original at `legged_gym/legged_gym/envs/g1/g1_29_config.py` noise_scales section. Confirmed by sub-agent code verification.
+
+---
+
+### 2. torque_limits: universal 50 Nm cap → per-joint _T1_EFFORT_MAP
+
+**What:** `gk_rew.torque_limits` previously used `torque_limit=50.0 Nm` as a universal cap for all joints. Replaced with `_T1_EFFORT_MAP` sourced directly from `T1_serial_clean.xml` `actuatorfrcrange` per joint.
+
+**Why it was wrong:** Arms (18 Nm limit) were penalised only above 47.5 Nm — 2.6× their actual limit. Arm torques above 18 Nm were effectively never penalised, removing a real constraint. Knees (60 Nm) were slightly under-penalised (47.5 Nm threshold). Universal caps mask per-joint constraint violations.
+
+**Correct values (from T1_serial_clean.xml actuatorfrcrange):**
+
+| Joint group | Effort limit |
+|---|---|
+| Arms (Shoulder/Elbow all 4 axes) | 18 Nm |
+| Waist | 30 Nm |
+| Hip Pitch | 45 Nm |
+| Hip Roll / Hip Yaw | 30 Nm |
+| Knee Pitch | 60 Nm |
+| Ankle Pitch | 20 Nm |
+| Ankle Roll | 15 Nm |
+
+**Note — discrepancy with official BoosterRobotics/booster_assets URDF:** Sub-agent web research found that the official URDF specifies Hip_Roll/Yaw=25 Nm, Ankle_Pitch=24 Nm, Waist=25 Nm. Our `T1_serial_clean.xml` differs (30/20/30 respectively). We use our XML values since those are what MuJoCo actually enforces in the simulation. This discrepancy is a potential source of sim2real mismatch for those joints.
+
+**Implementation:** `_T1_EFFORT_MAP` dict in `rewards.py`, cached at first call as `env._t1_effort_limits` per-joint tensor (same pattern as existing `_T1_KP_MAP` / `env._t1_kp_inv`).
+
+---
+
 ## 2026-05-15 — num_envs restored from 1020 → 6144 (MuJoCo Warp vs Isaac Gym memory model)
 
 **File:** `my_mjlab_project_booster_t1/src/my_mjlab_project_booster_t1/tasks/goalkeeper_env_cfg.py`

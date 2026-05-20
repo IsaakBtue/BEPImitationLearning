@@ -318,20 +318,28 @@ def dof_vel_limits(
 def torque_limits(
     env: ManagerBasedRlEnv,
     asset_cfg: SceneEntityCfg = _ALL_JOINT_CFG,
-    torque_limit: float = 50.0,
     soft_factor: float = 0.95,
 ) -> torch.Tensor:
-    """Penalize actuator torques exceeding the soft torque limit.
+    """Penalize actuator torques exceeding the per-joint soft torque limit.
 
-    Mirrors upstream _reward_torque_limits. Uses qfrc_actuator (joint-space
-    actuator force). torque_limit=50 Nm is the median T1 effort limit; knees
-    (60 Nm) are slightly under-penalised, arms (18 Nm) are over-penalised but
-    their torques are naturally small so the penalty rarely fires there.
+    Uses _T1_EFFORT_MAP (sourced from T1_serial_clean.xml actuatorfrcrange)
+    instead of the previous universal 50 Nm cap. Arms (18 Nm) and ankles
+    (15–20 Nm) are now penalised at their actual limits rather than 2.5–3x over.
     Weight: -3.0 (same as upstream).
     """
     robot: Entity = env.scene[asset_cfg.name]
     torques = robot.data.qfrc_actuator[:, asset_cfg.joint_ids].abs()
-    out_of_limit = (torques - torque_limit * soft_factor).clamp(min=0.0)
+
+    if not hasattr(env, "_t1_effort_limits"):
+        all_names = robot.joint_names
+        effort_all = torch.ones(len(all_names), device=env.device) * 50.0
+        for i, name in enumerate(all_names):
+            if name in _T1_EFFORT_MAP:
+                effort_all[i] = _T1_EFFORT_MAP[name]
+        env._t1_effort_limits = effort_all
+
+    effort_limits = env._t1_effort_limits[asset_cfg.joint_ids]
+    out_of_limit = (torques - effort_limits * soft_factor).clamp(min=0.0)
     return out_of_limit.sum(dim=-1)
 
 
@@ -398,6 +406,25 @@ _T1_KP_MAP: dict[str, float] = {
     "Left_Knee_Pitch":    200.0, "Right_Knee_Pitch":   200.0,
     "Left_Ankle_Pitch":    50.0, "Right_Ankle_Pitch":   50.0,
     "Left_Ankle_Roll":     40.0, "Right_Ankle_Roll":    40.0,
+}
+
+# Per-joint effort limits from T1_serial_clean.xml actuatorfrcrange.
+# Cross-referenced against official BoosterRobotics/booster_assets URDF — minor
+# discrepancies noted: official URDF has Hip_Roll/Yaw=25 Nm, Ankle_Pitch=24 Nm,
+# Waist=25 Nm. Our XML uses 30/20/30 respectively (likely a tuned sim version).
+# We use our XML values since those are what MuJoCo actually enforces in training.
+_T1_EFFORT_MAP: dict[str, float] = {
+    "Left_Shoulder_Pitch": 18.0, "Left_Shoulder_Roll": 18.0,
+    "Left_Elbow_Pitch":    18.0, "Left_Elbow_Yaw":     18.0,
+    "Right_Shoulder_Pitch": 18.0, "Right_Shoulder_Roll": 18.0,
+    "Right_Elbow_Pitch":   18.0, "Right_Elbow_Yaw":    18.0,
+    "Waist":               30.0,
+    "Left_Hip_Pitch":      45.0, "Right_Hip_Pitch":     45.0,
+    "Left_Hip_Roll":       30.0, "Left_Hip_Yaw":        30.0,
+    "Right_Hip_Roll":      30.0, "Right_Hip_Yaw":       30.0,
+    "Left_Knee_Pitch":     60.0, "Right_Knee_Pitch":    60.0,
+    "Left_Ankle_Pitch":    20.0, "Right_Ankle_Pitch":   20.0,
+    "Left_Ankle_Roll":     15.0, "Right_Ankle_Roll":    15.0,
 }
 
 
