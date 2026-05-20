@@ -186,6 +186,12 @@ def goalkeeper_env_cfg(play: bool = False, num_steps_per_env: int = 24) -> Manag
             func=mjlab_obs.base_ang_vel, params={"asset_cfg": _robot_cfg},
             noise=Unoise(n_min=-0.2, n_max=0.2),
         )
+        # Increase joint_vel noise from base ±0.5 to KaydenKnapik ±1.5.
+        # Base tracking_env_cfg uses 0.5; KaydenKnapik's hardware-verified config uses 1.5.
+        group.terms["joint_vel"] = ObservationTermCfg(
+            func=mjlab_mdp.joint_vel_rel,
+            noise=Unoise(n_min=-1.5, n_max=1.5),
+        )
 
     actor_extra = {
         "ball_pos_b": ObservationTermCfg(
@@ -252,14 +258,15 @@ def goalkeeper_env_cfg(play: bool = False, num_steps_per_env: int = 24) -> Manag
     # ====================================================================
     # Override motion tracking weights from base config
     # (These come from make_tracking_env_cfg() in mjlab)
-    # Replacing AMP with explicit motion tracking to learn the lefthand save
+    # Reduced from previous values: motion was ~34 total vs task ~15, causing the policy
+    # to prioritise motion mimicry over ball interception. Now ~17 vs task ~25 (with curriculum).
     # ====================================================================
-    cfg.rewards["motion_global_root_pos"].weight = 10.0   # was 0.5 → Force sideways dive
-    cfg.rewards["motion_global_root_ori"].weight = 5.0    # was 0.5 → Force rotation
-    cfg.rewards["motion_body_pos"].weight = 10.0          # was 1.0 → Force body pose
-    cfg.rewards["motion_body_ori"].weight = 3.0           # was 1.0
-    cfg.rewards["motion_body_lin_vel"].weight = 3.0       # was 1.0
-    cfg.rewards["motion_body_ang_vel"].weight = 3.0       # was 1.0
+    cfg.rewards["motion_global_root_pos"].weight = 4.0    # was 10.0
+    cfg.rewards["motion_global_root_ori"].weight = 3.0    # was 5.0
+    cfg.rewards["motion_body_pos"].weight = 4.0           # was 10.0
+    cfg.rewards["motion_body_ori"].weight = 2.0           # was 3.0
+    cfg.rewards["motion_body_lin_vel"].weight = 2.0       # was 3.0
+    cfg.rewards["motion_body_ang_vel"].weight = 2.0       # was 3.0
 
     # Second-order smoothness (jerk) penalty — matches original's _reward_smoothness.
     # Original weight is -0.1; our earlier -0.01 was 10x too weak, allowing jerk to balloon.

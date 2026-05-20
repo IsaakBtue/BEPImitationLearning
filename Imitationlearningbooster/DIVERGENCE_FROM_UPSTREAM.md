@@ -1,5 +1,61 @@
 # Divergence from Upstream (Humanoid-Goalkeeper)
 
+## 2026-05-20 — KaydenKnapik hardware-verified actuator config; joint_vel noise; actuator delay
+
+**Files:** `robots/t1_constants.py`, `mdp/rewards.py`, `assets/booster_t1/T1_serial_clean.xml`, `tasks/goalkeeper_env_cfg.py`
+
+**Reference:** `https://github.com/KaydenKnapik/BoosterT1mjlab` — successfully deployed RL on real T1 hardware. Cloned at `/home/isaak/BEPImitationlearning/BoosterT1mjlab/`. Two Haiku subagents independently verified all values before applying.
+
+### 1. Effort limits updated to KaydenKnapik hardware-verified values
+
+**What:** `robots/t1_constants.py` actuator `effort_limit` values and `mdp/rewards.py` `_T1_EFFORT_MAP` updated.
+
+**Why it was wrong:** Our original values came from `T1_serial_clean.xml` `actuatorfrcrange`. KaydenKnapik's values are higher (especially ankles: 15→50 Nm, arms: 18→36 Nm) and represent what the real hardware can actually sustain. Using artificially low limits over-penalised torques that are physically achievable, biasing the policy toward weaker actions than necessary.
+
+| Joint group | Old value | New value (KaydenKnapik) |
+|---|---|---|
+| Arms (Shoulder/Elbow 4×2) | 18 Nm | **36 Nm** |
+| Waist | 30 Nm | **40 Nm** |
+| Hip Pitch | 45 Nm | **55 Nm** |
+| Hip Roll / Hip Yaw | 30 Nm | **40 Nm** |
+| Knee Pitch | 60 Nm | **65 Nm** |
+| Ankle Pitch | 20 Nm | **50 Nm** |
+| Ankle Roll | 15 Nm | **50 Nm** |
+
+**Impact on T1_ACTION_SCALE:** `T1_ACTION_SCALE[joint] = 0.25 × effort / stiffness`. Stiffness values unchanged. Arm scale doubles (0.30 → 0.60), ankle scales increase significantly (0.10 → 0.31 for ankle_pitch).
+
+---
+
+### 2. actuatorfrcrange removed from T1_serial_clean.xml
+
+**What:** All `actuatorfrcrange` attributes removed from `T1_serial_clean.xml`.
+
+**Why it was wrong:** MuJoCo applies `actuatorfrcrange` as a hard joint-level force clamp independent of Python's `effort_limit`. With both active, the tighter (XML) value wins — making the Python effort_limit irrelevant for arms and ankles. KaydenKnapik's XML has **no actuatorfrcrange at all**; Python `effort_limit` is their only hard clamp. After updating Python effort_limits to KaydenKnapik values, the old XML clamps (e.g., ankle ±15 Nm) would override the new Python limits (50 Nm), defeating the upgrade entirely. Solution: remove XML clamps and let Python be the sole constraint, matching KaydenKnapik exactly.
+
+**Evidence:** KaydenKnapik XML `grep actuatorfrcrange` → 0 results. Our XML had 22 instances.
+
+---
+
+### 3. Actuator command delay added (2–8 timesteps)
+
+**What:** `delay_min_lag=2, delay_max_lag=8` added to all actuators in `robots/t1_constants.py`.
+
+**Why it was missing:** KaydenKnapik applies delay at the actuator command level (not obs level) to simulate network/motor controller latency on real hardware. Without this, the policy sees immediate actuator response which is unrealistic. At 200 Hz, 2–8 timesteps = 10–40 ms latency, consistent with real T1 motor controller response time.
+
+**Implementation:** Added `_DELAY_MIN = 2, _DELAY_MAX = 8` constants and passed to `_make_actuator()`.
+
+---
+
+### 4. Joint velocity observation noise increased (±0.5 → ±1.5)
+
+**What:** `joint_vel` obs noise in actor observations raised from ±0.5 (base `tracking_env_cfg.py` default) to ±1.5 (KaydenKnapik value).
+
+**Why it was wrong:** The base tracking config uses ±0.5, but KaydenKnapik's hardware-tuned setup uses ±1.5. Real joint velocity encoders have higher noise than position encoders; ±0.5 rad/s underestimates the noise seen on real hardware, creating a sim2real gap.
+
+**Implementation:** `goalkeeper_env_cfg.py` overrides `joint_vel` in all obs groups after calling `make_tracking_env_cfg()`.
+
+---
+
 ## 2026-05-20 — IMU velocity noise added; torque_limits upgraded to per-joint map
 
 **Files:** `tasks/goalkeeper_env_cfg.py`, `mdp/rewards.py`
@@ -8,33 +64,19 @@
 
 **What:** Added `noise=Unoise(n_min=-0.1, n_max=0.1)` to `base_lin_vel` and `noise=Unoise(n_min=-0.2, n_max=0.2)` to `base_ang_vel`.
 
-**Why it was wrong:** Both obs were replaced with direct state reads (no IMU sensor on T1) but noise was not added. G1 explicitly applies `lin_vel=0.1` and `ang_vel=0.2` noise in `g1_29_config.py`. The absence of any noise created a training/real gap — policy learned with perfect velocity knowledge which real hardware cannot provide.
+**Why it was wrong:** Both obs were replaced with direct state reads (no IMU sensor on T1) but noise was not added. G1 explicitly applies `lin_vel=0.1` and `ang_vel=0.2` noise in `g1_29_config.py`. The absence of any noise created a training/real gap.
 
-**Evidence:** Cross-reference with G1 original at `legged_gym/legged_gym/envs/g1/g1_29_config.py` noise_scales section. Confirmed by sub-agent code verification.
+**Evidence:** Cross-reference with G1 original at `legged_gym/legged_gym/envs/g1/g1_29_config.py`. Confirmed by sub-agent code verification.
 
 ---
 
 ### 2. torque_limits: universal 50 Nm cap → per-joint _T1_EFFORT_MAP
 
-**What:** `gk_rew.torque_limits` previously used `torque_limit=50.0 Nm` as a universal cap for all joints. Replaced with `_T1_EFFORT_MAP` sourced directly from `T1_serial_clean.xml` `actuatorfrcrange` per joint.
+**What:** `gk_rew.torque_limits` now uses `_T1_EFFORT_MAP` for per-joint soft limit enforcement (updated to KaydenKnapik values above).
 
-**Why it was wrong:** Arms (18 Nm limit) were penalised only above 47.5 Nm — 2.6× their actual limit. Arm torques above 18 Nm were effectively never penalised, removing a real constraint. Knees (60 Nm) were slightly under-penalised (47.5 Nm threshold). Universal caps mask per-joint constraint violations.
+**Why it was wrong:** Arms (now 36 Nm) were penalised only above 47.5 Nm with the old universal 50 Nm cap. After KaydenKnapik update, arms are penalised above 34.2 Nm — more than 2× stricter. Universal caps mask per-joint constraint violations.
 
-**Correct values (from T1_serial_clean.xml actuatorfrcrange):**
-
-| Joint group | Effort limit |
-|---|---|
-| Arms (Shoulder/Elbow all 4 axes) | 18 Nm |
-| Waist | 30 Nm |
-| Hip Pitch | 45 Nm |
-| Hip Roll / Hip Yaw | 30 Nm |
-| Knee Pitch | 60 Nm |
-| Ankle Pitch | 20 Nm |
-| Ankle Roll | 15 Nm |
-
-**Note — discrepancy with official BoosterRobotics/booster_assets URDF:** Sub-agent web research found that the official URDF specifies Hip_Roll/Yaw=25 Nm, Ankle_Pitch=24 Nm, Waist=25 Nm. Our `T1_serial_clean.xml` differs (30/20/30 respectively). We use our XML values since those are what MuJoCo actually enforces in the simulation. This discrepancy is a potential source of sim2real mismatch for those joints.
-
-**Implementation:** `_T1_EFFORT_MAP` dict in `rewards.py`, cached at first call as `env._t1_effort_limits` per-joint tensor (same pattern as existing `_T1_KP_MAP` / `env._t1_kp_inv`).
+**Implementation:** `_T1_EFFORT_MAP` dict in `rewards.py`, cached as `env._t1_effort_limits` tensor.
 
 ---
 

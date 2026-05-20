@@ -56,17 +56,43 @@ def eereach(
     reach_th: float = 0.3,
     sigma: float = 5.0,
 ) -> torch.Tensor:
-    """Sigmoid reward for nearest hand reaching the ball."""
+    """Sigmoid reach reward with velocity amplification and behind-ball boost.
+
+    Mirrors the original isaacgym _reward_eereach more faithfully:
+    - vel_sigma: up to 4× multiplier when the closest hand is swinging toward the ball.
+      Without this the policy learns to hover near the ball rather than commit to a strike.
+    - behind boost: 2× multiplier once the ball passes, matching the original's
+      vel_sigma=2.0 post-pass behaviour — keeps the robot reaching aggressively
+      during the post-save recovery window.
+    - upright gate: unchanged from original.
+    """
     robot: Entity = env.scene[asset_cfg.name]
     ball: Entity = env.scene[ball_name]
-    ball_pos_w = ball.data.root_link_pos_w
-    hand_pos_w = robot.data.body_link_pos_w[:, asset_cfg.body_ids, :]
-    dist = torch.norm(hand_pos_w - ball_pos_w[:, None, :], dim=-1)
-    min_dist = dist.min(dim=-1).values
+    ball_pos_w = ball.data.root_link_pos_w                              # (N, 3)
+    hand_pos_w = robot.data.body_link_pos_w[:, asset_cfg.body_ids, :]  # (N, 2, 3)
+
+    # Per-hand distance and index of closest hand.
+    to_ball = ball_pos_w[:, None, :] - hand_pos_w                      # (N, 2, 3)
+    dist = torch.norm(to_ball, dim=-1)                                  # (N, 2)
+    min_dist, closest_idx = dist.min(dim=-1)                           # (N,), (N,)
+
+    # Base sigmoid: 1 at dist=0, 0 far away.
     rew = 1.0 - 1.0 / (1.0 + torch.exp(-sigma * (min_dist - reach_th)))
+
+    # Velocity amplification: reward the closest hand actively moving toward the ball.
+    hand_vel_w = robot.data.body_link_lin_vel_w[:, asset_cfg.body_ids, :]  # (N, 2, 3)
+    to_ball_unit = to_ball / to_ball.norm(dim=-1, keepdim=True).clamp(min=1e-6)
+    vel_toward = (hand_vel_w * to_ball_unit).sum(dim=-1)               # (N, 2)
+    closest_vel = vel_toward[torch.arange(env.num_envs, device=env.device), closest_idx]
+    vel_sigma = 1.0 + 3.0 * torch.clamp(closest_vel, 0.0, 3.0)        # 1× – 4×
+
+    # Post-pass: double the multiplier so the robot keeps committing after the ball goes by.
+    behind = _ball_is_behind(env, ball_name)
+    vel_sigma = torch.where(behind, vel_sigma * 2.0, vel_sigma)
+
     projected_grav = env.scene["robot"].data.projected_gravity_b
     upright = (1.0 - torch.clamp(torch.sum(projected_grav[:, :2] ** 2, dim=1), 0.0, 1.0))
-    return rew * upright
+    return rew * vel_sigma * upright
 
 
 def catch_success(
@@ -408,23 +434,22 @@ _T1_KP_MAP: dict[str, float] = {
     "Left_Ankle_Roll":     40.0, "Right_Ankle_Roll":    40.0,
 }
 
-# Per-joint effort limits from T1_serial_clean.xml actuatorfrcrange.
-# Cross-referenced against official BoosterRobotics/booster_assets URDF — minor
-# discrepancies noted: official URDF has Hip_Roll/Yaw=25 Nm, Ankle_Pitch=24 Nm,
-# Waist=25 Nm. Our XML uses 30/20/30 respectively (likely a tuned sim version).
-# We use our XML values since those are what MuJoCo actually enforces in training.
+# Per-joint effort limits sourced from KaydenKnapik/BoosterT1mjlab t1_constants.py.
+# Their setup was successfully deployed on real T1 hardware. actuatorfrcrange has been
+# removed from T1_serial_clean.xml so Python effort_limit is the only hard clamp,
+# matching KaydenKnapik's approach (their XML has no actuatorfrcrange at all).
 _T1_EFFORT_MAP: dict[str, float] = {
-    "Left_Shoulder_Pitch": 18.0, "Left_Shoulder_Roll": 18.0,
-    "Left_Elbow_Pitch":    18.0, "Left_Elbow_Yaw":     18.0,
-    "Right_Shoulder_Pitch": 18.0, "Right_Shoulder_Roll": 18.0,
-    "Right_Elbow_Pitch":   18.0, "Right_Elbow_Yaw":    18.0,
-    "Waist":               30.0,
-    "Left_Hip_Pitch":      45.0, "Right_Hip_Pitch":     45.0,
-    "Left_Hip_Roll":       30.0, "Left_Hip_Yaw":        30.0,
-    "Right_Hip_Roll":      30.0, "Right_Hip_Yaw":       30.0,
-    "Left_Knee_Pitch":     60.0, "Right_Knee_Pitch":    60.0,
-    "Left_Ankle_Pitch":    20.0, "Right_Ankle_Pitch":   20.0,
-    "Left_Ankle_Roll":     15.0, "Right_Ankle_Roll":    15.0,
+    "Left_Shoulder_Pitch": 36.0, "Left_Shoulder_Roll": 36.0,
+    "Left_Elbow_Pitch":    36.0, "Left_Elbow_Yaw":     36.0,
+    "Right_Shoulder_Pitch": 36.0, "Right_Shoulder_Roll": 36.0,
+    "Right_Elbow_Pitch":   36.0, "Right_Elbow_Yaw":    36.0,
+    "Waist":               40.0,
+    "Left_Hip_Pitch":      55.0, "Right_Hip_Pitch":     55.0,
+    "Left_Hip_Roll":       40.0, "Left_Hip_Yaw":        40.0,
+    "Right_Hip_Roll":      40.0, "Right_Hip_Yaw":       40.0,
+    "Left_Knee_Pitch":     65.0, "Right_Knee_Pitch":    65.0,
+    "Left_Ankle_Pitch":    50.0, "Right_Ankle_Pitch":   50.0,
+    "Left_Ankle_Roll":     50.0, "Right_Ankle_Roll":    50.0,
 }
 
 

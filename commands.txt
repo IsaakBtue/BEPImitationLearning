@@ -1,2 +1,4 @@
-sudo modprobe nvidia && sudo modprobe nvidia-uvm && sudo modprobe nvidia-modeset
-nvidia-smi
+# No interactive commands needed — all changes were file edits.
+# To verify the XML change:
+grep -c "actuatorfrcrange" my_mjlab_project_booster_t1/src/my_mjlab_project_booster_t1/assets/booster_t1/T1_serial_clean.xml
+# Expected output: 0
