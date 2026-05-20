@@ -27,14 +27,25 @@ _ALL_JOINT_CFG = SceneEntityCfg("robot")
 
 
 def _ball_is_behind(env: ManagerBasedRlEnv, ball_name: str = "ball") -> torch.Tensor:
-    """Boolean mask (N,): ball has passed the goal line or is moving away.
+    """Boolean mask (N,): ball has passed the goal line or has been deflected.
 
-    Ball approaches from +Y; 'behind' means ball_y < 0 (passed the robot)
-    or ball moving strongly back in +Y (was deflected toward attacker).
+    Mirrors the original Humanoid-Goalkeeper's 'behind' condition exactly:
+        behind = (ball_x < 0) | (ball_vx - initial_vx > 2.0)
+    i.e. ball passed goal line OR velocity increased ≥2 m/s from its
+    initial value (deflected/stopped by the robot).
+
+    Reuses _sb_init_vy from stopball if already initialised; otherwise
+    falls back to the absolute threshold so post-save rewards still gate
+    correctly even if stopball hasn't run first this step.
     """
     ball: Entity = env.scene[ball_name]
     ball_y_local = ball.data.root_link_pos_w[:, 1] - env.scene.env_origins[:, 1]
     ball_y_vel = ball.data.root_link_lin_vel_w[:, 1]
+    init_vy = getattr(env, "_sb_init_vy", None)
+    if init_vy is not None:
+        delta_vy = ball_y_vel - init_vy
+        return (ball_y_local < 0.0) | (delta_vy > 2.0)
+    # Fallback before stopball has run (first policy step of first episode).
     return (ball_y_local < 0.0) | (ball_y_vel > 1.0)
 
 
@@ -43,7 +54,7 @@ def eereach(
     ball_name: str = "ball",
     asset_cfg: SceneEntityCfg = _HAND_CFG,
     reach_th: float = 0.3,
-    sigma: float = 3.0,
+    sigma: float = 5.0,
 ) -> torch.Tensor:
     """Sigmoid reward for nearest hand reaching the ball."""
     robot: Entity = env.scene[asset_cfg.name]
@@ -76,39 +87,36 @@ def catch_success(
 def stopball(
     env: ManagerBasedRlEnv,
     ball_name: str = "ball",
-    delta_vel_threshold: float = 1.0,
+    delta_vel_threshold: float = 2.0,
 ) -> torch.Tensor:
-    """One-time reward when ball first decelerates significantly while in front.
+    """One-time reward when ball decelerates ≥2 m/s from its initial Y velocity.
 
-    Mirrors the original Humanoid-Goalkeeper logic: fires exactly once per
-    episode when the ball's Y velocity increases by >2 m/s (i.e., the ball
-    was approaching in -Y and decelerated or reversed). A per-env flag blocks
-    subsequent firings. This prevents the continuous passive-blocking exploit
-    where standing still and letting the ball roll into the body earned
-    100 pts/step for the entire episode.
+    Mirrors the original Humanoid-Goalkeeper _reward_stopball exactly:
+    compares current ball velocity against the velocity stored at episode
+    reset (not per-step delta), so the threshold is robust to air resistance.
+    A per-env flag prevents re-firing after the first deceleration event.
 
-    Ball approaches from +Y so approaching vy < 0; deceleration/reversal
-    means vy_now - vy_prev > delta_vel_threshold.
+    Ball approaches from +Y so initial vy < 0; deceleration/reversal means
+    current_vy - initial_vy > delta_vel_threshold (2.0 m/s, matching G1).
     """
     ball: Entity = env.scene[ball_name]
     ball_y_vel = ball.data.root_link_lin_vel_w[:, 1]
     ball_y_local = ball.data.root_link_pos_w[:, 1] - env.scene.env_origins[:, 1]
 
-    if not hasattr(env, "_sb_prev_vy"):
-        env._sb_prev_vy = ball_y_vel.clone()
+    if not hasattr(env, "_sb_init_vy"):
+        env._sb_init_vy = ball_y_vel.clone()
         env._sb_flag = torch.zeros(env.num_envs, dtype=torch.bool, device=env.device)
 
-    # Reset state for envs at the start of a new episode.
+    # Store the ball's initial velocity at episode reset (first step).
     just_reset = env.episode_length_buf <= 1
     env._sb_flag[just_reset] = False
-    env._sb_prev_vy[just_reset] = ball_y_vel[just_reset].clone()
+    env._sb_init_vy[just_reset] = ball_y_vel[just_reset].clone()
 
-    delta_vy = ball_y_vel - env._sb_prev_vy
+    delta_vy = ball_y_vel - env._sb_init_vy
     in_front = ball_y_local > 0.0
     fired = (delta_vy > delta_vel_threshold) & in_front & ~env._sb_flag
 
     env._sb_flag |= fired
-    env._sb_prev_vy.copy_(ball_y_vel)
 
     return fired.float()
 
@@ -373,7 +381,52 @@ def hand_proximity_strict(
     ball: Entity = env.scene[ball_name]
     hand_pos_w = robot.data.body_link_pos_w[:, asset_cfg.body_ids, :]
     dist = torch.norm(hand_pos_w - ball.data.root_link_pos_w[:, None, :], dim=-1).min(dim=-1).values
-    return (dist < strict_th).float()
+    stopped = getattr(env, "_sb_flag", torch.zeros(env.num_envs, dtype=torch.bool, device=env.device))
+    multiplier = 1.0 + stopped.float()
+    return (dist < strict_th).float() * multiplier
+
+
+_T1_KP_MAP: dict[str, float] = {
+    "Left_Shoulder_Pitch": 15.0, "Left_Shoulder_Roll": 15.0,
+    "Left_Elbow_Pitch":    15.0, "Left_Elbow_Yaw":     15.0,
+    "Right_Shoulder_Pitch": 15.0, "Right_Shoulder_Roll": 15.0,
+    "Right_Elbow_Pitch":   15.0, "Right_Elbow_Yaw":    15.0,
+    "Waist":               80.0,
+    "Left_Hip_Pitch":     120.0, "Right_Hip_Pitch":    120.0,
+    "Left_Hip_Roll":       80.0, "Left_Hip_Yaw":        80.0,
+    "Right_Hip_Roll":      80.0, "Right_Hip_Yaw":       80.0,
+    "Left_Knee_Pitch":    200.0, "Right_Knee_Pitch":   200.0,
+    "Left_Ankle_Pitch":    50.0, "Right_Ankle_Pitch":   50.0,
+    "Left_Ankle_Roll":     40.0, "Right_Ankle_Roll":    40.0,
+}
+
+
+def torques_normalized_l2(
+    env: ManagerBasedRlEnv,
+    asset_cfg: SceneEntityCfg = _ALL_JOINT_CFG,
+) -> torch.Tensor:
+    """Penalize torques normalized by per-joint stiffness (kp).
+
+    Mirrors the original _reward_torques exactly:
+        return sum(square(torques / p_gains))
+    Since torque = kp × (target - current), dividing by kp gives a
+    dimensionless position-error proxy that is comparable across joints
+    regardless of stiffness. Without normalization, high-stiffness leg joints
+    (kp=200) would dominate the penalty over soft arm joints (kp=15).
+    """
+    robot: Entity = env.scene[asset_cfg.name]
+    torques = robot.data.qfrc_actuator[:, asset_cfg.joint_ids]
+
+    if not hasattr(env, "_t1_kp_inv"):
+        all_names = robot.joint_names
+        kp_all = torch.ones(len(all_names), device=env.device)
+        for i, name in enumerate(all_names):
+            if name in _T1_KP_MAP:
+                kp_all[i] = _T1_KP_MAP[name]
+        env._t1_kp_inv = 1.0 / kp_all
+
+    kp_inv = env._t1_kp_inv[asset_cfg.joint_ids]
+    return torch.sum(torch.square(torques * kp_inv), dim=-1)
 
 
 def deviation_waist_joint(
@@ -389,4 +442,4 @@ def deviation_waist_joint(
     """
     robot: Entity = env.scene[asset_cfg.name]
     delta = robot.data.joint_pos[:, asset_cfg.joint_ids] - robot.data.default_joint_pos[:, asset_cfg.joint_ids]
-    return delta.abs().sum(dim=-1)
+    return torch.sum(torch.square(delta), dim=-1)

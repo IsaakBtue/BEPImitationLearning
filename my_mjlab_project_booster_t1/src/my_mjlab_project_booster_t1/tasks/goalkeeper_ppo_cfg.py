@@ -23,7 +23,7 @@ def goalkeeper_ppo_runner_cfg() -> RslRlOnPolicyRunnerCfg:
             value_loss_coef=1.0,
             use_clipped_value_loss=True,
             clip_param=0.2,
-            entropy_coef=0.005,
+            entropy_coef=0.01,
             num_learning_epochs=5,
             num_mini_batches=4,
             learning_rate=1.0e-3,
@@ -36,5 +36,5 @@ def goalkeeper_ppo_runner_cfg() -> RslRlOnPolicyRunnerCfg:
         experiment_name="g1_goalkeeper",
         save_interval=200,
         num_steps_per_env=100,
-        max_iterations=20_000,
+        max_iterations=40_000,
     )

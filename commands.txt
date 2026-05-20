@@ -1,1 +1,2 @@
-cd /home/isaak/BEPImitationlearning/my_mjlab_project_booster_t1 && uv run python -m mjlab.scripts.train goalkeeper_booster_t1 --gpu-ids '[0]' --num-steps-per-env 24
+sudo modprobe nvidia && sudo modprobe nvidia-uvm && sudo modprobe nvidia-modeset
+nvidia-smi
