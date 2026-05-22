@@ -1,0 +1,306 @@
+\documentclass[a4paper,10pt]{article}
+\usepackage[margin=2cm]{geometry}
+\usepackage{booktabs}
+\usepackage{longtable}
+\usepackage{array}
+\usepackage{xcolor}
+\usepackage{pifont}
+\usepackage{multirow}
+\usepackage{colortbl}
+\usepackage{caption}
+
+% Status symbols, black only
+\newcommand{\cmark}{\ding{51}}   % check mark
+\newcommand{\xmark}{\ding{55}}   % cross
+\newcommand{\wmark}{$\approx$}   % partial / differs
+
+% Row shading, red header
+\definecolor{sectionbg}{RGB}{220,60,60}
+\definecolor{lightgray}{RGB}{245,245,245}
+
+\begin{document}
+
+\begin{center}
+{\large\bfseries Domain randomisation \& curriculum: G1 goalkeeper vs KaydenKnapik T1 vs T1 single goalkeeper}
+\end{center}
+
+\vspace{4pt}
+
+{\small
+\begin{longtable}{>{\bfseries}p{3.6cm} p{3.4cm} p{3.4cm} p{3.4cm} p{1.2cm}}
+\toprule
+\textbf{Feature} & \textbf{G1 goalkeeper (original)} & \textbf{KaydenKnapik T1} & \textbf{T1 single goalkeeper} & \textbf{Status} \\
+\midrule
+\endfirsthead
+\toprule
+\textbf{Feature} & \textbf{G1 goalkeeper (original)} & \textbf{KaydenKnapik T1} & \textbf{T1 single goalkeeper} & \textbf{Status} \\
+\midrule
+\endhead
+\bottomrule
+\endfoot
+
+%% ─── SECTION: DR EVENTS ──────────────────────────────────────────────────────
+\rowcolor{sectionbg}
+\multicolumn{5}{l}{\textcolor{white}{\textbf{Domain randomisation events}}} \\
+\midrule
+
+Foot friction
+  & Startup, $[0.1,\ 2.0]$
+  & Startup, $[0.3,\ 1.2]$
+  & Startup, $[0.3,\ 1.2]$
+  & \cmark \\
+
+Joint encoder bias
+  & Startup, $\pm0.01$\,rad
+  & Startup, $\pm0.015$\,rad
+  & Startup, $\pm0.010$\,rad
+  & \wmark \\
+
+Actuation offset
+  & Startup, $\pm0.01$\,rad
+  & Not present
+  & Not present
+  & \xmark \\
+
+Centre of mass offset (trunk)
+  & Startup, $\pm0.1$\,m all axes
+  & Startup, XY $\pm2.5$\,cm, Z $\pm3$\,cm
+  & Startup, X $\pm2.5$\,cm, YZ $\pm5$\,cm
+  & \wmark \\
+
+Payload mass
+  & Startup, $[-5,\ +10]$\,kg
+  & Not present
+  & Not present
+  & \xmark \\
+
+Link mass scale
+  & Startup, $[0.8,\ 1.2]\times$
+  & Not present
+  & Disabled (too hard early)
+  & \xmark \\
+
+PD gains (kp and kd)
+  & Startup, $[0.8,\ 1.2]\times$
+  & Not present
+  & Disabled (too hard early)
+  & \xmark \\
+
+Restitution
+  & Startup, $[0.0,\ 1.0]$
+  & Not present
+  & Not present
+  & \xmark \\
+
+Initial joint positions
+  & Reset, scale $[0.5,\ 1.5]$, offset $\pm0.1$\,rad
+  & Reset, no randomisation
+  & Reset, $\pm0.1$\,rad offset at spawn
+  & \wmark \\
+
+Push robot, interval
+  & 15\,s, XY $\pm1.5$\,m/s
+  & 1--3\,s, XY $\pm0.5$\,m/s
+  & 10--15\,s, XY $\pm0.5$\,m/s
+  & \xmark \\
+
+Push robot, angular
+  & XY only
+  & Roll/pitch $\pm0.52$, yaw $\pm0.78$\,rad/s, Z $\pm0.4$\,m/s
+  & XY only, angular removed
+  & \xmark \\
+
+Ball perturbation
+  & Interval 0.5\,s, $\pm0.5$\,m/s
+  & Not applicable
+  & Not applicable (handled by motion command)
+  & -- \\
+
+Spawn position
+  & Fixed default
+  & Reset, XY $\pm0.5$\,m, yaw $\pm\pi$
+  & Pose scatter $\pm5$\,cm, yaw $\pm0.2$\,rad
+  & \wmark \\
+
+\midrule
+%% ─── SECTION: OBSERVATION NOISE ─────────────────────────────────────────────
+\rowcolor{sectionbg}
+\multicolumn{5}{l}{\textcolor{white}{\textbf{Observation noise (actor only; critic has no noise)}}} \\
+\midrule
+
+Base linear velocity
+  & $\pm0.1$\,m/s
+  & Excluded from actor observations
+  & $\pm0.1$\,m/s (included)
+  & \wmark \\
+
+Base angular velocity
+  & $\pm0.2$\,rad/s
+  & $\pm0.2$\,rad/s
+  & $\pm0.2$\,rad/s
+  & \cmark \\
+
+Projected gravity
+  & $\pm0.05$
+  & $\pm0.05$
+  & Not set
+  & \xmark \\
+
+Joint position
+  & $\pm0.01$\,rad
+  & $\pm0.01$\,rad
+  & $\pm0.01$\,rad
+  & \cmark \\
+
+Joint velocity
+  & $\pm1.5$\,rad/s
+  & $\pm1.5$\,rad/s
+  & $\pm1.5$\,rad/s
+  & \cmark \\
+
+Ball position
+  & $\pm0.08$\,m
+  & Not applicable
+  & $\pm0.05$\,m
+  & \wmark \\
+
+Ball velocity
+  & Not explicit
+  & Not applicable
+  & $\pm0.1$\,m/s
+  & \cmark\ (our addition) \\
+
+\midrule
+%% ─── SECTION: DELAYS ─────────────────────────────────────────────────────────
+\rowcolor{sectionbg}
+\multicolumn{5}{l}{\textcolor{white}{\textbf{Delays}}} \\
+\midrule
+
+Actuator command delay
+  & Enabled (exact range unspecified)
+  & 10--40\,ms (2--8 steps at 200\,Hz)
+  & 10--40\,ms (2--8 steps at 200\,Hz)
+  & \cmark \\
+
+Observation lag
+  & Enabled (exact range unspecified)
+  & Not present
+  & 0--40\,ms (0--2 steps at 50\,Hz, training only)
+  & \cmark\ (our addition) \\
+
+\midrule
+%% ─── SECTION: CURRICULUM / PHASES ───────────────────────────────────────────
+\rowcolor{sectionbg}
+\multicolumn{5}{l}{\textcolor{white}{\textbf{Curriculum \& training phases}}} \\
+\midrule
+
+Stopball curriculum
+  & Weight scales with training progress
+  & Not applicable (velocity task)
+  & 100 $\to$ 150 $\to$ 200 \newline (iter 0 / 600 / 1200)
+  & \cmark \\
+
+Eereach curriculum
+  & Weight scales with training progress
+  & Not applicable
+  & 10 $\to$ 15 $\to$ 20 \newline (iter 0 / 600 / 1200)
+  & \cmark \\
+
+Terrain / velocity curriculum
+  & Not present (flat floor)
+  & 3 stages: $\pm0.4\to\pm1.0\to\pm2.0$\,m/s
+  & Not applicable (goalkeeper task)
+  & -- \\
+
+Self-collision enabled
+  & Yes, full body
+  & Yes, via collision config
+  & Yes + penalty $-50$ + sensor
+  & \cmark \\
+
+Force-based termination
+  & $>1500$\,N at feet
+  & Not explicit
+  & $>1500$\,N via sensor
+  & \cmark \\
+
+Hard impact penalty
+  & $>1000$\,N at feet, weight $-100$
+  & Not explicit
+  & $>1000$\,N via sensor, weight $-100$
+  & \cmark \\
+
+\midrule
+%% ─── SECTION: STILL TO IMPLEMENT ────────────────────────────────────────────
+\rowcolor{sectionbg}
+\multicolumn{5}{l}{\textcolor{white}{\textbf{Still to implement}}} \\
+\midrule
+
+Push robot fix
+  & --
+  & Interval 1--3\,s, 6-DOF
+  & Interval 10--15\,s, 2-DOF
+  & \xmark \\
+
+PD gains randomisation
+  & $[0.8,\ 1.2]\times$
+  & Not used
+  & Disabled
+  & \xmark \\
+
+Link mass randomisation
+  & $[0.8,\ 1.2]\times$
+  & Not used
+  & Disabled
+  & \xmark \\
+
+Actuation offset
+  & $\pm0.01$\,rad
+  & Not used
+  & Not present
+  & \xmark \\
+
+Payload mass
+  & $[-5,\ +10]$\,kg
+  & Not used
+  & Not present
+  & \xmark \\
+
+Projected gravity noise
+  & $\pm0.05$
+  & $\pm0.05$
+  & Not set
+  & \xmark \\
+
+Encoder bias range
+  & $\pm0.01$\,rad
+  & $\pm0.015$\,rad
+  & $\pm0.010$\,rad
+  & Align to $\pm0.015$ \\
+
+Centre of mass Y/Z range
+  & $\pm0.1$\,m
+  & Y/Z $\pm2.5$\,cm / $\pm3$\,cm
+  & Y/Z $\pm5$\,cm / $\pm5$\,cm
+  & Tighten to KK \\
+
+\bottomrule
+\end{longtable}
+}
+
+\vspace{6pt}
+{\footnotesize
+\textbf{Legend:}
+\cmark\ = implemented and matches reference \quad
+\wmark\ = implemented but value differs \quad
+\xmark\ = missing or not yet implemented \quad
+-- = not applicable to goalkeeper task
+}
+
+\vspace{4pt}
+{\footnotesize
+\textbf{KK} = KaydenKnapik hardware-verified T1 config.
+Curriculum thresholds (iter 600 / 1200) assume \texttt{num\_steps\_per\_env=100}.
+}
+
+\end{document}
