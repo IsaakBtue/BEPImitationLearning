@@ -7,6 +7,7 @@ import torch
 
 from mjlab.entity import Entity
 from mjlab.managers.scene_entity_config import SceneEntityCfg
+from mjlab.sensor import ContactSensor
 from mjlab.utils.lab_api.math import quat_apply, quat_inv
 
 if TYPE_CHECKING:
@@ -233,18 +234,45 @@ def postlinvel(env: ManagerBasedRlEnv, ball_name: str = "ball") -> torch.Tensor:
 
 def penalize_sharpcontact(
     env: ManagerBasedRlEnv,
-    height_threshold: float = 0.35,
+    force_threshold: float = 1000.0,
 ) -> torch.Tensor:
-    """Penalize trunk collapse as proxy for hard body–ground contact.
+    """Penalize large impulsive foot contact forces.
 
-    cfrc_ext is not exposed per-body in mjlab, so we use trunk height drop as
-    a proxy. Trunk Z < 0.35 m (half of normal ~0.7 m) indicates a hard fall.
-    Weight: -100 (same as upstream) — fires as a binary flag.
+    Mirrors upstream _reward_penalize_sharpcontact exactly:
+        return (mean(norm(foot_contact_forces)) > max_contact_force) * 1.0
+    where max_contact_force = 1000 N (g1_29_config.py cfg.rewards.max_contact_force).
+
+    Uses feet_contact sensor (reduce="netforce"): force [B, 4, 3] is the
+    summed contact force per foot geom, equivalent to Isaac Gym's
+    net_contact_force_tensor per-body. Mean over all 4 geoms matches the
+    upstream mean over 2 foot bodies (math is identical since both compute
+    the unweighted average of all foot force magnitudes).
+
+    Replaces the trunk-height proxy (z < 0.35 m) which was a fall detector,
+    not an impact detector — it missed hard landings at standing height and
+    falsely fired during controlled low crouches.
+
+    Weight: -100.0 (same as upstream).
     """
-    robot: Entity = env.scene["robot"]
-    trunk_z = robot.data.root_link_pos_w[:, 2]
-    env_z = env.scene.env_origins[:, 2]
-    return (trunk_z - env_z < height_threshold).float()
+    sensor: ContactSensor = env.scene["feet_contact"]
+    force = sensor.data.force                          # [B, 4, 3]
+    mean_force = torch.norm(force, dim=-1).mean(-1)    # [B]
+    return (mean_force > force_threshold).float()
+
+
+def penalize_self_collision(env: ManagerBasedRlEnv) -> torch.Tensor:
+    """Binary penalty when any self-collision is detected in the Trunk subtree.
+
+    Reads from the self_collision ContactSensor (already declared in the scene).
+    The sensor monitors Trunk-subtree vs Trunk-subtree contacts; found > 0 means
+    at least one matching contact was detected this step.
+
+    data.found shape: [B, 1] (reduce="none", num_slots=1).
+    Returns 1.0 on any self-collision, 0.0 otherwise.
+    Weight: -50.0.
+    """
+    sensor: ContactSensor = env.scene["self_collision"]
+    return (sensor.data.found > 0).any(dim=-1).float()
 
 
 def penalize_kneeheight(
@@ -372,7 +400,6 @@ def torque_limits(
 def feet_slippage(
     env: ManagerBasedRlEnv,
     asset_cfg: SceneEntityCfg = _FEET_CFG,
-    contact_height_threshold: float = 0.05,
 ) -> torch.Tensor:
     """Reward feet not slipping while in ground contact.
 
@@ -382,17 +409,29 @@ def feet_slippage(
     Returns 1.0 when no contact or no slip; approaches 0 with high slip.
     Weight: +3.0 (positive reward for not slipping — same as upstream).
 
-    Contact detection: upstream uses contact_forces > 1 N; mjlab has no
-    per-foot contact sensor here so foot height < threshold is used as proxy.
-    3D velocity (not just XY) matches upstream rigid_body_states[:, :, 7:10].
-    """
-    robot: Entity = env.scene[asset_cfg.name]
-    foot_vel_w = robot.data.body_link_lin_vel_w[:, asset_cfg.body_ids, :]  # (N, 2, 3)
-    foot_speed = torch.norm(foot_vel_w, dim=-1)  # (N, 2)
+    Contact detection: physics-based via feet_contact sensor (found > 0).
+    Replaces the previous foot-height proxy which returned exp(0) = 1.0
+    whenever feet were in the air (e.g., during a dive), inflating WandB
+    curves and masking true slippage behaviour.
 
-    foot_z = robot.data.body_link_pos_w[:, asset_cfg.body_ids, 2]
-    env_z = env.scene.env_origins[:, 2:3]
-    in_contact = (foot_z - env_z < contact_height_threshold).float()
+    Geom layout from feet_contact sensor (sorted by name):
+        index 0: left_foot_1  ─┐ left foot
+        index 1: left_foot_2  ─┘
+        index 2: right_foot_1 ─┐ right foot
+        index 3: right_foot_2 ─┘
+
+    Velocity from body_link_lin_vel_w matches upstream rigid_body_states[:, feet, 7:10].
+    """
+    sensor: ContactSensor = env.scene["feet_contact"]
+    found = sensor.data.found  # [B, 4]
+
+    left_in_contact  = (found[:, 0] > 0) | (found[:, 1] > 0)  # [B]
+    right_in_contact = (found[:, 2] > 0) | (found[:, 3] > 0)  # [B]
+    in_contact = torch.stack([left_in_contact, right_in_contact], dim=-1).float()  # [B, 2]
+
+    robot: Entity = env.scene[asset_cfg.name]
+    foot_vel_w = robot.data.body_link_lin_vel_w[:, asset_cfg.body_ids, :]  # [B, 2, 3]
+    foot_speed = torch.norm(foot_vel_w, dim=-1)                             # [B, 2]
 
     contactvel = torch.sum(foot_speed * in_contact, dim=-1)
     return torch.exp(-10.0 * contactvel)

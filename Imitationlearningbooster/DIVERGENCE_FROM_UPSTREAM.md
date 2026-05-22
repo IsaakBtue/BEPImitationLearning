@@ -537,3 +537,80 @@ style-shaping rewards during training only.
 
 **Impact:** All checkpoints trained before 2026-05-02 are incompatible with the
 new observation space (actor dim changed). Full retrain required.
+
+## 2026-05-22 — Physics-based collision detection replacing height proxies
+
+**Files:**
+- `my_mjlab_project_booster_t1/src/.../mdp/rewards.py`
+- `my_mjlab_project_booster_t1/src/.../tasks/goalkeeper_env_cfg.py`
+- `my_mjlab_project_booster_t1/src/.../mdp/resets.py`
+
+### 1. New `feet_contact` ContactSensor
+
+**What:** Added a `ContactSensorCfg(name="feet_contact")` monitoring the 4 foot geoms
+(`left_foot_1`, `left_foot_2`, `right_foot_1`, `right_foot_2`) with `secondary=None`
+(any contact partner, including ground) and `reduce="netforce"`.
+
+**Why it was missing:** mjlab has no global `cfrc_ext`-equivalent tensor. Isaac Gym
+exposed `net_contact_force_tensor` per-body; mjlab requires explicit `ContactSensorCfg`
+declarations. The original port used height proxies everywhere because this API gap
+was not addressed.
+
+**Shape:** `data.found [B, 4]`, `data.force [B, 4, 3]`. Geom index order (lexicographic):
+0=left_foot_1, 1=left_foot_2, 2=right_foot_1, 3=right_foot_2.
+
+---
+
+### 2. `penalize_sharpcontact` — trunk height proxy → foot force sensor
+
+**What was wrong:** Used `trunk_z < 0.35 m` as a fall detector. Original uses
+`mean(norm(foot_forces)) > 1000 N` — a direct impact measurement.
+
+**Fix:** Now reads `env.scene["feet_contact"].data.force` and returns binary
+`(mean_force_norm > 1000.0).float()`. Weight: -100.0 unchanged.
+
+**Evidence:** Original `legged_robot.py:1477`. Proxy missed hard landings at standing
+height; falsely fired during controlled crouches.
+
+---
+
+### 3. `feet_slippage` — foot height proxy → sensor-based contact detection
+
+**What was wrong:** Used `foot_z < 0.05 m` for `in_contact`. When feet were airborne
+(mid-dive), `in_contact=0` → `contactvel=0` → `exp(0)=1.0` — full reward even while
+the robot was completely in the air. Inflated WandB `feet_slippage` curves throughout
+training.
+
+**Fix:** Now uses `env.scene["feet_contact"].data.found > 0` per foot geom. Left foot
+in_contact = `(found[:,0]>0) | (found[:,1]>0)`, right similarly. Rest of formula
+unchanged. Weight: +3.0 unchanged.
+
+**Evidence:** Original `legged_robot.py:1472` uses `contact_forces > 1 N` as the
+in_contact threshold.
+
+---
+
+### 4. `penalize_self_collision` — new reward wiring `self_collision` sensor
+
+**What was missing:** The `self_collision` ContactSensor was already registered in
+`goalkeeper_env_cfg.py` but its output was never consumed by any reward or observation.
+
+**Fix:** Added `penalize_self_collision` reward that reads `self_collision.data.found`
+and returns `(found > 0).any(dim=-1).float()`. Registered at weight -50.0.
+
+**Reasoning:** Self-collisions (arm hitting torso during dive) are recoverable but
+undesirable. Weight -50 (half of sharpcontact -100) reflects lower severity.
+
+---
+
+### 5. `sharpforce_termination` — force-based episode termination
+
+**What was missing:** Original terminates at `mean_foot_force > 1500 N`
+(`sharpforce_buf` at `legged_robot.py:258`). mjlab port had no equivalent.
+
+**Fix:** Added `sharpforce_termination` in `resets.py`, registered as
+`TerminationTermCfg(time_out=False)` with `max_contact_force=1500.0`. Uses the
+same `feet_contact` sensor force computation as `penalize_sharpcontact`.
+
+**Impact:** New termination fires only on catastrophic impacts. Checkpoints trained
+before this date are fully compatible — this does not change observation or action space.

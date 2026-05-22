@@ -98,15 +98,29 @@ def goalkeeper_env_cfg(play: bool = False, num_steps_per_env: int = 24) -> Manag
     }
     cfg.scene.num_envs = 6144
 
-    cfg.scene.sensors = (ContactSensorCfg(
-        name="self_collision",
-        primary=ContactMatch(mode="subtree", pattern="Trunk", entity="robot"),
-        secondary=ContactMatch(mode="subtree", pattern="Trunk", entity="robot"),
-        fields=("found", "force"),
-        reduce="none",
-        num_slots=1,
-        history_length=4,
-    ),)
+    cfg.scene.sensors = (
+        ContactSensorCfg(
+            name="self_collision",
+            primary=ContactMatch(mode="subtree", pattern="Trunk", entity="robot"),
+            secondary=ContactMatch(mode="subtree", pattern="Trunk", entity="robot"),
+            fields=("found", "force"),
+            reduce="none",
+            num_slots=1,
+            history_length=4,
+        ),
+        ContactSensorCfg(
+            name="feet_contact",
+            primary=ContactMatch(
+                mode="geom",
+                pattern=r"^(left|right)_foot_[12]$",
+                entity="robot",
+            ),
+            secondary=None,       # any contact partner (ground, ball, etc.)
+            fields=("found", "force"),
+            reduce="netforce",    # sum all contact points per geom → true net force
+            history_length=0,
+        ),
+    )
 
     cfg.sim.nconmax = 100
     cfg.sim.njmax = 500
@@ -318,6 +332,9 @@ def goalkeeper_env_cfg(play: bool = False, num_steps_per_env: int = 24) -> Manag
         func=gk_rew.penalize_kneeheight, weight=-100.0,
         params={"asset_cfg": _KNEE_BODY_CFG},
     )
+    cfg.rewards["penalize_self_collision"] = RewardTermCfg(
+        func=gk_rew.penalize_self_collision, weight=-50.0,
+    )
 
     # Gap 3 — Successland: reward safe landing after save (4.0)
     cfg.rewards["successland"] = RewardTermCfg(
@@ -437,6 +454,12 @@ def goalkeeper_env_cfg(play: bool = False, num_steps_per_env: int = 24) -> Manag
     cfg.terminations["base_height"] = TerminationTermCfg(
         func=mjlab_mdp.root_height_below_minimum,
         params={"minimum_height": 0.4},
+        time_out=False,
+    )
+    # 3. Force-based: mirrors upstream sharpforce_buf (> 1.5 × 1000 N at feet).
+    cfg.terminations["sharpforce"] = TerminationTermCfg(
+        func=gk_resets.sharpforce_termination,
+        params={"max_contact_force": 1500.0},
         time_out=False,
     )
 

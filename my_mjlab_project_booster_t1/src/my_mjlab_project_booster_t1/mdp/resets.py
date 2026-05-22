@@ -67,3 +67,25 @@ def reset_ball_training(env: ManagerBasedRlEnv, env_ids: torch.Tensor, ball_name
 def reset_ball_autonomous(env: ManagerBasedRlEnv, env_ids: torch.Tensor, ball_name: str = "ball") -> None:
     """Reset ball with random trajectory for autonomous play."""
     _shoot_ball(env, env_ids, ball_name)
+
+
+def sharpforce_termination(
+    env: ManagerBasedRlEnv,
+    max_contact_force: float = 1500.0,
+) -> torch.Tensor:
+    """Terminate when mean foot contact force exceeds threshold.
+
+    Mirrors upstream Humanoid-Goalkeeper sharpforce_buf termination:
+        terminate = mean(norm(contact_forces[:, feet, :])) > 1.5 * max_contact_force
+    where max_contact_force = 1000 N, giving a termination threshold of 1500 N.
+
+    Uses feet_contact sensor (reduce="netforce"): force [B, 4, 3] is the true
+    net force per foot geom, equivalent to Isaac Gym's net_contact_force_tensor.
+
+    Returns [B] bool tensor: True → terminate this environment.
+    """
+    from mjlab.sensor import ContactSensor
+    sensor: ContactSensor = env.scene["feet_contact"]
+    force = sensor.data.force                           # [B, 4, 3]
+    mean_force = torch.norm(force, dim=-1).mean(-1)     # [B]
+    return mean_force > max_contact_force
