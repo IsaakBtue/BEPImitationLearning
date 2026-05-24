@@ -206,6 +206,42 @@ Eereach curriculum
   & 10 $\to$ 15 $\to$ 20 \newline (iter 0 / 600 / 1200)
   & \cmark \\
 
+Ball difficulty curriculum (P2A)
+  & Per-env \texttt{command\_ranges} expands with mean ep.\ length
+  & Not applicable
+  & Global \texttt{\_ball\_difficulty} float $0\!\to\!0.5\!\to\!1.0$; \newline lerp easy$\to$full end-target range
+  & \cmark \\
+
+dof\_pos / torque limits curriculum (P2B)
+  & Weight $\times 2$ then $\times 3$ per curriculum step
+  & Not applicable
+  & Weight $-3\!\to\!-6\!\to\!-9$ \newline (iter 0 / 600 / 1200)
+  & \cmark \\
+
+hand\_proximity\_strict curriculum (P2C)
+  & success weight $\times (1 + 0.5\,\times\,$update$)$
+  & Not applicable
+  & Weight $5\!\to\!7.5\!\to\!10$ \newline (iter 0 / 600 / 1200)
+  & \cmark \\
+
+Successland landing reward (P1B)
+  & \texttt{\_has\_in\_air} flag; $+1$ airborne, $+5$ landing, $-1$ one-foot; jump regions only
+  & Not applicable
+  & Same logic; all envs gated on \texttt{\_has\_in\_air} (no region partitioning needed for single motion)
+  & \cmark \\
+
+Ball visibility masking
+  & 3-phase: initial\_vanish (catchstep warmup), flying (in-range approaching), random\_vanish (0--30 step threshold)
+  & Not applicable
+  & All 3 phases implemented in \texttt{\_compute\_ball\_visibility}; ball pos \& vel zeroed when hidden
+  & \cmark \\
+
+Catchstep warmup
+  & Action override: \texttt{joint\_pos\_target} forced to default for first 3--10 steps
+  & Not applicable
+  & Ball-observation masking only (\texttt{\_catchstep} $= 50$ at reset, decrements per step); action override not possible without framework fork
+  & \wmark \\
+
 Terrain / velocity curriculum
   & Not present (flat floor)
   & 3 stages: $\pm0.4\to\pm1.0\to\pm2.0$\,m/s
@@ -231,27 +267,57 @@ Hard impact penalty
   & \cmark \\
 
 \midrule
-%% ─── SECTION: STILL TO IMPLEMENT ────────────────────────────────────────────
+%% ─── SECTION: REWARD DESIGN GAPS ────────────────────────────────────────────
 \rowcolor{sectionbg}
-\multicolumn{5}{l}{\textcolor{white}{\textbf{Still to implement}}} \\
+\multicolumn{5}{l}{\textcolor{white}{\textbf{Reward design limitations (design choices, not implementation gaps)}}} \\
+\midrule
+
+Stopball definition
+  & $\Delta v_x > 2$\,m/s from initial; fires on \emph{any} deceleration $\geq 2$\,m/s (ball may still be heading to goal)
+  & Not applicable
+  & Same threshold; ball at $-8$\,m/s $\to$ $-5$\,m/s fires --- ball still heading to goal. Suggested fix: require $v_y > 0$ (bounce-back) or $\Delta v_y > |\text{init\_vy}|$
+  & \xmark \\
+
+No ball-arrest reward
+  & No reward for ball having low absolute velocity after save
+  & Not applicable
+  & Same gap: \texttt{hand\_proximity\_strict} rewards hand-near-ball, not ball stopping. Add $\exp(-k|v_y|)\cdot\mathbf{1}[\text{saved}]$ to incentivise true arrest
+  & \xmark \\
+
+AMP motion prior
+  & 6$\times$ AMP discriminators, 40\,\% reward share
+  & Not applicable
+  & Not implemented; explicit motion tracking used instead ($\approx$17 pts total vs 25 pts task)
+  & \xmark \\
+
+HIM-PPO
+  & History encoder + ball/region estimators in actor
+  & Not applicable
+  & Not implemented; standard PPO; full ball obs given to actor
+  & \xmark \\
+
+\midrule
+%% ─── SECTION: STILL TO IMPLEMENT (DR) ───────────────────────────────────────
+\rowcolor{sectionbg}
+\multicolumn{5}{l}{\textcolor{white}{\textbf{Still to implement (DR / sim2real gaps)}}} \\
 \midrule
 
 Push robot fix
-  & --
+  & Interval 15\,s, XY $\pm1.5$\,m/s
   & Interval 1--3\,s, 6-DOF
-  & Interval 10--15\,s, 2-DOF
+  & Interval 10--15\,s, 2-DOF only
   & \xmark \\
 
 PD gains randomisation
   & $[0.8,\ 1.2]\times$
   & Not used
-  & Disabled
+  & Disabled (too hard early)
   & \xmark \\
 
 Link mass randomisation
   & $[0.8,\ 1.2]\times$
   & Not used
-  & Disabled
+  & Disabled (too hard early)
   & \xmark \\
 
 Actuation offset
@@ -269,14 +335,14 @@ Payload mass
 Projected gravity noise
   & $\pm0.05$
   & $\pm0.05$
-  & Not set
+  & Not set in actor obs
   & \xmark \\
 
 Encoder bias range
   & $\pm0.01$\,rad
   & $\pm0.015$\,rad
   & $\pm0.010$\,rad
-  & Align to $\pm0.015$ \\
+  & Align to KK \\
 
 Centre of mass Y/Z range
   & $\pm0.1$\,m

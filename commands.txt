@@ -1,1 +1,10 @@
-cd /home/isaak/BEPImitationlearning/my_mjlab_project_lefthand && .venv/bin/python -m mjlab.scripts.play goalkeeper_lefthand --checkpoint-file logs/rsl_rl/g1_goalkeeper/2026-05-05_20-27-02/model_4600.pt
+# Install missing LaTeX packages needed to compile the tex file:
+sudo apt-get install -y texlive-latex-recommended texlive-latex-extra
+
+# Then compile (run twice for TOC/cross-refs):
+cd /home/isaak/BEPImitationlearning/zzzzfixes
+pdflatex booster_t1_port_analysis.tex
+pdflatex booster_t1_port_analysis.tex
+
+# Clean up aux files after:
+rm -f booster_t1_port_analysis.{aux,log,toc,out}
