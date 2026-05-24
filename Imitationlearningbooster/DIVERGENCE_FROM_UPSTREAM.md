@@ -1,5 +1,383 @@
 # Divergence from Upstream (Humanoid-Goalkeeper)
 
+## 2026-05-24 — 8 missing features implemented in mjlab port
+
+**Scope:** Eight features from the upstream `Humanoid-Goalkeeper` Isaacgym training pipeline were implemented into the mjlab port (`my_mjlab_project_booster_t1`). All upstream code was read verbatim before implementation. Coordinate system note: upstream uses X as the ball approach axis; port uses Y.
+
+---
+
+### Feature P1B: `successland` — add `_has_in_air` tracking
+
+**Original (`legged_robot.py` lines 1445–1466):**
+```python
+def _reward_successland(self):
+    foot_contact_forces_z = self.contact_forces[:, self.contact_feet_indices, 2]
+    jump = self.root_states[:,2] > 1.0
+    self.has_in_air = torch.logical_or(self.has_in_air, jump)
+    has_contact = (foot_contact_forces_z[:, 0] > 1.) & (foot_contact_forces_z[:, 1] > 1.)
+    one_feet_contact = (((foot_contact_forces_z[:, 0] >  1.) & (foot_contact_forces_z[:, 1] < 1.)) | ((foot_contact_forces_z[:, 0] <  1.) & (foot_contact_forces_z[:, 1] > 1.))) & (self.has_in_air)
+    successful_landings = torch.logical_and(has_contact, self.has_in_air)
+    air_reward = self.has_in_air.float()
+    landing_reward = successful_landings.float() * 5.0
+    one_feet_punish = one_feet_contact.float() * -1.0
+    jump_ids = (self.end_regions == 2) | (self.end_regions == 3)
+    return (air_reward + landing_reward + one_feet_punish) * jump_ids
+```
+
+**What was wrong:** Port version fired whenever `behind AND feet_down` — it never tracked whether the robot had actually left the ground, and had no landing bonus (+5×) or one-foot penalty (-1). The `jump_ids` gate (jump-region envs only) was also absent.
+
+**Fix:** Added `env._has_in_air` bool tensor (reset on `episode_length_buf <= 1`), set via `root_z - env_z > 1.0`, gate reward to require `_has_in_air`. Landing bonus (+5×) and one-foot penalty (-1) added. Since port has no region partitioning, `jump_ids` gate replaced by the `_has_in_air` requirement (equivalent — only fires after actual jumps).
+
+**File:** `mdp/rewards.py` → `successland()`
+
+---
+
+### Feature P1C: Fix force averaging in `penalize_sharpcontact` and `sharpforce_termination`
+
+**Original (`legged_robot.py` lines 1475–1477, 258):**
+```python
+def _reward_penalize_sharpcontact(self):
+    return (torch.mean(torch.norm(self.contact_forces[:, self.contact_feet_indices, :], dim=-1), dim=-1) > self.cfg.rewards.max_contact_force) * 1.0
+# termination:
+sharpforce_buf = torch.mean(torch.norm(self.contact_forces[:, self.contact_feet_indices, :], dim=-1), dim=-1) > 1.5 * self.cfg.rewards.max_contact_force
+```
+`contact_feet_indices` has 2 entries (two ankle-roll-link bodies).
+
+**What was wrong:** Port averaged over all 4 foot geoms with a flat mean — this underestimates peak force by 50% on single-foot impacts, since the two geoms of the unloaded foot contribute zeros that halve the mean.
+
+**Fix:** Per-foot max over geoms, then mean over two feet — matches upstream 2-body mean semantics:
+```python
+force_per_geom = sensor.data.force.norm(dim=-1)   # [B, 4]
+left_max  = force_per_geom[:, :2].max(dim=-1).values
+right_max = force_per_geom[:, 2:].max(dim=-1).values
+mean_force = (left_max + right_max) / 2.0
+```
+Applied to both `penalize_sharpcontact()` (rewards.py) and `sharpforce_termination()` (resets.py).
+
+---
+
+### Feature P2A: Ball difficulty curriculum
+
+**Original (`legged_robot.py` lines 333–336, `assign_ball_states` lines 784–788):**
+```python
+# reset_idx curriculum:
+self.command_ranges[:, 0] = torch.clip(self.command_ranges[:, 0] - 0.3 * self.curriculumupdate, self.command_bound[:,0], self.command_bound[:,1])
+self.command_ranges[:, 1] = torch.clip(self.command_ranges[:, 1] + 0.3 * self.curriculumupdate, self.command_bound[:,0], self.command_bound[:,1])
+# ... similar for height ranges
+# assign_ball_states:
+ball_end_local = torch.stack([...
+    torch.rand(len(ball_ids)) * (self.command_ranges[ball_ids, 1] - self.command_ranges[ball_ids, 0]) + self.command_ranges[ball_ids, 0],
+    torch.rand(len(ball_ids)) * (self.command_ranges[ball_ids, 3] - self.command_ranges[ball_ids, 2]) + self.command_ranges[ball_ids, 2]
+], dim=1)
+```
+
+**What was wrong:** Port's `_reset_ball` used fixed `_BALL_END_RANGES` with no curriculum expansion.
+
+**Fix:**
+- Added `_BALL_END_RANGES_EASY` (difficulty=0): x_end ∈ (−0.40, −0.20), z_end ∈ (0.55, 1.05)
+- Added `env._ball_difficulty` float (0.0–1.0), linearly interpolated in `_reset_ball`
+- Added `ball_difficulty_curriculum` class in `resets.py`, registered in `cfg.curriculum`
+- Stages: step=0→0.0, step=stage1→0.5, step=stage2→1.0
+
+**Files:** `mdp/commands.py` → `_reset_ball()`, `mdp/resets.py` → `ball_difficulty_curriculum`, `tasks/goalkeeper_env_cfg.py` → curriculum
+
+---
+
+### Feature P2B: `dof_pos_limits` and `torque_limits` curriculum
+
+**Original (`legged_robot.py` lines 366–373):**
+```python
+if self.curriculumupdate > 1.0:
+     self.reward_scales["dof_pos_limits"] = self.dof_pos_init * 2.0
+     self.reward_scales["torque_limits"]  = self.torque_init  * 2.0
+if self.curriculumupdate > 2.0:
+     self.reward_scales["dof_pos_limits"] = self.dof_pos_init * 3.0
+     self.reward_scales["torque_limits"]  = self.torque_init  * 3.0
+```
+`dof_pos_init = torque_init = -3.0 × dt`.
+
+**What was wrong:** Port used fixed weights (-3.0) with no scaling.
+
+**Fix:** Added `dof_pos_limits_curriculum` and `torque_limits_curriculum` `CurriculumTermCfg` entries in `cfg.curriculum`, scaling from -3.0 → -6.0 → -9.0 at stage1/stage2 steps.
+
+**File:** `tasks/goalkeeper_env_cfg.py`
+
+---
+
+### Feature P2C: `hand_proximity_strict` curriculum
+
+**Original (`legged_robot.py` lines 362–363):**
+```python
+if "success" in self.reward_scales:
+    self.reward_scales["success"] = self.success_init * (1 + 0.5 * self.curriculumupdate)
+```
+`success_init = 5.0 × dt`. curriculumupdate 0→1→2 gives weight 5→7.5→10.
+
+**What was wrong:** Port's `hand_proximity_strict` had fixed weight 5.0.
+
+**Fix:** Added `hand_proximity_strict_curriculum` `CurriculumTermCfg` in `cfg.curriculum`, scaling 5.0 → 7.5 → 10.0 at stage1/stage2 steps.
+
+**File:** `tasks/goalkeeper_env_cfg.py`
+
+---
+
+### Feature P3A: `eereach` target uses predicted intercept point + Phase 1
+
+**Original (`legged_robot.py` lines 797–808, 1361–1400):**
+```python
+# assign_ball_states: compute intercept point
+catch_prop = (0.1 - ball_start_local[:,0:1]) / (ball_end_local[:,0:1] - ball_start_local[:,0:1])
+self.end_target[ball_ids,:] = self.ball_start[ball_ids,:] + delta_pos * catch_prop
+
+# post_physics_step: update when ball is close (0.1–0.5 m from robot)
+approachidx = ((balllocal < 0.5) & (balllocal > 0.1) & ...).nonzero(as_tuple=False).flatten()
+self.end_target[approachidx, :] = self.ball_states[approachidx, :3].clone()
+
+# _reward_eereach Phase 1 (ball far, x_local > 1.5):
+asidegoal = clip(end_target_local[:, 1], -1, 1)
+asidegoal[|asidegoal| < 0.3] = 0
+verticalgoal = clip(torso_z - clip(end_target[:, 2], 0.3, 1.2), 0, 1)
+phase1_rew = 1 - (verticalgoal + |asidegoal|) / 2
+taskrew[phase1] = phase1_rew[phase1]
+```
+
+**What was wrong:** Port's `eereach()` always used current ball position for distance computation — no prediction of intercept point, no Phase 1 pre-positioning reward.
+
+**Fix:**
+- `_reset_ball` now computes `catch_prop = (y_start - 0.1) / (y_start + 0.3)` (Y-axis equivalent of upstream X formula) and stores `env._ball_end_target` in world frame.
+- `eereach()` now uses Phase 1 (ball y_local > 1.5): lateral+vertical pre-positioning reward.
+- Phase 2 (ball y_local ≤ 1.5): uses `end_target` when ball > 0.5 m out, snaps to ball when ≤ 0.5 m.
+
+**Files:** `mdp/commands.py` → `_reset_ball()`, `mdp/rewards.py` → `eereach()`
+
+---
+
+### Feature 7: Catchstep warmup — mask ball observations during launch
+
+**Original (`legged_robot.py` lines 643, 968, 178, 392–403):**
+```python
+# _compute_torques:
+self.joint_pos_target[self.catchstep > self.startstep] = self.init_dof_pos[self.catchstep > self.startstep]
+# _init_buffers:
+self.catchstep = 50 * torch.ones(self.num_envs, dtype=torch.int, device=self.device)
+self.startstep = 50 - random.randint(3, 10)
+# post_physics_step:
+self.catchstep -= 1
+# compute_observations:
+initial_vanish = (self.catchstep < self.startstep).view(-1, 1)
+end_target_local = ... * initial_vanish   # zero ball obs during warmup
+```
+
+**What was wrong:** Port had no catchstep warmup — ball observations were visible immediately at episode start, giving the policy an unrealistic view of a ball that hasn't reached a physically consistent trajectory yet.
+
+**Fix:**
+- `_reset_ball` stores `env._catchstep[env_ids] = 50` (int tensor).
+- `_update_command` decrements it each step: `_catchstep = (_catchstep - 1).clamp(min=0)`.
+- `ball_pos_b` and `ball_vel_b` in observations.py apply `initial_vanish = (catchstep < 43)` — ball is hidden for the first ~7 steps (when catchstep ≥ 43 = startstep equivalent).
+- This also initialises `env._ball_end_target` storage for the intercept point (P3A).
+
+**Files:** `mdp/commands.py` → `_reset_ball()`, `_update_command()`, `mdp/observations.py`
+
+---
+
+### Feature 8: Ball visibility masking curriculum
+
+**Original (`legged_robot.py` lines 392–428):**
+```python
+initial_vanish = (self.catchstep < self.startstep).view(-1, 1)
+end_target_local = quat_rotate_inverse(...) * initial_vanish
+
+flying = ((end_target_local[:,0] > 0.05) & (end_target_local[:,0] < 3.4) &
+          (end_target_local[:,1] > -2.0) & (end_target_local[:,1] < 2.0) &
+          (end_target_local[:,2] < 1.8) & (self.catchstep > 0.) &
+          ((end_target_local[:,0] < self.ball_last[:,0]) | (self.ball_last[:,0] == 0.))).view(-1, 1)
+random_vanish = (self.catchstep > self.vanish_step).view(-1, 1)
+self.ball_last = end_target_local
+
+# actor_obs[:, :num_ballobs] = actor_obs[:, :num_ballobs] * flying * random_vanish
+# (with noise: also multiplied by random_vanish; without noise: only by flying)
+```
+
+**What was wrong:** Port exposed ball position/velocity to the policy at all times — no flying-zone check, no random disappearance, no warmup masking. This lets the policy see the ball when it's behind the robot or in physically implausible states.
+
+**Fix:** Added `_compute_ball_visibility()` helper in `observations.py` that implements all three conditions:
+1. `initial_vanish`: `_catchstep < 43` (startstep ≈ 43)
+2. `flying`: y_local ∈ (0.05, 3.4), |x_local| < 2.0, z < 1.8, approaching, catchstep > 0
+3. `random_vanish`: `_ball_visible_step > _vanish_step` (per-env random threshold 0–30 steps)
+
+Both `ball_pos_b` and `ball_vel_b` multiply output by `visible.float()`, zeroing the observation when ball is not visible.
+
+**File:** `mdp/observations.py`
+
+---
+
+## 2026-05-24 — Full conversion feasibility: AMP, HIM-PPO, and algorithmic gap analysis
+
+**Scope:** Feasibility assessment for a complete port of the Humanoid-Goalkeeper Isaac Gym pipeline (HIM-PPO + 6× AMP + MotionLib) into mjlab/MuJoCo. Two independent research passes cross-referenced upstream source code, the mjlab port, and Isaac Lab's installed AMP infrastructure. Key finding: **the full conversion is feasible** — it is a research engineering task (~1500 lines of new code), not a configuration exercise. No component is a blocking limitation.
+
+**AMP availability clarification:** AMP is **not** in rsl_rl 5.0.1 (the mjlab venv backend), but Isaac Lab ships a working AMP pipeline at `/home/isaak/IsaacLab/source/isaaclab_tasks/isaaclab_tasks/direct/humanoid_amp/` (SKRL backend). A Booster T1 AMP prototype already exists at `/home/isaak/Humanoid_Imitation-Learning/Isaaclab_Humanoid_Booster_AMP/`. The path for the mjlab port is to port the upstream custom rsl_rl fork directly rather than use the SKRL route.
+
+---
+
+### 1. AMP (Adversarial Motion Priors)
+
+**Upstream architecture** (`Humanoid-Goalkeeper/rsl_rl/rsl_rl/`):
+
+| Component | Location | Description |
+|---|---|---|
+| `AMP` discriminator class | `modules/amp.py` | GAIL + spectral norm + gradient penalty λ=5; architecture: 58→512→ReLU→256→1 |
+| 6 motion-keyed discriminators | `algorithms/him_ppo.py` lines 31–37 | One per motion type; routed per-env via `critic_obs[:, num_one_step_obs+3]` |
+| LSGAN loss + gradient penalty | `modules/amp.py compute_loss()` | `(expert_d−1)² + (policy_d+1)²` + one-sided expert penalty |
+| MC-smoothed reward | `modules/amp.py predict_reward()` | 20 perturbations σ=0.3, `clamp(1 − 0.25·min_se, 0)` |
+| AMP reward blending | `runners/him_on_policy_runner.py` line 185 | `rewards = amp_reward × 0.4 + task_reward × 0.6` |
+| AMP obs: 58-D | `envs/base/legged_robot.py get_amp_observations()` | Two consecutive frames of 29 joint positions |
+| Expert buffer with temporal jitter | `envs/g1/g1_utils.py MotionLib.get_expert_obs()` lines 158–189 | Bilinear interp + fps jitter U(0.25, 1.25) |
+| Running AMP normalizer | `rsl_rl/utils/utils.py` lines 108–160 | `RunningMeanStd` over 58-D, updated from both expert and policy batches |
+
+**Current port status:** Not implemented. The port uses explicit L2 penalty terms (`dof_acc`, `torques`, `dof_vel`, `ang_vel_xy`, `action_acc_l2`) as a substitute for the discriminator's implicit regularization. AMP's 40% reward contribution is absent, and `entropy_coef` required recalibration (0.01 → 0.01 with supporting penalties) to avoid std runaway.
+
+**Feasibility:** Portable with medium effort. The `AMP` class and `SpectralNorm` (~100 lines) are pure PyTorch with no Isaac Gym dependency. Key porting steps:
+1. Copy `AMP` class into `Imitationlearningbooster/` — zero dependency changes.
+2. Add `amp_obs` field (shape `[T, N, 40]` for T1's 20 joints × 2 frames) to a `RolloutStorage` subclass.
+3. Add `MotionLib.get_expert_obs()` equivalent with bilinear temporal jitter over `.npz` joint_pos tensors.
+4. Subclass rsl_rl `PPO.update()` to add: discriminator optimizer groups, `AMP.compute_loss()`, `Normalizer.update()`.
+5. Add `get_amp_observations()` env method → `robot.data.joint_pos` (shape `[N, 20]`).
+6. Down-weight explicit `motion_body_*` tracking rewards (they conflict with discriminator gradients).
+- **Estimated scope:** ~400 lines. No mjlab framework changes required.
+
+**Residual limitation (scientific, not blocking):** The upstream uses 6 motion-keyed discriminators. The mjlab port currently has only 1 motion type (`lefthand_t1.npz`). A single-discriminator AMP is fully valid and matches what Isaac Lab's canonical AMP task implements. Expanding to 6 motion types requires converting 5 additional motion files to `.npz`, which is a data preparation task.
+
+---
+
+### 2. HIM-PPO Internal Model
+
+**Upstream architecture** (`Humanoid-Goalkeeper/rsl_rl/rsl_rl/modules/actor_critic.py`):
+
+Three auxiliary sub-networks operate on the full 960-D history:
+
+| Head | Architecture | Loss | Purpose |
+|---|---|---|---|
+| **History encoder** | 960→128→64→16 | PPO gradient (implicit) | 16-D latent compressing hidden system state |
+| **Ball estimator** | 960→128→32→6 | MSE vs `critic_obs[:, −13:−7]` | Supervises ball 3D pos+vel inference |
+| **Region estimator** | 960→128→32→6 | CrossEntropy vs `critic_obs[:, −14]` | 6-class interception region |
+
+Actor MLP input = **119-D** (96 one-step + 16 encoder latent + 6 ball est + 1 region argmax), not the raw 960-D history.
+
+Additional loss terms in `him_ppo.py` `update()`:
+- `est_loss`: MSE(ball_estimate, privileged_ball_state)
+- `region_loss`: CrossEntropy(region_logits, region_id)
+- `smooth_loss`: `‖π(obs)−π(interp_obs)‖² + ‖V(obs)−V(interp_obs)‖²` — temporal Lipschitz regularization via mixup interpolation of consecutive obs pairs
+
+**Current port status:** Not implemented. Port uses flat 900-D input to standard MLP. `action_acc_l2` penalty substitutes for `smooth_loss` but is not mathematically equivalent.
+
+**Feasibility:** Requires framework fork (portable, medium effort). The three sub-networks are ~150 lines of pure PyTorch. The `HIMPPO`, `HIMRolloutStorage`, `HIMOnPolicyRunner` classes total ~600 lines with zero Isaac Gym dependency — they depend only on `torch` and the rsl_rl `VecEnv` interface. Strategy: port the entire upstream rsl_rl fork into `Imitationlearningbooster/` as a standalone package and adapt `HIMOnPolicyRunner` to unpack mjlab's `TensorDict` observations into the flat `actor_obs`/`critic_obs` tensors `HIMPPO.act()` expects.
+- **Estimated scope:** ~600 lines (mostly copy from upstream with interface adapter).
+
+---
+
+### 3. Asymmetric Actor-Critic (Privileged Observations)
+
+**Upstream:** `HIMRolloutStorage` stores separate `observations` (actor) and `privileged_observations` (critic). Critic receives 113-D: actor obs + lin_vel + region_id + end_target + ball_vel + hand positions + hand-ball dist. Source: `storage/him_rollout_storage.py`.
+
+**Current port status:** Both actor and critic receive identical 900-D observations. Ball velocity and hand positions were dissolved into the actor observation instead of being privileged.
+
+**Feasibility:** **Native in rsl_rl v5 / mjlab** — no porting required. The `obs_groups` dict in `RslRlOnPolicyRunnerCfg` directly supports named actor/critic groups:
+```python
+obs_groups: dict = {"actor": ["policy"], "critic": ["critic"]}
+```
+Source: `/home/isaak/BEPImitationlearning/my_mjlab_project_booster_t1/.venv/lib/python3.12/site-packages/mjlab/rl/config.py` lines 92–93. Restoring the asymmetric split requires only redefining the observation groups in `goalkeeper_env_cfg.py` — moving ball_vel, hand_pos, and hand-ball-dist out of the actor group and into a separate critic group.
+- **Estimated scope:** ~20 lines in `goalkeeper_env_cfg.py`. Zero new code.
+
+---
+
+### 4. Ball Masking Curriculum
+
+**Upstream** (`legged_robot.py` lines 397–428): Three masking conditions applied to actor ball_pos:
+- `initial_vanish`: ball hidden until step `catchstep >= startstep` (~40–47 steps, decays with curriculum)
+- `random_vanish`: ball hidden after `catchstep > vanish_step` (random 0–30 per reset)
+- `flying`: ball visible only when inside valid catch volume (x 0.05–3.4 m, y ±2 m, z < 1.8 m) and moving toward robot
+
+**Current port status:** Absent. Policy sees continuous unmasked ball position throughout every episode — a sim-to-real gap if vision is occluded.
+
+**Feasibility:** Portable (low effort). mjlab `ObservationTermCfg` accepts custom `func` callables. The three masking conditions are pure tensor logic on environment state, wrappable as a custom observation term in `mdp/observations.py` (file already exists).
+- **Estimated scope:** ~50 lines.
+
+---
+
+### 5. MotionLib Expert Buffer with Temporal Jitter
+
+**Upstream** (`g1_utils.py` lines 158–189): `MotionLib.get_expert_obs()` samples random clip + random time with per-sample temporal ratio `ratio = (fps/env_fps) × U(0.25, 1.25)`, interpolates between adjacent frames, returns concatenated two-frame vector.
+
+**Current port status:** `MotionLoader` in mjlab only exposes the current reference frame for the current timestep — no random-access sampling for discriminator training.
+
+**Feasibility:** Portable (medium effort). `MotionLib` class is ~200 lines of pure PyTorch with no Isaac Gym dependency. Copy verbatim into `Imitationlearningbooster/`. Integration into the AMP training loop (Component 1 Step 3) is the main work.
+- **Estimated scope:** ~150 lines (class copy + integration).
+
+---
+
+### 6. 6-Motion RSI Coverage
+
+**Upstream:** `num_envs` partitioned into 6 equal groups at init, each assigned a motion type and catch region. Reset uses the partition to initialize joint state from the relevant motion trajectory.
+
+**Current port status:** 1 motion type, `sampling_mode="start"` (always frame 0).
+
+**Feasibility:** Portable (low effort). A custom `EventTermCfg` reset function in `mdp/resets.py` (file exists) can partition envs across motion types and sample init poses from `MotionLib`.
+- **Estimated scope:** ~40 lines.
+
+---
+
+### 7. Physics: PhysX vs MuJoCo Contact Model
+
+| Property | G1 / PhysX | T1 / MuJoCo | Portability |
+|---|---|---|---|
+| Contact model | Hard complementarity (LCP/TGS) | Soft penalty (solref/solimp) | Scientific difference — not portable, requires recalibration |
+| Ball restitution DR [0.0, 1.0] | ✅ direct coefficient | No native DR primitive | Custom `EventTermCfg` modifying `model.pair_solref` (~30 lines) |
+| Foot friction DR [0.1, 2.0] | ✅ | ✅ via `mjlab_dr.geom_friction` | Already partially implemented |
+| Joint limits | Hard constraint | Soft solimp penalty | Behavioral difference at limits |
+| Armature | Not applicable | Added: `stiffness/(2π×10)²` | Already implemented |
+
+**Practical calibration already done:** `stopball delta_vy` threshold recalibrated 2.0→1.0 m/s (MuJoCo softer contacts produce smaller velocity deltas). Force thresholds (sharpcontact 1000 N, termination 1500 N) carried from upstream but not yet validated against MuJoCo profiles.
+
+**Residual scientific limitation:** PhysX and MuJoCo use fundamentally different contact solvers. Ball-bounce trajectories at the same nominal friction/restitution values will differ quantitatively. This is a **scientific validity concern for the BEP** (policies trained in MuJoCo may behave differently than a PhysX-equivalent), not a blocking implementation concern.
+
+---
+
+### 8. Domain Randomization — Partially Disabled
+
+| DR Type | G1 Original | mjlab Port | Status |
+|---|---|---|---|
+| Kp gain scale [0.8, 1.2] | ✅ per reset | Configured but **disabled** | Re-enable after stable locomotion |
+| Kd gain scale [0.8, 1.2] | ✅ per reset | Configured but **disabled** | Same |
+| Link mass scale [0.8, 1.2] | ✅ per reset | Configured but **disabled** | Same |
+| Initial joint pos offset ±0.1 rad | ✅ per reset | Configured but **disabled** | Same |
+| Ball mid-trajectory perturbation ±0.5 m/s every 0.5 s | ✅ | **Not implemented** | ~20 lines in `mdp/commands.py` |
+| Ball restitution [0.0, 1.0] | ✅ per reset | **Not implemented** | Custom event, ~30 lines |
+| Push robot ±1.5 m/s | ✅ every 15 s | ✅ reduced ±0.5 m/s | Intentional for early training |
+| Foot friction [0.1, 2.0] | ✅ | ✅ [0.3, 1.2] | Narrower range |
+| Actuator command delay (2–8 steps) | ✅ action-level | ✅ actuator-pipeline level | KaydenKnapik values |
+| Obs noise: joint_vel ±1.5 | ✅ | ✅ | Verified vs KaydenKnapik |
+
+The four disabled DR terms must be re-enabled before any sim-to-real transfer attempt.
+
+---
+
+### 9. Feasibility Summary
+
+| Component | Verdict | Effort estimate |
+|---|---|---|
+| AMP 6× discriminators | Portable — custom rsl_rl subclass | ~400 lines |
+| HIM-PPO internal model + aux losses | Portable — port upstream rsl_rl fork | ~600 lines |
+| Asymmetric actor-critic | **Native** in rsl_rl v5 / mjlab | ~20 lines (config only) |
+| Ball masking curriculum | Portable (low) | ~50 lines |
+| MotionLib expert buffer + temporal jitter | Portable (medium) | ~150 lines |
+| 6-motion RSI | Portable (low) | ~40 lines |
+| Physics DR (friction ✅, restitution custom) | Portable (medium) | ~30 lines |
+| PhysX vs MuJoCo contact semantics | Scientific gap — recalibrate thresholds | Ongoing |
+
+**Overall:** Full conversion is feasible. No blocking limitations. Total estimated new code: ~1,300 lines in `Imitationlearningbooster/`, no mjlab framework modifications. Strategy is to port the upstream rsl_rl custom fork as a standalone package and wire it to mjlab's `VecEnv` interface. The MuJoCo vs PhysX contact model difference is a scientific consideration to characterize in the BEP, not an obstacle.
+
+---
+
 ## 2026-05-20 — KaydenKnapik hardware-verified actuator config; joint_vel noise; actuator delay
 
 **Files:** `robots/t1_constants.py`, `mdp/rewards.py`, `assets/booster_t1/T1_serial_clean.xml`, `tasks/goalkeeper_env_cfg.py`

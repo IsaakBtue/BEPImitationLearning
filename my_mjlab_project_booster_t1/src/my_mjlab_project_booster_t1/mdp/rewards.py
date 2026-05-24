@@ -57,43 +57,100 @@ def eereach(
     reach_th: float = 0.3,
     sigma: float = 5.0,
 ) -> torch.Tensor:
-    """Sigmoid reach reward with velocity amplification and behind-ball boost.
+    """Sigmoid reach reward with velocity amplification, intercept target, and behind-ball boost.
 
-    Mirrors the original isaacgym _reward_eereach more faithfully:
-    - vel_sigma: up to 4× multiplier when the closest hand is swinging toward the ball.
-      Without this the policy learns to hover near the ball rather than commit to a strike.
-    - behind boost: 2× multiplier once the ball passes, matching the original's
-      vel_sigma=2.0 post-pass behaviour — keeps the robot reaching aggressively
-      during the post-save recovery window.
-    - upright gate: unchanged from original.
+    Mirrors the original isaacgym _reward_eereach faithfully:
+
+    Phase 1 (ball far away, y_local > 1.5):
+      - Use _ball_end_target (predicted intercept point) for lateral pre-positioning.
+      - Compute aside = (end_target_x - robot_x) / 0.8, clamped ±1.
+      - phase1_rew = 1 - |aside| (reward being on the correct side of the goal).
+
+    Phase 2 (ball close, y_local ≤ 1.5):
+      - Use current ball position OR end_target (if ball y_local > 0.5) for distance.
+      - Sigmoid reach reward × vel_sigma multiplier.
+      - Mirrors upstream: approachidx updates end_target when ball_x_local ∈ [0.1, 0.5].
+
+    Post-pass (behind=True):
+      - vel_sigma doubled to 2× so the robot keeps reaching after the ball passes.
+
+    Upright gate: multiply by (1 - clamp(grav_xy², 0, 1)) as in original.
     """
     robot: Entity = env.scene[asset_cfg.name]
     ball: Entity = env.scene[ball_name]
     ball_pos_w = ball.data.root_link_pos_w                              # (N, 3)
     hand_pos_w = robot.data.body_link_pos_w[:, asset_cfg.body_ids, :]  # (N, 2, 3)
 
-    # Per-hand distance and index of closest hand.
-    to_ball = ball_pos_w[:, None, :] - hand_pos_w                      # (N, 2, 3)
-    dist = torch.norm(to_ball, dim=-1)                                  # (N, 2)
-    min_dist, closest_idx = dist.min(dim=-1)                           # (N,), (N,)
+    # Ball distance from env origin (Y axis = approach axis in port).
+    ball_y_local = ball_pos_w[:, 1] - env.scene.env_origins[:, 1]      # (N,)
+
+    # Retrieve predicted intercept point set by _reset_ball.
+    end_target = getattr(env, "_ball_end_target", None)
+
+    # ---- Phase 1: pre-positioning when ball is far (y_local > 1.5) ----
+    # Mirrors upstream:
+    #   end_target_local = end_target - torso_pos
+    #   asidegoal = clip(end_target_local[:, 1], -1, 1)   [original Y is lateral]
+    #   asidegoal[|asidegoal| < 0.3] = 0
+    #   verticalgoal = clip(torso_z - clip(end_target_z, 0.3, 1.2), 0, 1)
+    #   phase1_rew = 1 - (verticalgoal + |asidegoal|) / 2
+    # Port: original lateral = Y (side), port lateral = X (side), original vertical = Z = same.
+    phase1_mask = ball_y_local > 1.5                                    # (N,)
+
+    if end_target is not None:
+        root_pos_w = robot.data.root_link_pos_w                         # (N, 3)
+        end_target_local = end_target - root_pos_w                      # (N, 3)
+
+        # Lateral (X) alignment — mirrors original end_target_local[:, 1] (Y lateral in G1).
+        asidegoal = end_target_local[:, 0].clamp(-1.0, 1.0)
+        asidegoal = torch.where(asidegoal.abs() < 0.3, torch.zeros_like(asidegoal), asidegoal)
+
+        # Vertical (Z) — same in both port and original.
+        torso_z = root_pos_w[:, 2]
+        verticalgoal = (torso_z - end_target[:, 2].clamp(0.3, 1.2)).clamp(0.0, 1.0)
+
+        phase1_rew = 1.0 - (verticalgoal + asidegoal.abs()) / 2.0      # (N,)
+    else:
+        phase1_rew = torch.zeros(env.num_envs, device=env.device)
+
+    # ---- Phase 2: sigmoid reach reward when ball is close ----
+    # Target point: use end_target when ball is between 0.5–1.5 m away (in-flight approach),
+    # snap to current ball position when ≤ 0.5 m (mirrors upstream approachidx update).
+    if end_target is not None:
+        use_end_target = (ball_y_local > 0.5) & ~phase1_mask           # 0.5 < y ≤ 1.5
+        target_pos = torch.where(
+            use_end_target.unsqueeze(-1),
+            end_target,
+            ball_pos_w,
+        )                                                                # (N, 3)
+    else:
+        target_pos = ball_pos_w
+
+    to_target = target_pos[:, None, :] - hand_pos_w                    # (N, 2, 3)
+    dist_to_target = torch.norm(to_target, dim=-1)                     # (N, 2)
+    min_dist, closest_idx = dist_to_target.min(dim=-1)                 # (N,), (N,)
 
     # Base sigmoid: 1 at dist=0, 0 far away.
     rew = 1.0 - 1.0 / (1.0 + torch.exp(-sigma * (min_dist - reach_th)))
 
-    # Velocity amplification: reward the closest hand actively moving toward the ball.
+    # Velocity amplification toward the ball (not the end_target) for physical realism.
+    to_ball = ball_pos_w[:, None, :] - hand_pos_w                      # (N, 2, 3)
     hand_vel_w = robot.data.body_link_lin_vel_w[:, asset_cfg.body_ids, :]  # (N, 2, 3)
     to_ball_unit = to_ball / to_ball.norm(dim=-1, keepdim=True).clamp(min=1e-6)
     vel_toward = (hand_vel_w * to_ball_unit).sum(dim=-1)               # (N, 2)
     closest_vel = vel_toward[torch.arange(env.num_envs, device=env.device), closest_idx]
     vel_sigma = 1.0 + 3.0 * torch.clamp(closest_vel, 0.0, 3.0)        # 1× – 4×
 
-    # Post-pass: double the multiplier so the robot keeps committing after the ball goes by.
+    # Post-pass: double the multiplier once ball passes goal line.
     behind = _ball_is_behind(env, ball_name)
     vel_sigma = torch.where(behind, vel_sigma * 2.0, vel_sigma)
 
+    # Combine: phase1 when ball is far, phase2 when ball is close.
+    taskrew = torch.where(phase1_mask, phase1_rew, rew * vel_sigma)
+
     projected_grav = env.scene["robot"].data.projected_gravity_b
     upright = (1.0 - torch.clamp(torch.sum(projected_grav[:, :2] ** 2, dim=1), 0.0, 1.0))
-    return rew * vel_sigma * upright
+    return taskrew * upright
 
 
 def catch_success(
@@ -242,21 +299,20 @@ def penalize_sharpcontact(
         return (mean(norm(foot_contact_forces)) > max_contact_force) * 1.0
     where max_contact_force = 1000 N (g1_29_config.py cfg.rewards.max_contact_force).
 
-    Uses feet_contact sensor (reduce="netforce"): force [B, 4, 3] is the
-    summed contact force per foot geom, equivalent to Isaac Gym's
-    net_contact_force_tensor per-body. Mean over all 4 geoms matches the
-    upstream mean over 2 foot bodies (math is identical since both compute
-    the unweighted average of all foot force magnitudes).
-
-    Replaces the trunk-height proxy (z < 0.35 m) which was a fall detector,
-    not an impact detector — it missed hard landings at standing height and
-    falsely fired during controlled low crouches.
-
+    Upstream averages over 2 foot bodies: mean(norm(contact_forces[:, feet, :]), dim=-1).
+    Port geom layout (4 geoms, sorted by name):
+        index 0: left_foot_1  ─┐ left foot
+        index 1: left_foot_2  ─┘
+        index 2: right_foot_1 ─┐ right foot
+        index 3: right_foot_2 ─┘
+    Fix: per-foot max over geoms, then mean over feet — matches upstream 2-body mean.
     Weight: -100.0 (same as upstream).
     """
     sensor: ContactSensor = env.scene["feet_contact"]
-    force = sensor.data.force                          # [B, 4, 3]
-    mean_force = torch.norm(force, dim=-1).mean(-1)    # [B]
+    force_per_geom = sensor.data.force.norm(dim=-1)          # [B, 4]
+    left_max  = force_per_geom[:, :2].max(dim=-1).values     # max of left_foot_1, left_foot_2
+    right_max = force_per_geom[:, 2:].max(dim=-1).values     # max of right_foot_1, right_foot_2
+    mean_force = (left_max + right_max) / 2.0                # [B]
     return (mean_force > force_threshold).float()
 
 
@@ -297,20 +353,63 @@ def successland(
     ball_name: str = "ball",
     asset_cfg: SceneEntityCfg = _FEET_CFG,
     height_threshold: float = 0.05,
+    air_height_threshold: float = 1.0,
 ) -> torch.Tensor:
-    """Reward both feet near ground after the ball passes — encourages safe landing.
+    """Reward safe landing after a jump save.
 
-    Mirrors upstream _reward_successland. Uses foot height < threshold as a
-    proxy for foot–ground contact (mjlab has no per-foot contact sensor here).
-    Only active when ball is behind/passed so it doesn't fire during the dive.
+    Mirrors upstream _reward_successland exactly:
+        jump = root_z > 1.0
+        has_in_air |= jump
+        has_contact = foot_0_contact & foot_1_contact
+        one_feet_contact = exactly one foot down & has_in_air
+        successful_landings = has_contact & has_in_air
+        air_reward = has_in_air.float()
+        landing_reward = successful_landings.float() * 5.0
+        one_feet_punish = one_feet_contact.float() * -1.0
+        jump_ids = end_regions == 2 | 3   ← upstream gates on jump-region envs only
+        return (air_reward + landing_reward + one_feet_punish) * jump_ids
+
+    Port adaptation:
+    - No region partitioning: all envs are treated as jump-region envs, BUT
+      we require _has_in_air so the reward only fires after actual jumps (never
+      fires for ground-level saves). This is functionally equivalent to the
+      upstream jump_ids gate.
+    - Contact detection: foot height < height_threshold (mjlab proxy for contact sensor).
+    - _has_in_air reset on episode_length_buf <= 1.
+
     Weight: 4.0 (same as upstream).
     """
-    behind = _ball_is_behind(env, ball_name)
     robot: Entity = env.scene[asset_cfg.name]
-    foot_z = robot.data.body_link_pos_w[:, asset_cfg.body_ids, 2]
-    env_z = env.scene.env_origins[:, 2:3]
-    feet_down = (foot_z - env_z < height_threshold).all(dim=-1)
-    return feet_down.float() * behind.float()
+    ball: Entity = env.scene[ball_name]
+
+    # Initialise per-env _has_in_air buffer.
+    if not hasattr(env, "_has_in_air"):
+        env._has_in_air = torch.zeros(env.num_envs, dtype=torch.bool, device=env.device)
+
+    # Reset at start of each episode.
+    just_reset = env.episode_length_buf <= 1
+    env._has_in_air[just_reset] = False
+
+    # Track whether the robot has actually left the ground this episode.
+    root_z = robot.data.root_link_pos_w[:, 2]
+    env_z  = env.scene.env_origins[:, 2]
+    env._has_in_air |= (root_z - env_z > air_height_threshold)
+
+    # Foot contact via height proxy.
+    foot_z = robot.data.body_link_pos_w[:, asset_cfg.body_ids, 2]    # [B, 2]
+    env_z_2d = env.scene.env_origins[:, 2:3]                          # [B, 1]
+    foot_down = (foot_z - env_z_2d < height_threshold)                # [B, 2]
+
+    has_contact       = foot_down[:, 0] & foot_down[:, 1]
+    one_feet_contact  = (foot_down[:, 0] ^ foot_down[:, 1]) & env._has_in_air
+
+    successful_landings = has_contact & env._has_in_air
+
+    air_reward      = env._has_in_air.float()
+    landing_reward  = successful_landings.float() * 5.0
+    one_feet_punish = one_feet_contact.float() * -1.0
+
+    return air_reward + landing_reward + one_feet_punish
 
 
 def postupperdofpos(

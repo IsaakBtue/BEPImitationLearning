@@ -16,8 +16,16 @@ if TYPE_CHECKING:
 # Ball end-target ranges per motion type (x_min, x_max, z_min, z_max) in env-local frame.
 # Ball approaches from +Y; robot faces +Y so left hand is at -X.
 # T1 only uses lefthand motion.
+# These are the FULL (difficulty=1.0) ranges — easy ranges are interpolated at runtime.
 _BALL_END_RANGES = [
-    (-0.84, -0.2, 0.4, 1.2),  # 0 lefthand — arrives at robot's left side (-X), 70% of max
+    (-0.84, -0.2, 0.4, 1.2),  # 0 lefthand — arrives at robot's left side (-X), full range
+]
+
+# Easy (difficulty=0.0) end-target ranges, used as the lerp starting point.
+# difficulty=0: centre-ish shots easy to intercept.
+# difficulty=1: full range matching _BALL_END_RANGES.
+_BALL_END_RANGES_EASY = [
+    (-0.40, -0.2, 0.55, 1.05),  # 0 lefthand — narrower, easier interception zone
 ]
 
 
@@ -185,8 +193,18 @@ class MultiMotionCommand(MotionCommand):
         # Ball approaches from +Y (rotated 90° clockwise vs original +X approach).
         y_start = sample_uniform(3.0, 5.0, (n,), device=self.device)
 
-        end_ranges = torch.tensor(_BALL_END_RANGES, device=self.device)
-        per_env_ranges = end_ranges[motion_types]
+        # Difficulty curriculum: linearly interpolate between easy and full ranges.
+        # difficulty=0.0 (easy): narrow centre zone; difficulty=1.0: full range.
+        difficulty = float(getattr(self._env, "_ball_difficulty", 0.0))
+        difficulty = max(0.0, min(1.0, difficulty))
+
+        end_ranges_full = torch.tensor(_BALL_END_RANGES, device=self.device)       # [M, 4]
+        end_ranges_easy = torch.tensor(_BALL_END_RANGES_EASY, device=self.device)  # [M, 4]
+
+        # Interpolate: full_range * difficulty + easy_range * (1 - difficulty)
+        end_ranges = end_ranges_easy + difficulty * (end_ranges_full - end_ranges_easy)
+
+        per_env_ranges = end_ranges[motion_types]  # [n, 4]
 
         x_end = sample_uniform(per_env_ranges[:, 0], per_env_ranges[:, 1], (n,), device=self.device)
         z_end = sample_uniform(per_env_ranges[:, 2], per_env_ranges[:, 3], (n,), device=self.device)
@@ -196,7 +214,7 @@ class MultiMotionCommand(MotionCommand):
         t_flight = sample_uniform(0.4, 1.0, (n,), device=self.device)
 
         dx = x_end - x_start
-        dy = -y_start - 0.3
+        dy = -y_start - 0.3          # target Y ≈ -0.3 (just behind goal line)
         dz = z_end - z_start
 
         vx = dx / t_flight
@@ -216,6 +234,55 @@ class MultiMotionCommand(MotionCommand):
         ball_ang_vel = torch.zeros((n, 3), device=self.device)
         ball_velocity = torch.cat([ball_vel, ball_ang_vel], dim=-1)
 
+        # ----------------------------------------------------------------
+        # Compute predicted intercept point (Feature P3A: eereach target).
+        # Mirrors upstream assign_ball_states catch_prop formula:
+        #     catch_prop = (0.1 - x_start) / (x_end_local - x_start)  [original X axis]
+        # Port uses Y axis: ball goes from +y_start → −0.3 (goal).
+        # catch_prop = fraction of Y travel when ball is at y_local = 0.1 (arm-reach plane).
+        # y_start_local > 0; total dy = -(y_start + 0.3).
+        # At y_local=0.1: fraction = (y_start - 0.1) / (y_start + 0.3)
+        # end_target_w = ball_start_w + delta_w * catch_prop
+        # ----------------------------------------------------------------
+        catch_prop = (y_start - 0.1) / (y_start + 0.3)      # [n]
+        catch_prop = catch_prop.clamp(0.0, 1.0)
+
+        delta_w = torch.stack([
+            (x_end - x_start),          # vx * t_flight
+            dy,                          # vy * t_flight  (world y)
+            (z_end - z_start),          # vz*t - 0.5g*t² = dz → dz is just delta, not full arc
+        ], dim=1)                        # [n, 3]
+
+        # ball_start in world frame
+        ball_start_world = ball_pos_w    # [n, 3]
+
+        # end_target in world frame = start + delta * catch_prop
+        end_target_w = ball_start_world + delta_w * catch_prop.unsqueeze(-1)   # [n, 3]
+        # Clip X so it stays within a reasonable arm-reach zone (≈ original clip).
+        end_target_w[:, 0] = end_target_w[:, 0].clamp(
+            origins[:, 0] - 1.0, origins[:, 0] + 1.0
+        )
+
+        # Store on env for use by eereach reward.
+        if not hasattr(self._env, "_ball_end_target"):
+            self._env._ball_end_target = torch.zeros(
+                self._env.num_envs, 3, dtype=torch.float, device=self.device
+            )
+        self._env._ball_end_target[env_ids] = end_target_w
+
+        # ----------------------------------------------------------------
+        # Catchstep warmup: during the first N steps after reset the ball
+        # observations are masked so the policy holds a standing pose while
+        # the ball is launched and reaches a stable trajectory.
+        # Mirrors upstream: catchstep = 50 (fixed), decremented each step.
+        # startstep = 50 − randint(3,10): the mask lifts when catchstep < startstep.
+        # ----------------------------------------------------------------
+        if not hasattr(self._env, "_catchstep"):
+            self._env._catchstep = torch.zeros(
+                self._env.num_envs, dtype=torch.int, device=self.device
+            )
+        self._env._catchstep[env_ids] = 50
+
         ball.write_root_link_pose_to_sim(ball_pose, env_ids=env_ids)
         ball.write_root_link_velocity_to_sim(ball_velocity, env_ids=env_ids)
 
@@ -226,6 +293,10 @@ class MultiMotionCommand(MotionCommand):
         if env_ids.numel() > 0:
             self._resample_command(env_ids, reset_ball=False)
         self.update_relative_body_poses()
+
+        # Decrement catchstep warmup counter each step (mirrors upstream post_physics_step).
+        if hasattr(self._env, "_catchstep"):
+            self._env._catchstep = (self._env._catchstep - 1).clamp(min=0)
 
         if self.cfg.sampling_mode == "adaptive":
             self.bin_failed_count = (

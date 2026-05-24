@@ -24,6 +24,7 @@ from my_mjlab_project_booster_t1.mdp import MultiMotionCommandCfg
 import my_mjlab_project_booster_t1.mdp.observations as gk_obs
 import my_mjlab_project_booster_t1.mdp.rewards as gk_rew
 import my_mjlab_project_booster_t1.mdp.resets as gk_resets
+from my_mjlab_project_booster_t1.mdp.resets import ball_difficulty_curriculum
 from my_mjlab_project_booster_t1.robots.t1_constants import get_t1_robot_cfg, T1_ACTION_SCALE
 
 _HAND_CFG = SceneEntityCfg("robot", body_names=("left_hand_link", "right_hand_link"))
@@ -421,6 +422,59 @@ def goalkeeper_env_cfg(play: bool = False, num_steps_per_env: int = 24) -> Manag
                     {"step": 0,            "weight": 10.0},
                     {"step": stage1_step,  "weight": 15.0},
                     {"step": stage2_step,  "weight": 20.0},
+                ],
+            },
+        ),
+        # Feature P2A: Ball difficulty curriculum — expands shot range over training.
+        # Mirrors upstream command_ranges curriculum in reset_idx.
+        "ball_difficulty_curriculum": CurriculumTermCfg(
+            func=ball_difficulty_curriculum,
+            params={
+                "stages": [
+                    {"step": 0,            "difficulty": 0.0},
+                    {"step": stage1_step,  "difficulty": 0.5},
+                    {"step": stage2_step,  "difficulty": 1.0},
+                ],
+            },
+        ),
+        # Feature P2B: dof_pos_limits and torque_limits scale up with training.
+        # Mirrors upstream compute_reward():
+        #   curriculumupdate > 1: scale *= 2; > 2: scale *= 3
+        # Using stage1/stage2 steps as the two thresholds.
+        "dof_pos_limits_curriculum": CurriculumTermCfg(
+            func=mjlab_mdp.reward_curriculum,
+            params={
+                "reward_name": "dof_pos_limits",
+                "stages": [
+                    {"step": 0,            "weight": -3.0},
+                    {"step": stage1_step,  "weight": -6.0},
+                    {"step": stage2_step,  "weight": -9.0},
+                ],
+            },
+        ),
+        "torque_limits_curriculum": CurriculumTermCfg(
+            func=mjlab_mdp.reward_curriculum,
+            params={
+                "reward_name": "torque_limits",
+                "stages": [
+                    {"step": 0,            "weight": -3.0},
+                    {"step": stage1_step,  "weight": -6.0},
+                    {"step": stage2_step,  "weight": -9.0},
+                ],
+            },
+        ),
+        # Feature P2C: hand_proximity_strict curriculum — increases reward weight over training.
+        # Mirrors upstream success reward scaling:
+        #   success_init * (1 + 0.5 * curriculumupdate)
+        #   curriculumupdate 0→1→2 → weight 5→7.5→10
+        "hand_proximity_strict_curriculum": CurriculumTermCfg(
+            func=mjlab_mdp.reward_curriculum,
+            params={
+                "reward_name": "hand_proximity_strict",
+                "stages": [
+                    {"step": 0,            "weight": 5.0},
+                    {"step": stage1_step,  "weight": 7.5},
+                    {"step": stage2_step,  "weight": 10.0},
                 ],
             },
         ),
