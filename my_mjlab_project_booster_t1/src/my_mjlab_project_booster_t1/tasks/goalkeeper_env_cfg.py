@@ -553,6 +553,24 @@ def goalkeeper_play_env_cfg(num_steps_per_env: int = 24) -> ManagerBasedRlEnvCfg
     return cfg
 
 
+def goalkeeper_play_withoverlay_legacy_env_cfg(num_steps_per_env: int = 24) -> ManagerBasedRlEnvCfg:
+    """Play config for checkpoints trained WITHOUT ball/hand obs (obs size 750, history=10)."""
+    cfg = goalkeeper_play_withoverlay_env_cfg(num_steps_per_env=num_steps_per_env)
+    _legacy_drop = ["ball_pos_b", "ball_vel_b", "left_hand_pos_b", "right_hand_pos_b"]
+    for _obs in _legacy_drop:
+        cfg.observations["actor"].terms.pop(_obs, None)
+        cfg.observations["critic"].terms.pop(_obs, None)
+    return cfg
+
+
+def goalkeeper_play_withoverlay_corporate_env_cfg(num_steps_per_env: int = 24) -> ManagerBasedRlEnvCfg:
+    """Play config for checkpoints trained with history_length=1 and ball/hand obs (obs size 87)."""
+    cfg = goalkeeper_play_withoverlay_env_cfg(num_steps_per_env=num_steps_per_env)
+    cfg.observations["actor"].history_length = 1
+    cfg.observations["critic"].history_length = 1
+    return cfg
+
+
 def goalkeeper_play_withoverlay_env_cfg(num_steps_per_env: int = 24) -> ManagerBasedRlEnvCfg:
     cfg = goalkeeper_env_cfg(play=True, num_steps_per_env=num_steps_per_env)
     cfg.scene.num_envs = 1

@@ -14,7 +14,7 @@ dependencies = [
 ]
 
 [tool.uv.sources]
-torch = { url = "https://download.pytorch.org/whl/cu130/torch-2.11.0%2Bcu130-cp312-cp312-manylinux_2_28_x86_64.whl" }
+torch = { url = "https://download.pytorch.org/whl/cu128/torch-2.11.0%2Bcu128-cp312-cp312-manylinux_2_28_x86_64.whl" }
 
 [project.entry-points."mjlab.tasks"]
 goalkeeper_booster_t1 = "my_mjlab_project_booster_t1"
