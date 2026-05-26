@@ -992,3 +992,61 @@ same `feet_contact` sensor force computation as `penalize_sharpcontact`.
 
 **Impact:** New termination fires only on catastrophic impacts. Checkpoints trained
 before this date are fully compatible — this does not change observation or action space.
+
+---
+
+## 2026-05-26 — Deployment bug fixes: base_lin_vel frame and ball visibility masking
+
+### Bug Fix 1: `base_lin_vel` was fed in world frame instead of body frame
+
+**What was wrong (`goalkeeper_deploy/tasks/goalkeeper/controller.py`):**
+```python
+base_lin_vel_b = dq[:3]  # WRONG — labelled body frame but is world frame
+```
+MuJoCo freejoint `qvel[0:3]` is the derivative of world-frame position, i.e. the **world-frame** linear velocity. It is NOT the body-frame velocity. The comment claiming it was body frame was incorrect.
+
+**What the training does (`mjlab/entity/data.py:597`):**
+```python
+root_link_lin_vel_b = quat_apply_inverse(root_link_quat_w, root_link_lin_vel_w)
+```
+Training explicitly rotates the world-frame velocity into body frame before adding it to the observation. At the robot's 90° yaw, world-X ↔ body-Y are completely swapped, making this a critical error — the policy received the wrong velocities in two out of three axes.
+
+**Angular velocity (`qvel[3:6]`) was actually correct.** MuJoCo freejoint `qvel[3:6]` is already body-frame angular velocity. Training also produces body-frame angular velocity (via `quat_apply_inverse(quat_w, ang_vel_w)`). Both resolve to the same value.
+
+**Fix:** Added `_rot_world_to_body(q_wxyz, v_w)` numpy helper (same rotation matrix as `_quat_rot_inv` in task.py) and applied it to `dq[:3]` in `update_state()`:
+```python
+base_lin_vel_b = _rot_world_to_body(base_quat, dq[:3])
+```
+Also fixed `qfrc_actuator[:23]` → `qfrc_actuator[6:29]` (robot joints are dofs 6-28 in the scene with ball).
+
+**Evidence:** Trace through `mjlab/entity/data.py` lines 594-602 and `observations.py` lines 24-28 confirmed training always gives body-frame velocity. Rotation test: world `[0,1,0]` at 90° yaw → body `[1,0,0]` ✓.
+
+---
+
+### Bug Fix 2: Ball visibility masking was completely absent
+
+**What was wrong:** Deployment always provided raw ball position and velocity. The policy was trained with three masking gates:
+1. **initial_vanish** — ball hidden for the first ~7-8 policy steps after each episode reset (catchstep warmup, mirrors upstream `startstep ≈ 43`)
+2. **flying** — ball hidden unless approaching, within 3.4 m in Y, |X| < 2 m, Z < 1.8 m
+3. **random_vanish** — ball disappears for a random number of steps (sampled 0-29) per episode
+
+Without masking, ball_pos_b and ball_vel_b carried out-of-distribution values during the warmup window and after the ball passed the robot.
+
+**Fix:** Added ball visibility state to `GoalkeeperMujocoController`:
+- `_ball_step` countdown (50→0 per launch, decremented in `update_state()`)
+- `_ball_prev_y` for approach direction tracking
+- `_ball_vanish_step` random threshold (re-sampled in `_launch_ball()`)
+- `_ball_visible_step` flying-step counter
+- `_compute_ball_visibility()` method mirroring `observations.py` logic exactly
+- `ball_visible: bool` attribute read by the policy
+
+In `task.py` `_compute_obs()`:
+```python
+vis = 1.0 if getattr(self.controller, 'ball_visible', True) else 0.0
+ball_pos_b = _quat_rot_inv(q, ball_pos_w - base_pos) * vis
+ball_vel_b = _quat_rot_inv(q, ball_vel_w) * vis
+```
+
+**Evidence:** Integration test confirmed `_ball_step` decrements correctly, visibility stays False during warmup (steps 0-7), and activates when ball enters flying zone.
+
+**Files changed:** `goalkeeper_deploy/tasks/goalkeeper/controller.py`, `goalkeeper_deploy/tasks/goalkeeper/task.py`

@@ -38,9 +38,18 @@ Thumbs.db
 logs/
 runs/
 *.log
+*.c3d
+*.pkl
+*.npz
+*.gif
+*.log
+*.tex
+
 
 # Model checkpoints (wandb training runs)
-**/wandb/
+my_mjlab_project_booster_t1/wandb/
+goalkeeper_deploy/tasks/goalkeeper/models/*.pt
+zzgifs/
 
 # Local overrides
 .local/

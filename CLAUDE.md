@@ -21,6 +21,7 @@ Adapt the **InternRobotics Humanoid-Goalkeeper** pipeline (originally targeting 
 4. **Log changes inside `Humanoid-Goalkeeper/`** — if upstream context must be noted, append "what" and "why" to `Humanoid-Goalkeeper/changes.md`.
 5. **License is CC BY-NC-SA 4.0** — non-commercial research only.
 6. **Document every fix immediately** — after every bug fix, reward change, or config change, update `Imitationlearningbooster/DIVERGENCE_FROM_UPSTREAM.md` in the same commit. Include: what changed, why it was wrong, what the correct value is, and what evidence (training data, error messages) confirmed the fix was needed.
+7. **Do NOT modify anything inside `booster_deploy/`** — treat it as a frozen upstream deployment framework. Read it for patterns; never edit it. All goalkeeper-specific deployment code lives in `goalkeeper_deploy/`.
 
 ## Installation
 
@@ -70,6 +71,37 @@ The policy uses **proprioceptive observations** (joint angles/velocities/forces)
 - **Utils:** create `Imitationlearningbooster/booster_t1_utils.py` (joint indices, AMP dataset loading, observation schema)
 - **Assets:** place Booster URDFs in `legged_gym/resources/robots/booster_t1/` (source from `Boosterversion/booster_t1/`)
 - **Registry:** register new task without touching existing G1 registration
+
+### Goalkeeper Deployment (`goalkeeper_deploy/`)
+
+Deploys `my_mjlab_project_booster_t1/logs/rsl_rl/g1_goalkeeper/2026-05-23_18-35-15/model_2000.pt`
+using the `booster_deploy` framework **without modifying any file in `booster_deploy/`**.
+
+| File | Purpose |
+|---|---|
+| `goalkeeper_deploy/deploy.py` | Wrapper entry-point; sets sys.path correctly so `tasks/` resolves to `goalkeeper_deploy/tasks/` before `booster_deploy/tasks/` |
+| `goalkeeper_deploy/export_model.py` | Converts rsl_rl checkpoint → TorchScript (run once) |
+| `goalkeeper_deploy/tasks/goalkeeper/task.py` | `GoalkeeperPolicy` + `GoalkeeperT1ControllerCfg` |
+| `goalkeeper_deploy/tasks/goalkeeper/controller.py` | `GoalkeeperMujocoController` (builds scene with ball, overrides `update_state`/`ctrl_step`) |
+| `goalkeeper_deploy/tasks/goalkeeper/models/goalkeeper_t1_2000.pt` | Exported TorchScript actor |
+
+**Sim2sim (MuJoCo):**
+```bash
+cd goalkeeper_deploy
+python deploy.py --task goalkeeper_t1 --mujoco
+```
+
+**Re-export model (if checkpoint changes):**
+```bash
+python goalkeeper_deploy/export_model.py
+```
+
+**Key design facts:**
+- Observation: 87 dims/step × 10 history = 870 input to network
+- Joints: 23 DOF in MuJoCo XML order = T1_23DOF_CFG.joint_names order (no remapping)
+- Default pose: T1_STANDING_KEYFRAME (bent legs, right arm counterbalance)
+- Action scale: per-joint `0.25 * effort / stiffness` (matching training T1_ACTION_SCALE)
+- PD gains: match training `BuiltinPositionActuatorCfg` (kp=stiffness, kd≈0.0637*kp)
 
 ### Known Upstream Modifications (in `changes.md`)
 
