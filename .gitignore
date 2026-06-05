@@ -48,6 +48,8 @@ runs/
 
 # Model checkpoints (wandb training runs)
 my_mjlab_project_booster_t1/wandb/
+Imitationlearningbooster/wandb/
+Imitationlearningbooster/logs/
 goalkeeper_deploy/tasks/goalkeeper/models/*.pt
 zzgifs/
 

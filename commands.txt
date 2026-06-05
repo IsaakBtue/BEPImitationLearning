@@ -1,1 +1,13 @@
-cd /home/isaak/BEPImitationlearning/goalkeeper_deploy && python deploy.py --task goalkeeper_t1 --mujoco
+# Run from: /home/isaak/BEPImitationlearning/Imitationlearningbooster
+
+# AMP training (runs at ~4s/iter, ~22h for 40k iters)
+uv run python -m mjlab.scripts.train goalkeeper_booster_t1_amp
+
+# Play with overlay — lefthand ghost (zero policy, see rotation/alignment)
+uv run python -m mjlab.scripts.play goalkeeper_booster_t1_withoverlay --agent zero --no-terminations True --motion-file src/imitationlearningbooster/motions/data/lefthand_t1.npz
+
+# Play with overlay — existing trained checkpoint
+uv run python -m mjlab.scripts.play goalkeeper_booster_t1_withoverlay --checkpoint-file /home/isaak/BEPImitationlearning/my_mjlab_project_booster_t1/logs/rsl_rl/g1_goalkeeper/2026-05-23_18-35-15/model_19000.pt --motion-file src/imitationlearningbooster/motions/data/lefthand_t1.npz
+
+# Play AMP checkpoint after training (replace run_id and iter)
+uv run python -m mjlab.scripts.play goalkeeper_booster_t1_withoverlay --checkpoint-file logs/rsl_rl/goalkeeper_amp_booster_t1/<run_id>/model_<iter>.pt --motion-file src/imitationlearningbooster/motions/data/lefthand_t1.npz

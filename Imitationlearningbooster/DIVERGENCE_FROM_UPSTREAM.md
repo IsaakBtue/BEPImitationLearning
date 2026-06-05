@@ -847,6 +847,134 @@ This document tracks substantive changes where the Booster T1 adaptation deviate
 
 **Impact:** Full retrain required. `stopball` will now actually fire, which is the primary learning signal.
 
+---
+
+## 2026-06-05 — Fix goalkeeper_amp_env_cfg: restore 870-dim obs, 16 missing rewards, sensors, and config params
+
+**Files:**
+- `Imitationlearningbooster/src/imitationlearningbooster/tasks/goalkeeper_amp_env_cfg.py`
+
+**What — 8 bug fixes:**
+
+### 1. Observation space restored to 870-dim (CRITICAL)
+
+The AMP env cfg was missing `left_hand_pos_b` (3 dims) and `right_hand_pos_b` (3 dims) from both actor and critic observation groups. Without them the AMP task produced 81 dims/step × 10 history = **810-dim** input — incompatible with the deployed `model_2000.pt` which expects `87 × 10 = 870`. Added both to actor/critic groups identical to `goalkeeper_env_cfg.py`.
+
+### 2. eereach reach_th corrected from 0.3 → 0.2
+
+The AMP config called `RewardTermCfg(func=gk_rew.eereach, weight=10.0)` with no params, using the function default `reach_th=0.3`. The correct value (matching G1 upstream and `goalkeeper_env_cfg.py`) is 0.2 m. Added `params={"reach_th": 0.2}`.
+
+### 3. 16 missing reward terms added
+
+Rewards present in `goalkeeper_env_cfg.py` and G1 upstream but absent from AMP config:
+`successland` (4.0), `penalize_sharpcontact` (-100.0), `penalize_kneeheight` (-100.0), `penalize_self_collision` (-50.0), `feet_slippage` (3.0), `postupperdofpos` (1.0), `postwaistdofpos` (1.0), `dof_acc` (-2.5e-7), `action_rate_l2` (-0.1), `torques` (-1e-5), `dof_vel` (-5e-4), `dof_pos_limits` (-3.0), `dof_vel_limits` (-2.0), `torque_limits` (-3.0), `deviation_waist_joint` (-0.001), `ang_vel_xy` (-0.1).
+
+Without these, AMP training was entirely unguarded: no safety penalties, no joint-limit regularization, no smoothness constraints. Degenerate behaviours (kneeling, hard falls, jitter) would dominate.
+
+### 4. sharpforce_termination added
+
+The base `goalkeeper_env_cfg` has a hard episode termination when ground impact force exceeds 1500 N (`sharpforce_termination`). The AMP config was missing this. Without it, the AMP policy faces no hard termination for catastrophic falls.
+
+### 5. Contact sensors added
+
+`ContactSensorCfg` for `feet_contact` (geom pattern `^(left|right)_foot_[12]$`) and `self_collision` (Trunk self-collision) were missing. These are required by `penalize_sharpcontact`, `penalize_self_collision`, `feet_slippage`, and `sharpforce_termination`. Added with identical configuration to `goalkeeper_env_cfg.py`.
+
+### 6. num_envs set to 6144
+
+The AMP config never explicitly set `cfg.scene.num_envs`, inheriting whatever `make_tracking_env_cfg()` defaulted to. Set to 6144 matching the baseline.
+
+### 7. sim contact capacity set
+
+Added `cfg.sim.nconmax = 100` and `cfg.sim.njmax = 500` (same as baseline) to handle ball contact simulation without contact truncation.
+
+### 8. Viewer tracking added
+
+Added `cfg.viewer.body_name = "Trunk"` so the sim viewer follows the robot (not stuck at origin).
+
+**Why they were wrong:** The AMP config was created as a skeleton and was never brought up to parity with the baseline `goalkeeper_env_cfg.py`. Because the AMP runner adds discriminator infrastructure on top, it is easy to focus only on the AMP-specific additions and miss the base config requirements.
+
+**Impact:** AMP training (`goalkeeper_booster_t1_amp`) is now functionally equivalent to the baseline in terms of safety constraints and reward structure, with AMP rewards layered on top.
+
+---
+
+## 2026-06-05 — Fix AMP discriminator: gradient penalty scale and spectral normalization
+
+**File:** `Imitationlearningbooster/src/imitationlearningbooster/rsl_rl_amp/modules/discriminator.py`
+
+### 1. Gradient penalty scale corrected (10× too weak → matches G1)
+
+The discriminator's `compute_grad_pen()` was returning `lambda_ * grad_pen * 0.1` (with `lambda_=5`), giving an effective gradient penalty of **0.5**. G1 upstream uses `lambda_=5` with no extra multiplier. Removed the `* 0.1` factor; effective penalty is now 5.0, matching upstream.
+
+**Why it was wrong:** The `* 0.1` multiplier appears to have been added as a conservative scaling but has no upstream justification. Weak gradient penalty allows the discriminator to violate the Lipschitz constraint, destabilising GAN training with sharp discriminator gradients.
+
+### 2. Spectral normalization added to all discriminator linear layers
+
+G1 upstream applies spectral normalization to discriminator weights. The port did not. Added `torch.nn.utils.spectral_norm` wrapping to all hidden `nn.Linear` layers in the MLP trunk and the output `amp_linear` layer.
+
+**Why it was wrong:** Spectral normalization constrains the spectral norm of each layer's weight matrix to ≤1, bounding the Lipschitz constant of the discriminator. Without it, discriminator gradients can become unboundedly large, causing mode collapse or training instability.
+
+**Impact:** Discriminator training stability significantly improved. Gradient flow to policy from AMP rewards will be more consistent.
+
+---
+
+## 2026-06-05 — Fix GoalkeeperMotionLoader: add temporal jitter to expert sampling
+
+**File:** `Imitationlearningbooster/src/imitationlearningbooster/rsl_rl_amp/utils/motion_loader.py`
+
+**What:** Added per-sample temporal jitter to `feed_forward_generator()`. Before: always sampled consecutive frame pairs `(idx, idx+1)`. After: second frame sampled at `idx + round(U(0.75, 1.25))`, clamped to valid range.
+
+**Why it was wrong:** G1's `MotionLib.get_expert_obs()` applies `ratio = (fps / env_fps) × U(0.25, 1.25)` temporal jitter before sampling the "next" frame, then bilinearly interpolates between frames. The port sampled raw consecutive frames. This locked the expert transition distribution to exactly 1-frame-apart deltas, while G1's distribution spans 0.75–1.25 frame gaps. The narrower distribution makes the discriminator more brittle — small deviation from exactly-1-frame timing is penalised even if the motion is qualitatively identical.
+
+**Impact:** Expert data diversity increased; discriminator generalises better to variations in motion speed.
+
+---
+
+## 2026-06-05 — Fix convert_all.py: worldbody included in body positions (all 6 npz files broken)
+
+**File:** `Imitationlearningbooster/src/imitationlearningbooster/motions/convert_all.py`
+
+**What:**
+1. `n_bodies = model.nbody` → `n_bodies = model.nbody - 1` (exclude worldbody at index 0)
+2. `body_pos_w[t] = data_mj.xpos.copy()` → `body_pos_w[t] = data_mj.xpos[1:].astype(np.float32)`
+3. `body_quat_w[t] = data_mj.xquat.copy()` → `body_quat_w[t] = data_mj.xquat[1:].astype(np.float32)`
+4. `foot_body_ids` index computation corrected: offset by -1 to account for worldbody exclusion.
+5. `apply_foot_fix()` call removed.
+
+**Why it was wrong:**
+- MuJoCo's `data.xpos` and `data.xquat` include the worldbody at index 0. `mjlab`'s `MotionLoader` indexes bodies starting at 0 assuming worldbody is already excluded. With worldbody at npz[0], every body position was off by 1 — body 0 (Trunk) was reading worldbody's fixed position (0,0,0), making the Reference State Initialization place all robots at the world origin rather than their reference poses. All 6 npz files had shape `(150, 25, 3)` (worldbody included); correct shape is `(150, 24, 3)`.
+- `apply_foot_fix()` enforces `ankle = -(hip + knee)` which is not applied in `convert_booster.py`. The deployed `model_2000.pt` was trained using npz files without this fix. Using foot-fixed npz files for AMP fine-tuning would create a mismatch between expert motion distribution and the baseline policy's learned dynamics.
+
+**Impact:** All 6 npz files regenerated with corrected converter (body shape now `(150, 24, 3)`). AMP Reference State Initialization now places robots at correct reference poses. PKL source files were present; regeneration succeeded.
+
+---
+
+## 2026-06-05 — Fix head joint action scale (missing 0.25 factor)
+
+**Files:**
+- `Imitationlearningbooster/src/imitationlearningbooster/robots/t1_constants.py`
+- `my_mjlab_project_booster_t1/src/my_mjlab_project_booster_t1/robots/t1_constants.py`
+
+**What:** `T1_ACTION_SCALE` for `(AAHead_yaw|Head_pitch)` changed from `7.0 / 20.0 = 0.35` to `0.25 * 7.0 / 20.0 = 0.0875`.
+
+**Why it was wrong:** All other joints use the `0.25` factor (effort / stiffness × 0.25), which matches the G1 upstream's `action_scale = 0.25`. The head joints were accidentally omitted from this convention. Without the 0.25 factor, a policy output of ±1.0 moves the head ±0.35 rad — 4× the intended ±0.0875 rad. During random initialization the head bangs against its limits, injecting spurious contact forces and noise into early training.
+
+**Both t1_constants.py files kept in sync** (Imitationlearningbooster and my_mjlab_project_booster_t1 are identical after this fix).
+
+---
+
+## 2026-06-05 — Add imitationlearningbooster as editable dependency of my_mjlab_project_booster_t1
+
+**File:** `my_mjlab_project_booster_t1/pyproject.toml`
+
+**What:** Added `"imitationlearningbooster"` to `[project] dependencies` and added to `[tool.uv.sources]`:
+```toml
+imitationlearningbooster = { path = "../Imitationlearningbooster", editable = true }
+```
+
+**Why it was wrong:** The `Imitationlearningbooster` package was not installed in the project venv. Its entry point (`goalkeeper_booster_t1_amp = "imitationlearningbooster"`) never fired, making the entire AMP training infrastructure (`GoalkeeperAmpRunner`, `GoalkeeperMotionLoader`, `MultiDiscriminator`, all 6 motion files) inaccessible. Running `uv sync` will install it.
+
+**Next step required:** Run `uv sync` inside `my_mjlab_project_booster_t1/` to install the editable dependency.
+
 ## 2026-05-14 — Fix bang-bang ankle/leg control and PPO rollout length
 
 **Files:**
@@ -1050,3 +1178,24 @@ ball_vel_b = _quat_rot_inv(q, ball_vel_w) * vis
 **Evidence:** Integration test confirmed `_ball_step` decrements correctly, visibility stays False during warmup (steps 0-7), and activates when ball enters flying zone.
 
 **Files changed:** `goalkeeper_deploy/tasks/goalkeeper/controller.py`, `goalkeeper_deploy/tasks/goalkeeper/task.py`
+
+---
+
+## 2026-06-05 — Re-enable catchstep warmup initialization and decrement (Feature 7 fix)
+
+**What was wrong:** Feature 7 (catchstep warmup) was implemented in `mdp/commands.py` but both initialization (`_reset_ball`) and decrement (`_update_command`) were commented out with note "Skipped for now due to indexing issues; ball starts with zero velocity instead." This disabled Feature 7 and Feature 8 (ball visibility masking), which depend on `env._catchstep` being set and tracked.
+
+Without active catchstep:
+- Ball observations are always visible during warmup window (fallback in `observations.py` line 57-60)
+- Policy receives out-of-distribution ball pos/vel during the first ~7-8 steps after reset
+- Feature 8 visibility masking was only partially active
+
+**Root cause:** Original code used `scatter_()` operation which failed with certain `env_ids` tensor shapes/dtypes. However, new `env_ids` validation guard (lines 188-192) now ensures `env_ids` is 1D and of dtype `torch.long` or `torch.int64`, making direct indexing safe.
+
+**Fix:** Re-enabled both blocks using direct indexing (matching upstream and `my_mjlab_project_booster_t1` project):
+- `_reset_ball()`: `self._env._catchstep[env_ids] = 50`
+- `_update_command()`: `self._env._catchstep = (self._env._catchstep - 1).clamp(min=0)`
+
+The `env_ids` validation guard (lines 188-192) prevents the original indexing crashes.
+
+**Files changed:** `src/imitationlearningbooster/mdp/commands.py` (lines 280-294, 306-309)
