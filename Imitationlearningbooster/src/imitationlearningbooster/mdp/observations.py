@@ -22,8 +22,8 @@ def _compute_ball_visibility(env: ManagerBasedRlEnv, ball_name: str) -> torch.Te
 
     initial_vanish: ball hidden during catchstep >= startstep warmup.
         (self.catchstep < self.startstep) in original — True when warmup expired.
-        Port: catchstep stored on env._catchstep (int tensor). startstep ≈ 43 (50 - randint(3,10)).
-        We use a fixed startstep=43 as a conservative upper bound.
+        Port: _catchstep counts down from 50; _startstep is per-env (50 - randint(3,10)),
+        initialised and re-sampled each episode reset in MultiMotionCommand._reset_ball.
 
     flying: ball is in the camera field of view and approaching:
         end_target_local (ball in body frame):
@@ -34,12 +34,22 @@ def _compute_ball_visibility(env: ManagerBasedRlEnv, ball_name: str) -> torch.Te
         ball moving closer: x_local < x_last OR x_last == 0 → port: y_local < y_last OR y_last == 0
 
     random_vanish: ball disappears at a random step during flight.
-        vanish_step sampled per-env at reset from randint(0, 30).
+        vanish_step sampled per-env at reset from randint(0, 30) in _reset_ball.
         ball_visible_step counts consecutive flying steps.
         random_vanish = ball_visible_step > vanish_step.
 
     visible = initial_vanish & flying & ~random_vanish
+
+    Result is cached per-step so that ball_pos_b and ball_vel_b share one
+    computation without re-running stateful side effects (ball_last update,
+    visible_step increment). Without the cache the second caller always sees
+    approaching=False (ball_last was just set to current y) → flying=False →
+    visible=False, permanently zeroing ball_vel observations.
     """
+    # Return cached result if already computed this step.
+    if getattr(env, "_ball_vis_step", -1) == env.common_step_counter:
+        return env._ball_vis_cache
+
     ball: Entity = env.scene[ball_name]
 
     ball_pos_w = ball.data.root_link_pos_w                           # (N, 3)
@@ -51,13 +61,17 @@ def _compute_ball_visibility(env: ManagerBasedRlEnv, ball_name: str) -> torch.Te
 
     # initial_vanish: True once the warmup countdown has expired.
     # Upstream: (catchstep < startstep) — mask expires when catchstep drops below startstep.
-    # Port: _catchstep counts down from 50; we reveal the ball when _catchstep < 43 (~startstep).
-    _STARTSTEP = 43  # 50 - mid(3,10) ≈ 43
+    # Port: _catchstep counts down from 50; _startstep is per-env, set in _reset_ball.
+    # Fall back to a fixed value of 43 (≈ 50 - mid(3,10)) when not yet initialised.
     catchstep = getattr(env, "_catchstep", None)
+    startstep = getattr(env, "_startstep", None)
     if catchstep is None:
         initial_vanish = torch.ones(env.num_envs, dtype=torch.bool, device=env.device)
+    elif startstep is None:
+        # _startstep not yet set by _reset_ball — use conservative fixed value.
+        initial_vanish = catchstep < 43
     else:
-        initial_vanish = catchstep < _STARTSTEP                      # (N,) bool
+        initial_vanish = catchstep < startstep                       # (N,) bool
 
     # flying: ball in camera view, approaching the robot, launched.
     catchstep_positive = (catchstep > 0) if catchstep is not None else torch.ones(
@@ -81,19 +95,25 @@ def _compute_ball_visibility(env: ManagerBasedRlEnv, ball_name: str) -> torch.Te
     )                                                                 # (N,) bool
 
     # random_vanish: ball disappears randomly after some in-flight steps.
-    just_reset = env.episode_length_buf <= 1
+    # _vanish_step is initialised and re-sampled per-episode in _reset_ball.
+    # _ball_visible_step counts consecutive steps where ball is flying.
     if not hasattr(env, "_vanish_step"):
+        # Fallback only: normally set by MultiMotionCommand._reset_ball before first step.
         env._vanish_step = torch.randint(0, 30, (env.num_envs,), device=env.device)
-        env._ball_visible_step = torch.zeros(env.num_envs, dtype=torch.int, device=env.device)
+        env._ball_visible_step = torch.zeros(env.num_envs, dtype=torch.long, device=env.device)
+    if not hasattr(env, "_ball_visible_step"):
+        env._ball_visible_step = torch.zeros(env.num_envs, dtype=torch.long, device=env.device)
 
-    env._vanish_step[just_reset] = torch.randint(
-        0, 30, (int(just_reset.sum().item()),), device=env.device
+    env._ball_visible_step = torch.where(
+        flying, env._ball_visible_step + 1, torch.zeros_like(env._ball_visible_step)
     )
-    env._ball_visible_step = torch.where(flying, env._ball_visible_step + 1, torch.zeros_like(env._ball_visible_step))
 
     random_vanish = env._ball_visible_step > env._vanish_step        # (N,) bool
 
     visible = initial_vanish & flying & ~random_vanish               # (N,) bool
+
+    env._ball_vis_cache = visible
+    env._ball_vis_step = env.common_step_counter
     return visible
 
 

@@ -47,11 +47,17 @@ class MultiMotionCommand(MotionCommand):
 
     def __init__(self, cfg: MultiMotionCommandCfg, env: ManagerBasedRlEnv) -> None:
         super().__init__(cfg, env)
-        self.loaders: list[MotionLoader] = [self.motion]
-        for mf in cfg.motion_files[1:]:
-            self.loaders.append(MotionLoader(mf, self.body_indexes, device=self.device))
+        # If --motion-file was passed via CLI, the play script overrides cfg.motion_file
+        # before the env is built. In that case use only that single file.
+        if cfg.motion_file and cfg.motion_file not in cfg.motion_files:
+            self.loaders = [MotionLoader(cfg.motion_file, self.body_indexes, device=self.device)]
+        else:
+            self.loaders = [self.motion]
+            for mf in cfg.motion_files[1:]:
+                self.loaders.append(MotionLoader(mf, self.body_indexes, device=self.device))
 
         self.motion_type_ids = torch.zeros(self.num_envs, dtype=torch.long, device=self.device)
+        self._cycle_counter: int = 0
 
         self._time_step_totals = torch.tensor(
             [loader.time_step_total for loader in self.loaders],
@@ -137,9 +143,19 @@ class MultiMotionCommand(MotionCommand):
         return self._gather_anchor("body_ang_vel_w")
 
     def _resample_command(self, env_ids: torch.Tensor, reset_ball: bool = True) -> None:
-        self.motion_type_ids[env_ids] = torch.randint(
-            0, len(self.loaders), (len(env_ids),), device=self.device
-        )
+        if self.cfg.cycle_motions:
+            n = len(self.loaders)
+            assigned = torch.tensor(
+                [(self._cycle_counter + i) % n for i in range(len(env_ids))],
+                dtype=torch.long,
+                device=self.device,
+            )
+            self.motion_type_ids[env_ids] = assigned
+            self._cycle_counter = (self._cycle_counter + len(env_ids)) % n
+        else:
+            self.motion_type_ids[env_ids] = torch.randint(
+                0, len(self.loaders), (len(env_ids),), device=self.device
+            )
 
         if self.cfg.sampling_mode == "start":
             self.time_steps[env_ids] = 0
@@ -296,9 +312,32 @@ class MultiMotionCommand(MotionCommand):
         # ----------------------------------------------------------------
         if not hasattr(self._env, "_catchstep"):
             self._env._catchstep = torch.zeros(
-                self._env.num_envs, dtype=torch.int, device=self.device
+                self._env.num_envs, dtype=torch.long, device=self.device
             )
         self._env._catchstep[env_ids] = 50
+
+        # startstep: per-env random threshold; ball obs reveal when catchstep < startstep.
+        # Upstream uses a single scalar updated once per N steps; port randomises per-env
+        # per-episode for better diversity. Range: 50 - randint(3,10) → [40, 47].
+        if not hasattr(self._env, "_startstep"):
+            self._env._startstep = torch.zeros(
+                self._env.num_envs, dtype=torch.long, device=self.device
+            )
+        self._env._startstep[env_ids] = 50 - torch.randint(
+            3, 11, (len(env_ids),), device=self.device
+        )
+
+        # vanish_step: random per-episode step at which ball obs disappear mid-flight.
+        # Mirrors upstream vanish_step = randint(0, 30), re-sampled at each episode reset.
+        # Upstream uses catchstep > vanish_step; the port uses _ball_visible_step > _vanish_step
+        # (counts consecutive flying steps), which is semantically equivalent but more robust.
+        if not hasattr(self._env, "_vanish_step"):
+            self._env._vanish_step = torch.zeros(
+                self._env.num_envs, dtype=torch.long, device=self.device
+            )
+        self._env._vanish_step[env_ids] = torch.randint(
+            0, 30, (len(env_ids),), device=self.device
+        )
 
         ball.write_root_link_pose_to_sim(ball_pose, env_ids=env_ids)
         ball.write_root_link_velocity_to_sim(ball_velocity, env_ids=env_ids)
@@ -330,6 +369,8 @@ class MultiMotionCommandCfg(MotionCommandCfg):
     motion_files: tuple[str, ...] = field(default_factory=tuple)
     motion_file: str = ""
     ball_name: str = "ball"
+    cycle_motions: bool = False
+    """If True, assign motion types round-robin across episodes instead of randomly."""
 
     def __post_init__(self) -> None:
         if self.motion_files:

@@ -93,7 +93,42 @@ class GoalkeeperAmpRunner(MotionTrackingOnPolicyRunner):
         cmd = self.env.unwrapped.command_manager.get_term("motion")
         return cmd.motion_type_ids.clone()  # (N,) long
 
+    def _verify_joint_order(self):
+        """Assert that robot.joint_names matches the joint order in the npz files.
+
+        Catches silent AMP failure caused by mismatched joint ordering between
+        mjlab (robot.data.joint_pos) and the converted motion npz files.
+        Runs once at the start of training; skipped if npz predates joint_names addition.
+        """
+        try:
+            base_env = self.env.unwrapped if hasattr(self.env, "unwrapped") else self.env
+            robot = base_env.scene["robot"]
+            robot_names = list(robot.joint_names)
+        except Exception:
+            print("[AMP] WARNING: could not read robot.joint_names — joint order unverified.")
+            return
+
+        for motion_name, loader in self.motion_loaders.items():
+            if loader.joint_names is None:
+                print(
+                    f"[AMP] WARNING: {motion_name}_t1.npz has no joint_names key. "
+                    "Re-run convert_all.py to regenerate npz files with joint order metadata."
+                )
+                continue
+            npz_names = [n if isinstance(n, str) else n.decode() for n in loader.joint_names]
+            if npz_names != robot_names:
+                mismatch = [(i, a, b) for i, (a, b) in enumerate(zip(npz_names, robot_names)) if a != b]
+                raise RuntimeError(
+                    f"[AMP] FATAL: joint order mismatch in {motion_name}_t1.npz vs robot.\n"
+                    f"  npz ({len(npz_names)} joints): {npz_names}\n"
+                    f"  robot ({len(robot_names)} joints): {robot_names}\n"
+                    f"  first mismatches: {mismatch[:5]}\n"
+                    "Re-run convert_all.py to regenerate npz files."
+                )
+        print(f"[AMP] Joint order verified OK: {robot_names}")
+
     def learn(self, num_learning_iterations: int, init_at_random_ep_len: bool = False):
+        self._verify_joint_order()
         if init_at_random_ep_len:
             self.env.episode_length_buf = torch.randint_like(
                 self.env.episode_length_buf, high=int(self.env.max_episode_length)
@@ -156,7 +191,7 @@ class GoalkeeperAmpRunner(MotionTrackingOnPolicyRunner):
                                 d = self.discriminators[name](obs_norm)
                                 amp_r_all[mask] = torch.clamp(
                                     1.0 - 0.25 * (d - 1.0).pow(2), min=0.0
-                                ).squeeze(-1) * 0.1  # 0.1 scale matches Goalkeeper
+                                ).squeeze(-1) * 0.5  # matches G1 Goalkeeper
 
                     # Blend: amp_coef * AMP + (1 - amp_coef) * task = 0.4 * AMP + 0.6 * task
                     blended_r = self._amp_coef * amp_r_all + (1.0 - self._amp_coef) * task_r
@@ -195,12 +230,14 @@ class GoalkeeperAmpRunner(MotionTrackingOnPolicyRunner):
             # PPO update
             loss_dict = self.alg.update()
 
-            # Discriminator update (same per-minibatch cadence as AMP_mjlab)
+            # Discriminator update — match G1's 20 gradient steps (5 epochs × 4 mini-batches)
             num_mini_batches = self.cfg.get("algorithm", {}).get("num_mini_batches", 4)
+            num_learning_epochs = self.cfg.get("algorithm", {}).get("num_learning_epochs", 5)
+            num_disc_updates = num_mini_batches * num_learning_epochs
             mini_batch_size = (self.env.num_envs * num_steps) // num_mini_batches
 
             disc_loss_total = torch.tensor(0.0, device=self.device)
-            for _ in range(num_mini_batches):
+            for _ in range(num_disc_updates):
                 for name in MOTION_NAMES:
                     if not self.replay_buffers[name].ready(mini_batch_size // len(MOTION_NAMES)):
                         continue
@@ -223,8 +260,8 @@ class GoalkeeperAmpRunner(MotionTrackingOnPolicyRunner):
                     policy_d = disc(pol_obs)
                     expert_loss = torch.nn.MSELoss()(expert_d, torch.ones_like(expert_d))
                     policy_loss = torch.nn.MSELoss()(policy_d, -torch.ones_like(policy_d))
-                    grad_pen = disc.compute_grad_pen(exp_obs, lambda_=5.0)
-                    disc_loss_total = disc_loss_total + 0.5 * (expert_loss + policy_loss) + grad_pen
+                    grad_pen = disc.compute_grad_pen(exp_obs, lambda_=5.0) * 0.1  # matches G1 effective lambda=0.5
+                    disc_loss_total = disc_loss_total + (expert_loss + policy_loss) + grad_pen
 
                     # Update normalizer
                     self.amp_normalizer.update(pol_obs.cpu())

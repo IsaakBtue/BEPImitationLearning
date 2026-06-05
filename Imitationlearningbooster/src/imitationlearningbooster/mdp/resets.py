@@ -14,7 +14,7 @@ if TYPE_CHECKING:
 
 
 def _shoot_ball(env: ManagerBasedRlEnv, env_ids: torch.Tensor, ball_name: str) -> None:
-    """Shared ball-launch logic: spawn at +Y, aim toward goal line (Y≈0)."""
+    """Shared ball-launch logic for autonomous play: spawn centered, aim toward goal line (Y≈0)."""
     ball: Entity = env.scene[ball_name]
 
     if env_ids is None:
@@ -26,10 +26,12 @@ def _shoot_ball(env: ManagerBasedRlEnv, env_ids: torch.Tensor, ball_name: str) -
 
     # Ball comes from +Y direction (rotated 90° vs original G1 +X setup).
     y_start = sample_uniform(3.0, 5.0, (n,), device=env.device)
-    x_end = sample_uniform(-1.2, 1.2, (n,), device=env.device)
-    z_end = sample_uniform(0.1, 1.6, (n,), device=env.device)
-    x_start = sample_uniform(-1.8, 1.8, (n,), device=env.device)
-    z_start = sample_uniform(0.3, 1.8, (n,), device=env.device)
+    # Spawn centered in X (small jitter) so the ball starts near the middle.
+    # Training uses per-motion _BALL_END_RANGES in commands.py — this path is play-only.
+    x_start = sample_uniform(-0.2, 0.2, (n,), device=env.device)
+    z_start = sample_uniform(0.5, 1.5, (n,), device=env.device)
+    x_end = sample_uniform(-0.6, 0.6, (n,), device=env.device)
+    z_end = sample_uniform(0.3, 1.4, (n,), device=env.device)
 
     t_flight = sample_uniform(0.5, 1.0, (n,), device=env.device)
 

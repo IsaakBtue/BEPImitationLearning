@@ -405,11 +405,15 @@ def successland(
 
     successful_landings = has_contact & env._has_in_air
 
-    air_reward      = env._has_in_air.float()
     landing_reward  = successful_landings.float() * 5.0
     one_feet_punish = one_feet_contact.float() * -1.0
 
-    return air_reward + landing_reward + one_feet_punish
+    # air_reward = has_in_air.float() is intentionally omitted.
+    # Upstream gates the entire successland reward on jump_ids (end_regions == 2|3).
+    # T1 only uses lefthand motion (region 0 equivalent) — no jump regions exist,
+    # so upstream would return 0 for all T1 envs. Emitting air_reward here would
+    # fire +1/step every step after any stumble, corrupting the reward signal.
+    return landing_reward + one_feet_punish
 
 
 def postupperdofpos(

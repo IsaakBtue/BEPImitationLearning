@@ -55,7 +55,7 @@ def goalkeeper_amp_ppo_runner_cfg() -> RslRlAmpRunnerCfg:
         ),
         experiment_name="goalkeeper_amp_booster_t1",
         save_interval=200,
-        num_steps_per_env=24,
+        num_steps_per_env=100,
         max_iterations=40_000,
         amp_coef=0.4,
         amp_discr_hidden_dims=[512, 256],

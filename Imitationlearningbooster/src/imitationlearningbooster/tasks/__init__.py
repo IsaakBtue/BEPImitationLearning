@@ -9,7 +9,11 @@ from imitationlearningbooster.tasks.goalkeeper_env_cfg import (
     goalkeeper_play_withoverlay_corporate_env_cfg,
 )
 from imitationlearningbooster.tasks.goalkeeper_ppo_cfg import goalkeeper_ppo_runner_cfg
-from imitationlearningbooster.tasks.goalkeeper_amp_env_cfg import goalkeeper_amp_env_cfg
+from imitationlearningbooster.tasks.goalkeeper_amp_env_cfg import (
+    goalkeeper_amp_env_cfg,
+    goalkeeper_amp_play_env_cfg,
+    goalkeeper_amp_play_withoverlay_env_cfg,
+)
 from imitationlearningbooster.tasks.goalkeeper_amp_ppo_cfg import goalkeeper_amp_ppo_runner_cfg
 from imitationlearningbooster.rsl_rl_amp.runners.him_amp_runner import GoalkeeperAmpRunner
 
@@ -78,7 +82,18 @@ def register_all() -> None:
         register_mjlab_task(
             task_id="goalkeeper_booster_t1_amp",
             env_cfg=goalkeeper_amp_env_cfg(num_steps_per_env=amp_num_steps),
-            play_env_cfg=goalkeeper_amp_env_cfg(play=True, num_steps_per_env=amp_num_steps),
+            play_env_cfg=goalkeeper_amp_play_env_cfg(num_steps_per_env=amp_num_steps),
+            rl_cfg=amp_rl_cfg,
+            runner_cls=GoalkeeperAmpRunner,
+        )
+
+    if "goalkeeper_booster_t1_amp_withoverlay" not in existing_tasks:
+        amp_rl_cfg = goalkeeper_amp_ppo_runner_cfg()
+        amp_num_steps = amp_rl_cfg.num_steps_per_env
+        register_mjlab_task(
+            task_id="goalkeeper_booster_t1_amp_withoverlay",
+            env_cfg=goalkeeper_amp_env_cfg(num_steps_per_env=amp_num_steps),
+            play_env_cfg=goalkeeper_amp_play_withoverlay_env_cfg(num_steps_per_env=amp_num_steps),
             rl_cfg=amp_rl_cfg,
             runner_cls=GoalkeeperAmpRunner,
         )

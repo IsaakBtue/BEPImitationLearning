@@ -1,7 +1,7 @@
 """Convert all 6 Booster T1 pkl motion files to npz for AMP training.
 
-Source pkl files: /home/isaak/BEPImitationlearning/Imitationlearningbooster/*.pkl
-Output npz files: data/{name}_t1.npz
+Source pkl files: src/imitationlearningbooster/motions/data_pkl/{name}_booster_t1.pkl
+Output npz files: src/imitationlearningbooster/motions/data/{name}_t1.npz
 Each npz has: joint_pos (150,23) float32 and body kinematics (150, N_bodies, ...) float32.
 """
 import os
@@ -21,7 +21,7 @@ ANKLE_L_IDX, HIP_L_IDX = 15, 11  # Left_Ankle_Pitch, Left_Hip_Pitch
 ANKLE_R_IDX, HIP_R_IDX = 21, 17  # Right_Ankle_Pitch, Right_Hip_Pitch
 
 _HERE = Path(__file__).parent
-_PKL_DIR = Path("/home/isaak/BEPImitationlearning/Imitationlearningbooster")
+_PKL_DIR = _HERE / "data_pkl"
 _XML = _HERE.parent / "assets" / "booster_t1" / "T1_serial_clean.xml"
 _OUT = _HERE / "data"
 _OUT.mkdir(exist_ok=True)
@@ -119,6 +119,9 @@ def convert_one(name: str):
     # Run MuJoCo FK to get body kinematics
     model = mujoco.MjModel.from_xml_path(str(_XML))
     data_mj = mujoco.MjData(model)
+    # Extract joint names in MuJoCo XML order (skip freejoint at index 0).
+    joint_names = np.array([model.joint(i).name for i in range(model.njnt)
+                            if model.joint(i).type != mujoco.mjtJoint.mjJNT_FREE])
     n_bodies = model.nbody - 1  # exclude worldbody (index 0)
     body_pos_w = np.zeros((TARGET_FRAMES, n_bodies, 3), dtype=np.float32)
     body_quat_w = np.zeros((TARGET_FRAMES, n_bodies, 4), dtype=np.float32)  # wxyz
@@ -144,13 +147,13 @@ def convert_one(name: str):
         body_lin_vel_w[t] = (body_pos_w[t] - body_pos_w[t-1]) / dt
     body_lin_vel_w[0] = body_lin_vel_w[1]
 
-    # Shift root_pos so lowest foot is 2mm above ground
-    # body_pos_w rows are model body indices 1..nbody (worldbody excluded).
-    # model.body(i) uses 1-based model indices; subtract 1 to get body_pos_w index.
+    # Shift so the lowest foot at frame 0 sits 2mm above ground.
+    # Using global min would leave jump motions floating at frame 0 (foot nadir
+    # occurs mid-jump, not at the start pose).
     foot_body_ids = [i - 1 for i in range(1, model.nbody)
                      if "foot" in model.body(i).name.lower()]
-    min_z = body_pos_w[:, foot_body_ids, 2].min()
-    shift = min_z - 0.002
+    foot_z_frame0 = body_pos_w[0, foot_body_ids, 2].min()
+    shift = foot_z_frame0 - 0.002
     root_pos[:, 2] -= shift
     body_pos_w[:, :, 2] -= shift
 
@@ -162,6 +165,7 @@ def convert_one(name: str):
         body_quat_w=body_quat_w,
         body_lin_vel_w=body_lin_vel_w,
         body_ang_vel_w=body_ang_vel_w,
+        joint_names=joint_names,
     )
     print(f"Saved {out_path}  joint_pos: {dof_pos.shape}")
 

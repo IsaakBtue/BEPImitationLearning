@@ -71,8 +71,14 @@ def eereach(
       - Sigmoid reach reward × vel_sigma multiplier.
       - Mirrors upstream: approachidx updates end_target when ball_x_local ∈ [0.1, 0.5].
 
+    vel_sigma computation (mirrors G1 _reward_eereach jump_scale mechanism):
+      - Non-jump envs (motion_type 0,1,4,5): vel_sigma = 1 + 3 × clamp(vel_toward, 0, 3)
+      - Jump envs (motion_type 2,3):         vel_sigma = 1 + jump_scale × clamp(vel_toward, 0, 3)
+        where jump_scale = 3 + 3 × curriculumupdate (3→9 as difficulty 0→1).
+        curriculumupdate = _ball_difficulty × 2 (maps 0→1 difficulty to 0→2 curriculum stages).
+
     Post-pass (behind=True):
-      - vel_sigma doubled to 2× so the robot keeps reaching after the ball passes.
+      - vel_sigma set to flat 2.0 (mirrors G1 exactly; previous port incorrectly doubled).
 
     Upright gate: multiply by (1 - clamp(grav_xy², 0, 1)) as in original.
     """
@@ -83,6 +89,9 @@ def eereach(
 
     # Ball distance from env origin (Y axis = approach axis in port).
     ball_y_local = ball_pos_w[:, 1] - env.scene.env_origins[:, 1]      # (N,)
+
+    # Compute behind once; reused for phase1_mask guard and post-pass vel_sigma.
+    behind = _ball_is_behind(env, ball_name)
 
     # Retrieve predicted intercept point set by _reset_ball.
     end_target = getattr(env, "_ball_end_target", None)
@@ -95,7 +104,8 @@ def eereach(
     #   verticalgoal = clip(torso_z - clip(end_target_z, 0.3, 1.2), 0, 1)
     #   phase1_rew = 1 - (verticalgoal + |asidegoal|) / 2
     # Port: original lateral = Y (side), port lateral = X (side), original vertical = Z = same.
-    phase1_mask = ball_y_local > 1.5                                    # (N,)
+    # Guard: phase1 must not fire for deflected balls still at y > 1.5 (mirrors G1 velocity check).
+    phase1_mask = (ball_y_local > 1.5) & ~behind                       # (N,)
 
     if end_target is not None:
         root_pos_w = robot.data.root_link_pos_w                         # (N, 3)
@@ -128,22 +138,47 @@ def eereach(
 
     to_target = target_pos[:, None, :] - hand_pos_w                    # (N, 2, 3)
     dist_to_target = torch.norm(to_target, dim=-1)                     # (N, 2)
-    min_dist, closest_idx = dist_to_target.min(dim=-1)                 # (N,), (N,)
+    min_dist = dist_to_target.min(dim=-1).values                       # (N,)
 
     # Base sigmoid: 1 at dist=0, 0 far away.
     rew = 1.0 - 1.0 / (1.0 + torch.exp(-sigma * (min_dist - reach_th)))
 
-    # Velocity amplification toward the ball (not the end_target) for physical realism.
-    to_ball = ball_pos_w[:, None, :] - hand_pos_w                      # (N, 2, 3)
-    hand_vel_w = robot.data.body_link_lin_vel_w[:, asset_cfg.body_ids, :]  # (N, 2, 3)
-    to_ball_unit = to_ball / to_ball.norm(dim=-1, keepdim=True).clamp(min=1e-6)
-    vel_toward = (hand_vel_w * to_ball_unit).sum(dim=-1)               # (N, 2)
-    closest_vel = vel_toward[torch.arange(env.num_envs, device=env.device), closest_idx]
-    vel_sigma = 1.0 + 3.0 * torch.clamp(closest_vel, 0.0, 3.0)        # 1× – 4×
+    # --- Jump-region-aware vel_sigma (mirrors G1 _reward_eereach) ---
+    # G1: upper-body world-Y lateral velocity for side-saves, world-Z for jumps.
+    # Port: world-X lateral velocity (90° rotation applied), world-Z unchanged.
+    difficulty = float(getattr(env, "_ball_difficulty", 0.0))
+    curriculumupdate = difficulty * 2.0                                # 0→2
+    jump_scale = 3.0 + 3.0 * curriculumupdate                         # 3→9 across stages
 
-    # Post-pass: double the multiplier once ball passes goal line.
-    behind = _ball_is_behind(env, ball_name)
-    vel_sigma = torch.where(behind, vel_sigma * 2.0, vel_sigma)
+    torso_vel_w = robot.data.root_link_lin_vel_w                       # (N, 3)
+
+    try:
+        motion_cmd = env.command_manager._terms.get("motion", None)
+        if motion_cmd is not None and hasattr(motion_cmd, "motion_type_ids"):
+            type_ids = motion_cmd.motion_type_ids                      # [N] long tensor
+            is_jump  = (type_ids == 2) | (type_ids == 3)
+            is_left  = (type_ids == 0) | (type_ids == 2) | (type_ids == 4)
+        else:
+            is_jump = torch.zeros(env.num_envs, dtype=torch.bool, device=env.device)
+            is_left = torch.zeros(env.num_envs, dtype=torch.bool, device=env.device)
+    except Exception:
+        is_jump = torch.zeros(env.num_envs, dtype=torch.bool, device=env.device)
+        is_left = torch.zeros(env.num_envs, dtype=torch.bool, device=env.device)
+
+    # Side-saves: reward lateral torso X-velocity toward the target side.
+    # Jumps: reward upward (Z) torso velocity for the leap.
+    lateral_vel_x = torso_vel_w[:, 0]
+    base_vel_sigma = torch.where(
+        is_left,
+        1.0 + 3.0 * torch.clamp(-lateral_vel_x, 0.0, 3.0),   # left: reward -X motion
+        1.0 + 3.0 * torch.clamp( lateral_vel_x, 0.0, 3.0),   # right: reward +X motion
+    )
+    jump_vel_sigma = 1.0 + jump_scale * torch.clamp(torso_vel_w[:, 2], 0.0, 3.0)
+
+    vel_sigma = torch.where(is_jump, jump_vel_sigma, base_vel_sigma)
+
+    # Post-pass: mirrors G1 which sets vel_sigma = 2.0 (flat) when behind.
+    vel_sigma = torch.where(behind, torch.full_like(vel_sigma, 2.0), vel_sigma)
 
     # Combine: phase1 when ball is far, phase2 when ball is close.
     taskrew = torch.where(phase1_mask, phase1_rew, rew * vel_sigma)
@@ -405,11 +440,13 @@ def successland(
 
     successful_landings = has_contact & env._has_in_air
 
-    air_reward      = env._has_in_air.float()
     landing_reward  = successful_landings.float() * 5.0
     one_feet_punish = one_feet_contact.float() * -1.0
 
-    return air_reward + landing_reward + one_feet_punish
+    # air_reward intentionally omitted: T1 has no jump-region partitioning.
+    # G1 gates this on jump_ids (end_regions == 2|3); without that gate,
+    # emitting +1/step for any stumble corrupts the reward signal.
+    return landing_reward + one_feet_punish
 
 
 def postupperdofpos(

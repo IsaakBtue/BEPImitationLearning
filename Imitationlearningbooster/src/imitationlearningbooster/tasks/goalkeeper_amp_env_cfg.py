@@ -12,6 +12,8 @@ from mjlab.entity import EntityCfg
 from mjlab.managers.observation_manager import ObservationGroupCfg, ObservationTermCfg
 from mjlab.managers.reward_manager import RewardTermCfg
 from mjlab.managers.termination_manager import TerminationTermCfg
+from mjlab.managers.event_manager import EventTermCfg
+from mjlab.managers.curriculum_manager import CurriculumTermCfg
 from mjlab.tasks.tracking.tracking_env_cfg import make_tracking_env_cfg
 from mjlab.utils.noise import UniformNoiseCfg as Unoise
 import mjlab.envs.mdp as mjlab_mdp
@@ -21,6 +23,7 @@ from imitationlearningbooster.mdp import MultiMotionCommandCfg
 import imitationlearningbooster.mdp.observations as gk_obs
 import imitationlearningbooster.mdp.rewards as gk_rew
 import imitationlearningbooster.mdp.resets as gk_resets
+from imitationlearningbooster.mdp.resets import ball_difficulty_curriculum
 from imitationlearningbooster.robots.t1_constants import get_t1_robot_cfg, T1_ACTION_SCALE
 from mjlab.managers.scene_entity_config import SceneEntityCfg
 from mjlab.sensor import ContactMatch, ContactSensorCfg
@@ -76,6 +79,16 @@ def goalkeeper_amp_env_cfg(play: bool = False, num_steps_per_env: int = 100) -> 
         ManagerBasedRlEnvCfg configured for AMP training.
     """
     cfg = make_tracking_env_cfg()
+
+    # Remove all domain randomization events.
+    # The base tracking config injects: base_com (COM offset), encoder_bias (joint bias),
+    # foot_friction (friction randomization), and push_robot (velocity perturbations).
+    # None of these are needed for the goalkeeper task; removing them keeps training
+    # stable and avoids confounding DR effects during early policy learning.
+    _dr_events = ["base_com", "encoder_bias", "foot_friction", "push_robot"]
+    for _ev in _dr_events:
+        cfg.events.pop(_ev, None)
+
     cfg.scene.entities["robot"] = get_t1_robot_cfg()
     cfg.scene.entities["ball"] = EntityCfg(spec_fn=get_ball_spec)
 
@@ -356,9 +369,114 @@ def goalkeeper_amp_env_cfg(play: bool = False, num_steps_per_env: int = 100) -> 
         ),
     })
 
-    cfg.curriculum = {}
+    if play:
+        cfg.curriculum = {}
+    else:
+        stage1_step = 600 * num_steps_per_env
+        stage2_step = 1200 * num_steps_per_env
+        cfg.curriculum = {
+            "stopball_curriculum": CurriculumTermCfg(
+                func=mjlab_mdp.reward_curriculum,
+                params={
+                    "reward_name": "stopball",
+                    "stages": [
+                        {"step": 0,           "weight": 100.0},
+                        {"step": stage1_step, "weight": 150.0},
+                        {"step": stage2_step, "weight": 200.0},
+                    ],
+                },
+            ),
+            "eereach_curriculum": CurriculumTermCfg(
+                func=mjlab_mdp.reward_curriculum,
+                params={
+                    "reward_name": "eereach",
+                    "stages": [
+                        {"step": 0,           "weight": 10.0},
+                        {"step": stage1_step, "weight": 15.0},
+                        {"step": stage2_step, "weight": 20.0},
+                    ],
+                },
+            ),
+            "hand_proximity_strict_curriculum": CurriculumTermCfg(
+                func=mjlab_mdp.reward_curriculum,
+                params={
+                    "reward_name": "hand_proximity_strict",
+                    "stages": [
+                        {"step": 0,           "weight": 5.0},
+                        {"step": stage1_step, "weight": 7.5},
+                        {"step": stage2_step, "weight": 10.0},
+                    ],
+                },
+            ),
+            "ball_difficulty_curriculum": CurriculumTermCfg(
+                func=ball_difficulty_curriculum,
+                params={
+                    "stages": [
+                        {"step": 0,           "difficulty": 0.0},
+                        {"step": stage1_step, "difficulty": 0.5},
+                        {"step": stage2_step, "difficulty": 1.0},
+                    ],
+                },
+            ),
+            "dof_pos_limits_curriculum": CurriculumTermCfg(
+                func=mjlab_mdp.reward_curriculum,
+                params={
+                    "reward_name": "dof_pos_limits",
+                    "stages": [
+                        {"step": 0,           "weight": -3.0},
+                        {"step": stage1_step, "weight": -6.0},
+                        {"step": stage2_step, "weight": -9.0},
+                    ],
+                },
+            ),
+            "torque_limits_curriculum": CurriculumTermCfg(
+                func=mjlab_mdp.reward_curriculum,
+                params={
+                    "reward_name": "torque_limits",
+                    "stages": [
+                        {"step": 0,           "weight": -3.0},
+                        {"step": stage1_step, "weight": -6.0},
+                        {"step": stage2_step, "weight": -9.0},
+                    ],
+                },
+            ),
+        }
     cfg.episode_length_s = 1e9 if play else 3.0
     if play:
         cfg.observations["actor"].enable_corruption = False
+
+    return cfg
+
+
+def goalkeeper_amp_play_env_cfg(num_steps_per_env: int = 100) -> ManagerBasedRlEnvCfg:
+    """Play config for AMP goalkeeper: 1 env, auto-reset, no motion file required."""
+    from imitationlearningbooster.tasks.goalkeeper_env_cfg import get_axes_spec
+
+    cfg = goalkeeper_amp_env_cfg(play=True, num_steps_per_env=num_steps_per_env)
+    cfg.scene.num_envs = 1
+    cfg.auto_reset = True
+    cfg.episode_length_s = 10.0
+    cfg.scene.entities["axes"] = EntityCfg(spec_fn=get_axes_spec)
+
+    cfg.events["reset_ball_autonomous"] = EventTermCfg(
+        func=gk_resets.reset_ball_autonomous,
+        mode="reset",
+        params={"ball_name": "ball"},
+    )
+
+    for _term in ["anchor_pos", "anchor_ori", "ee_body_pos"]:
+        cfg.terminations.pop(_term, None)
+
+    return cfg
+
+
+def goalkeeper_amp_play_withoverlay_env_cfg(num_steps_per_env: int = 100) -> ManagerBasedRlEnvCfg:
+    """Play config for AMP goalkeeper with ghost-robot overlay cycling through all 6 motions."""
+    cfg = goalkeeper_amp_play_env_cfg(num_steps_per_env=num_steps_per_env)
+
+    motion_cmd = cfg.commands["motion"]
+    assert isinstance(motion_cmd, MultiMotionCommandCfg)
+    motion_cmd.debug_vis = True
+    motion_cmd.cycle_motions = True
 
     return cfg

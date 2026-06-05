@@ -1,5 +1,91 @@
 # Divergence from Upstream (Humanoid-Goalkeeper)
 
+## 2026-06-05 — AMP joint ordering: joint_names embedded in npz + runtime assertion
+
+**What changed:**
+1. `convert_all.py` — `joint_names` (23-element string array in MuJoCo XML order) is now saved into every converted `.npz` file.
+2. `rsl_rl_amp/utils/motion_loader.py` — `GoalkeeperMotionLoader.__init__` loads and exposes `self.joint_names` from the npz if present.
+3. `rsl_rl_amp/runners/him_amp_runner.py` — `_verify_joint_order()` runs once at the start of `learn()`, asserting that `robot.joint_names` (mjlab ordering) == npz `joint_names` (MuJoCo XML ordering). Raises `RuntimeError` on mismatch; prints a clear warning if npz predates this fix (no `joint_names` key).
+4. All 6 `.npz` files regenerated with `joint_names` embedded.
+
+**Why it was needed:**
+The pkl files have no `joint_names` key (`link_body_list` is `None`). The npz conversion assumed pkl `dof_pos` is in MuJoCo XML order (since `data_mj.qpos[7:] = dof_pos[t]`). If this assumption is wrong, or if mjlab reorders joints differently from MuJoCo XML, the discriminator trains on silently mismatched joint positions and AMP fails with no error message.
+
+**Correct values:** Joint order (MuJoCo XML): AAHead_yaw, Head_pitch, Left_Shoulder_Pitch, …, Right_Ankle_Roll (23 joints). This matches `robot.joint_names` in mjlab (same backend XML). At first `learn()` call, the assertion will confirm this live.
+
+**noretreat axis — verified correct, no change:**
+`T1_STANDING_KEYFRAME rot=(0.7071, 0, 0, 0.7071)` is a +90° yaw (wxyz quaternion), rotating body-frame X to world +Y (forward into field). `noretreat` correctly uses `root_link_lin_vel_b[:, 0]` (body-frame X = forward at spawn orientation). No fix required.
+
+---
+
+## 2026-06-05 — Third-pass audit: 7 bugs fixed (AMP training signal, vel_sigma, phase1 guard)
+
+### Fix 1 — `num_steps_per_env` 24 → 100 (`goalkeeper_amp_ppo_cfg.py`)
+**What changed:** `num_steps_per_env=24` → `num_steps_per_env=100`.
+**Why it was wrong:** 24 steps = 0.48 s of rollout per iteration at 50 Hz; a full ball approach takes 3 s (150 steps). The policy almost never witnessed a complete interception during a single rollout, starving the critic of return signal.
+**Correct value:** 100 (matches G1's `legged_robot_config.py:335`; 2 s of rollout, enough to observe ball arrival and contact).
+**Evidence:** G1 config explicitly sets `num_steps_per_env = 100`; port comment said "24" with no justification.
+
+### Fix 2 — AMP reward scale 0.1 → 0.5 (`him_amp_runner.py:159`)
+**What changed:** `* 0.1` → `* 0.5` in the per-discriminator reward formula.
+**Why it was wrong:** G1 runner (`him_on_policy_runner.py:177`) uses `predict_reward(...) * 0.5`. With `amp_coef=0.4`, max AMP contribution = 0.4 × 0.5 = 0.20 per env. Port's `* 0.1` gave max 0.04 — AMP signal was 5× too weak to meaningfully shape the policy.
+**Correct value:** `* 0.5`.
+
+### Fix 3 — Discriminator gradient penalty lambda 5.0 → effective 0.5 (`him_amp_runner.py:226`)
+**What changed:** `disc.compute_grad_pen(exp_obs, lambda_=5.0)` → `disc.compute_grad_pen(exp_obs, lambda_=5.0) * 0.1`.
+**Why it was wrong:** G1 computes `compute_grad_pen(..., lambda_=5) * 0.1`, effective lambda = 0.5. Port called `compute_grad_pen(..., lambda_=5.0)` with no multiplier — effective lambda = 5.0, 10× over-regularised, preventing the discriminator from learning meaningful motion features.
+**Correct value:** effective lambda = 0.5 (achieved via `* 0.1` post-multiplication).
+
+### Fix 4 — Discriminator update frequency 4 → 20 steps/iteration (`him_amp_runner.py:203`)
+**What changed:** `for _ in range(num_mini_batches):` → `for _ in range(num_mini_batches * num_learning_epochs):`.
+**Why it was wrong:** G1 trains discriminator jointly with PPO for 5 epochs × 4 mini-batches = 20 gradient steps per iteration. Port trained it for only 4 steps — discriminator was 5× under-trained relative to the policy, causing reward hacking.
+**Correct value:** `num_mini_batches * num_learning_epochs` = 4 × 5 = 20 gradient steps.
+
+### Fix 5 — GAN loss halved → restored (`him_amp_runner.py:227`)
+**What changed:** `0.5 * (expert_loss + policy_loss)` → `(expert_loss + policy_loss)`.
+**Why it was wrong:** G1 uses `expert_loss + policy_loss` (full MSE). Port halved the GAN signal with no justification, compounding fixes 2–4 in weakening the discriminator's learning signal.
+**Correct value:** unscaled sum.
+
+### Fix 6 — `eereach` vel_sigma: hand-toward-ball → lateral/vertical torso velocity (`rewards.py:eereach`)
+**What changed:** Replaced `closest_vel` (dot product of hand velocity toward ball) with `torso_vel_w`:
+- Non-jump side-saves (motion_ids 0,1,4,5): `1 + 3 × clamp(±lateral_vel_x, 0, 3)`, sign chosen by target side.
+- Jump saves (motion_ids 2,3): `1 + jump_scale × clamp(torso_vel_w[:,2], 0, 3)` (upward Z velocity).
+**Why it was wrong:** G1 rewards upper-body world-Y lateral velocity for side-saves and world-Z vertical velocity for jump-saves (G1 `legged_robot.py:1382–1388`). Port rewarded `dot(hand_vel, to_ball_unit)` — a mix of lateral and approach components — giving the wrong gradient for stepping behavior and incorrect jump shaping.
+**Correct values:** lateral torso X (90° rotation of G1's Y), vertical torso Z (unchanged).
+
+### Fix 7 — `eereach` phase1 missing deflection guard (`rewards.py:eereach`)
+**What changed:** `phase1_mask = ball_y_local > 1.5` → `phase1_mask = (ball_y_local > 1.5) & ~behind`.
+**Why it was wrong:** G1 guards phase1 with `ball_vx - ball_vel < 2.0` (ball not yet deflected). Port had no equivalent check — phase1 lateral pre-positioning reward fired even for already-deflected balls still at y > 1.5, giving incorrect gradient when the ball had been stopped or reversed.
+**Correct value:** gate phase1 on `~_ball_is_behind(env, ball_name)`.
+Also: moved `behind = _ball_is_behind(env, ball_name)` to be computed once near the top of `eereach` (previously it was computed twice, and the phase1 guard was missing it entirely).
+
+---
+
+## 2026-06-05 — Ball observation masking: vanish_step and startstep per-env reset added
+
+**What changed:**
+1. `Imitationlearningbooster/src/imitationlearningbooster/mdp/commands.py` — `MultiMotionCommand._reset_ball` now initialises and re-samples `env._vanish_step` and `env._startstep` per-env at every episode reset.
+2. `Imitationlearningbooster/src/imitationlearningbooster/mdp/observations.py` — `_compute_ball_visibility` now uses per-env `env._startstep` (instead of a fixed constant 43) for the `initial_vanish` mask, guards `_ball_visible_step` with a separate `hasattr` check, and caches the result per step via `env._ball_vis_step / env._ball_vis_cache` to prevent double-execution of stateful side effects when both `ball_pos_b` and `ball_vel_b` are called in the same step.
+
+**Why it was wrong:**
+- `_catchstep` was correctly reset to 50 per episode but `_vanish_step` was never reset from `_reset_ball`. Instead, `_compute_ball_visibility` initialised it lazily using `episode_length_buf <= 1` detection, which fires every first step of every episode — correct in principle but fragile and not aligned with the upstream design.
+- `_startstep` was completely absent from `_reset_ball`. `_compute_ball_visibility` used a hardcoded scalar `_STARTSTEP = 43`, so every env had the same reveal threshold instead of the per-env `50 - randint(3,10)` randomisation from upstream.
+- The step-caching guard was missing from `Imitationlearningbooster`'s version (it was only present in `my_mjlab_project_booster_t1`). Without it, calling `ball_vel_b` after `ball_pos_b` in the same step always returned zeros (ball_last had already been updated by the first call, so approaching=False, flying=False, visible=False).
+
+**Correct values:**
+- `_startstep[env_ids] = 50 - randint(3, 11)` gives range [40, 47], re-sampled per-episode per-env.
+- `_vanish_step[env_ids] = randint(0, 30)` re-sampled per-episode per-env.
+- `_ball_visible_step` resets to zero each time `flying` is False (torch.where branch); `_vanish_step` must be explicitly re-seeded at reset.
+
+**Evidence confirming the fix was needed:**
+Upstream `_assign_ball_states` (G1): `self.catchstep[ball_ids] = 50` and `self.vanish_step[env_ids] = randint(0, 30)` are both called at every episode reset. Upstream `_reset_idx`: `self.startstep = 50 - random.randint(3, 10)` is updated every N steps. Upstream `_get_observations`: `random_vanish = (self.catchstep > self.vanish_step)` — both arrays set at reset. The port's `_vanish_step` fallback in `_compute_ball_visibility` was only triggered at step 1, making it effectively set once at episode start — correct but fragile and not surviving across module reloads.
+
+**Files changed:**
+- `Imitationlearningbooster/src/imitationlearningbooster/mdp/commands.py`
+- `Imitationlearningbooster/src/imitationlearningbooster/mdp/observations.py`
+
+---
+
 ## 2026-05-24 — 8 missing features implemented in mjlab port
 
 **Scope:** Eight features from the upstream `Humanoid-Goalkeeper` Isaacgym training pipeline were implemented into the mjlab port (`my_mjlab_project_booster_t1`). All upstream code was read verbatim before implementation. Coordinate system note: upstream uses X as the ball approach axis; port uses Y.
@@ -1199,3 +1285,45 @@ Without active catchstep:
 The `env_ids` validation guard (lines 188-192) prevents the original indexing crashes.
 
 **Files changed:** `src/imitationlearningbooster/mdp/commands.py` (lines 280-294, 306-309)
+
+---
+
+## 2026-06-05 — Remove all domain randomization from AMP goalkeeper env config
+
+**What changed:** Added a DR removal block immediately after `cfg = make_tracking_env_cfg()` in `goalkeeper_amp_env_cfg()` inside `tasks/goalkeeper_amp_env_cfg.py`.
+
+**Events removed:**
+- `base_com` — startup event that adds random COM offset to `Trunk` body (DR)
+- `encoder_bias` — startup event that adds random encoder bias to all joints (DR)
+- `foot_friction` — startup event that randomizes foot geom friction (DR)
+- `push_robot` — interval event that perturbs the robot with random velocity impulses (DR)
+
+**Why it was wrong:** The base `make_tracking_env_cfg()` injects all four events automatically. The AMP goalkeeper config never explicitly removed them, so all DR was silently active during training. This caused instability during early policy learning and made it harder to diagnose motion quality issues, because multiple confounding effects (random COMs, random friction, random joint bias, random pushes) were always present.
+
+**Correct value:** No DR events during goalkeeper AMP training. Ball reset is handled internally by `MultiMotionCommandCfg._reset_ball` at every episode reset. Robot reset to reference state is handled by the `motion` command RSI (Reference State Initialization). No separate DR events are needed.
+
+**Evidence confirming the fix was needed:** The prior config referenced in `goalkeeper_env_cfg.py` (non-AMP version) commented: "Disabled: pd_gains, link_mass, reset_joints (re-enable after policy can stand and dive; they make early optimisation too hard)." The AMP port inherited the same issue but never applied an equivalent disable. Upstream G1 config (`g1_29_config.py`) has DR flags (`randomize_payload_mass`, `randomize_friction`, etc.) that were explicitly studied; the mjlab base config's four events are the direct analogues.
+
+**Files changed:** `Imitationlearningbooster/src/imitationlearningbooster/tasks/goalkeeper_amp_env_cfg.py`
+
+---
+
+## 2026-06-05 — Port G1 jump_scale mechanism to eereach reward
+
+**What changed:** Replaced the flat `vel_sigma = 1.0 + 3.0 * clamp(vel_toward, 0, 3)` in `eereach()` (`mdp/rewards.py`) with a jump-region-aware computation that mirrors G1 `_reward_eereach` exactly.
+
+**Why it was wrong:** The previous port used a uniform `3.0` multiplier for all motion types. G1 amplifies `vel_sigma` for jump-region envs (`end_regions == 2|3`) using `jump_scale = 3.0 + 3.0 * curriculumupdate` (ranging 3→9 across curriculum stages). Without this amplification, jump-region envs received the same reach incentive as ground-level saves, giving the policy insufficient gradient to learn to leap and reach high balls. The post-pass `vel_sigma` was also wrong: previous port doubled the computed value (`vel_sigma * 2.0`), but G1 sets a flat `vel_sigma = 2.0` regardless of motion velocity.
+
+**Correct value:**
+- Non-jump envs (motion_type 0,1,4,5): `vel_sigma = 1 + 3.0 × clamp(vel_toward, 0, 3)` — unchanged
+- Jump envs (motion_type 2,3): `vel_sigma = 1 + jump_scale × clamp(vel_toward, 0, 3)`
+  where `jump_scale = 3.0 + 3.0 × curriculumupdate` and `curriculumupdate = _ball_difficulty × 2`
+  (maps difficulty 0→1 to curriculum 0→2, matching upstream 3-stage progression)
+- Post-pass (behind=True): `vel_sigma = 2.0` (flat, matching G1 exactly)
+
+**Evidence confirming the fix was needed:**
+- G1 source lines 1379–1390 (`legged_robot.py`): `jump_scale = 3.0 + 3.0 * self.curriculumupdate` with `vel_sigma[end_regions==2|3] = 1 + jump_scale * clip(z_vel, 0, 3)` and `vel_sigma[behind] = 2.0`
+- Port's motion_type_ids 2 and 3 map directly to G1's `end_regions == 2` (leftjump) and `end_regions == 3` (rightjump)
+- `_ball_difficulty` (0→1) is the port's curriculum proxy: `difficulty=0.5` → `curriculumupdate=1` → `jump_scale=6`; `difficulty=1.0` → `curriculumupdate=2` → `jump_scale=9`
+
+**Files changed:** `Imitationlearningbooster/src/imitationlearningbooster/mdp/rewards.py`

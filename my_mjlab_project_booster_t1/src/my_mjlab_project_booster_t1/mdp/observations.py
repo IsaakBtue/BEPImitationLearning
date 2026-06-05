@@ -39,7 +39,17 @@ def _compute_ball_visibility(env: ManagerBasedRlEnv, ball_name: str) -> torch.Te
         random_vanish = ball_visible_step > vanish_step.
 
     visible = initial_vanish & flying & ~random_vanish
+
+    Result is cached per-step so that ball_pos_b and ball_vel_b share one
+    computation without re-running stateful side effects (ball_last update,
+    visible_step increment). Without the cache the second caller always sees
+    approaching=False (ball_last was just set to current y) → flying=False →
+    visible=False, permanently zeroing ball_vel observations.
     """
+    # Return cached result if already computed this step.
+    if getattr(env, "_ball_vis_step", -1) == env.common_step_counter:
+        return env._ball_vis_cache
+
     ball: Entity = env.scene[ball_name]
 
     ball_pos_w = ball.data.root_link_pos_w                           # (N, 3)
@@ -94,6 +104,9 @@ def _compute_ball_visibility(env: ManagerBasedRlEnv, ball_name: str) -> torch.Te
     random_vanish = env._ball_visible_step > env._vanish_step        # (N,) bool
 
     visible = initial_vanish & flying & ~random_vanish               # (N,) bool
+
+    env._ball_vis_cache = visible
+    env._ball_vis_step = env.common_step_counter
     return visible
 
 

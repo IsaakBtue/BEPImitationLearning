@@ -1,92 +1,70 @@
-  ## Comparison Task: AMP (isaacgym) vs Motion Tracking (mjlab)
+You are doing a deep third-pass code audit of the Booster T1 AMP goalkeeper port.
+Two previous audit rounds already found and fixed many issues. This round should
+verify those fixes are correct AND find anything still missing.
 
-  Compare the reward shaping and architecture between:
-  - **Original:** `/home/isaak/BEPImitationlearning/Humanoid-Goalkeeper/` (isaacgym + AMP)
-  - **New:** `/home/isaak/BEPImitationlearning/my_mjlab_project_booster_t1/` (mjlab + motion tracking)
+## Coordinate system note (critical context)
+G1 original: ball approaches from +X, robot faces +X, lateral axis = Y.
+T1 port: ball approaches from +Y, robot faces +Y, lateral axis = X.
+This 90° rotation was applied in convert_booster.py on the motion npz files.
+Every reward/obs that references an axis must use the rotated equivalent.
+Check for any axis errors throughout.
 
-  ### Comparison Focus
+## What was already fixed (verify these are correct, not just present)
+1. Ball obs masking: catchstep (counts down from 50), startstep (per-env 50-randint(3,11)),
+   vanish_step (per-env randint(0,30)), flying flag, step-cache to avoid double-call bug.
+   Files: mdp/observations.py (_compute_ball_visibility), mdp/commands.py (_reset_ball)
 
-  1. **Reward Philosophy**
-     - In isaacgym: How does AMP work? What rewards guide motion learning?
-     - In mjlab: What are the explicit motion tracking rewards (motion_global_root_pos, motion_body_pos,
-  etc.)?
-     - Key question: Are the weights equivalent or fundamentally different?
+2. jump_scale in eereach: motion_type_ids 2/3 = jump envs, jump_scale = 3+3*curriculumupdate,
+   curriculumupdate = _ball_difficulty*2, post-pass vel_sigma = flat 2.0 (not *2.0).
+   File: mdp/rewards.py (eereach function)
 
-  2. **Essential Differences**
-     - AMP: Adversarial motion priors (discriminator + privileged observations during training)
-     - Motion tracking: Explicit reward penalties on pose/velocity/position errors
-     - Which is "easier" for the robot to optimize?
+3. successland: air_reward removed (no jump-region gate in T1).
+   File: mdp/rewards.py (successland function)
 
-  3. **Reward Shaping Details**
-     - List all motion-related rewards in isaacgym (look for "amp" or motion references)
-     - List all motion-related rewards in mjlab goalkeeper_env_cfg.py
-     - Compare weights and purposes side-by-side
-     - Identify any rewards in isaacgym that have no equivalent in mjlab (or vice versa)
+4. Curriculum: 6 terms wired up (stopball, eereach, hand_proximity_strict,
+   ball_difficulty, dof_pos_limits, torque_limits).
+   File: tasks/goalkeeper_amp_env_cfg.py
 
-  4. **Observations During Training**
-     - What "privileged" observations does isaacgym use during training that play doesn't see?
-     - What observations does mjlab training use that play doesn't see?
-     - Are they the same or different?
+5. DR removed: base_com, encoder_bias, foot_friction, push_robot popped from cfg.events.
+   File: tasks/goalkeeper_amp_env_cfg.py
 
-  5. **Output** (write to a new file: `REWARD_COMPARISON_AMP_vs_TRACKING.md`)
-     - Side-by-side table of all motion/tracking related rewards
-     - Summary of architectural differences
-     - Hypothesis: What might explain if one approach learns faster/better than the other?
+6. Ball spawn in play: x_start narrowed to (-0.2, 0.2), x_end to (-0.6, 0.6).
+   File: mdp/resets.py (_shoot_ball)
 
-  Start by reading isaacgym goalkeeper config, then compare to mjlab config systematically.
+## Source files to read IN FULL (G1 originals)
+- /home/robocup/IsaakB/BEPImitationLearning/Humanoid-Goalkeeper/legged_gym/legged_gym/envs/g1/g1_29_env.py
+- /home/robocup/IsaakB/BEPImitationLearning/Humanoid-Goalkeeper/legged_gym/legged_gym/envs/g1/g1_29_config.py
+- /home/robocup/IsaakB/BEPImitationLearning/Humanoid-Goalkeeper/legged_gym/legged_gym/envs/base/legged_robot.py
 
+## Port files to read IN FULL
+- /home/robocup/IsaakB/BEPImitationLearning/Imitationlearningbooster/src/imitationlearningbooster/mdp/rewards.py
+- /home/robocup/IsaakB/BEPImitationLearning/Imitationlearningbooster/src/imitationlearningbooster/mdp/observations.py
+- /home/robocup/IsaakB/BEPImitationLearning/Imitationlearningbooster/src/imitationlearningbooster/mdp/commands.py
+- /home/robocup/IsaakB/BEPImitationLearning/Imitationlearningbooster/src/imitationlearningbooster/mdp/resets.py
+- /home/robocup/IsaakB/BEPImitationLearning/Imitationlearningbooster/src/imitationlearningbooster/tasks/goalkeeper_amp_env_cfg.py
+- /home/robocup/IsaakB/BEPImitationLearning/Imitationlearningbooster/src/imitationlearningbooster/rsl_rl_amp/runners/him_amp_runner.py
+- /home/robocup/IsaakB/BEPImitationLearning/Imitationlearningbooster/src/imitationlearningbooster/tasks/goalkeeper_amp_ppo_cfg.py
 
-  Compare the original Unitree G1 goalkeeper implementation in                                                                                                                                                                   
-    /home/isaak/BEPImitationlearning/Humanoid-Goalkeeper (IsaacGym, Python) against the Booster T1 port in                                                                                                                       
-    /home/isaak/BEPImitationlearning/my_mjlab_project_booster_t1 (MJLab, Python). The goal of the port was to go                                                                                                                 
-     from an AMP-based IsaacGym humanoid goalkeeper (G1, 29 DOF) to a single-motion MJLab implementation                                                                                                                         
-    (Booster T1, 23 DOF).                                                                                                                                                                                                        
-                                                                                                                                                                                                                                 
-    Be critical and exhaustive. Cover:                                                                                                                                                                                           
-                                                                                                                                                                                                                                 
-    1. Reward functions — compare every reward term: formula, sigma values, normalization, thresholds, weights.                                                                                                                  
-    Flag any that differ from the original code (not just the config values).                                                                                                                                                    
-    2. Coordinate system / 90-degree rotation — the Booster T1 is spawned rotated 90° around Z so it faces +Y                                                                                                                    
-    instead of the original's +X. Check every reward, observation, reset, and motion conversion for whether this                                                                                                                 
-     rotation is correctly accounted for.                                                                                                                                                                                        
-    3. Observations — what's present, what's missing, what changed.                                                                                                                                                              
-    4. Ball trajectory and reset — how is the ball spawned and reset each episode in both versions? Is it                                                                                                                        
-    equivalent?                                                                                                                                                                                                                  
-    5. Domain randomization — what's present vs missing.                                                                                                                                                                         
-    6. Training config — PPO hyperparameters, entropy, num_steps, normalization.                                                                                                                                                 
-    7. Robot model — DOF count, PD gain differences, effort limits.                                                                                                                                                              
-    8. Architecture — AMP vs explicit motion tracking, number of motion files, motion data conversion.                                                                                                                           
-                                                                                                                                                                                                                                 
-    Key files to read:                                                                                                                                                                                                           
-    - Original: Humanoid-Goalkeeper/legged_gym/legged_gym/envs/base/legged_robot.py, envs/g1/g1_29_config.py                                                                                                                     
-    - Booster: my_mjlab_project_booster_t1/src/my_mjlab_project_booster_t1/mdp/rewards.py, mdp/resets.py,                                                                                                                        
-    mdp/observations.py, tasks/goalkeeper_env_cfg.py, tasks/goalkeeper_ppo_cfg.py, robots/t1_constants.py,                                                                                                                       
-    motions/convert_booster.py                                                                                                                                                                                                   
-                                                                                    
+## For each item found, report:
+### [Name]
+**G1**: exact code/values (file:line)
+**Port status**: CORRECT / WRONG (describe error) / MISSING
+**Axis check**: correct axis used? (X vs Y adapted correctly?)
+**Fix**: exact copy-paste code if wrong/missing, or "None" if correct
 
-                                                                                    Compare the original Unitree G1 goalkeeper implementation in                                                                                                                                                                   
-    /home/isaak/BEPImitationlearning/Humanoid-Goalkeeper (IsaacGym, Python) against the Booster T1 port in                                                                                                                       
-    /home/isaak/BEPImitationlearning/my_mjlab_project_booster_t1 (MJLab, Python). The goal of the port was to go                                                                                                                 
-     from an AMP-based IsaacGym humanoid goalkeeper (G1, 29 DOF) to a single-motion MJLab implementation                                                                                                                         
-    (Booster T1, 23 DOF).                                                                                                                                                                                                        
-                                                                                                                                                                                                                                 
-    Be critical and exhaustive. Cover:                                                                                                                                                                                           
-                                                                                                                                                                                                                                 
-    1. Reward functions — compare every reward term: formula, sigma values, normalization, thresholds, weights.                                                                                                                  
-    Flag any that differ from the original code (not just the config values).                                                                                                                                                    
-    2. Coordinate system / 90-degree rotation — the Booster T1 is spawned rotated 90° around Z so it faces +Y                                                                                                                    
-    instead of the original's +X. Check every reward, observation, reset, and motion conversion for whether this                                                                                                                 
-     rotation is correctly accounted for.                                                                                                                                                                                        
-    3. Observations — what's present, what's missing, what changed.                                                                                                                                                              
-    4. Ball trajectory and reset — how is the ball spawned and reset each episode in both versions? Is it                                                                                                                        
-    equivalent?                                                                                                                                                                                                                  
-    5. Domain randomization — what's present vs missing.                                                                                                                                                                         
-    6. Training config — PPO hyperparameters, entropy, num_steps, normalization.                                                                                                                                                 
-    7. Robot model — DOF count, PD gain differences, effort limits.                                                                                                                                                              
-    8. Architecture — AMP vs explicit motion tracking, number of motion files, motion data conversion.                                                                                                                           
-                                                                                                                                                                                                                                 
-    Key files to read:                                                                                                                                                                                                           
-    - Original: Humanoid-Goalkeeper/legged_gym/legged_gym/envs/base/legged_robot.py, envs/g1/g1_29_config.py                                                                                                                     
-    - Booster: my_mjlab_project_booster_t1/src/my_mjlab_project_booster_t1/mdp/rewards.py, mdp/resets.py,                                                                                                                        
-    mdp/observations.py, tasks/goalkeeper_env_cfg.py, tasks/goalkeeper_ppo_cfg.py, robots/t1_constants.py,                                                                                                                       
-    motions/convert_booster.py                      
+## Specific things to verify carefully
+- flying flag: G1 uses ball_vx > initial_vx + threshold; port uses ball_vy — correct?
+- catchstep decrement: happens in _update_command every step — confirmed?
+- _ball_end_target: set per-env in _reset_ball, used by eereach phase1 — correct?
+- stayonline: uses root_pos[:, 1] not [:, 0] — axis correct for +Y approach?
+- noretreat: which axis/frame is forward? body frame [:, 0] or world Y?
+- eereach phase1 (pre-positioning): asidegoal uses end_target_local[:, 0] (X lateral) — correct given 90° rotation?
+- stopball: uses ball_vy delta not ball_vx — correct for +Y approach?
+- _ball_is_behind: uses ball_y_local < 0 not ball_x — correct?
+- AMP discriminator obs (joint_pos_amp): what does it return? Is it consistent with training?
+- observation history: 10 frames stacked — confirmed in play cfg too?
+- Does the play cfg (goalkeeper_amp_play_env_cfg) correctly inherit all fixes?
+- Are there any events still present in play mode that should be removed?
+- PPO hyperparameters: compare G1 legged_gym PPO cfg vs goalkeeper_amp_ppo_cfg.py (lr, entropy, clip, num_steps, mini_batches)
+- AMP discriminator: how many layers, hidden size, learning rate — does it match G1?
+- motion data: are all 6 npz files present and correctly converted (check convert_all.py output)?

@@ -18,12 +18,13 @@ class GoalkeeperMotionLoader:
 
     def __init__(self, npz_path: str, device: str = "cpu"):
         self.device = device
-        d = np.load(npz_path)
+        d = np.load(npz_path, allow_pickle=True)
         # joint_pos: (150, 23) float32
         jp = torch.tensor(d["joint_pos"], dtype=torch.float32, device=device)
         self.frames: torch.Tensor = jp          # (T, 23)
         self.T = jp.shape[0]
         self.observation_dim = jp.shape[1] * 2  # 46
+        self.joint_names: list = list(d["joint_names"]) if "joint_names" in d else None
 
     def feed_forward_generator(self, mini_batch_size: int):
         """Yield (s, s_next) of shape (mini_batch_size, 23) each, repeated.
