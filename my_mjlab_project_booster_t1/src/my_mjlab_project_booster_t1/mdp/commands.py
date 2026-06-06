@@ -150,6 +150,7 @@ class MultiMotionCommand(MotionCommand):
         # Rotate 90° around Z-axis so robot faces +X (instead of +Y from motion data).
         # Rotation quaternion: 90° yaw = [cos(45°), 0, 0, sin(45°)]
         yaw_90_quat = torch.tensor([0.7071, 0.0, 0.0, 0.7071], device=self.device, dtype=torch.float32)
+        yaw_90_quat = yaw_90_quat.unsqueeze(0).expand(root_ori.shape[0], -1)
         root_ori = quat_mul(yaw_90_quat, root_ori)
 
         range_list = [self.cfg.pose_range.get(k, (0.0, 0.0)) for k in ["x", "y", "z", "roll", "pitch", "yaw"]]
