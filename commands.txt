@@ -53,3 +53,7 @@ cd /home/robocup/IsaakB/BEPImitationLearning/Imitationlearningbooster && env -u 
 #    - stayonline: X-local (goal line) instead of Y-local
 #
 # 4-6. Same changes applied to my_mjlab_project_booster_t1 package (observations, commands, rewards)
+
+# ========== Local PC Commands (/home/isaak) ==========
+# Visualise all 6 reference motions (no policy, ghost overlay only, cycles sequentially)
+cd /home/isaak/BEPImitationlearning/Imitationlearningbooster && env -u PYTHONPATH .venv/bin/play goalkeeper_booster_t1_amp_withoverlay --agent zero --no-terminations True

@@ -32,7 +32,7 @@ def _ball_is_behind(env: ManagerBasedRlEnv, ball_name: str = "ball") -> torch.Te
 
     Mirrors the original Humanoid-Goalkeeper's 'behind' condition exactly:
         behind = (ball_x < 0) | (ball_vx - initial_vx > 2.0)
-    i.e. ball passed goal line OR velocity increased ≥2 m/s from its
+    i.e. ball passed goal line OR velocity increased >= 2 m/s from its
     initial value (deflected/stopped by the robot).
 
     Reuses _sb_init_vx from stopball if already initialised; otherwise
@@ -173,7 +173,7 @@ def stopball(
     ball_name: str = "ball",
     delta_vel_threshold: float = 2.0,
 ) -> torch.Tensor:
-    """One-time reward when ball decelerates ≥2 m/s from its initial Y velocity.
+    """One-time reward when ball decelerates >= 2 m/s from its initial X velocity.
 
     Mirrors the original Humanoid-Goalkeeper _reward_stopball exactly:
     compares current ball velocity against the velocity stored at episode

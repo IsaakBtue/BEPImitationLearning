@@ -221,7 +221,7 @@ def stopball(
     (ball approaching at -1 m/s, deflected to +0.5 m/s → Δvy = 1.5 m/s) never
     fire this 100-weight reward, starving the primary training signal.
 =======
-    """One-time reward when ball decelerates ≥2 m/s from its initial X velocity.
+    """One-time reward when ball decelerates >= 2 m/s from its initial X velocity.
 
     Mirrors the original Humanoid-Goalkeeper _reward_stopball exactly:
     compares current ball velocity against the velocity stored at episode
