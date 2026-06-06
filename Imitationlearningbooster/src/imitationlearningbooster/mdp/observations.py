@@ -27,11 +27,11 @@ def _compute_ball_visibility(env: ManagerBasedRlEnv, ball_name: str) -> torch.Te
 
     flying: ball is in the camera field of view and approaching:
         end_target_local (ball in body frame):
-            x > 0.05 AND x < 3.4   → port: y_local (approach axis)
-            |y| < 2.0               → port: |x_local| < 2.0
+            x > 0.05 AND x < 3.4   → x_local (approach axis = forwards)
+            |y| < 2.0               → |y_local| < 2.0 (lateral axis = left/right)
             z < 1.8
         catchstep > 0: ball has been launched (warmup not finished)
-        ball moving closer: x_local < x_last OR x_last == 0 → port: y_local < y_last OR y_last == 0
+        ball moving closer: x_local < x_last OR x_last == 0 → ball approaching
 
     random_vanish: ball disappears at a random step during flight.
         vanish_step sampled per-env at reset from randint(0, 30) in _reset_ball.
@@ -55,8 +55,8 @@ def _compute_ball_visibility(env: ManagerBasedRlEnv, ball_name: str) -> torch.Te
     ball_pos_w = ball.data.root_link_pos_w                           # (N, 3)
     env_origins = env.scene.env_origins                              # (N, 3)
 
-    ball_y_local = ball_pos_w[:, 1] - env_origins[:, 1]             # approach axis (Y in port)
-    ball_x_local = ball_pos_w[:, 0] - env_origins[:, 0]             # lateral axis
+    ball_x_local = ball_pos_w[:, 0] - env_origins[:, 0]             # approach axis (X = forwards)
+    ball_y_local = ball_pos_w[:, 1] - env_origins[:, 1]             # lateral axis (Y = left/right)
     ball_z_local = ball_pos_w[:, 2]                                  # absolute Z (floor at ~0)
 
     # initial_vanish: True once the warmup countdown has expired.
@@ -79,16 +79,16 @@ def _compute_ball_visibility(env: ManagerBasedRlEnv, ball_name: str) -> torch.Te
     )
 
     # Ball-last tracking for approach direction (mirrors upstream ball_last).
-    if not hasattr(env, "_ball_obs_last_y"):
-        env._ball_obs_last_y = torch.zeros(env.num_envs, device=env.device)
+    if not hasattr(env, "_ball_obs_last_x"):
+        env._ball_obs_last_x = torch.zeros(env.num_envs, device=env.device)
 
-    approaching = (ball_y_local < env._ball_obs_last_y) | (env._ball_obs_last_y == 0.0)
-    env._ball_obs_last_y = ball_y_local.clone()
+    approaching = (ball_x_local < env._ball_obs_last_x) | (env._ball_obs_last_x == 0.0)
+    env._ball_obs_last_x = ball_x_local.clone()
 
     flying = (
-        (ball_y_local > 0.05)  &
-        (ball_y_local < 3.4)   &
-        (ball_x_local.abs() < 2.0) &
+        (ball_x_local > 0.05)  &
+        (ball_x_local < 3.4)   &
+        (ball_y_local.abs() < 2.0) &
         (ball_z_local < 1.8)   &
         catchstep_positive     &
         approaching

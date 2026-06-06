@@ -30,3 +30,26 @@ cd /home/robocup/IsaakB/BEPImitationLearning/Imitationlearningbooster && env -u 
 
 # Re-convert pkl → npz
 cd /home/robocup/IsaakB/BEPImitationLearning/Imitationlearningbooster && env -u PYTHONPATH python src/imitationlearningbooster/motions/convert_all.py
+
+# Ball Observation Coordinate System Fix
+# Changed coordinate system: X-axis=forwards (approach), Y-axis=left/right (lateral)
+# Reference: https://github.com/KaydenKnapik/BoosterT1mjlab
+#
+# Files modified:
+# 1. Imitationlearningbooster/src/imitationlearningbooster/mdp/observations.py
+#    - Swapped axes: ball_x_local (was lateral) now approach, ball_y_local (was approach) now lateral
+#    - Updated visibility logic to check X-axis for approach distance
+#    - Renamed _ball_obs_last_y to _ball_obs_last_x
+#
+# 2. Imitationlearningbooster/src/imitationlearningbooster/mdp/commands.py
+#    - Ball now launches from +X (instead of +Y) toward goal at X≈-0.3
+#    - Swapped x_start/x_end with y_start/y_end in all trajectory calculations
+#    - Updated catch_prop to use X-axis, end_target clamp to Y-axis
+#
+# 3. Imitationlearningbooster/src/imitationlearningbooster/mdp/rewards.py
+#    - _ball_is_behind: switched to X-axis (_sb_init_vx, ball_x_vel, ball_x_local)
+#    - eereach: ball_x_local for approach distance, end_target_local[:, 1] for lateral
+#    - stopball: changed to X-axis velocity checks
+#    - stayonline: X-local (goal line) instead of Y-local
+#
+# 4-6. Same changes applied to my_mjlab_project_booster_t1 package (observations, commands, rewards)

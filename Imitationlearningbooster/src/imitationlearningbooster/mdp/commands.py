@@ -13,18 +13,18 @@ from mjlab.utils.lab_api.math import quat_from_euler_xyz, quat_mul, sample_unifo
 if TYPE_CHECKING:
     from mjlab.envs import ManagerBasedRlEnv
 
-# Ball end-target ranges per motion type (x_min, x_max, z_min, z_max) in env-local frame.
-# Ball approaches from +Y; robot faces +Y so left hand is at -X, right hand at +X.
+# Ball end-target ranges per motion type (y_min, y_max, z_min, z_max) in env-local frame.
+# Ball approaches from +X (forwards); robot faces +X so left hand is at -Y, right hand at +Y.
 # Order matches MOTION_NAMES in rsl_rl_amp/utils/motion_loader.py:
 #   ["lefthand", "righthand", "leftjump", "rightjump", "leftstep", "rightstep"]
 # These are the FULL (difficulty=1.0) ranges — easy ranges are interpolated at runtime.
 _BALL_END_RANGES = [
-    (-0.84, -0.2, 0.40, 1.20),  # 0 lefthand  — left side (-X), mid-height arm catch
-    ( 0.20,  0.84, 0.40, 1.20),  # 1 righthand — right side (+X), mid-height arm catch
-    (-0.84, -0.2, 0.80, 1.50),  # 2 leftjump  — left side (-X), high (diving jump)
-    ( 0.20,  0.84, 0.80, 1.50),  # 3 rightjump — right side (+X), high (diving jump)
-    (-0.84, -0.2, 0.20, 0.70),  # 4 leftstep  — left side (-X), low (lateral step)
-    ( 0.20,  0.84, 0.20, 0.70),  # 5 rightstep — right side (+X), low (lateral step)
+    (-0.84, -0.2, 0.40, 1.20),  # 0 lefthand  — left side (-Y), mid-height arm catch
+    ( 0.20,  0.84, 0.40, 1.20),  # 1 righthand — right side (+Y), mid-height arm catch
+    (-0.84, -0.2, 0.80, 1.50),  # 2 leftjump  — left side (-Y), high (diving jump)
+    ( 0.20,  0.84, 0.80, 1.50),  # 3 rightjump — right side (+Y), high (diving jump)
+    (-0.84, -0.2, 0.20, 0.70),  # 4 leftstep  — left side (-Y), low (lateral step)
+    ( 0.20,  0.84, 0.20, 0.70),  # 5 rightstep — right side (+Y), low (lateral step)
 ]
 
 # Easy (difficulty=0.0) end-target ranges, used as the lerp starting point.
@@ -223,8 +223,8 @@ class MultiMotionCommand(MotionCommand):
         origins = self._env.scene.env_origins[env_ids]
         motion_types = self.motion_type_ids[env_ids]
 
-        # Ball approaches from +Y (rotated 90° clockwise vs original +X approach).
-        y_start = sample_uniform(3.0, 5.0, (n,), device=self.device)
+        # Ball approaches from +X (forwards from robot).
+        x_start = sample_uniform(3.0, 5.0, (n,), device=self.device)
 
         # Difficulty curriculum: linearly interpolate between easy and full ranges.
         # difficulty=0.0 (easy): narrow centre zone; difficulty=1.0: full range.
@@ -239,15 +239,15 @@ class MultiMotionCommand(MotionCommand):
 
         per_env_ranges = end_ranges[motion_types]  # [n, 4]
 
-        x_end = sample_uniform(per_env_ranges[:, 0], per_env_ranges[:, 1], (n,), device=self.device)
+        y_end = sample_uniform(per_env_ranges[:, 0], per_env_ranges[:, 1], (n,), device=self.device)
         z_end = sample_uniform(per_env_ranges[:, 2], per_env_ranges[:, 3], (n,), device=self.device)
-        x_start = sample_uniform(-1.8, 1.8, (n,), device=self.device)
+        y_start = sample_uniform(-1.8, 1.8, (n,), device=self.device)
         z_start = sample_uniform(0.3, 1.8, (n,), device=self.device)
 
         t_flight = sample_uniform(0.4, 1.0, (n,), device=self.device)
 
-        dx = x_end - x_start
-        dy = -y_start - 0.3          # target Y ≈ -0.3 (just behind goal line)
+        dx = -x_start - 0.3          # target X ≈ -0.3 (just behind goal line)
+        dy = y_end - y_start
         dz = z_end - z_start
 
         vx = dx / t_flight
@@ -271,18 +271,18 @@ class MultiMotionCommand(MotionCommand):
         # Compute predicted intercept point (Feature P3A: eereach target).
         # Mirrors upstream assign_ball_states catch_prop formula:
         #     catch_prop = (0.1 - x_start) / (x_end_local - x_start)  [original X axis]
-        # Port uses Y axis: ball goes from +y_start → −0.3 (goal).
-        # catch_prop = fraction of Y travel when ball is at y_local = 0.1 (arm-reach plane).
-        # y_start_local > 0; total dy = -(y_start + 0.3).
-        # At y_local=0.1: fraction = (y_start - 0.1) / (y_start + 0.3)
+        # New system uses X axis: ball goes from +x_start → −0.3 (goal).
+        # catch_prop = fraction of X travel when ball is at x_local = 0.1 (arm-reach plane).
+        # x_start_local > 0; total dx = -(x_start + 0.3).
+        # At x_local=0.1: fraction = (x_start - 0.1) / (x_start + 0.3)
         # end_target_w = ball_start_w + delta_w * catch_prop
         # ----------------------------------------------------------------
-        catch_prop = (y_start - 0.1) / (y_start + 0.3)      # [n]
+        catch_prop = (x_start - 0.1) / (x_start + 0.3)      # [n]
         catch_prop = catch_prop.clamp(0.0, 1.0)
 
         delta_w = torch.stack([
-            (x_end - x_start),          # vx * t_flight
-            dy,                          # vy * t_flight  (world y)
+            dx,                          # vx * t_flight  (world x)
+            (y_end - y_start),          # vy * t_flight
             (z_end - z_start),          # vz*t - 0.5g*t² = dz → dz is just delta, not full arc
         ], dim=1)                        # [n, 3]
 
@@ -291,9 +291,9 @@ class MultiMotionCommand(MotionCommand):
 
         # end_target in world frame = start + delta * catch_prop
         end_target_w = ball_start_world + delta_w * catch_prop.unsqueeze(-1)   # [n, 3]
-        # Clip X so it stays within a reasonable arm-reach zone (≈ original clip).
-        end_target_w[:, 0] = end_target_w[:, 0].clamp(
-            origins[:, 0] - 1.0, origins[:, 0] + 1.0
+        # Clip Y so it stays within a reasonable arm-reach zone (≈ original clip).
+        end_target_w[:, 1] = end_target_w[:, 1].clamp(
+            origins[:, 1] - 1.0, origins[:, 1] + 1.0
         )
 
         # Store on env for use by eereach reward.

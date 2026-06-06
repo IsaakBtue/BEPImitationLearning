@@ -35,17 +35,17 @@ def _ball_is_behind(env: ManagerBasedRlEnv, ball_name: str = "ball") -> torch.Te
     i.e. ball passed goal line OR velocity increased ≥2 m/s from its
     initial value (deflected/stopped by the robot).
 
-    Reuses _sb_init_vy from stopball if already initialised; otherwise
+    Reuses _sb_init_vx from stopball if already initialised; otherwise
     falls back to the absolute threshold so post-save rewards still gate
     correctly even if stopball hasn't run first this step.
     """
     ball: Entity = env.scene[ball_name]
-    ball_y_local = ball.data.root_link_pos_w[:, 1] - env.scene.env_origins[:, 1]
-    ball_y_vel = ball.data.root_link_lin_vel_w[:, 1]
-    init_vy = getattr(env, "_sb_init_vy", None)
+    ball_x_local = ball.data.root_link_pos_w[:, 0] - env.scene.env_origins[:, 0]
+    ball_x_vel = ball.data.root_link_lin_vel_w[:, 0]
+    init_vy = getattr(env, "_sb_init_vx", None)
     if init_vy is not None:
-        delta_vy = ball_y_vel - init_vy
-        return (ball_y_local < 0.0) | (delta_vy > 2.0)
+        delta_vx = ball_y_vel - init_vy
+        return (ball_y_local < 0.0) | (delta_vx > 2.0)
     # Fallback before stopball has run (first policy step of first episode).
     return (ball_y_local < 0.0) | (ball_y_vel > 1.0)
 
@@ -95,14 +95,14 @@ def eereach(
     #   verticalgoal = clip(torso_z - clip(end_target_z, 0.3, 1.2), 0, 1)
     #   phase1_rew = 1 - (verticalgoal + |asidegoal|) / 2
     # Port: original lateral = Y (side), port lateral = X (side), original vertical = Z = same.
-    phase1_mask = ball_y_local > 1.5                                    # (N,)
+    phase1_mask = ball_x_local > 1.5                                    # (N,)
 
     if end_target is not None:
         root_pos_w = robot.data.root_link_pos_w                         # (N, 3)
         end_target_local = end_target - root_pos_w                      # (N, 3)
 
         # Lateral (X) alignment — mirrors original end_target_local[:, 1] (Y lateral in G1).
-        asidegoal = end_target_local[:, 0].clamp(-1.0, 1.0)
+        asidegoal = end_target_local[:, 1].clamp(-1.0, 1.0)
         asidegoal = torch.where(asidegoal.abs() < 0.3, torch.zeros_like(asidegoal), asidegoal)
 
         # Vertical (Z) — same in both port and original.
@@ -117,7 +117,7 @@ def eereach(
     # Target point: use end_target when ball is between 0.5–1.5 m away (in-flight approach),
     # snap to current ball position when ≤ 0.5 m (mirrors upstream approachidx update).
     if end_target is not None:
-        use_end_target = (ball_y_local > 0.5) & ~phase1_mask           # 0.5 < y ≤ 1.5
+        use_end_target = (ball_x_local > 0.5) & ~phase1_mask           # 0.5 < y ≤ 1.5
         target_pos = torch.where(
             use_end_target.unsqueeze(-1),
             end_target,
@@ -184,21 +184,21 @@ def stopball(
     current_vy - initial_vy > delta_vel_threshold (2.0 m/s, matching G1).
     """
     ball: Entity = env.scene[ball_name]
-    ball_y_vel = ball.data.root_link_lin_vel_w[:, 1]
-    ball_y_local = ball.data.root_link_pos_w[:, 1] - env.scene.env_origins[:, 1]
+    ball_x_vel = ball.data.root_link_lin_vel_w[:, 0]
+    ball_x_local = ball.data.root_link_pos_w[:, 0] - env.scene.env_origins[:, 0]
 
-    if not hasattr(env, "_sb_init_vy"):
-        env._sb_init_vy = ball_y_vel.clone()
+    if not hasattr(env, "_sb_init_vx"):
+        env._sb_init_vx = ball_y_vel.clone()
         env._sb_flag = torch.zeros(env.num_envs, dtype=torch.bool, device=env.device)
 
     # Store the ball's initial velocity at episode reset (first step).
     just_reset = env.episode_length_buf <= 1
     env._sb_flag[just_reset] = False
-    env._sb_init_vy[just_reset] = ball_y_vel[just_reset].clone()
+    env._sb_init_vx[just_reset] = ball_y_vel[just_reset].clone()
 
-    delta_vy = ball_y_vel - env._sb_init_vy
+    delta_vx = ball_y_vel - env._sb_init_vx
     in_front = ball_y_local > 0.0
-    fired = (delta_vy > delta_vel_threshold) & in_front & ~env._sb_flag
+    fired = (delta_vx > delta_vel_threshold) & in_front & ~env._sb_flag
 
     env._sb_flag |= fired
 
@@ -216,8 +216,8 @@ def stayonline(
     The robot slides laterally in X to intercept; this penalises Y deviation.
     """
     robot: Entity = env.scene["robot"]
-    y_local = robot.data.root_link_pos_w[:, 1] - env.scene.env_origins[:, 1]
-    dist = torch.clamp(y_local.abs(), line_offset, max_offset) - line_offset
+    x_local = robot.data.root_link_pos_w[:, 0] - env.scene.env_origins[:, 0]
+    dist = torch.clamp(x_local.abs(), line_offset, max_offset) - line_offset
     return dist
 
 
