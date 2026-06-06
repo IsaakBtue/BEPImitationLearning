@@ -15,6 +15,7 @@ class RslRlAmpRunnerCfg(RslRlOnPolicyRunnerCfg):
     """PPO runner config with AMP hyperparameters."""
     amp_coef: float = 0.4
     amp_discr_hidden_dims: List[int] = field(default_factory=lambda: [512, 256])
+    amp_disc_mini_batch_size: int = 4096  # per-discriminator cap; G1 upstream gets ~17k but uses 8GB GPU
 
 
 def goalkeeper_amp_ppo_runner_cfg() -> RslRlAmpRunnerCfg:
@@ -59,4 +60,5 @@ def goalkeeper_amp_ppo_runner_cfg() -> RslRlAmpRunnerCfg:
         max_iterations=40_000,
         amp_coef=0.4,
         amp_discr_hidden_dims=[512, 256],
+        amp_disc_mini_batch_size=4096,
     )

@@ -234,26 +234,38 @@ class GoalkeeperAmpRunner(MotionTrackingOnPolicyRunner):
             num_mini_batches = self.cfg.get("algorithm", {}).get("num_mini_batches", 4)
             num_learning_epochs = self.cfg.get("algorithm", {}).get("num_learning_epochs", 5)
             num_disc_updates = num_mini_batches * num_learning_epochs
-            mini_batch_size = (self.env.num_envs * num_steps) // num_mini_batches
+            # Cap per-discriminator batch to avoid OOM in compute_grad_pen (create_graph=True
+            # on 25k samples exhausts 31 GB VRAM; G1 upstream gets ~17k on an 8 GB GPU).
+            # Default 4096 is close to G1's effective batch without the OOM risk.
+            amp_disc_batch_cap = self.cfg.get("amp_disc_mini_batch_size", 4096)
+            disc_per_motion = min(
+                (self.env.num_envs * num_steps) // num_mini_batches // len(MOTION_NAMES),
+                amp_disc_batch_cap,
+            )
 
-            disc_loss_total = torch.tensor(0.0, device=self.device)
+            disc_loss_total = 0.0
             for _ in range(num_disc_updates):
+                # One gradient step per disc update (matches G1's 20 separate SGD steps).
+                disc_loss_iter = torch.tensor(0.0, device=self.device)
                 for name in MOTION_NAMES:
-                    if not self.replay_buffers[name].ready(mini_batch_size // len(MOTION_NAMES)):
+                    if not self.replay_buffers[name].ready(disc_per_motion):
                         continue
                     pol_s, pol_s_next = next(self.replay_buffers[name].feed_forward_generator(
-                        mini_batch_size // len(MOTION_NAMES)
+                        disc_per_motion
                     ))
                     exp_s, exp_s_next = next(self.motion_loaders[name].feed_forward_generator(
-                        mini_batch_size // len(MOTION_NAMES)
+                        disc_per_motion
                     ))
 
-                    pol_obs = self.amp_normalizer.normalize_torch(
-                        torch.cat([pol_s, pol_s_next], dim=-1), self.device
-                    )
-                    exp_obs = self.amp_normalizer.normalize_torch(
-                        torch.cat([exp_s, exp_s_next], dim=-1), self.device
-                    )
+                    pol_raw = torch.cat([pol_s, pol_s_next], dim=-1)
+                    exp_raw = torch.cat([exp_s, exp_s_next], dim=-1)
+
+                    # Update normalizer with raw (unnormalized) observations.
+                    self.amp_normalizer.update(pol_raw.cpu())
+                    self.amp_normalizer.update(exp_raw.cpu())
+
+                    pol_obs = self.amp_normalizer.normalize_torch(pol_raw, self.device)
+                    exp_obs = self.amp_normalizer.normalize_torch(exp_raw, self.device)
 
                     disc = self.discriminators[name]
                     expert_d = disc(exp_obs)
@@ -261,21 +273,18 @@ class GoalkeeperAmpRunner(MotionTrackingOnPolicyRunner):
                     expert_loss = torch.nn.MSELoss()(expert_d, torch.ones_like(expert_d))
                     policy_loss = torch.nn.MSELoss()(policy_d, -torch.ones_like(policy_d))
                     grad_pen = disc.compute_grad_pen(exp_obs, lambda_=5.0) * 0.1  # matches G1 effective lambda=0.5
-                    disc_loss_total = disc_loss_total + (expert_loss + policy_loss) + grad_pen
+                    disc_loss_iter = disc_loss_iter + (expert_loss + policy_loss) + grad_pen
 
-                    # Update normalizer
-                    self.amp_normalizer.update(pol_obs.cpu())
-                    self.amp_normalizer.update(exp_obs.cpu())
-
-            self.disc_optimizer.zero_grad()
-            if disc_loss_total.requires_grad:
-                disc_loss_total.backward()
-                self.disc_optimizer.step()
+                self.disc_optimizer.zero_grad()
+                if disc_loss_iter.requires_grad:
+                    disc_loss_iter.backward()
+                    self.disc_optimizer.step()
+                disc_loss_total += disc_loss_iter.item()
 
             learn_time = time.time() - t1
             self.current_learning_iteration = it
 
-            loss_dict["amp_disc_loss"] = disc_loss_total.item()
+            loss_dict["amp_disc_loss"] = disc_loss_total
             loss_dict["mean_amp_reward"] = sum(amp_rewbuffer) / len(amp_rewbuffer) if amp_rewbuffer else 0.0
             self.logger.log(
                 it=it, start_it=start_it, total_it=total_it,

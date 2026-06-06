@@ -45,7 +45,7 @@ def _ball_is_behind(env: ManagerBasedRlEnv, ball_name: str = "ball") -> torch.Te
     init_vy = getattr(env, "_sb_init_vy", None)
     if init_vy is not None:
         delta_vy = ball_y_vel - init_vy
-        return (ball_y_local < 0.0) | (delta_vy > 2.0)
+        return (ball_y_local < 0.0) | (delta_vy > 1.0)
     # Fallback before stopball has run (first policy step of first episode).
     return (ball_y_local < 0.0) | (ball_y_vel > 1.0)
 
@@ -138,10 +138,6 @@ def eereach(
 
     to_target = target_pos[:, None, :] - hand_pos_w                    # (N, 2, 3)
     dist_to_target = torch.norm(to_target, dim=-1)                     # (N, 2)
-    min_dist = dist_to_target.min(dim=-1).values                       # (N,)
-
-    # Base sigmoid: 1 at dist=0, 0 far away.
-    rew = 1.0 - 1.0 / (1.0 + torch.exp(-sigma * (min_dist - reach_th)))
 
     # --- Jump-region-aware vel_sigma (mirrors G1 _reward_eereach) ---
     # G1: upper-body world-Y lateral velocity for side-saves, world-Z for jumps.
@@ -152,6 +148,7 @@ def eereach(
 
     torso_vel_w = robot.data.root_link_lin_vel_w                       # (N, 3)
 
+    # is_left/is_jump must be computed before min_dist so we can route to the correct hand.
     try:
         motion_cmd = env.command_manager._terms.get("motion", None)
         if motion_cmd is not None and hasattr(motion_cmd, "motion_type_ids"):
@@ -164,6 +161,13 @@ def eereach(
     except Exception:
         is_jump = torch.zeros(env.num_envs, dtype=torch.bool, device=env.device)
         is_left = torch.zeros(env.num_envs, dtype=torch.bool, device=env.device)
+
+    # Route to the correct hand per motion type: left hand (idx 0) for types 0/2/4,
+    # right hand (idx 1) for types 1/3/5. Mirrors G1 which selects by save region.
+    min_dist = torch.where(is_left, dist_to_target[:, 0], dist_to_target[:, 1])
+
+    # Base sigmoid: 1 at dist=0, 0 far away.
+    rew = 1.0 - 1.0 / (1.0 + torch.exp(-sigma * (min_dist - reach_th)))
 
     # Side-saves: reward lateral torso X-velocity toward the target side.
     # Jumps: reward upward (Z) torso velocity for the leap.
@@ -206,17 +210,15 @@ def catch_success(
 def stopball(
     env: ManagerBasedRlEnv,
     ball_name: str = "ball",
-    delta_vel_threshold: float = 2.0,
+    delta_vel_threshold: float = 1.0,
 ) -> torch.Tensor:
-    """One-time reward when ball decelerates ≥2 m/s from its initial Y velocity.
+    """One-time reward when ball decelerates ≥1 m/s from its initial Y velocity.
 
-    Mirrors the original Humanoid-Goalkeeper _reward_stopball exactly:
-    compares current ball velocity against the velocity stored at episode
-    reset (not per-step delta), so the threshold is robust to air resistance.
-    A per-env flag prevents re-firing after the first deceleration event.
-
-    Ball approaches from +Y so initial vy < 0; deceleration/reversal means
-    current_vy - initial_vy > delta_vel_threshold (2.0 m/s, matching G1).
+    Mirrors the original Humanoid-Goalkeeper _reward_stopball logic but with a
+    lower threshold (1.0 vs G1's 2.0) because MuJoCo's soft contact solver
+    produces smaller velocity impulses than PhysX. At 2.0 m/s, slow-ball saves
+    (ball approaching at -1 m/s, deflected to +0.5 m/s → Δvy = 1.5 m/s) never
+    fire this 100-weight reward, starving the primary training signal.
     """
     ball: Entity = env.scene[ball_name]
     ball_y_vel = ball.data.root_link_lin_vel_w[:, 1]

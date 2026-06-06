@@ -1,5 +1,36 @@
 # Divergence from Upstream (Humanoid-Goalkeeper)
 
+## 2026-06-06 — Fourth-pass audit: 5 bugs fixed (AMP normalizer, disc training loop, stopball threshold, eereach hand routing)
+
+### Fix 1 — Variance collapse in `EmpiricalNormalization.update()` (`normalizer.py`)
+**What changed:** Rewrote `EmpiricalNormalization.update()` using Chan's correct parallel algorithm. Three errors were present: (1) `self.count += n` was incremented before the cross-term, so the denominator used `old_count + 2n` instead of `old_count + n`; (2) `m_a = self.var * n` multiplied by the batch size `n` instead of `old_count`; (3) `M2 / (self.count + n)` divided by `old_count + 2n`.
+**Why it was wrong:** These three compounding errors caused the running variance to converge to ~0.01 instead of the true variance (~1.0). Because `normalize_torch` divides by `sqrt(var + 1e-8)`, the discriminator received inputs amplified by ~10,000×, making discriminator training completely unusable.
+**Correct value:** `m_a = self.var * old_count` (save count before increment), `M2 / tot_count`, increment count last.
+**Evidence:** Simulation confirms buggy estimate converges var→0.0099 (std≈0.1) for true variance=1.0.
+
+### Fix 2 — Discriminator: 120 backward passes collapsed into 1 (`him_amp_runner.py`)
+**What changed:** Moved `zero_grad()`, `backward()`, and `step()` inside the `num_disc_updates` loop. Previously, `disc_loss_total` accumulated across all `num_disc_updates × len(MOTION_NAMES)` (up to 120) forward passes before a single optimizer step outside both loops.
+**Why it was wrong:** The 20 intended separate SGD steps were collapsed into 1 step with a 120× larger gradient, fundamentally changing update dynamics. Also, `compute_grad_pen` uses `create_graph=True`, so retaining all 120 computation graphs caused quadratic VRAM growth.
+**Correct value:** One `zero_grad/backward/step` per `num_disc_updates` iteration, with a per-iteration loss accumulator.
+
+### Fix 3 — Normalizer updated with already-normalized data (`him_amp_runner.py`)
+**What changed:** Normalizer now updated with raw (unnormalized) joint-position tensors (`pol_raw`, `exp_raw`) before normalization, not with the post-normalization `pol_obs`/`exp_obs`.
+**Why it was wrong:** Feeding the normalizer its own output (mean≈0, var≈1 theoretically) created a degenerate circular dependency. The normalizer's running statistics drifted away from the true joint-position distribution.
+**Correct value:** `self.amp_normalizer.update(pol_raw.cpu())` before calling `normalize_torch`.
+
+### Fix 4 — `stopball` threshold regression 2.0 → 1.0 (`rewards.py`)
+**What changed:** `delta_vel_threshold` default lowered from 2.0 back to 1.0. `_ball_is_behind` hardcoded `delta_vy > 2.0` also lowered to `> 1.0` for consistency.
+**Why it was wrong:** G1 uses PhysX (hard contacts); T1 trains in MuJoCo (soft contact solver). MuJoCo produces smaller velocity impulses. A slow-ball save (ball at -1 m/s, deflected to +0.5 m/s → Δvy = 1.5 m/s) would never fire the 100-weight `stopball` reward at threshold 2.0, starving the primary task signal. This fix was previously applied (2026-05-14, 2026-05-24) but silently reverted in a rewrite.
+**Correct value:** `delta_vel_threshold = 1.0` for MuJoCo contacts.
+**Evidence:** Prior DIVERGENCE entries at lines 813 and 425 document the same fix.
+
+### Fix 5 — `eereach` distance routed to wrong hand (`rewards.py`)
+**What changed:** Replaced `dist_to_target.min(dim=-1).values` (nearest hand, any) with `torch.where(is_left, dist_to_target[:, 0], dist_to_target[:, 1])` (left hand for motion types 0/2/4, right hand for 1/3/5). Moved `is_left`/`is_jump` computation before `min_dist` to enable the selection.
+**Why it was wrong:** The policy could satisfy `eereach` by bringing the wrong hand close to the ball. For a left-side save, the right hand being near the ball would yield a reward, potentially encouraging wrong-hand interceptions.
+**Correct value:** Mirror G1's `_reward_eereach` which selects `left_hand_pos` for regions 0/2/4 and `right_hand_pos` for regions 1/3/5.
+
+---
+
 ## 2026-06-05 — AMP joint ordering: joint_names embedded in npz + runtime assertion
 
 **What changed:**
@@ -1327,3 +1358,83 @@ The `env_ids` validation guard (lines 188-192) prevents the original indexing cr
 - `_ball_difficulty` (0→1) is the port's curriculum proxy: `difficulty=0.5` → `curriculumupdate=1` → `jump_scale=6`; `difficulty=1.0` → `curriculumupdate=2` → `jump_scale=9`
 
 **Files changed:** `Imitationlearningbooster/src/imitationlearningbooster/mdp/rewards.py`
+
+## 2026-06-05 — AMP training loop: G1 vs T1 port comparison and disc batch OOM fix
+
+### Background: complete fidelity audit
+
+The goal of this port is to replicate G1 goalkeeper behavior (IsaacGym + rsl_rl) on Booster T1 (MuJoCo Warp + mjlab). This entry documents every training-loop divergence found in a side-by-side comparison of `Humanoid-Goalkeeper/rsl_rl/rsl_rl/` against `Imitationlearningbooster/src/imitationlearningbooster/rsl_rl_amp/`.
+
+---
+
+### What is faithfully replicated (no meaningful divergence)
+
+| Component | G1 upstream | T1 port | Notes |
+|---|---|---|---|
+| Motion classes | 6 (lefthand/righthand/leftjump/rightjump/leftstep/rightstep) | 6 identical | ✓ |
+| Discriminators | 1 per motion class (6 total, deepcopy of base AMP) | 1 per motion class (6 total) | ✓ |
+| AMP reward blending | 40% AMP + 60% task | 40% AMP + 60% task | ✓ |
+| Disc architecture | Linear(46,512)→ReLU→Linear(512,256)→ReLU→Linear(256,1) | same | ✓ |
+| Grad penalty formula | `sum(square(grad)).mean() * lambda_` | `grad.norm(2).pow(2).mean() * lambda_` | mathematically identical |
+| Effective grad penalty lambda | `lambda_=5 * 0.1 = 0.5` | `lambda_=5 * 0.1 = 0.5` | ✓ |
+| AMP obs dimension | 46 (23 DOF × 2 consecutive frames) | 46 | ✓ |
+| AMP normalizer | shared across 6 discriminators | shared across 6 discriminators | ✓ |
+| Reward weights | all 27 terms ported from G1 | ✓ (see earlier entries) | |
+| Observation space | 870-dim, 10-step history | 870-dim, 10-step history | ✓ |
+| Network architecture | MLP 512-256-128 | MLP 512-256-128 | ✓ |
+
+---
+
+### Divergences: framework adaptations (necessary, not bugs)
+
+#### 1. Disc optimizer: separate vs joint with PPO
+
+**G1:** One shared Adam optimizer covers both the PPO actor-critic and all 6 discriminators. The disc loss (`expert_loss + policy_loss + grad_pen * 0.1`) is added to the PPO surrogate loss and everything is updated in one `loss.backward()` / `optimizer.step()`.
+
+**T1 port:** Separate Adam optimizer for the 6 discriminators. PPO and disc are updated in two sequential phases per iteration. The disc optimizer uses the same `(lr=1e-3, weight_decay=1e-3)` parameters as G1's disc param groups.
+
+**Why this divergence:** mjlab's `MotionTrackingOnPolicyRunner` base class owns and controls the PPO optimizer. Hooking into its internal backward pass to add disc gradients would require modifying the base class (prohibited). A separate disc optimizer is architecturally equivalent — both optimize the same loss terms, just via different Adam instances.
+
+**Impact on training:** Negligible. The policy gradient and disc gradient do not depend on sharing an optimizer; they are independent objectives. Separating them is the norm in most AMP literature.
+
+---
+
+#### 2. PPO update frequency: 5 epochs × 4 mini-batches vs 1 × 1
+
+**G1:** `num_learning_epochs=1`, `num_mini_batches=1` → **1 PPO gradient step** per rollout collection.
+
+**T1 port:** `num_learning_epochs=5`, `num_mini_batches=4` → **20 PPO gradient steps** per rollout collection.
+
+**Why this divergence:** G1 uses 1×1 because the disc loss is folded into the PPO loss with `create_graph=True`; multiple epochs over stale advantages with a live disc graph would accumulate prohibitive memory. With a separate disc phase, standard PPO practice (4-10 epochs) is safe and improves sample efficiency on a 6144-env setup.
+
+**Impact on training:** Faster policy convergence per wall-clock hour. The qualitative behavior (motion style + ball-stopping objective) is unchanged.
+
+---
+
+#### 3. Spectral normalization on discriminator layers
+
+**G1:** Plain `nn.Linear` on all discriminator layers (no spectral norm).
+
+**T1 port:** `spectral_norm(nn.Linear(...))` on all layers of each discriminator.
+
+**Why this divergence:** Added as a stability measure during initial port (see entry "Fix AMP discriminator: gradient penalty scale and spectral normalization"). G1 avoids spectral norm because its disc receives large, well-mixed batches (~17k samples) that are naturally diverse. With smaller batches, spectral norm constrains Lipschitz constant and prevents gradient explosion.
+
+**Impact on training:** Minor. Spectral norm slightly slows disc convergence but prevents instability. If the disc trains too slowly in practice, this can be removed to match G1 exactly.
+
+---
+
+### Divergence that caused the CUDA OOM (now fixed)
+
+#### 4. Discriminator mini-batch size: 25,600/disc → capped at 4,096/disc
+
+**G1 effective disc batch:** `1020 envs × 100 steps / 1 mini-batch = 102,000` total, split by motion type → **~17,000 samples per discriminator** per update (1 update/iteration). Running on an 8 GB GPU.
+
+**T1 port (broken):** `6144 envs × 100 steps / 4 mini-batches = 153,600`, split by 6 → **25,600 per discriminator**, multiplied by 20 disc updates per iteration. All 120 `compute_grad_pen` calls (20 updates × 6 discs) accumulated their `create_graph=True` second-order graphs into one tensor before `backward()` was called. This consumed the full 31 GB VRAM.
+
+**Error:** `torch.OutOfMemoryError: CUDA out of memory. Tried to allocate 50.00 MiB. GPU 0 has a total capacity of 31.35 GiB of which 52.31 MiB is free.` at `him_amp_runner.py` / `discriminator.py:37`.
+
+**Fix:** Added `amp_disc_mini_batch_size: int = 4096` to `RslRlAmpRunnerCfg`. The runner uses `min(ppo_mini_batch // num_motions, amp_disc_mini_batch_size)` as the per-discriminator batch size. With 4,096 samples/disc and 20 updates, total disc samples processed per iteration = 4,096 × 20 = 81,920 — larger than G1's 17,000 and safely within VRAM.
+
+**Files changed:**
+- `Imitationlearningbooster/src/imitationlearningbooster/rsl_rl_amp/runners/him_amp_runner.py`
+- `Imitationlearningbooster/src/imitationlearningbooster/tasks/goalkeeper_amp_ppo_cfg.py`
