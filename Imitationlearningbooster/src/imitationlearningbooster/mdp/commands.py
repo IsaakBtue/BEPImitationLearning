@@ -174,6 +174,11 @@ class MultiMotionCommand(MotionCommand):
         root_lin_vel = self.body_lin_vel_w[env_ids, 0].clone()
         root_ang_vel = self.body_ang_vel_w[env_ids, 0].clone()
 
+        # Rotate 90° around Z-axis so robot faces +X (instead of +Y from motion data).
+        # Rotation quaternion: 90° yaw = [cos(45°), 0, 0, sin(45°)]
+        yaw_90_quat = torch.tensor([0.7071, 0.0, 0.0, 0.7071], device=self.device, dtype=torch.float32)
+        root_ori = quat_mul(yaw_90_quat, root_ori)
+
         range_list = [self.cfg.pose_range.get(k, (0.0, 0.0)) for k in ["x", "y", "z", "roll", "pitch", "yaw"]]
         ranges = torch.tensor(range_list, device=self.device)
         rand_samples = sample_uniform(ranges[:, 0], ranges[:, 1], (len(env_ids), 6), device=self.device)

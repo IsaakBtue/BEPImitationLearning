@@ -44,8 +44,8 @@ _ALL_JOINT_CFG = SceneEntityCfg("robot")
 def get_axes_spec() -> mujoco.MjSpec:
     """World-frame axis markers for play-mode orientation reference.
 
-    Red  = +X (robot slides laterally in this direction to intercept)
-    Green = +Y (ball approaches FROM here — robot faces +Y)
+    Red  = +X (ball approaches FROM here — robot faces +X)
+    Green = +Y (robot slides laterally in this direction to intercept)
     Blue  = +Z (up)
 
     Purely visual: contype=0, conaffinity=0, no physics.
@@ -64,8 +64,8 @@ def get_axes_spec() -> mujoco.MjSpec:
         g.conaffinity = 0
         g.group = 1
 
-    _arrow("axis_x", [1.5, 0.0, 0.02], (1.0, 0.2, 0.2, 0.9))   # red  → +X
-    _arrow("axis_y", [0.0, 2.0, 0.02], (0.2, 1.0, 0.2, 0.9))   # green → +Y (ball)
+    _arrow("axis_x", [1.5, 0.0, 0.02], (1.0, 0.2, 0.2, 0.9))   # red  → +X (ball approach)
+    _arrow("axis_y", [0.0, 2.0, 0.02], (0.2, 1.0, 0.2, 0.9))   # green → +Y (lateral)
     _arrow("axis_z", [0.0, 0.0, 0.52], (0.2, 0.4, 1.0, 0.9))   # blue  → +Z
 
     return spec
