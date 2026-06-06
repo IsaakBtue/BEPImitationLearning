@@ -45,9 +45,35 @@ def resample(arr, src_fps, tgt_frames):
     return np.stack([np.interp(t_dst, t_src, arr[:, i]) for i in range(arr.shape[1])], axis=1).astype(np.float32)
 
 
-def rotate_z90(root_pos, root_rot_wxyz):
-    """No-op: PKL data already faces +X (yaw ≈ -10°). No rotation needed."""
+def snap_yaw_to_zero(root_pos, root_rot_wxyz):
+    """Rotate entire trajectory so frame-0 yaw is exactly 0° (true +X facing).
+    Each PKL motion has a small retargeting yaw offset; this corrects it per-motion."""
+    q0 = root_rot_wxyz[0]  # WXYZ
+    yaw0 = Rotation.from_quat([q0[1], q0[2], q0[3], q0[0]]).as_euler('xyz')[2]
+    if abs(yaw0) < 1e-4:
+        return root_pos, root_rot_wxyz
+    print(f"  correcting frame-0 yaw {np.degrees(yaw0):+.2f}° → 0°")
+    c, s = np.cos(-yaw0), np.sin(-yaw0)
+    xy = root_pos[:, :2].copy()
+    root_pos[:, 0] = c * xy[:, 0] - s * xy[:, 1]
+    root_pos[:, 1] = s * xy[:, 0] + c * xy[:, 1]
+    # Correction quaternion in WXYZ: rotate by -yaw0 around Z
+    qc = np.array([np.cos(-yaw0 / 2), 0.0, 0.0, np.sin(-yaw0 / 2)])
+    for i in range(len(root_rot_wxyz)):
+        w0, x0, y0, z0 = qc
+        w1, x1, y1, z1 = root_rot_wxyz[i]
+        root_rot_wxyz[i] = [
+            w0*w1 - x0*x1 - y0*y1 - z0*z1,
+            w0*x1 + x0*w1 + y0*z1 - z0*y1,
+            w0*y1 - x0*z1 + y0*w1 + z0*x1,
+            w0*z1 + x0*y1 - y0*x1 + z0*w1,
+        ]
     return root_pos, root_rot_wxyz
+
+
+def rotate_z90(root_pos, root_rot_wxyz):
+    """Alias kept for compatibility — delegates to snap_yaw_to_zero."""
+    return snap_yaw_to_zero(root_pos, root_rot_wxyz)
 
 
 def apply_foot_fix(dof_pos):
