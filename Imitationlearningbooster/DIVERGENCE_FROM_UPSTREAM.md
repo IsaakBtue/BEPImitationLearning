@@ -1438,3 +1438,26 @@ The goal of this port is to replicate G1 goalkeeper behavior (IsaacGym + rsl_rl)
 **Files changed:**
 - `Imitationlearningbooster/src/imitationlearningbooster/rsl_rl_amp/runners/him_amp_runner.py`
 - `Imitationlearningbooster/src/imitationlearningbooster/tasks/goalkeeper_amp_ppo_cfg.py`
+
+---
+
+## 2026-06-06 — Remove double-rotation: NPZ motion data now natively faces +X
+
+**What changed:** The conversion pipeline previously applied a +90° Z-axis rotation to the motion data (PKL → NPZ), then the runtime code applied a matching -90° rotation when loading the overlay and spawning the robot. This double-rotation was fragile and confusing. Both rotations have been removed: the PKL data originally faces +X (matching `https://github.com/KaydenKnapik/BoosterT1mjlab`), so the NPZ files are now written as-is, natively facing +X.
+
+**Why it was wrong:** The original `convert_all.py` comment stated "T1 faces +Y, original faces +X" and rotated the data +90° to match a +Y-forward convention. But the target setup (matching the GitHub reference) uses +X as forwards. The runtime code attempted to compensate with a -90° rotation, but this made the codebase hard to reason about and left the overlay and ball-spawn positions potentially inconsistent.
+
+**Correct values:**
+- `convert_all.py`: `rotate_z90()` is now a no-op (returns inputs unchanged)
+- `convert_booster.py`: +90° position and quaternion rotation removed
+- `commands.py` (both packages): `body_pos_w` and `body_quat_w` properties no longer apply rotation; `_resample_command` no longer rotates `root_ori` at reset
+
+**Evidence:** Visual inspection showed robot facing +Y (green axis) while ball spawned on +X. Tracing the code confirmed the NPZ files contained +Y-facing data from the conversion script. Reverting to the original PKL facing (+X) eliminates the mismatch.
+
+**Files changed:**
+- `Imitationlearningbooster/src/imitationlearningbooster/motions/convert_all.py`
+- `Imitationlearningbooster/src/imitationlearningbooster/motions/convert_booster.py`
+- `Imitationlearningbooster/src/imitationlearningbooster/mdp/commands.py`
+- `my_mjlab_project_booster_t1/src/my_mjlab_project_booster_t1/mdp/commands.py`
+
+**Action required:** Re-run `convert_all.py` to regenerate all 6 NPZ files before training or visualising motions.

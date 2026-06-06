@@ -108,25 +108,8 @@ def convert():
     # 0.080 = 0.058 (body center offset) + 0.021 (geom local z + margin) + 0.001 clearance
     root_pos[:, 2] += 0.080
 
-    # ── Rotate entire motion +90° around Z (T1 faces +Y, original faces +X) ─
-    xy = root_pos[:, :2].copy()
-    root_pos[:, 0] = -xy[:, 1]
-    root_pos[:, 1] =  xy[:, 0]
-
+    # PKL data already faces +X (yaw ≈ -10°). No rotation needed.
     root_rot_wxyz = xyzw_to_wxyz(root_rot_xyzw)  # (T, 4) WXYZ
-
-    def quat_mul_wxyz(q1: np.ndarray, q2: np.ndarray) -> np.ndarray:
-        w1, x1, y1, z1 = q1[..., 0], q1[..., 1], q1[..., 2], q1[..., 3]
-        w2, x2, y2, z2 = q2[..., 0], q2[..., 1], q2[..., 2], q2[..., 3]
-        return np.stack([
-            w1*w2 - x1*x2 - y1*y2 - z1*z2,
-            w1*x2 + x1*w2 + y1*z2 - z1*y2,
-            w1*y2 - x1*z2 + y1*w2 + z1*x2,
-            w1*z2 + x1*y2 - y1*x2 + z1*w2,
-        ], axis=-1)
-
-    q_90 = np.array([[0.7071068, 0.0, 0.0, 0.7071068]])  # +90° around Z (wxyz)
-    root_rot_wxyz = quat_mul_wxyz(q_90, root_rot_wxyz)
 
     # ── Knee clamping ────────────────────────────────────────────────────────
     # Retargeted pkl has near-zero knee bend; robot needs ≥0.5 rad to stand stably.

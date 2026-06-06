@@ -109,26 +109,13 @@ class MultiMotionCommand(MotionCommand):
 
     @property
     def body_pos_w(self) -> torch.Tensor:
-        # npz already has corrected foot heights (see fix_motion_foot.py): no extra z shift here.
-        pos = self._gather("body_pos_w")
-        # Rotate XY positions -90° around Z: (x,y) → (-y,x) for counterclockwise rotation
-        pos_rot = pos.clone()
-        pos_rot[..., 0] = -pos[..., 1]
-        pos_rot[..., 1] = pos[..., 0]
-        return pos_rot + self._env.scene.env_origins[:, None, :]
+        # npz natively faces +X — no rotation needed.
+        return self._gather("body_pos_w") + self._env.scene.env_origins[:, None, :]
 
     @property
     def body_quat_w(self) -> torch.Tensor:
-        # Apply -90° Z-axis rotation to motion body quaternions so overlay faces +X
-        quat = self._gather("body_quat_w")
-        yaw_neg90_quat = torch.tensor([0.7071, 0.0, 0.0, -0.7071], device=self.device, dtype=torch.float32)
-        # quat is shape (N, num_bodies, 4), need to rotate each body separately
-        rotated = quat.clone()
-        for i in range(quat.shape[1]):
-            # Expand yaw_neg90_quat to match batch size
-            yaw_expanded = yaw_neg90_quat.unsqueeze(0).expand(quat.shape[0], -1)
-            rotated[:, i, :] = quat_mul(yaw_expanded, quat[:, i, :])
-        return rotated
+        # npz natively faces +X — no rotation needed.
+        return self._gather("body_quat_w")
 
     @property
     def body_lin_vel_w(self) -> torch.Tensor:
@@ -185,12 +172,6 @@ class MultiMotionCommand(MotionCommand):
         root_ori = self.body_quat_w[env_ids, 0].clone()
         root_lin_vel = self.body_lin_vel_w[env_ids, 0].clone()
         root_ang_vel = self.body_ang_vel_w[env_ids, 0].clone()
-
-        # Rotate -90° around Z-axis so robot faces +X (instead of +Y from motion data).
-        # Rotation quaternion: -90° yaw = [cos(-45°), 0, 0, sin(-45°)]
-        yaw_neg90_quat = torch.tensor([0.7071, 0.0, 0.0, -0.7071], device=self.device, dtype=torch.float32)
-        yaw_neg90_quat = yaw_neg90_quat.unsqueeze(0).expand(root_ori.shape[0], -1)
-        root_ori = quat_mul(yaw_neg90_quat, root_ori)
 
         range_list = [self.cfg.pose_range.get(k, (0.0, 0.0)) for k in ["x", "y", "z", "roll", "pitch", "yaw"]]
         ranges = torch.tensor(range_list, device=self.device)

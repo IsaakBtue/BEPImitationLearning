@@ -21,7 +21,7 @@ ANKLE_L_IDX, HIP_L_IDX = 15, 11  # Left_Ankle_Pitch, Left_Hip_Pitch
 ANKLE_R_IDX, HIP_R_IDX = 21, 17  # Right_Ankle_Pitch, Right_Hip_Pitch
 
 _HERE = Path(__file__).parent
-_PKL_DIR = _HERE / "data_pkl"
+_PKL_DIR = _HERE.parent.parent.parent  # Imitationlearningbooster/ root
 _XML = _HERE.parent / "assets" / "booster_t1" / "T1_serial_clean.xml"
 _OUT = _HERE / "data"
 _OUT.mkdir(exist_ok=True)
@@ -46,23 +46,7 @@ def resample(arr, src_fps, tgt_frames):
 
 
 def rotate_z90(root_pos, root_rot_wxyz):
-    """Rotate entire trajectory +90° around Z (T1 faces +Y, original data faces +X)."""
-    c, s = 0.0, 1.0  # cos(90°), sin(90°)
-    xy = root_pos[:, :2].copy()
-    root_pos[:, 0] = c * xy[:, 0] - s * xy[:, 1]
-    root_pos[:, 1] = s * xy[:, 0] + c * xy[:, 1]
-    # Rotate orientation: multiply by R_z(90°) quaternion [cos45, 0, 0, sin45]
-    q_rot = np.array([np.cos(np.pi / 4), 0, 0, np.sin(np.pi / 4)])  # wxyz
-    for i in range(len(root_rot_wxyz)):
-        # Hamilton product: q_rot * q_orig
-        w0, x0, y0, z0 = q_rot
-        w1, x1, y1, z1 = root_rot_wxyz[i]
-        root_rot_wxyz[i] = [
-            w0*w1 - x0*x1 - y0*y1 - z0*z1,
-            w0*x1 + x0*w1 + y0*z1 - z0*y1,
-            w0*y1 - x0*z1 + y0*w1 + z0*x1,
-            w0*z1 + x0*y1 - y0*x1 + z0*w1,
-        ]
+    """No-op: PKL data already faces +X (yaw ≈ -10°). No rotation needed."""
     return root_pos, root_rot_wxyz
 
 
@@ -105,7 +89,7 @@ def convert_one(name: str):
     # Root height correction
     root_pos[:, 2] += ROOT_HEIGHT_OFFSET
 
-    # +90° yaw rotation
+    # Rotate -90° around Z: PKL faces +Y → NPZ faces +X.
     root_pos, root_rot_wxyz = rotate_z90(root_pos, root_rot_wxyz)
 
     # Clamp knee bending
