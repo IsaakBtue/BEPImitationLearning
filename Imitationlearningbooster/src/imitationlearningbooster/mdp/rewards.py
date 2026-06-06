@@ -212,25 +212,16 @@ def stopball(
     ball_name: str = "ball",
     delta_vel_threshold: float = 1.0,
 ) -> torch.Tensor:
-<<<<<<< Updated upstream
-    """One-time reward when ball decelerates ≥1 m/s from its initial Y velocity.
+    """One-time reward when ball decelerates >= 1 m/s from its initial X velocity.
 
     Mirrors the original Humanoid-Goalkeeper _reward_stopball logic but with a
     lower threshold (1.0 vs G1's 2.0) because MuJoCo's soft contact solver
     produces smaller velocity impulses than PhysX. At 2.0 m/s, slow-ball saves
-    (ball approaching at -1 m/s, deflected to +0.5 m/s → Δvy = 1.5 m/s) never
-    fire this 100-weight reward, starving the primary training signal.
-=======
-    """One-time reward when ball decelerates >= 2 m/s from its initial X velocity.
-
-    Mirrors the original Humanoid-Goalkeeper _reward_stopball exactly:
-    compares current ball velocity against the velocity stored at episode
-    reset (not per-step delta), so the threshold is robust to air resistance.
-    A per-env flag prevents re-firing after the first deceleration event.
+    (ball approaching at -1 m/s, deflected to +0.5 m/s) never fire this
+    100-weight reward, starving the primary training signal.
 
     Ball approaches from +X so initial vx < 0; deceleration/reversal means
-    current_vx - initial_vx > delta_vel_threshold (2.0 m/s, matching G1).
->>>>>>> Stashed changes
+    current_vx - initial_vx > delta_vel_threshold (1.0 m/s, tuned for MuJoCo).
     """
     ball: Entity = env.scene[ball_name]
     ball_x_vel = ball.data.root_link_lin_vel_w[:, 0]
