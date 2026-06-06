@@ -125,7 +125,9 @@ class MultiMotionCommand(MotionCommand):
         # quat is shape (N, num_bodies, 4), need to rotate each body separately
         rotated = quat.clone()
         for i in range(quat.shape[1]):
-            rotated[:, i, :] = quat_mul(yaw_neg90_quat, quat[:, i, :])
+            # Expand yaw_neg90_quat to match batch size
+            yaw_expanded = yaw_neg90_quat.unsqueeze(0).expand(quat.shape[0], -1)
+            rotated[:, i, :] = quat_mul(yaw_expanded, quat[:, i, :])
         return rotated
 
     @property
