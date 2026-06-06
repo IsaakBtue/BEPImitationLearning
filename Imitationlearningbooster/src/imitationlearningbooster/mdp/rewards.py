@@ -141,7 +141,7 @@ def eereach(
 
     # --- Jump-region-aware vel_sigma (mirrors G1 _reward_eereach) ---
     # G1: upper-body world-Y lateral velocity for side-saves, world-Z for jumps.
-    # Port: world-X lateral velocity (90° rotation applied), world-Z unchanged.
+    # T1 faces +X (same as G1): world Y is the lateral axis, world Z is up.
     difficulty = float(getattr(env, "_ball_difficulty", 0.0))
     curriculumupdate = difficulty * 2.0                                # 0→2
     jump_scale = 3.0 + 3.0 * curriculumupdate                         # 3→9 across stages
@@ -169,13 +169,15 @@ def eereach(
     # Base sigmoid: 1 at dist=0, 0 far away.
     rew = 1.0 - 1.0 / (1.0 + torch.exp(-sigma * (min_dist - reach_th)))
 
-    # Side-saves: reward lateral torso X-velocity toward the target side.
-    # Jumps: reward upward (Z) torso velocity for the leap.
-    lateral_vel_x = torso_vel_w[:, 0]
+    # Side-saves: reward lateral torso Y-velocity toward the ball target side.
+    # Mirrors G1 which rewards rigid_body_states[..., 8] = world-Y velocity.
+    # lefthand (types 0/2/4): ball end at -Y → reward negative Y velocity.
+    # righthand (types 1/3/5): ball end at +Y → reward positive Y velocity.
+    lateral_vel_y = torso_vel_w[:, 1]
     base_vel_sigma = torch.where(
         is_left,
-        1.0 + 3.0 * torch.clamp(-lateral_vel_x, 0.0, 3.0),   # left: reward -X motion
-        1.0 + 3.0 * torch.clamp( lateral_vel_x, 0.0, 3.0),   # right: reward +X motion
+        1.0 + 3.0 * torch.clamp(-lateral_vel_y, 0.0, 3.0),   # left (ball -Y): reward -Y motion
+        1.0 + 3.0 * torch.clamp( lateral_vel_y, 0.0, 3.0),   # right (ball +Y): reward +Y motion
     )
     jump_vel_sigma = 1.0 + jump_scale * torch.clamp(torso_vel_w[:, 2], 0.0, 3.0)
 
@@ -265,8 +267,8 @@ def noretreat(env: ManagerBasedRlEnv) -> torch.Tensor:
     """Penalty for retreating in the robot's forward direction away from the ball.
 
     Uses body-frame forward (X) so the penalty stays semantically correct when
-    the robot yaws during a dive. World-Y and body-X agree when the robot faces
-    +Y (spawn orientation) but diverge at 30-45° yaw mid-save.
+    the robot yaws during a dive. World-X and body-X agree when the robot faces
+    +X (spawn orientation) but diverge at 30-45° yaw mid-save.
     """
     robot: Entity = env.scene["robot"]
     fwd_vel = robot.data.root_link_lin_vel_b[:, 0]
