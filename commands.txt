@@ -18,24 +18,10 @@ cd /home/robocup/IsaakB/BEPImitationLearning/Imitationlearningbooster && env -u 
 # Full GPU training (6144 envs) — SERVER ONLY
 cd /home/robocup/IsaakB/BEPImitationLearning/Imitationlearningbooster && env -u PYTHONPATH .venv/bin/train goalkeeper_booster_t1_amp
 
-# Play (no overlay) — LOCAL:
-cd /home/isaak/BEPImitationlearning/Imitationlearningbooster && env -u PYTHONPATH .venv/bin/play goalkeeper_booster_t1_amp --checkpoint-file logs/rsl_rl/goalkeeper_amp_booster_t1/2026-06-05_17-33-14/model_0.pt
+# Play with ghost overlay — LOCAL (policy from local checkpoint):
+# Absolute path required so it matches motion_files list and all 6 motions cycle
+cd /home/isaak/BEPImitationlearning/Imitationlearningbooster && env -u PYTHONPATH .venv/bin/play goalkeeper_booster_t1_amp_withoverlay --checkpoint-file logs/rsl_rl/goalkeeper_amp_booster_t1/2026-06-05_11-25-46/model_0.pt --motion-file /home/isaak/BEPImitationlearning/Imitationlearningbooster/src/imitationlearningbooster/motions/data/lefthand_t1.npz
 
-# Play with ghost overlay — LOCAL:
-cd /home/isaak/BEPImitationlearning/Imitationlearningbooster && env -u PYTHONPATH .venv/bin/play goalkeeper_booster_t1_amp_withoverlay --checkpoint-file logs/rsl_rl/goalkeeper_amp_booster_t1/2026-06-05_17-33-14/model_0.pt
-
-# Visualise all 6 reference motions (no policy) — LOCAL:
-cd /home/isaak/BEPImitationlearning/Imitationlearningbooster && env -u PYTHONPATH .venv/bin/play goalkeeper_booster_t1_amp_withoverlay --agent zero --no-terminations True
-
-# Visualise a single motion — LOCAL:
-cd /home/isaak/BEPImitationlearning/Imitationlearningbooster && env -u PYTHONPATH .venv/bin/play goalkeeper_booster_t1_amp_withoverlay --agent zero --no-terminations True --motion-file src/imitationlearningbooster/motions/data/lefthand_t1.npz
-
-cd /home/isaak/BEPImitationlearning/Imitationlearningbooster && env -u PYTHONPATH .venv/bin/play goalkeeper_booster_t1_amp_withoverlay --agent zero --no-terminations True --motion-file src/imitationlearningbooster/motions/data/righthand_t1.npz
-
-cd /home/isaak/BEPImitationlearning/Imitationlearningbooster && env -u PYTHONPATH .venv/bin/play goalkeeper_booster_t1_amp_withoverlay --agent zero --no-terminations True --motion-file src/imitationlearningbooster/motions/data/leftjump_t1.npz
-
-cd /home/isaak/BEPImitationlearning/Imitationlearningbooster && env -u PYTHONPATH .venv/bin/play goalkeeper_booster_t1_amp_withoverlay --agent zero --no-terminations True --motion-file src/imitationlearningbooster/motions/data/rightjump_t1.npz
-
-cd /home/isaak/BEPImitationlearning/Imitationlearningbooster && env -u PYTHONPATH .venv/bin/play goalkeeper_booster_t1_amp_withoverlay --agent zero --no-terminations True --motion-file src/imitationlearningbooster/motions/data/leftstep_t1.npz
-
-cd /home/isaak/BEPImitationlearning/Imitationlearningbooster && env -u PYTHONPATH .venv/bin/play goalkeeper_booster_t1_amp_withoverlay --agent zero --no-terminations True --motion-file src/imitationlearningbooster/motions/data/rightstep_t1.npz
+# Play with ghost overlay — LOCAL (no policy, zero agent, cycles all 6 motions):
+# Absolute path required so it matches motion_files list and all 6 motions cycle
+cd /home/isaak/BEPImitationlearning/Imitationlearningbooster && env -u PYTHONPATH .venv/bin/play goalkeeper_booster_t1_amp_withoverlay --agent zero --motion-file /home/isaak/BEPImitationlearning/Imitationlearningbooster/src/imitationlearningbooster/motions/data/lefthand_t1.npz

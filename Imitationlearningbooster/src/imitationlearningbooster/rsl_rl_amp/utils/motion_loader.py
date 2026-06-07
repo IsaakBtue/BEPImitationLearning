@@ -19,7 +19,7 @@ class GoalkeeperMotionLoader:
     def __init__(self, npz_path: str, device: str = "cpu"):
         self.device = device
         d = np.load(npz_path, allow_pickle=True)
-        # joint_pos: (150, 23) float32
+        # joint_pos: (T, 23) float32 — T varies per motion (natural duration at 50 Hz)
         jp = torch.tensor(d["joint_pos"], dtype=torch.float32, device=device)
         self.frames: torch.Tensor = jp          # (T, 23)
         self.T = jp.shape[0]
