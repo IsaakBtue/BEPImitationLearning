@@ -1,8 +1,12 @@
 """Convert all 6 Booster T1 pkl motion files to npz for AMP training.
 
-Source pkl files: src/imitationlearningbooster/motions/data_pkl/{name}_booster_t1.pkl
+Source pkl files: Imitationlearningbooster/{name}_booster_t1.pkl
 Output npz files: src/imitationlearningbooster/motions/data/{name}_t1.npz
-Each npz has: joint_pos (150,23) float32 and body kinematics (150, N_bodies, ...) float32.
+Each npz has: joint_pos (T,23) float32 and body kinematics (T, N_bodies, ...) float32.
+
+Frame count is not fixed: each motion is resampled to TARGET_FPS at its natural
+duration (src_frames / src_fps * TARGET_FPS), preserving original playback speed.
+The motion loader samples random frames so variable T is fine.
 """
 import os
 import pickle
@@ -12,8 +16,6 @@ from scipy.spatial.transform import Rotation, Slerp
 from pathlib import Path
 
 TARGET_FPS = 50
-TARGET_DURATION = 3.0
-TARGET_FRAMES = int(TARGET_FPS * TARGET_DURATION)  # 150
 ROOT_HEIGHT_OFFSET = 0.080
 MIN_KNEE_BEND = 0.5
 KNEE_INDICES = [14, 20]          # Left_Knee_Pitch, Right_Knee_Pitch
@@ -99,18 +101,22 @@ def convert_one(name: str):
     root_rot = np.array(data["root_rot"], dtype=np.float64)   # (T, 4) XYZW
     dof_pos = np.array(data["dof_pos"], dtype=np.float64)     # (T, 23)
 
+    # Preserve natural playback speed: resample to TARGET_FPS at the original duration.
+    target_frames = int(round(len(root_pos) * TARGET_FPS / src_fps))
+    print(f"  {len(root_pos)} frames @ {src_fps} fps → {target_frames} frames @ {TARGET_FPS} fps ({len(root_pos)/src_fps:.2f}s)")
+
     # Convert root_rot from XYZW → WXYZ
     root_rot_wxyz = root_rot[:, [3, 0, 1, 2]].copy()
 
-    # Resample to TARGET_FRAMES
-    root_pos = resample(root_pos, src_fps, TARGET_FRAMES)
+    # Resample to target_frames
+    root_pos = resample(root_pos, src_fps, target_frames)
     root_rot_wxyz = np.stack([
-        slerp_quat(root_rot_wxyz[int(i * (len(root_rot_wxyz) - 1) / (TARGET_FRAMES - 1))],
-                   root_rot_wxyz[min(int(i * (len(root_rot_wxyz) - 1) / (TARGET_FRAMES - 1)) + 1, len(root_rot_wxyz) - 1)],
-                   (i * (len(root_rot_wxyz) - 1) / (TARGET_FRAMES - 1)) % 1.0)
-        for i in range(TARGET_FRAMES)
+        slerp_quat(root_rot_wxyz[int(i * (len(root_rot_wxyz) - 1) / (target_frames - 1))],
+                   root_rot_wxyz[min(int(i * (len(root_rot_wxyz) - 1) / (target_frames - 1)) + 1, len(root_rot_wxyz) - 1)],
+                   (i * (len(root_rot_wxyz) - 1) / (target_frames - 1)) % 1.0)
+        for i in range(target_frames)
     ])
-    dof_pos = resample(dof_pos, src_fps, TARGET_FRAMES)
+    dof_pos = resample(dof_pos, src_fps, target_frames)
 
     # Root height correction
     root_pos[:, 2] += ROOT_HEIGHT_OFFSET
@@ -133,12 +139,12 @@ def convert_one(name: str):
     joint_names = np.array([model.joint(i).name for i in range(model.njnt)
                             if model.joint(i).type != mujoco.mjtJoint.mjJNT_FREE])
     n_bodies = model.nbody - 1  # exclude worldbody (index 0)
-    body_pos_w = np.zeros((TARGET_FRAMES, n_bodies, 3), dtype=np.float32)
-    body_quat_w = np.zeros((TARGET_FRAMES, n_bodies, 4), dtype=np.float32)  # wxyz
-    body_lin_vel_w = np.zeros((TARGET_FRAMES, n_bodies, 3), dtype=np.float32)
-    body_ang_vel_w = np.zeros((TARGET_FRAMES, n_bodies, 3), dtype=np.float32)
+    body_pos_w = np.zeros((target_frames, n_bodies, 3), dtype=np.float32)
+    body_quat_w = np.zeros((target_frames, n_bodies, 4), dtype=np.float32)  # wxyz
+    body_lin_vel_w = np.zeros((target_frames, n_bodies, 3), dtype=np.float32)
+    body_ang_vel_w = np.zeros((target_frames, n_bodies, 3), dtype=np.float32)
 
-    for t in range(TARGET_FRAMES):
+    for t in range(target_frames):
         # freejoint: qpos[0:3]=pos, qpos[3:7]=wxyz
         data_mj.qpos[:3] = root_pos[t]
         data_mj.qpos[3:7] = root_rot_wxyz[t]
@@ -152,7 +158,7 @@ def convert_one(name: str):
         body_quat_w[t] = data_mj.xquat[1:].astype(np.float32)  # exclude worldbody at index 0
 
     # Finite-diff velocities for bodies
-    for t in range(1, TARGET_FRAMES):
+    for t in range(1, target_frames):
         dt = 1.0 / TARGET_FPS
         body_lin_vel_w[t] = (body_pos_w[t] - body_pos_w[t-1]) / dt
     body_lin_vel_w[0] = body_lin_vel_w[1]
