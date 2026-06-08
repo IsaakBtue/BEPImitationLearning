@@ -118,7 +118,23 @@ def _quat_ang_vel(quats: np.ndarray, dt: float) -> np.ndarray:
     return ang_vel
 
 
-def convert_one(pkl_path: Path, output_path: Path, output_fps: int = 50) -> None:
+def convert_one(
+    pkl_path: Path,
+    output_path: Path,
+    output_fps: int = 50,
+    speed_factor: float = 2.0,
+) -> None:
+    """Convert one PKL file.
+
+    speed_factor compresses the time axis so the motion plays speed_factor× faster
+    in simulation.  All source PKL files from this project are captured at 30 fps and
+    show slow walking (feet ≤ 9 cm, trunk lateral velocity ≤ 0.6 m/s).  Compressing
+    by 2× doubles all velocities and halves the motion duration, which:
+      - gives the AMP discriminator a reference that demands more dynamic leg motion;
+      - keeps the compressed clip (1–2 s) well within the 4 s training episode.
+    Any future PKL files recorded from the same motion-capture source will be sped up
+    automatically without additional flags.
+    """
     with open(pkl_path, "rb") as f:
         data = pickle.load(f)
 
@@ -128,16 +144,22 @@ def convert_one(pkl_path: Path, output_path: Path, output_fps: int = 50) -> None
     dof_pos = np.array(data["dof_pos"], dtype=np.float32)          # (T, 23)
     T_in = root_pos.shape[0]
 
-    # Resample to output_fps via linear interpolation
+    # Resample to output_fps, compressing the time axis by speed_factor.
+    # t_out_compressed: the playback timeline at output_fps.
+    # t_out_original:   the corresponding lookup positions in the original recording.
+    # Velocities computed later via finite-diff on compressed positions will be
+    # speed_factor× larger than the original, matching the faster playback.
     duration = (T_in - 1) / input_fps
-    t_out = np.arange(0, duration, 1.0 / output_fps)
+    compressed_duration = duration / speed_factor
+    t_out = np.arange(0, compressed_duration, 1.0 / output_fps)
     T_out = len(t_out)
     t_in = np.linspace(0, duration, T_in)
+    t_out_orig = t_out * speed_factor   # map compressed time → original time for interp
 
     def resample(arr: np.ndarray) -> np.ndarray:
         out = np.zeros((T_out, arr.shape[1]), dtype=np.float32)
         for j in range(arr.shape[1]):
-            out[:, j] = np.interp(t_out, t_in, arr[:, j])
+            out[:, j] = np.interp(t_out_orig, t_in, arr[:, j])
         return out
 
     root_pos_r = resample(root_pos)
@@ -236,16 +258,23 @@ def main(
     input_dir: str = str(_HERE.parent / "motions" / "raw"),
     output_dir: str = str(_HERE.parent / "motions" / "data"),
     output_fps: int = 50,
+    speed_factor: float = 2.0,
 ) -> None:
-    """Convert all *.pkl in input_dir to NPZ files in output_dir."""
+    """Convert all *.pkl in input_dir to NPZ files in output_dir.
+
+    speed_factor: time-compression applied to every clip (default 2.0).
+    Source PKL files from this project are 30 fps slow-walking recordings.
+    2× compression doubles joint velocities, matching the faster movements
+    needed for goalkeeper saves.  Pass --speed-factor 1.0 to disable.
+    """
     in_dir = Path(input_dir)
     out_dir = Path(output_dir)
     pkl_files = sorted(in_dir.glob("*.pkl"))
     if not pkl_files:
         raise FileNotFoundError(f"No .pkl files in {in_dir}")
-    print(f"Converting {len(pkl_files)} files @ {output_fps} fps → {out_dir}")
+    print(f"Converting {len(pkl_files)} files @ {output_fps} fps  speed_factor={speed_factor}× → {out_dir}")
     for pkl in pkl_files:
-        convert_one(pkl, out_dir / (pkl.stem + ".npz"), output_fps)
+        convert_one(pkl, out_dir / (pkl.stem + ".npz"), output_fps, speed_factor)
     print("Done.")
 
 

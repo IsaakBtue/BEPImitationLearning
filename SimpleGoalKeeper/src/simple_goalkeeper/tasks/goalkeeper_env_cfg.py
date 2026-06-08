@@ -251,7 +251,12 @@ def goalkeeper_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
     # the policy from learning to react to the ball during early training.
     cfg.events.pop("push_robot", None)
 
-    # Restrict base reset yaw to ±15° so robot roughly faces +X (ball spawn direction).
+    # Goalkeeper spawn: robot starts at/near the goal line, centered, facing +X.
+    # The velocity-base default (±0.5 m in X and Y) is for locomotion generalization
+    # and is wrong here — it puts the robot up to 0.5 m off-center before the ball
+    # even spawns, immediately triggering stayonline penalties.
+    cfg.events["reset_base"].params["pose_range"]["x"] = (0.0, 0.0)
+    cfg.events["reset_base"].params["pose_range"]["y"] = (0.0, 0.0)
     cfg.events["reset_base"].params["pose_range"]["yaw"] = (-0.15, 0.15)
 
     # Ball reset: spawn in robot local +X frame with parabolic arc to foot level.

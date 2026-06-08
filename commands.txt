@@ -1,12 +1,9 @@
-# === SimpleGoalKeeper — Reward redesign applied. Run fresh training. ===
+# === SimpleGoalKeeper — spawn fix + speed-up applied. Run fresh training. ===
 
-# Train (local) — use run_name to distinguish from old phase1 run:
+# Train:
 cd /home/isaak/BEPImitationlearning/SimpleGoalKeeper
-uv run sgk_train Mjlab-BeyondAMP-Goalkeeper-T1 --num-envs 4096 --run-name phase1_v2
+uv run sgk_train Mjlab-BeyondAMP-Goalkeeper-T1 --num-envs 4096 --run-name phase1_v3
 
-# Or on the server (use the server NPZ path — already correct in amp_cfg):
-# uv run sgk_train Mjlab-BeyondAMP-Goalkeeper-T1 --num-envs 4096 --run-name phase1_v2
-
-# Sanity check (zero policy, 1 env — watch ball spawn and visibility):
+# Re-convert motions (only needed when new PKL files arrive):
 cd /home/isaak/BEPImitationlearning/SimpleGoalKeeper
-uv run sgk_play Mjlab-BeyondAMP-Goalkeeper-T1 --agent zero --num-envs 1
+uv run sgk_convert --input-dir Motions --output-dir src/simple_goalkeeper/motions/data

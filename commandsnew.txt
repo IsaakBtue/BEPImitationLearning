@@ -15,7 +15,7 @@ cd /home/isaak/BEPImitationlearning/SimpleGoalKeeper && uv run sgk_play Mjlab-Be
 cd /home/isaak/BEPImitationlearning/SimpleGoalKeeper && uv run sgk_play Mjlab-BeyondAMP-Goalkeeper-T1 --checkpoint-file logs/rsl_rl/simple_goalkeeper/2026-06-08_16-20-26_phase1/model_0.pt
 
 # Play trained checkpoint WITH ghost overlay (default: 1-1_booster_t1.npz):
-cd /home/isaak/BEPImitationlearning/SimpleGoalKeeper && uv run sgk_play Mjlab-BeyondAMP-Goalkeeper-T1-WithOverlay --checkpoint-file logs/rsl_rl/simple_goalkeeper/2026-06-08_16-20-26_phase1/model_0.pt
+cd /home/isaak/BEPImitationlearning/SimpleGoalKeeper && uv run sgk_play Mjlab-BeyondAMP-Goalkeeper-T1-WithOverlay --checkpoint-file logs/rsl_rl/simple_goalkeeper/2026-06-08_21-30-54_phase1/model_500.pt
 
 # Visualise reference motions only (zero policy, ghost overlay, no terminations):
 cd /home/isaak/BEPImitationlearning/SimpleGoalKeeper && uv run sgk_play Mjlab-BeyondAMP-Goalkeeper-T1-WithOverlay --agent zero --no-terminations True
