@@ -9,6 +9,7 @@ from typing import TYPE_CHECKING
 import numpy as np
 from torch.utils.tensorboard import SummaryWriter
 import torch
+import wandb
 
 from rsl_rl_amp.algorithms import AMPPPO, PPO, AMPPPOWeighted
 from rsl_rl_amp.modules import ActorCritic, ActorCriticRecurrent
@@ -84,6 +85,21 @@ class AMPOnPolicyRunner:
         # initialize writer
         if self.log_dir is not None and self.writer is None:
             self.writer = SummaryWriter(log_dir=self.log_dir, flush_secs=10)
+            if self.cfg.get("use_wandb", False):
+                wandb_config = {
+                    "algorithm": self.alg_cfg,
+                    "policy": self.policy_cfg,
+                    "amp_data": self.amp_data_cfg,
+                    "amp_reward_coef": self.cfg.get("amp_reward_coef"),
+                    "amp_task_reward_lerp": self.cfg.get("amp_task_reward_lerp"),
+                }
+                wandb.init(
+                    project=self.cfg.get("wandb_project", "SimpleGoalKeeper"),
+                    entity=self.cfg.get("wandb_entity"),
+                    name=f"{self.cfg.get('experiment_name', 'exp')}_{self.cfg.get('run_name', '')}",
+                    config=wandb_config,
+                    dir=self.log_dir,
+                )
         if init_at_random_ep_len:
             self.env.episode_length_buf = torch.randint_like(self.env.episode_length_buf, high=int(self.env.max_episode_length))
         obs = self.env.get_observations()
@@ -173,6 +189,7 @@ class AMPOnPolicyRunner:
         self.tot_timesteps += self.num_steps_per_env * self.env.num_envs
         self.tot_time += locs['collection_time'] + locs['learn_time']
         iteration_time = locs['collection_time'] + locs['learn_time']
+        use_wandb = self.cfg.get("use_wandb", False) and wandb.run is not None
 
         ep_string = f''
         if locs['ep_infos']:
@@ -194,6 +211,8 @@ class AMPOnPolicyRunner:
                 if infotensor.numel() > 0:
                     value = torch.mean(infotensor)
                     self.writer.add_scalar('Episode/' + key, value, locs['it'])
+                    if use_wandb:
+                        wandb.log({'Episode/' + key: value}, step=locs['it'])
                     ep_string += f"""{f'Mean episode {key}:':>{pad}} {value:.4f}\n"""
         mean_std = self.alg.actor_critic.std.mean()
         fps = int(self.num_steps_per_env * self.env.num_envs / (locs['collection_time'] + locs['learn_time']))
@@ -207,6 +226,20 @@ class AMPOnPolicyRunner:
         self.writer.add_scalar('Perf/total_fps', fps, locs['it'])
         self.writer.add_scalar('Perf/collection time', locs['collection_time'], locs['it'])
         self.writer.add_scalar('Perf/learning_time', locs['learn_time'], locs['it'])
+
+        if use_wandb:
+            wandb.log({
+                'Loss/value_function': locs['mean_value_loss'],
+                'Loss/surrogate': locs['mean_surrogate_loss'],
+                'Loss/AMP': locs['mean_amp_loss'],
+                'Loss/AMP_grad': locs['mean_grad_pen_loss'],
+                'Loss/learning_rate': self.alg.learning_rate,
+                'Policy/mean_noise_std': mean_std.item(),
+                'Perf/total_fps': fps,
+                'Perf/collection time': locs['collection_time'],
+                'Perf/learning_time': locs['learn_time'],
+            }, step=locs['it'])
+
         if len(locs['rewbuffer']) > 0:
             self.writer.add_scalar('Train/mean_reward', statistics.mean(locs['rewbuffer']), locs['it'])
             self.writer.add_scalar('Train/mean_episode_length', statistics.mean(locs['lenbuffer']), locs['it'])
@@ -216,6 +249,14 @@ class AMPOnPolicyRunner:
             self.writer.add_scalar('Train/mean_discri_logits', statistics.mean(locs['discribuffer']), locs['it'])
             self.writer.add_scalar('Train/mean_amp_reward/time', statistics.mean(locs['ampbuffer']), self.tot_time)
             self.writer.add_scalar('Train/mean_discri_logits/time', statistics.mean(locs['discribuffer']), self.tot_time)
+
+            if use_wandb:
+                wandb.log({
+                    'Train/mean_reward': statistics.mean(locs['rewbuffer']),
+                    'Train/mean_episode_length': statistics.mean(locs['lenbuffer']),
+                    'Train/mean_amp_reward': statistics.mean(locs['ampbuffer']),
+                    'Train/mean_discri_logits': statistics.mean(locs['discribuffer']),
+                }, step=locs['it'])
 
         str = f" \033[1m Learning iteration {locs['it']}/{self.current_learning_iteration + locs['num_learning_iterations']} \033[0m "
 

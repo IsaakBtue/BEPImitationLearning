@@ -35,3 +35,6 @@ class AMPRunnerCfg(RslRlOnPolicyRunnerCfg):
   # 1.0 → only task reward, 0.0 → only AMP reward.
   amp_task_reward_lerp: float = 0.9
   amp_min_normalized_std: float = 0.0
+  use_wandb: bool = True
+  wandb_project: str = "SimpleGoalKeeper"
+  wandb_entity: str = "i-p-b-bouwmeester"
