@@ -37,4 +37,4 @@ class AMPRunnerCfg(RslRlOnPolicyRunnerCfg):
   amp_min_normalized_std: float = 0.0
   use_wandb: bool = True
   wandb_project: str = "SimpleGoalKeeper"
-  wandb_entity: str = "i-p-b-bouwmeester"
+  wandb_entity: str = "i-p-b-bouwmeester-eindhoven-university-of-technology"
