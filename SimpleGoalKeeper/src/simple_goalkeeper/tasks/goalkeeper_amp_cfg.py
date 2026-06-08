@@ -41,6 +41,9 @@ def goalkeeper_amp_runner_cfg() -> AMPRunnerCfg:
         experiment_name="simple_goalkeeper",
         run_name="phase1",
         empirical_normalization=True,
+        use_wandb=True,
+        wandb_project="SimpleGoalKeeper",
+        wandb_entity="i-p-b-bouwmeester",
         policy=RslRlPpoActorCriticCfg(
             init_noise_std=1.0,
             actor_hidden_dims=[512, 256, 128],
