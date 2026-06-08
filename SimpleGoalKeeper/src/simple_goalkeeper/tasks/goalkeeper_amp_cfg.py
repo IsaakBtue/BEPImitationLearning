@@ -37,7 +37,7 @@ def goalkeeper_amp_runner_cfg() -> AMPRunnerCfg:
     return AMPRunnerCfg(
         num_steps_per_env=24,
         max_iterations=50_000,
-        save_interval=100,
+        save_interval=500,
         experiment_name="simple_goalkeeper",
         run_name="phase1",
         empirical_normalization=True,

@@ -59,9 +59,9 @@ def reset_ball_local_frame(
     arrive_height_range: tuple[float, float] = (0.1, 0.4),
     speed_range: tuple[float, float] = (3.0, 7.0),
 ) -> None:
-    """Spawn ball in robot local -X frame, always approaching in +X direction.
+    """Spawn ball in front of robot, always approaching from +X direction.
 
-    Ball spawns behind the robot (local -X) and moves toward the robot (local +X).
+    Ball spawns in front of the robot (local +X) and moves toward it (local -X).
     Ball position and direction are world-orientation-independent (robot-local frame,
     using yaw-only quaternion for XY rotation). Heights are floor-absolute so the
     ball arc is unaffected by robot trunk height.
@@ -111,18 +111,18 @@ def reset_ball_local_frame(
     z_end   = floor_z + sample_uniform(*z_end_r,   (n,), env.device)
     speed_h = sample_uniform(*speed_r,  (n,), env.device)
 
-    # Ball spawn: dist backward (-X) + lateral in robot yaw frame.
-    # Ball moves toward robot in +X direction.
-    local_xy = torch.stack([-dist, lateral, torch.zeros_like(dist)], dim=-1)
+    # Ball spawn: dist forward (+X) + lateral in robot yaw frame.
+    # Ball approaches robot from +X direction (in front).
+    local_xy = torch.stack([dist, lateral, torch.zeros_like(dist)], dim=-1)
     world_xy = quat_apply(yaw_q, local_xy)
     ball_pos = torch.empty((n, 3), device=env.device)
     ball_pos[:, 0] = robot_pos_w[:, 0] + world_xy[:, 0]
     ball_pos[:, 1] = robot_pos_w[:, 1] + world_xy[:, 1]
     ball_pos[:, 2] = z_start
 
-    # Horizontal velocity: toward robot along +local_X.
+    # Horizontal velocity: toward robot along -local_X.
     local_vel_h = torch.stack(
-        [speed_h, torch.zeros_like(speed_h), torch.zeros_like(speed_h)], dim=-1
+        [-speed_h, torch.zeros_like(speed_h), torch.zeros_like(speed_h)], dim=-1
     )
     world_vel_h = quat_apply(yaw_q, local_vel_h)
 
