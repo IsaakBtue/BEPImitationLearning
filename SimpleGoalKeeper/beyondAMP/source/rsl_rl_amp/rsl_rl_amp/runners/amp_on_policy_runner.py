@@ -9,8 +9,6 @@ from typing import TYPE_CHECKING
 import numpy as np
 from torch.utils.tensorboard import SummaryWriter
 import torch
-import wandb
-
 from rsl_rl_amp.algorithms import AMPPPO, PPO, AMPPPOWeighted
 from rsl_rl_amp.modules import ActorCritic, ActorCriticRecurrent
 from rsl_rl_amp.env import VecEnv
@@ -84,27 +82,11 @@ class AMPOnPolicyRunner:
     def learn(self, num_learning_iterations, init_at_random_ep_len=False):
         # initialize writer
         if self.log_dir is not None and self.writer is None:
-            self.writer = SummaryWriter(log_dir=self.log_dir, flush_secs=10)
             if self.cfg.get("use_wandb", False):
-                run_name = os.path.basename(self.log_dir)
-                wandb.init(
-                    project=self.cfg.get("wandb_project", "SimpleGoalKeeper"),
-                    entity=self.cfg.get("wandb_entity"),
-                    name=run_name,
-                    group=self.cfg.get("experiment_name", "exp"),
-                    tags=[self.cfg.get("run_name", "")],
-                    config={
-                        "algorithm": self.alg_cfg,
-                        "policy": self.policy_cfg,
-                        "amp_reward_coef": self.cfg.get("amp_reward_coef"),
-                        "amp_task_reward_lerp": self.cfg.get("amp_task_reward_lerp"),
-                        "amp_discr_hidden_dims": self.cfg.get("amp_discr_hidden_dims"),
-                        "num_steps_per_env": self.cfg.get("num_steps_per_env"),
-                        "max_iterations": self.cfg.get("max_iterations"),
-                    },
-                    sync_tensorboard=True,
-                    dir=os.path.dirname(self.log_dir),
-                )
+                from rsl_rl_amp.utils.wandb_utils import WandbSummaryWriter
+                self.writer = WandbSummaryWriter(log_dir=self.log_dir, flush_secs=10, cfg=self.cfg)
+            else:
+                self.writer = SummaryWriter(log_dir=self.log_dir, flush_secs=10)
         if init_at_random_ep_len:
             self.env.episode_length_buf = torch.randint_like(self.env.episode_length_buf, high=int(self.env.max_episode_length))
         obs = self.env.get_observations()
