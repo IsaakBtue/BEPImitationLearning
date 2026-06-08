@@ -1,0 +1,38 @@
+# ========== SimpleGoalKeeper (beyondAMP + MuJoCo-Warp) ==========
+# Run all commands from: /home/isaak/BEPImitationlearning/SimpleGoalKeeper
+
+# Convert PKL motions → NPZ (already done; re-run only if pkl_to_npz.py changes):
+cd /home/isaak/BEPImitationlearning/SimpleGoalKeeper && uv run sgk_convert
+
+# Train (4096 envs) — ball difficulty curriculum: easy centre shots at step 0,
+# ramps to full range at step 14400 (stage1) and 28800 (stage2):
+cd /home/isaak/BEPImitationlearning/SimpleGoalKeeper && uv run sgk_train Mjlab-BeyondAMP-Goalkeeper-T1 --num-envs 4096
+
+# Zero-policy (ball spawns with full range, parabolic arc to foot level, camera follows robot):
+cd /home/isaak/BEPImitationlearning/SimpleGoalKeeper && uv run sgk_play Mjlab-BeyondAMP-Goalkeeper-T1 --agent zero --num-envs 1
+
+# Play trained checkpoint (no overlay):
+cd /home/isaak/BEPImitationlearning/SimpleGoalKeeper && uv run sgk_play Mjlab-BeyondAMP-Goalkeeper-T1 --checkpoint-file logs/rsl_rl/simple_goalkeeper/2026-06-08_16-20-26_phase1/model_0.pt
+
+# Play trained checkpoint WITH ghost overlay (default: 1-1_booster_t1.npz):
+cd /home/isaak/BEPImitationlearning/SimpleGoalKeeper && uv run sgk_play Mjlab-BeyondAMP-Goalkeeper-T1-WithOverlay --checkpoint-file logs/rsl_rl/simple_goalkeeper/2026-06-08_16-20-26_phase1/model_0.pt
+
+# Visualise reference motions only (zero policy, ghost overlay, no terminations):
+cd /home/isaak/BEPImitationlearning/SimpleGoalKeeper && uv run sgk_play Mjlab-BeyondAMP-Goalkeeper-T1-WithOverlay --agent zero --no-terminations True
+
+# Play with overlay + specific motion file:
+cd /home/isaak/BEPImitationlearning/SimpleGoalKeeper && uv run sgk_play Mjlab-BeyondAMP-Goalkeeper-T1-WithOverlay --checkpoint-file logs/rsl_rl/simple_goalkeeper/2026-06-08_16-20-26_phase1/model_0.pt --motion-file src/simple_goalkeeper/motions/data/1-1_booster_t1.npz
+
+cd /home/isaak/BEPImitationlearning/SimpleGoalKeeper && uv run sgk_play Mjlab-BeyondAMP-Goalkeeper-T1-WithOverlay --checkpoint-file logs/rsl_rl/simple_goalkeeper/2026-06-08_16-20-26_phase1/model_0.pt --motion-file src/simple_goalkeeper/motions/data/2-1_booster_t1.npz
+
+cd /home/isaak/BEPImitationlearning/SimpleGoalKeeper && uv run sgk_play Mjlab-BeyondAMP-Goalkeeper-T1-WithOverlay --checkpoint-file logs/rsl_rl/simple_goalkeeper/2026-06-08_16-20-26_phase1/model_0.pt --motion-file src/simple_goalkeeper/motions/data/3-1_booster_t1.npz
+
+cd /home/isaak/BEPImitationlearning/SimpleGoalKeeper && uv run sgk_play Mjlab-BeyondAMP-Goalkeeper-T1-WithOverlay --checkpoint-file logs/rsl_rl/simple_goalkeeper/2026-06-08_16-20-26_phase1/model_0.pt --motion-file src/simple_goalkeeper/motions/data/4-1_booster_t1.npz
+
+cd /home/isaak/BEPImitationlearning/SimpleGoalKeeper && uv run sgk_play Mjlab-BeyondAMP-Goalkeeper-T1-WithOverlay --checkpoint-file logs/rsl_rl/simple_goalkeeper/2026-06-08_16-20-26_phase1/model_0.pt --motion-file src/simple_goalkeeper/motions/data/5-1_booster_t1.npz
+
+cd /home/isaak/BEPImitationlearning/SimpleGoalKeeper && uv run sgk_play Mjlab-BeyondAMP-Goalkeeper-T1-WithOverlay --checkpoint-file logs/rsl_rl/simple_goalkeeper/2026-06-08_16-20-26_phase1/model_0.pt --motion-file src/simple_goalkeeper/motions/data/6-1_booster_t1.npz
+
+cd /home/isaak/BEPImitationlearning/SimpleGoalKeeper && uv run sgk_play Mjlab-BeyondAMP-Goalkeeper-T1-WithOverlay --checkpoint-file logs/rsl_rl/simple_goalkeeper/2026-06-08_16-20-26_phase1/model_0.pt --motion-file src/simple_goalkeeper/motions/data/7-1_booster_t1.npz
+
+cd /home/isaak/BEPImitationlearning/SimpleGoalKeeper && uv run sgk_play Mjlab-BeyondAMP-Goalkeeper-T1-WithOverlay --checkpoint-file logs/rsl_rl/simple_goalkeeper/2026-06-08_16-20-26_phase1/model_0.pt --motion-file src/simple_goalkeeper/motions/data/8-1_booster_t1.npz

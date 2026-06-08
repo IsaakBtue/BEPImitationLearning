@@ -1,0 +1,75 @@
+"""AMP runner configuration for the goalkeeper task."""
+from __future__ import annotations
+
+import os
+from pathlib import Path
+
+from beyondAMP.mjlab.obs_groups import AMPObsBaiscTerms
+from beyondAMP.mjlab.rsl_rl import (
+    AMPPPOAlgorithmCfg,
+    AMPRunnerCfg,
+    RslRlPpoActorCriticCfg,
+)
+from beyondAMP.motion.motion_dataset import MotionDatasetCfg
+
+_MOTIONS_DIR = Path(__file__).parents[1] / "motions" / "data"
+
+GOALKEEPER_ANCHOR_NAME: str = "Trunk"
+
+# Lower-body + waist key bodies — AMP discriminates natural leg movement,
+# ignoring arms (Phase 1 is foot-only).
+GOALKEEPER_KEY_BODY_NAMES: list[str] = [
+    "left_foot_link",
+    "right_foot_link",
+    "Shank_Left",
+    "Shank_Right",
+    "Waist",
+]
+
+
+def _motion_files() -> list[str]:
+    if not _MOTIONS_DIR.is_dir():
+        return []
+    return sorted(str(p) for p in _MOTIONS_DIR.glob("*.npz"))
+
+
+def goalkeeper_amp_runner_cfg() -> AMPRunnerCfg:
+    return AMPRunnerCfg(
+        num_steps_per_env=24,
+        max_iterations=50_000,
+        save_interval=100,
+        experiment_name="simple_goalkeeper",
+        run_name="phase1",
+        empirical_normalization=True,
+        policy=RslRlPpoActorCriticCfg(
+            init_noise_std=1.0,
+            actor_hidden_dims=[512, 256, 128],
+            critic_hidden_dims=[512, 256, 128],
+            activation="elu",
+        ),
+        algorithm=AMPPPOAlgorithmCfg(
+            class_name="AMPPPO",
+            value_loss_coef=1.0,
+            use_clipped_value_loss=True,
+            clip_param=0.2,
+            entropy_coef=0.005,
+            num_learning_epochs=5,
+            num_mini_batches=4,
+            learning_rate=1.0e-3,
+            schedule="adaptive",
+            gamma=0.99,
+            lam=0.95,
+            desired_kl=0.01,
+            max_grad_norm=1.0,
+        ),
+        amp_data=MotionDatasetCfg(
+            motion_files=_motion_files(),
+            body_names=GOALKEEPER_KEY_BODY_NAMES,
+            amp_obs_terms=AMPObsBaiscTerms,
+            anchor_name=GOALKEEPER_ANCHOR_NAME,
+        ),
+        amp_discr_hidden_dims=[512, 256, 128],
+        amp_reward_coef=0.5,
+        amp_task_reward_lerp=0.7,
+        amp_min_normalized_std=0.05,
+    )
