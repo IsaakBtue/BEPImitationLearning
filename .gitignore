@@ -47,6 +47,7 @@ runs/
 
 
 # SimpleGoalKeeper motion files (small reference data, explicitly tracked)
+!SimpleGoalKeeper/logs/
 !SimpleGoalKeeper/src/simple_goalkeeper/motions/data/*.npz
 !SimpleGoalKeeper/src/simple_goalkeeper/motions/raw/*.pkl
 
