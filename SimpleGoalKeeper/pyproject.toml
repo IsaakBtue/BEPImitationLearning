@@ -15,6 +15,7 @@ dependencies = [
     "torch",
     "tyro",
     "tqdm",
+    "wandb>=0.27.2",
 ]
 
 [tool.uv.sources]
