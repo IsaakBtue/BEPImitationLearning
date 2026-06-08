@@ -196,7 +196,7 @@ class AMPOnPolicyRunner:
                     infotensor = torch.cat((infotensor, ep_info[key].to(self.device)))
                 if infotensor.numel() > 0:
                     value = torch.mean(infotensor)
-                    self.writer.add_scalar('Episode/' + key, value, locs['it'])
+                    self.writer.add_scalar('Episode_Reward/' + key, value, locs['it'])
                     ep_string += f"""{f'Mean episode {key}:':>{pad}} {value:.4f}\n"""
         mean_std = self.alg.actor_critic.std.mean()
         fps = int(self.num_steps_per_env * self.env.num_envs / (locs['collection_time'] + locs['learn_time']))
@@ -206,7 +206,7 @@ class AMPOnPolicyRunner:
         self.writer.add_scalar('Loss/AMP', locs['mean_amp_loss'], locs['it'])
         self.writer.add_scalar('Loss/AMP_grad', locs['mean_grad_pen_loss'], locs['it'])
         self.writer.add_scalar('Loss/learning_rate', self.alg.learning_rate, locs['it'])
-        self.writer.add_scalar('Policy/mean_noise_std', mean_std.item(), locs['it'])
+        self.writer.add_scalar('Policy/mean_std', mean_std.item(), locs['it'])
         self.writer.add_scalar('Perf/total_fps', fps, locs['it'])
         self.writer.add_scalar('Perf/collection_time', locs['collection_time'], locs['it'])
         self.writer.add_scalar('Perf/learning_time', locs['learn_time'], locs['it'])
