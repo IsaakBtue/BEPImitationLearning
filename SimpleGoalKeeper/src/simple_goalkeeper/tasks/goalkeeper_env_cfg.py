@@ -34,6 +34,7 @@ BALL_NAME = "ball"
 
 _FEET_CFG = SceneEntityCfg("robot", body_names=("left_foot_link", "right_foot_link"))
 _ALL_JOINTS_CFG = SceneEntityCfg("robot", joint_names=(".*",))
+_WAIST_JOINT_CFG = SceneEntityCfg("robot", joint_names=("Waist",))
 _ROBOT_CFG = SceneEntityCfg("robot")
 
 
@@ -172,7 +173,7 @@ def goalkeeper_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
     # Rewards
     # ------------------------------------------------------------------
     cfg.rewards = {
-        # --- goalkeeper-specific ---
+        # --- ball interception (feet-only) ---
         "foot_to_ball": RewardTermCfg(
             func=gk_mdp.foot_to_ball,
             weight=3.0,
@@ -188,6 +189,20 @@ def goalkeeper_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
             weight=10.0,
             params={"ball_name": BALL_NAME, "target_speed": 5.0},
         ),
+        # --- goalkeeper stance ---
+        "stayonline": RewardTermCfg(
+            func=gk_mdp.stayonline,
+            weight=-2.0,
+        ),
+        "noretreat": RewardTermCfg(
+            func=gk_mdp.noretreat,
+            weight=-2.0,
+        ),
+        "feetorientation": RewardTermCfg(
+            func=gk_mdp.feetorientation,
+            weight=2.0,
+            params={"asset_cfg": _FEET_CFG},
+        ),
         # --- posture / stability ---
         "posture": RewardTermCfg(
             func=gk_mdp.posture,
@@ -198,6 +213,17 @@ def goalkeeper_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
             func=gk_mdp.ang_vel_xy_l2,
             weight=-0.1,
             params={"asset_cfg": _ROBOT_CFG},
+        ),
+        "deviation_waist_joint": RewardTermCfg(
+            func=gk_mdp.deviation_waist_joint,
+            weight=-0.001,
+            params={"asset_cfg": _WAIST_JOINT_CFG},
+        ),
+        # --- joint safety ---
+        "dof_pos_limits": RewardTermCfg(
+            func=mjlab_mdp.joint_pos_limits,
+            weight=-3.0,
+            params={"asset_cfg": _ALL_JOINTS_CFG},
         ),
         # --- regularisation ---
         "action_rate_l2": RewardTermCfg(

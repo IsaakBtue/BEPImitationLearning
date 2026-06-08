@@ -1,27 +1,13 @@
-# ========== Imitationlearningbooster (6 motions, AMP) ==========
-# Local PC:  cd /home/isaak/BEPImitationlearning/Imitationlearningbooster
-# Train server: cd /home/robocup/IsaakB/BEPImitationLearning/Imitationlearningbooster
-# Prefix all commands below with the correct path for your machine.
+# === SimpleGoalKeeper — NPZ already regenerated, run these to train ===
 
-# Re-convert pkl → npz (run after any coordinate system change)
-# LOCAL:
-cd /home/isaak/BEPImitationlearning/Imitationlearningbooster && env -u PYTHONPATH .venv/bin/python src/imitationlearningbooster/motions/convert_all.py
-# SERVER:
-cd /home/robocup/IsaakB/BEPImitationLearning/Imitationlearningbooster && env -u PYTHONPATH .venv/bin/python src/imitationlearningbooster/motions/convert_all.py
+# Re-convert motions (already done, only re-run if PKL files change):
+cd /home/isaak/BEPImitationlearning/SimpleGoalKeeper
+uv run sgk_convert --input-dir Motions --output-dir src/simple_goalkeeper/motions/data
 
-# Smoke test (2 envs, 3 iterations)
-# LOCAL:
-cd /home/isaak/BEPImitationlearning/Imitationlearningbooster && env -u PYTHONPATH .venv/bin/train goalkeeper_booster_t1_amp --env.scene.num-envs 2 --runner.max-iterations 3
-# SERVER:
-cd /home/robocup/IsaakB/BEPImitationLearning/Imitationlearningbooster && env -u PYTHONPATH .venv/bin/train goalkeeper_booster_t1_amp --env.scene.num-envs 2 --runner.max-iterations 3
+# Train (local):
+cd /home/isaak/BEPImitationlearning/SimpleGoalKeeper
+uv run sgk_train Mjlab-BeyondAMP-Goalkeeper-T1 --num-envs 4096
 
-# Full GPU training (6144 envs) — SERVER ONLY
-cd /home/robocup/IsaakB/BEPImitationLearning/Imitationlearningbooster && env -u PYTHONPATH .venv/bin/train goalkeeper_booster_t1_amp
-
-# Play with ghost overlay — LOCAL (policy from local checkpoint):
-# Absolute path required so it matches motion_files list and all 6 motions cycle
-cd /home/isaak/BEPImitationlearning/Imitationlearningbooster && env -u PYTHONPATH .venv/bin/play goalkeeper_booster_t1_amp_withoverlay --checkpoint-file logs/rsl_rl/goalkeeper_amp_booster_t1/2026-06-05_11-25-46/model_0.pt --motion-file /home/isaak/BEPImitationlearning/Imitationlearningbooster/src/imitationlearningbooster/motions/data/lefthand_t1.npz
-
-# Play with ghost overlay — LOCAL (no policy, zero agent, cycles all 6 motions):
-# Absolute path required so it matches motion_files list and all 6 motions cycle
-cd /home/isaak/BEPImitationlearning/Imitationlearningbooster && env -u PYTHONPATH .venv/bin/play goalkeeper_booster_t1_amp_withoverlay --agent zero --motion-file /home/isaak/BEPImitationlearning/Imitationlearningbooster/src/imitationlearningbooster/motions/data/lefthand_t1.npz
+# Play (zero policy sanity check):
+cd /home/isaak/BEPImitationlearning/SimpleGoalKeeper
+uv run sgk_play Mjlab-BeyondAMP-Goalkeeper-T1 --agent zero --num-envs 1

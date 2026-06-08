@@ -7,7 +7,7 @@ import torch
 
 from mjlab.entity import Entity
 from mjlab.managers.scene_entity_config import SceneEntityCfg
-from mjlab.utils.lab_api.math import quat_apply
+from mjlab.utils.lab_api.math import quat_apply, quat_inv
 
 if TYPE_CHECKING:
     from mjlab.envs import ManagerBasedRlEnv
@@ -99,9 +99,60 @@ def ang_vel_xy_l2(
     env: "ManagerBasedRlEnv",
     asset_cfg: SceneEntityCfg = _DEFAULT_ROBOT_CFG,
 ) -> torch.Tensor:
-    """Sum of squared base roll+pitch angular velocity. Shape (N,).
-
-    Penalises excessive rolling/pitching to keep robot upright.
-    """
+    """Sum of squared base roll+pitch angular velocity. Shape (N,)."""
     asset: Entity = env.scene[asset_cfg.name]
     return torch.sum(torch.square(asset.data.root_link_ang_vel_b[:, :2]), dim=1)
+
+
+def stayonline(
+    env: "ManagerBasedRlEnv",
+    line_offset: float = 0.2,
+    max_offset: float = 1.2,
+) -> torch.Tensor:
+    """Penalty for robot drifting away from the goal line along global X.
+
+    Ball approaches from local +X so the goal line is at X = env_origin_X.
+    Returns the X deviation above `line_offset`, clamped to `max_offset`.
+    """
+    robot: Entity = env.scene["robot"]
+    x_local = robot.data.root_link_pos_w[:, 0] - env.scene.env_origins[:, 0]
+    dist = torch.clamp(x_local.abs(), line_offset, max_offset) - line_offset
+    return dist
+
+
+def noretreat(env: "ManagerBasedRlEnv") -> torch.Tensor:
+    """Penalty for retreating backward (negative body-frame forward velocity).
+
+    Uses body-frame X so the penalty stays correct when the robot yaws during a dive.
+    """
+    robot: Entity = env.scene["robot"]
+    fwd_vel = robot.data.root_link_lin_vel_b[:, 0]
+    return -torch.clamp(fwd_vel, -1.0, 0.0)
+
+
+def feetorientation(
+    env: "ManagerBasedRlEnv",
+    asset_cfg: SceneEntityCfg = _DEFAULT_FEET_CFG,
+    sigma: float = 5.0,
+) -> torch.Tensor:
+    """Reward for keeping feet flat (gravity aligned with foot z-axis).
+
+    Flat feet produce better ball deflections during a save.
+    """
+    gravity_w = torch.tensor([0.0, 0.0, -1.0], device=env.device).expand(env.num_envs, -1)
+    robot: Entity = env.scene[asset_cfg.name]
+    feet_quat_w = robot.data.body_link_quat_w[:, asset_cfg.body_ids, :]
+    gravity_w_exp = gravity_w[:, None, :].expand(-1, 2, -1)
+    gravity_foot = quat_apply(quat_inv(feet_quat_w), gravity_w_exp)
+    err = torch.sum(gravity_foot[..., :2] ** 2, dim=-1).sum(dim=-1)
+    return torch.exp(-sigma * err)
+
+
+def deviation_waist_joint(
+    env: "ManagerBasedRlEnv",
+    asset_cfg: SceneEntityCfg = _DEFAULT_ROBOT_CFG,
+) -> torch.Tensor:
+    """Penalty for waist joint deviation from default pose (always active)."""
+    robot: Entity = env.scene[asset_cfg.name]
+    delta = robot.data.joint_pos[:, asset_cfg.joint_ids] - robot.data.default_joint_pos[:, asset_cfg.joint_ids]
+    return torch.sum(torch.square(delta), dim=-1)

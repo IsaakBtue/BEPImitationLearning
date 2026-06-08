@@ -23,6 +23,32 @@ _XML = _HERE.parent / "robots" / "xmls" / "t1_headless.xml"
 # Head joints (AAHead_yaw, Head_pitch) are first 2 DOFs — skip in headless output
 _HEAD_JOINT_COUNT = 2
 
+# T1 headless standing keyframe (HOME_KEYFRAME) in XML joint order.
+# AMP discriminator obs uses joint_pos_rel = joint_pos - default; NPZ must match.
+_T1_HEADLESS_DEFAULT_JOINT_POS = np.array([
+    0.0,   # Left_Shoulder_Pitch
+   -1.4,   # Left_Shoulder_Roll
+    0.0,   # Left_Elbow_Pitch
+   -0.4,   # Left_Elbow_Yaw
+    0.0,   # Right_Shoulder_Pitch
+    1.4,   # Right_Shoulder_Roll
+    0.0,   # Right_Elbow_Pitch
+    0.4,   # Right_Elbow_Yaw
+    0.0,   # Waist
+   -0.2,   # Left_Hip_Pitch
+    0.0,   # Left_Hip_Roll
+    0.0,   # Left_Hip_Yaw
+    0.4,   # Left_Knee_Pitch
+   -0.2,   # Left_Ankle_Pitch
+    0.0,   # Left_Ankle_Roll
+   -0.2,   # Right_Hip_Pitch
+    0.0,   # Right_Hip_Roll
+    0.0,   # Right_Hip_Yaw
+    0.4,   # Right_Knee_Pitch
+   -0.2,   # Right_Ankle_Pitch
+    0.0,   # Right_Ankle_Roll
+], dtype=np.float32)
+
 
 def _quat_xyzw_to_wxyz(q: np.ndarray) -> np.ndarray:
     """Convert xyzw → wxyz (MuJoCo convention)."""
@@ -183,8 +209,12 @@ def convert_one(pkl_path: Path, output_path: Path, output_fps: int = 50) -> None
     for b in range(n_robot_bodies):
         body_ang_vel_w[:, b, :] = _quat_ang_vel(body_quat_w[:, b, :], 1.0 / output_fps)
 
-    # Strip head joints → 21-DOF headless
-    joint_pos = dof_pos_r[:, _HEAD_JOINT_COUNT:]
+    # Strip head joints → 21-DOF headless, then subtract standing default so
+    # stored joint_pos matches what joint_pos_rel returns at runtime.
+    # The AMP discriminator trains on (env joint_pos_rel) vs (NPZ joint_pos); they
+    # must be in the same coordinate: relative to the T1 home keyframe.
+    joint_pos_abs = dof_pos_r[:, _HEAD_JOINT_COUNT:]
+    joint_pos = joint_pos_abs - _T1_HEADLESS_DEFAULT_JOINT_POS[np.newaxis, :]
     joint_vel = _finite_diff_vel(joint_pos, 1.0 / output_fps)
 
     output_path.parent.mkdir(parents=True, exist_ok=True)
@@ -197,7 +227,7 @@ def convert_one(pkl_path: Path, output_path: Path, output_fps: int = 50) -> None
         body_quat_w=body_quat_w,
         body_lin_vel_w=body_lin_vel_w,
         body_ang_vel_w=body_ang_vel_w,
-        joint_pos_absolute=np.array([1], dtype=np.int8),
+        joint_pos_relative=np.array([1], dtype=np.int8),
     )
     print(f"  Saved → {output_path.name}  shape={joint_pos.shape}")
 

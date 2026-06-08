@@ -1461,3 +1461,38 @@ The goal of this port is to replicate G1 goalkeeper behavior (IsaacGym + rsl_rl)
 - `my_mjlab_project_booster_t1/src/my_mjlab_project_booster_t1/mdp/commands.py`
 
 **Action required:** Re-run `convert_all.py` to regenerate all 6 NPZ files before training or visualising motions.
+
+---
+
+## 2026-06-08 — SimpleGoalKeeper: Fix AMP joint-position mismatch + add missing rewards
+
+### Bug: AMP discriminator trained on absolute vs. relative joint positions
+
+**What changed:** `SimpleGoalKeeper/src/simple_goalkeeper/scripts/pkl_to_npz.py` now subtracts the T1 home-keyframe default joint positions from `joint_pos` before saving to NPZ. All 8 NPZ files have been regenerated.
+
+**Why it was wrong:** The AMP discriminator compares reference motion samples (from NPZ) to policy samples (from the env's AMP obs group). The env uses `joint_pos_rel = joint_pos - default_joint_pos`, but the NPZ stored absolute DOF positions. The discriminator saw systematically different distributions — not because the policy moved unnaturally, but because of a fixed offset equal to the standing pose. The NPZ even contained a `joint_pos_absolute=1` flag confirming this.
+
+**Correct values:** NPZ now stores `absolute_pos - T1_HOME_KEYFRAME_pos` (same coordinate as `joint_pos_rel`). Joint order is headless XML order (21 DOF, skipping 2 head joints). Verified: first-frame max abs value dropped from ~1.07 rad to ~0.61 rad, values are now small deviations around 0.
+
+**Evidence:** Traced `joint_pos_rel` source → `joint_pos - asset.data.default_joint_pos`. NPZ first-frame value for Left_Shoulder_Roll was -1.068 (absolute); standing default is -1.4; policy would see 0.332 (relative). Discriminator trivially separated them by offset, not motion quality.
+
+**Files changed:**
+- `SimpleGoalKeeper/src/simple_goalkeeper/scripts/pkl_to_npz.py`
+- `SimpleGoalKeeper/src/simple_goalkeeper/motions/data/*.npz` (all 8, regenerated)
+
+### Missing rewards added to SimpleGoalKeeper
+
+**What changed:** Added `stayonline`, `noretreat`, `feetorientation`, `deviation_waist_joint` to `mdp/rewards.py` and `dof_pos_limits` (mjlab built-in) to the env cfg. All are feet-keeper-appropriate and require no contact sensors.
+
+| Reward | Weight | Purpose |
+|---|---|---|
+| `stayonline` | -2.0 | Penalise drifting off goal line (X axis) |
+| `noretreat` | -2.0 | Penalise retreating from ball |
+| `feetorientation` | +2.0 | Keep feet flat for better deflections |
+| `deviation_waist_joint` | -0.001 | Always-active waist centering |
+| `dof_pos_limits` | -3.0 | Joint safety — soft limit penalty |
+
+**Files changed:**
+- `SimpleGoalKeeper/src/simple_goalkeeper/mdp/rewards.py`
+- `SimpleGoalKeeper/src/simple_goalkeeper/mdp/__init__.py`
+- `SimpleGoalKeeper/src/simple_goalkeeper/tasks/goalkeeper_env_cfg.py`
