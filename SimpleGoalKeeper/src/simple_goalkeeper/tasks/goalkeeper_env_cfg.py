@@ -107,8 +107,10 @@ def goalkeeper_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
 
     # ------------------------------------------------------------------
     # Observations
+    # Ball is always visible during Phase 1 training so the policy has
+    # a clean signal from the start. Visibility gating (warmup + vanish)
+    # is left for play/sim2real evaluation.
     # ------------------------------------------------------------------
-    # Actor terms with noise.
     actor_terms = {
         "base_ang_vel": ObservationTermCfg(
             func=mjlab_mdp.base_ang_vel,
@@ -129,12 +131,12 @@ def goalkeeper_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
         "actions": ObservationTermCfg(func=mjlab_mdp.last_action),
         "ball_pos_b": ObservationTermCfg(
             func=gk_mdp.ball_pos_b,
-            params={"ball_name": BALL_NAME},
+            params={"ball_name": BALL_NAME, "always_visible": not play},
             noise=Unoise(n_min=-0.05, n_max=0.05),
         ),
         "ball_vel_b": ObservationTermCfg(
             func=gk_mdp.ball_vel_b,
-            params={"ball_name": BALL_NAME},
+            params={"ball_name": BALL_NAME, "always_visible": not play},
             noise=Unoise(n_min=-0.1, n_max=0.1),
         ),
         "left_foot_pos_b": ObservationTermCfg(
@@ -171,18 +173,24 @@ def goalkeeper_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
 
     # ------------------------------------------------------------------
     # Rewards
+    # Design principles (matching Imitationlearningbooster proven structure):
+    #   - footreach (w=10): dense phase1 lateral alignment + phase2 proximity×vel_sigma
+    #   - stopball (w=100): one-time bonus when ball is deflected (primary task signal)
+    #   - ball_positive_vx (w=10): continuous reward for sustained deflection
+    #   - posture removed: AMP handles motion naturalness; posture created stand-still optimum
+    #   - ball_vx_reduction removed: it peaked when ball stopped naturally (do-nothing reward)
     # ------------------------------------------------------------------
     cfg.rewards = {
         # --- ball interception (feet-only) ---
-        "foot_to_ball": RewardTermCfg(
-            func=gk_mdp.foot_to_ball,
-            weight=3.0,
-            params={"ball_name": BALL_NAME, "std": 0.15, "asset_cfg": _FEET_CFG},
+        "footreach": RewardTermCfg(
+            func=gk_mdp.footreach,
+            weight=10.0,
+            params={"ball_name": BALL_NAME, "reach_th": 0.3, "sigma": 5.0, "asset_cfg": _FEET_CFG},
         ),
-        "ball_vx_reduction": RewardTermCfg(
-            func=gk_mdp.ball_vx_reduction,
-            weight=5.0,
-            params={"ball_name": BALL_NAME, "max_speed": 8.0},
+        "stopball": RewardTermCfg(
+            func=gk_mdp.stopball,
+            weight=100.0,
+            params={"ball_name": BALL_NAME, "delta_vel_threshold": 1.0},
         ),
         "ball_positive_vx": RewardTermCfg(
             func=gk_mdp.ball_positive_vx,
@@ -200,15 +208,10 @@ def goalkeeper_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
         ),
         "feetorientation": RewardTermCfg(
             func=gk_mdp.feetorientation,
-            weight=2.0,
+            weight=1.5,
             params={"asset_cfg": _FEET_CFG},
         ),
-        # --- posture / stability ---
-        "posture": RewardTermCfg(
-            func=gk_mdp.posture,
-            weight=1.0,
-            params={"std": 0.25, "asset_cfg": _ALL_JOINTS_CFG},
-        ),
+        # --- stability ---
         "ang_vel_xy": RewardTermCfg(
             func=gk_mdp.ang_vel_xy_l2,
             weight=-0.1,
@@ -240,10 +243,13 @@ def goalkeeper_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
     # ------------------------------------------------------------------
     # Events
     # ------------------------------------------------------------------
-    # Keep only base reset events; remove DR that's too aggressive for Phase 1.
+    # Remove DR events not needed for Phase 1 (no domain randomization yet).
     cfg.events.pop("foot_friction", None)
     cfg.events.pop("encoder_bias", None)
     cfg.events.pop("base_com", None)
+    # Remove push_robot: random impulses disrupt the goalkeeper stance and prevent
+    # the policy from learning to react to the ball during early training.
+    cfg.events.pop("push_robot", None)
 
     # Restrict base reset yaw to ±15° so robot roughly faces +X (ball spawn direction).
     cfg.events["reset_base"].params["pose_range"]["yaw"] = (-0.15, 0.15)
@@ -287,14 +293,13 @@ def goalkeeper_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
     # ------------------------------------------------------------------
     # Episode length
     # ------------------------------------------------------------------
-    cfg.episode_length_s = 10.0 if play else 3.0
+    cfg.episode_length_s = 10.0 if play else 4.0
 
     # ------------------------------------------------------------------
     # Play-mode overrides
     # ------------------------------------------------------------------
     if play:
         cfg.observations["actor"].enable_corruption = False
-        cfg.events.pop("push_robot", None)
         cfg.terminations.pop("out_of_terrain_bounds", None)
 
     return cfg

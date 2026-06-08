@@ -63,17 +63,29 @@ uv run sgk_convert --input-dir /path/to/Motions --output-dir src/simple_goalkeep
 
 ## Reward Design
 
-All rewards use robot local frame. Phase 1 rewards (7 total):
+Phase 1 reward structure (ported from proven Imitationlearningbooster pattern):
 
 | Term | Weight | Purpose |
 |------|--------|---------|
-| `foot_to_ball` | +3.0 | Foot midpoint XY proximity to ball |
-| `ball_vx_reduction` | +5.0 | Stop incoming ball (reduce negative vx_local) |
-| `ball_positive_vx` | +10.0 | Deflect ball back along robot +X |
-| `posture` | +1.0 | Stay near default joint pose |
+| `footreach` | +10.0 | Phase1: lateral alignment. Phase2: sigmoid reach × vel_sigma (1–10×) |
+| `stopball` | +100.0 | One-time bonus when ball is deflected (delta_vx > 1 m/s). Primary signal. |
+| `ball_positive_vx` | +10.0 | Continuous reward for sustained deflection back toward +X |
+| `stayonline` | -2.0 | Penalty for drifting away from goal line (X displacement) |
+| `noretreat` | -2.0 | Penalty for retreating backward (negative body-frame X velocity) |
+| `feetorientation` | +1.5 | Flat feet (gravity aligned with foot Z) |
 | `ang_vel_xy` | -0.1 | Penalise rolling/pitching |
+| `deviation_waist_joint` | -0.001 | Waist joint regularisation |
+| `dof_pos_limits` | -3.0 | Joint limit violation penalty |
 | `action_rate_l2` | -0.3 | Action smoothness |
 | `dof_vel` | -0.001 | Joint velocity regularisation |
+
+**Removed (created stand-still local optimum):**
+- `ball_vx_reduction`: peaked when ball stopped naturally — rewarded doing nothing
+- `foot_to_ball` (std=0.15): zero gradient at 2–4 m spawn distance
+- `posture`: AMP handles motion naturalness; posture+regularisation incentivised standing still
+
+**Ball visibility:** `always_visible=True` during training so policy always has ball position.
+Play mode re-enables the visibility gate (warmup + vanish) for partial observability.
 
 ## Training Commands
 

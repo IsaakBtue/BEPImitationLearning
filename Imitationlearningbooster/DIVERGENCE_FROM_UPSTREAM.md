@@ -1496,3 +1496,48 @@ The goal of this port is to replicate G1 goalkeeper behavior (IsaacGym + rsl_rl)
 - `SimpleGoalKeeper/src/simple_goalkeeper/mdp/rewards.py`
 - `SimpleGoalKeeper/src/simple_goalkeeper/mdp/__init__.py`
 - `SimpleGoalKeeper/src/simple_goalkeeper/tasks/goalkeeper_env_cfg.py`
+
+---
+
+## 2026-06-08 — SimpleGoalKeeper: Fix stand-still local optimum (reward redesign)
+
+### Root cause: `ball_vx_reduction` + `foot_to_ball` (std=0.15) created do-nothing optimum
+
+**What changed:** Replaced the broken reward structure with the proven Imitationlearningbooster pattern (footreach + stopball). Removed `ball_vx_reduction`, `foot_to_ball`, and `posture`. Disabled ball visibility warmup during training. Removed `push_robot` event.
+
+**Why it was wrong:** TensorBoard confirmed `ball_vx_reduction` grew from 0.27 → 3.41 per episode, becoming the dominant reward. This reward returns `exp(-(incoming_speed/4)²)` which peaks at 1.0 when the ball is **not moving** — so the optimal policy was to do nothing and let the ball stop naturally. Combined with `posture` (max when at default pose = standing still) and `foot_to_ball` (std=0.15m → zero gradient at 2–4 m spawn distance), the training converged to a stand-still local minimum.
+
+**Evidence from TensorBoard logs** (`2026-06-08_20-14-56_phase1`):
+- `ball_vx_reduction`: 0.27 → 3.41 (dominated all task rewards)
+- `foot_to_ball`: 0.0001 → 0.018 (essentially zero — robot never contacted ball)
+- `feetorientation`: 0.16 → 1.67 (robot learned perfect flat feet = standing still)
+- `mean_episode_length`: 23 → 140 (robot learned to not fall = stand still)
+- `ball_positive_vx`: only 0.33 (ball rarely deflected back)
+
+**Correct approach (ported from Imitationlearningbooster):**
+
+| Term | Weight | Purpose |
+|---|---|---|
+| `footreach` | +10.0 | Phase1 lateral alignment + Phase2 sigmoid reach × vel_sigma (1–10×) |
+| `stopball` | +100.0 | One-time reward when ball deflected (delta_vx > 1 m/s) |
+| `ball_positive_vx` | +10.0 | Continuous signal for sustained deflection |
+| `stayonline` | -2.0 | Keep |
+| `noretreat` | -2.0 | Keep |
+| `feetorientation` | +1.5 | Reduced from 2.0 |
+
+**Removed:**
+- `ball_vx_reduction`: rewards doing nothing (ball stops naturally)
+- `foot_to_ball` (std=0.15): zero gradient at spawn distance
+- `posture`: AMP handles naturalness; posture added to the stand-still optimum
+
+**Additional fixes:**
+- Ball visibility: `always_visible=True` during training (`ball_pos_b`, `ball_vel_b`). The visibility gate (warmup + random vanish) made the ball invisible for most of the episode, killing the ball-approach learning signal.
+- `push_robot` removed from training events (was only removed in play mode before). Random impulses disrupted the goalkeeper stance during early learning.
+- Episode length extended from 3.0 → 4.0 s to give slow easy-difficulty balls time to reach the robot.
+
+**Files changed:**
+- `SimpleGoalKeeper/src/simple_goalkeeper/mdp/rewards.py` (add footreach, stopball)
+- `SimpleGoalKeeper/src/simple_goalkeeper/mdp/__init__.py` (export footreach, stopball)
+- `SimpleGoalKeeper/src/simple_goalkeeper/mdp/observations.py` (add always_visible param)
+- `SimpleGoalKeeper/src/simple_goalkeeper/tasks/goalkeeper_env_cfg.py` (reward table, events, episode length)
+- `SimpleGoalKeeper/CLAUDE.md` (updated reward table)

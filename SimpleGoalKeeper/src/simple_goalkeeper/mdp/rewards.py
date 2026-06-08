@@ -16,6 +16,91 @@ _DEFAULT_FEET_CFG = SceneEntityCfg("robot", body_names=("left_foot_link", "right
 _DEFAULT_ROBOT_CFG = SceneEntityCfg("robot")
 
 
+def footreach(
+    env: "ManagerBasedRlEnv",
+    ball_name: str,
+    asset_cfg: SceneEntityCfg = _DEFAULT_FEET_CFG,
+    reach_th: float = 0.3,
+    sigma: float = 5.0,
+) -> torch.Tensor:
+    """Reach reward adapted from Imitationlearningbooster eereach, for feet instead of hands.
+
+    Phase 1 (ball x_local > 1.5 m): reward lateral alignment with ball Y position so the
+    robot pre-positions in front of the incoming ball's trajectory.
+
+    Phase 2 (ball x_local <= 1.5 m): sigmoid reach reward × lateral vel_sigma so actively
+    diving/stepping toward the ball gives up to 10× the static reach reward.
+
+    vel_sigma = 1 + 3 * clamp(vel_toward_ball_side, 0, 3).
+
+    Upright gate suppresses reward when falling (mirrors eereach upright gate).
+    """
+    robot: Entity = env.scene[asset_cfg.name]
+    ball: Entity = env.scene[ball_name]
+
+    ball_pos_w = ball.data.root_link_pos_w                              # (N, 3)
+    foot_pos_w = robot.data.body_link_pos_w[:, asset_cfg.body_ids, :]  # (N, 2, 3)
+
+    ball_x_local = ball_pos_w[:, 0] - env.scene.env_origins[:, 0]     # (N,)
+    ball_y_w = ball_pos_w[:, 1]                                         # (N,)
+    robot_y_w = robot.data.root_link_pos_w[:, 1]                       # (N,)
+
+    # Phase 1: pre-position laterally when ball is far (> 1.5 m in front).
+    lateral_error = ball_y_w - robot_y_w                                # positive → ball right
+    asidegoal = lateral_error.clamp(-1.0, 1.0)
+    asidegoal = torch.where(asidegoal.abs() < 0.3, torch.zeros_like(asidegoal), asidegoal)
+    phase1_rew = 1.0 - asidegoal.abs()                                  # 1=aligned, 0=1 m off
+
+    # Phase 2: sigmoid reach when ball is close.
+    dist_to_ball = torch.norm(foot_pos_w - ball_pos_w[:, None, :], dim=-1)  # (N, 2)
+    min_dist = dist_to_ball.min(dim=-1).values                          # (N,)
+    reach_rew = 1.0 - 1.0 / (1.0 + torch.exp(-sigma * (min_dist - reach_th)))
+
+    # Lateral velocity toward ball side amplifies the reach reward (mirrors eereach vel_sigma).
+    lateral_vel_y = robot.data.root_link_lin_vel_w[:, 1]
+    vel_toward = torch.where(lateral_error > 0, lateral_vel_y, -lateral_vel_y)
+    vel_sigma = 1.0 + 3.0 * vel_toward.clamp(0.0, 3.0)                # 1–10×
+
+    # Combine: phase1 when ball is far, phase2 sigmoid when close.
+    phase1_mask = ball_x_local > 1.5
+    taskrew = torch.where(phase1_mask, phase1_rew, reach_rew * vel_sigma)
+
+    # Upright gate: suppress reward when robot is falling.
+    projected_grav = robot.data.projected_gravity_b
+    upright = 1.0 - torch.clamp(torch.sum(projected_grav[:, :2] ** 2, dim=1), 0.0, 1.0)
+    return taskrew * upright
+
+
+def stopball(
+    env: "ManagerBasedRlEnv",
+    ball_name: str,
+    delta_vel_threshold: float = 1.0,
+) -> torch.Tensor:
+    """One-time reward when ball X velocity increases by >= delta_vel_threshold (m/s).
+
+    Ball approaches with negative X velocity; foot contact reverses or decelerates it.
+    Fires exactly once per episode when delta_vx > threshold, providing the primary
+    training signal for a successful save. Mirrors Imitationlearningbooster stopball.
+    """
+    ball: Entity = env.scene[ball_name]
+    ball_x_vel = ball.data.root_link_lin_vel_w[:, 0]
+    ball_x_local = ball.data.root_link_pos_w[:, 0] - env.scene.env_origins[:, 0]
+
+    if not hasattr(env, "_sb_init_vx"):
+        env._sb_init_vx = ball_x_vel.clone()
+        env._sb_flag = torch.zeros(env.num_envs, dtype=torch.bool, device=env.device)
+
+    just_reset = env.episode_length_buf <= 1
+    env._sb_flag[just_reset] = False
+    env._sb_init_vx[just_reset] = ball_x_vel[just_reset].clone()
+
+    delta_vx = ball_x_vel - env._sb_init_vx
+    in_front = ball_x_local > 0.0
+    fired = (delta_vx > delta_vel_threshold) & in_front & ~env._sb_flag
+    env._sb_flag |= fired
+    return fired.float()
+
+
 def _robot_x_axis_w(env: "ManagerBasedRlEnv") -> torch.Tensor:
     """Robot local +X unit vector in world frame. Shape (N, 3)."""
     robot: Entity = env.scene["robot"]

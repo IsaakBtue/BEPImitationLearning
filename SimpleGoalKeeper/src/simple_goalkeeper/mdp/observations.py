@@ -88,26 +88,43 @@ def _compute_ball_visibility(env: "ManagerBasedRlEnv", ball_name: str) -> torch.
     return visible
 
 
-def ball_pos_b(env: "ManagerBasedRlEnv", ball_name: str = "ball") -> torch.Tensor:
-    """Ball position in robot body frame, zeroed when not visible. Shape (N, 3)."""
+def ball_pos_b(
+    env: "ManagerBasedRlEnv",
+    ball_name: str = "ball",
+    always_visible: bool = False,
+) -> torch.Tensor:
+    """Ball position in robot body frame, optionally gated by visibility. Shape (N, 3).
+
+    Set always_visible=True during Phase 1 training so the policy always has the ball
+    position as input. The visibility system (warmup + random vanish) is enabled for
+    play/evaluation to simulate partial observability.
+    """
     robot: Entity = env.scene["robot"]
     ball: Entity = env.scene[ball_name]
     ball_pos_b_val = quat_apply(
         quat_inv(robot.data.root_link_quat_w),
         ball.data.root_link_pos_w - robot.data.root_link_pos_w,
     )
+    if always_visible:
+        return ball_pos_b_val
     visible = _compute_ball_visibility(env, ball_name)
     return ball_pos_b_val * visible.float().unsqueeze(-1)
 
 
-def ball_vel_b(env: "ManagerBasedRlEnv", ball_name: str = "ball") -> torch.Tensor:
-    """Ball linear velocity in robot body frame, zeroed when not visible. Shape (N, 3)."""
+def ball_vel_b(
+    env: "ManagerBasedRlEnv",
+    ball_name: str = "ball",
+    always_visible: bool = False,
+) -> torch.Tensor:
+    """Ball velocity in robot body frame, optionally gated by visibility. Shape (N, 3)."""
     robot: Entity = env.scene["robot"]
     ball: Entity = env.scene[ball_name]
     ball_vel_b_val = quat_apply(
         quat_inv(robot.data.root_link_quat_w),
         ball.data.root_link_lin_vel_w,
     )
+    if always_visible:
+        return ball_vel_b_val
     visible = _compute_ball_visibility(env, ball_name)
     return ball_vel_b_val * visible.float().unsqueeze(-1)
 
