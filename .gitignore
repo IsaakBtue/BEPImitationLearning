@@ -46,6 +46,10 @@ runs/
 *.tex
 
 
+# SimpleGoalKeeper motion files (small reference data, explicitly tracked)
+!SimpleGoalKeeper/src/simple_goalkeeper/motions/data/*.npz
+!SimpleGoalKeeper/src/simple_goalkeeper/motions/raw/*.pkl
+
 # Model checkpoints (wandb training runs)
 my_mjlab_project_booster_t1/wandb/
 Imitationlearningbooster/wandb/
