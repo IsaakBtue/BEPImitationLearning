@@ -1,7 +1,11 @@
 """Train the beyondAMP goalkeeper policy on Booster T1 (mjlab backend).
 
 Usage:
+    # Single GPU:
     uv run sgk_train Mjlab-BeyondAMP-Goalkeeper-T1 --num-envs 4096
+
+    # Multi-GPU (torchrunx):
+    TORCHRUNX_HOSTS=localhost uv run sgk_train Mjlab-BeyondAMP-Goalkeeper-T1 --num-envs 4096 --gpu-ids all
 
     # Resume from checkpoint:
     uv run sgk_train Mjlab-BeyondAMP-Goalkeeper-T1 \\
@@ -52,8 +56,14 @@ class TrainConfig:
 
 
 def run_train(task_id: str, cfg: TrainConfig, log_dir: Path) -> None:
+    local_rank = int(os.environ.get("LOCAL_RANK", "0"))
     cuda_visible = os.environ.get("CUDA_VISIBLE_DEVICES", "")
-    device = "cpu" if cuda_visible == "" else f"cuda:{int(os.environ.get('LOCAL_RANK', '0'))}"
+    device = "cpu" if cuda_visible == "" else f"cuda:{local_rank}"
+
+    # Each rank writes to its own subdirectory to avoid checkpoint conflicts.
+    world_size = int(os.environ.get("WORLD_SIZE", "1"))
+    if world_size > 1:
+        log_dir = log_dir / f"rank_{local_rank}"
 
     configure_torch_backends()
     if cfg.num_envs is not None:
@@ -121,7 +131,16 @@ def main() -> None:
         os.environ["CUDA_VISIBLE_DEVICES"] = ",".join(map(str, selected_gpus))
     os.environ["MUJOCO_GL"] = "egl"
 
-    run_train(chosen_task, args, log_dir)
+    if "TORCHRUNX_HOSTS" in os.environ:
+        import torchrunx
+        hosts = os.environ["TORCHRUNX_HOSTS"].split(",")
+        num_gpus = len(selected_gpus) if selected_gpus else 1
+        torchrunx.Launcher(
+            hostnames=hosts,
+            workers_per_host=num_gpus,
+        ).run(run_train, chosen_task, args, log_dir)
+    else:
+        run_train(chosen_task, args, log_dir)
 
 
 if __name__ == "__main__":
