@@ -38,3 +38,7 @@ class AMPRunnerCfg(RslRlOnPolicyRunnerCfg):
   use_wandb: bool = True
   wandb_project: str = "SimpleGoalKeeper"
   wandb_entity: str = "i-p-b-bouwmeester-eindhoven-university-of-technology"
+  video_interval: int = 0
+  """Record a WandB video every N training iterations. 0 = disabled."""
+  video_n_steps: int = 200
+  """Number of env steps to render per video (at 50 Hz ≈ 4 s of footage)."""

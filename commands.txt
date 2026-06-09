@@ -1,2 +1,1 @@
-# Static motion partition implemented — each env permanently assigned to one motion type
-cd /home/robocup/IsaakB/BEPImitationLearning/Imitationlearningbooster && env -u PYTHONPATH .venv/bin/train goalkeeper_booster_t1_amp
+cd /home/isaak/BEPImitationlearning/Imitationlearningbooster && env -u PYTHONPATH .venv/bin/train goalkeeper_booster_t1_amp --env.scene.num-envs 2 --agent.max-iterations 3

@@ -76,6 +76,7 @@ class AMPOnPolicyRunner:
         self.tot_timesteps = 0
         self.tot_time = 0
         self.current_learning_iteration = 0
+        self._video_renderer = None
 
         _, _ = self.env.reset()
     
@@ -162,6 +163,19 @@ class AMPOnPolicyRunner:
                 self.log(locals())
             if it % self.save_interval == 0:
                 self.save(os.path.join(self.log_dir, 'model_{}.pt'.format(it)))
+
+            video_interval = self.cfg.get("video_interval", 0)
+            if (video_interval > 0 and it % video_interval == 0
+                    and self.cfg.get("use_wandb", False) and self.log_dir is not None):
+                self._record_video(it)
+                # Re-sync obs: env state was modified by the video pass.
+                with torch.inference_mode():
+                    obs = self.env.get_observations().to(self.device)
+                    privileged_obs = self.env.get_privileged_observations()
+                    amp_obs = self.env.get_amp_observations().to(self.device)
+                    critic_obs = (privileged_obs.to(self.device)
+                                  if privileged_obs is not None else obs)
+
             ep_infos.clear()
         
         self.current_learning_iteration += num_learning_iterations
@@ -254,6 +268,80 @@ class AMPOnPolicyRunner:
                        f"""{'ETA:':>{pad}} {self.tot_time / (locs['it'] + 1) * (
                                locs['num_learning_iterations'] - locs['it']):.1f}s\n""")
         print(log_string)
+
+    def _init_video_renderer(self) -> None:
+        """Create a headless MuJoCo renderer for WandB video logging (mjlab only)."""
+        from mjlab.viewer import OffscreenRenderer, ViewerConfig
+
+        base_env = self.env.unwrapped
+        cfg = ViewerConfig(
+            origin_type=ViewerConfig.OriginType.ASSET_ROOT,
+            entity_name="robot",
+            env_idx=0,
+            max_extra_envs=0,
+            distance=4.0,
+            elevation=-25.0,
+            azimuth=90.0,
+            height=360,
+            width=640,
+            enable_shadows=False,
+            enable_reflections=False,
+        )
+        self._video_renderer = OffscreenRenderer(
+            model=base_env.sim.mj_model,
+            cfg=cfg,
+            scene=base_env.scene,
+            sim_model=base_env.sim.model,
+            expanded_fields=base_env.sim.expanded_fields,
+        )
+        self._video_renderer.initialize()
+
+    def _record_video(self, it: int) -> None:
+        """Run a short inference episode, render env 0, and upload to WandB."""
+        import numpy as np
+        import wandb
+
+        base_env = self.env.unwrapped
+        if not hasattr(base_env, "sim"):
+            return  # not an mjlab env — skip silently
+
+        if self._video_renderer is None:
+            try:
+                self._init_video_renderer()
+            except Exception as exc:
+                print(f"[WARN] Video renderer init failed: {exc}")
+                return
+
+        n_steps = self.cfg.get("video_n_steps", 200)
+        policy = self.alg.actor_critic.act_inference
+        self.alg.actor_critic.eval()
+
+        frames: list[np.ndarray] = []
+        try:
+            with torch.inference_mode():
+                obs = self.env.get_observations().to(self.device)
+                for _ in range(n_steps):
+                    action = policy(obs)
+                    result = self.env.step(action, not_amp=False)
+                    obs = result[0].to(self.device)
+                    self._video_renderer.update(base_env.sim.data)
+                    frames.append(self._video_renderer.render())
+        except Exception as exc:
+            print(f"[WARN] Video recording failed at step: {exc}")
+        finally:
+            self.alg.actor_critic.train()
+            self.alg.discriminator.train()
+
+        if not frames:
+            return
+
+        # (T, H, W, C) → (T, C, H, W) for wandb.Video
+        video_array = np.stack(frames).transpose(0, 3, 1, 2)
+        try:
+            wandb.log({"video/gameplay": wandb.Video(video_array, fps=50, format="mp4")}, step=it)
+            print(f"[INFO] WandB video logged at iteration {it} ({len(frames)} frames)")
+        except Exception as exc:
+            print(f"[WARN] WandB video upload failed: {exc}")
 
     def save(self, path, infos=None):
         torch.save({
