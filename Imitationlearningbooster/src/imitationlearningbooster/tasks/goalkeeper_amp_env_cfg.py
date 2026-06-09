@@ -23,7 +23,7 @@ from imitationlearningbooster.mdp import MultiMotionCommandCfg
 import imitationlearningbooster.mdp.observations as gk_obs
 import imitationlearningbooster.mdp.rewards as gk_rew
 import imitationlearningbooster.mdp.resets as gk_resets
-from imitationlearningbooster.mdp.resets import ball_difficulty_curriculum
+from imitationlearningbooster.mdp.resets import adaptive_curriculum_update
 from imitationlearningbooster.robots.t1_constants import get_t1_robot_cfg, T1_ACTION_SCALE
 from mjlab.managers.scene_entity_config import SceneEntityCfg
 from mjlab.sensor import ContactMatch, ContactSensorCfg
@@ -169,6 +169,7 @@ def goalkeeper_amp_env_cfg(play: bool = False, num_steps_per_env: int = 100) -> 
         },
         joint_position_range=(0.0, 0.0) if play else (-0.1, 0.1),
         sampling_mode="start",
+        static_partition=True,
     )
 
     # Action scale
@@ -201,24 +202,27 @@ def goalkeeper_amp_env_cfg(play: bool = False, num_steps_per_env: int = 100) -> 
             noise=Unoise(n_min=-1.5, n_max=1.5),
         )
 
-    # Remove motion tracking rewards and add goalkeeper task rewards
+    # Remove all motion tracking rewards — AMP handles posture and arm naturalness.
+    # AMP discriminator sees all 23 joint positions (including arms) across 2 consecutive
+    # frames, so it learns to detect unnatural joint velocity patterns. This mirrors the
+    # upstream G1 design (num_obs=29*2=58) where AMP is the sole arm guidance mechanism.
     motion_reward_keys = [
         "motion_global_root_pos", "motion_global_root_ori",
-        "motion_body_pos", "motion_body_ori",
+        "motion_body_ori",
         "motion_body_lin_vel", "motion_body_ang_vel",
+        "motion_body_pos",
     ]
     for key in motion_reward_keys:
         cfg.rewards.pop(key, None)
 
     _robot_cfg_all = SceneEntityCfg("robot")
     cfg.rewards.update({
-        # Fix 1.2: eereach with correct reach_th=0.2 (was missing params, defaulted to 0.3)
         "eereach": RewardTermCfg(
-            func=gk_rew.eereach, weight=10.0,
+            func=gk_rew.eereach, weight=20.0,
             params={"ball_name": "ball", "asset_cfg": _HAND_CFG, "reach_th": 0.2},
         ),
         "hand_proximity_strict": RewardTermCfg(
-            func=gk_rew.hand_proximity_strict, weight=5.0,
+            func=gk_rew.hand_proximity_strict, weight=10.0,
             params={"ball_name": "ball", "asset_cfg": _HAND_CFG, "strict_th": 0.15},
         ),
         "stopball": RewardTermCfg(
@@ -327,8 +331,12 @@ def goalkeeper_amp_env_cfg(play: bool = False, num_steps_per_env: int = 100) -> 
     cfg.observations["actor"].history_length = 10
     cfg.observations["critic"].history_length = 10
 
-    # AMP observation group: single frame, raw joint positions, no corruption
-    # Used by discriminators to distinguish expert motions from policy behavior
+    # AMP observation group: single frame of raw joint positions per step, no corruption.
+    # history_length=1 → 23 dims per step. The runner (him_amp_runner.py) concatenates
+    # current + previous step AMP obs to produce the 46-dim (23*2) discriminator input,
+    # matching upstream G1's num_obs=29*2=58 design. Setting history_length=2 here would
+    # double-stack the frames (obs_group gives 46, runner adds another 46 → 92 dims),
+    # breaking the normalizer which expects 46.
     cfg.observations["amp"] = ObservationGroupCfg(
         terms={
             "amp_obs": ObservationTermCfg(func=gk_obs.joint_pos_amp, noise=None)
@@ -379,10 +387,12 @@ def goalkeeper_amp_env_cfg(play: bool = False, num_steps_per_env: int = 100) -> 
                 func=mjlab_mdp.reward_curriculum,
                 params={
                     "reward_name": "stopball",
+                    # G1 peak: 100 * (1 + 0.5*3) = 250 at curriculumupdate=3.
+                    # Three stages approximate the continuous G1 scaling.
                     "stages": [
                         {"step": 0,           "weight": 100.0},
-                        {"step": stage1_step, "weight": 150.0},
-                        {"step": stage2_step, "weight": 200.0},
+                        {"step": stage1_step, "weight": 175.0},
+                        {"step": stage2_step, "weight": 250.0},
                     ],
                 },
             ),
@@ -390,10 +400,12 @@ def goalkeeper_amp_env_cfg(play: bool = False, num_steps_per_env: int = 100) -> 
                 func=mjlab_mdp.reward_curriculum,
                 params={
                     "reward_name": "eereach",
+                    # Doubled from (10/15/20): at 10 the arm signal was overwhelmed
+                    # by AMP + regularisation terms before 2k iterations.
                     "stages": [
-                        {"step": 0,           "weight": 10.0},
-                        {"step": stage1_step, "weight": 15.0},
-                        {"step": stage2_step, "weight": 20.0},
+                        {"step": 0,           "weight": 20.0},
+                        {"step": stage1_step, "weight": 28.0},
+                        {"step": stage2_step, "weight": 36.0},
                     ],
                 },
             ),
@@ -401,22 +413,21 @@ def goalkeeper_amp_env_cfg(play: bool = False, num_steps_per_env: int = 100) -> 
                 func=mjlab_mdp.reward_curriculum,
                 params={
                     "reward_name": "hand_proximity_strict",
+                    # Doubled from (5/7.5/10) for same reason as eereach.
                     "stages": [
-                        {"step": 0,           "weight": 5.0},
-                        {"step": stage1_step, "weight": 7.5},
-                        {"step": stage2_step, "weight": 10.0},
+                        {"step": 0,           "weight": 10.0},
+                        {"step": stage1_step, "weight": 15.0},
+                        {"step": stage2_step, "weight": 20.0},
                     ],
                 },
             ),
-            "ball_difficulty_curriculum": CurriculumTermCfg(
-                func=ball_difficulty_curriculum,
-                params={
-                    "stages": [
-                        {"step": 0,           "difficulty": 0.0},
-                        {"step": stage1_step, "difficulty": 0.5},
-                        {"step": stage2_step, "difficulty": 1.0},
-                    ],
-                },
+            "adaptive_curriculum": CurriculumTermCfg(
+                # Mirrors G1 legged_robot.py reset_idx curriculum driver exactly:
+                #   curriculumupdate = int(mean(episode_length_buf[env_ids]) / 50)
+                # Updates every ~500 sim steps (min_gate). Sets env._curriculumupdate
+                # (0→3) and env._ball_difficulty (0→1) used by _reset_ball and eereach.
+                func=adaptive_curriculum_update,
+                params={"min_gate": 500},
             ),
             "dof_pos_limits_curriculum": CurriculumTermCfg(
                 func=mjlab_mdp.reward_curriculum,

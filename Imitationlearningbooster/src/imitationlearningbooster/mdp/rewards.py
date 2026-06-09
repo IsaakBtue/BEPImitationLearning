@@ -74,8 +74,8 @@ def eereach(
     vel_sigma computation (mirrors G1 _reward_eereach jump_scale mechanism):
       - Non-jump envs (motion_type 0,1,4,5): vel_sigma = 1 + 3 × clamp(vel_toward, 0, 3)
       - Jump envs (motion_type 2,3):         vel_sigma = 1 + jump_scale × clamp(vel_toward, 0, 3)
-        where jump_scale = 3 + 3 × curriculumupdate (3→9 as difficulty 0→1).
-        curriculumupdate = _ball_difficulty × 2 (maps 0→1 difficulty to 0→2 curriculum stages).
+        where jump_scale = 3 + 3 × curriculumupdate (3→12 as curriculumupdate 0→3).
+        curriculumupdate = env._curriculumupdate (set by adaptive_curriculum_update, range 0→3).
 
     Post-pass (behind=True):
       - vel_sigma set to flat 2.0 (mirrors G1 exactly; previous port incorrectly doubled).
@@ -142,9 +142,10 @@ def eereach(
     # --- Jump-region-aware vel_sigma (mirrors G1 _reward_eereach) ---
     # G1: upper-body world-Y lateral velocity for side-saves, world-Z for jumps.
     # T1 faces +X (same as G1): world Y is the lateral axis, world Z is up.
-    difficulty = float(getattr(env, "_ball_difficulty", 0.0))
-    curriculumupdate = difficulty * 2.0                                # 0→2
-    jump_scale = 3.0 + 3.0 * curriculumupdate                         # 3→9 across stages
+    # Read curriculumupdate directly from env (set by adaptive_curriculum_update).
+    # Range {0,1,2,3} matching G1's int(mean_ep_len/50), set every ~500 sim steps.
+    curriculumupdate = float(getattr(env, "_curriculumupdate", 0.0))
+    jump_scale = 3.0 + 3.0 * curriculumupdate                         # 3→12 across stages
 
     torso_vel_w = robot.data.root_link_lin_vel_w                       # (N, 3)
 

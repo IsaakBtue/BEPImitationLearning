@@ -18,25 +18,27 @@ if TYPE_CHECKING:
 # Order matches MOTION_NAMES in rsl_rl_amp/utils/motion_loader.py:
 #   ["lefthand", "righthand", "leftjump", "rightjump", "leftstep", "rightstep"]
 # These are the FULL (difficulty=1.0) ranges — easy ranges are interpolated at runtime.
+# Lateral Y max reduced 0.84→0.65: at 0.84m the robot needs a lateral step + full arm
+# extension simultaneously — ~50% of shots were unreachable. 0.65m is within T1's reach.
 _BALL_END_RANGES = [
-    (-0.84, -0.2, 0.40, 1.20),  # 0 lefthand  — left side (-Y), mid-height arm catch
-    ( 0.20,  0.84, 0.40, 1.20),  # 1 righthand — right side (+Y), mid-height arm catch
-    (-0.84, -0.2, 0.80, 1.50),  # 2 leftjump  — left side (-Y), high (diving jump)
-    ( 0.20,  0.84, 0.80, 1.50),  # 3 rightjump — right side (+Y), high (diving jump)
-    (-0.84, -0.2, 0.20, 0.70),  # 4 leftstep  — left side (-Y), low (lateral step)
-    ( 0.20,  0.84, 0.20, 0.70),  # 5 rightstep — right side (+Y), low (lateral step)
+    (-0.65, -0.15, 0.40, 1.15),  # 0 lefthand  — left side (-Y), mid-height arm catch
+    ( 0.15,  0.65, 0.40, 1.15),  # 1 righthand — right side (+Y), mid-height arm catch
+    (-0.65, -0.15, 0.85, 1.40),  # 2 leftjump  — left side (-Y), high (diving jump)
+    ( 0.15,  0.65, 0.85, 1.40),  # 3 rightjump — right side (+Y), high (diving jump)
+    (-0.65, -0.15, 0.20, 0.65),  # 4 leftstep  — left side (-Y), low (lateral step)
+    ( 0.15,  0.65, 0.20, 0.65),  # 5 rightstep — right side (+Y), low (lateral step)
 ]
 
 # Easy (difficulty=0.0) end-target ranges, used as the lerp starting point.
 # difficulty=0: centre-ish shots easy to intercept.
 # difficulty=1: full range matching _BALL_END_RANGES.
 _BALL_END_RANGES_EASY = [
-    (-0.40, -0.2, 0.55, 1.05),  # 0 lefthand  — narrower, easier
-    ( 0.20,  0.40, 0.55, 1.05),  # 1 righthand — narrower, easier
-    (-0.40, -0.2, 0.90, 1.30),  # 2 leftjump  — high, narrower
-    ( 0.20,  0.40, 0.90, 1.30),  # 3 rightjump — high, narrower
-    (-0.40, -0.2, 0.30, 0.60),  # 4 leftstep  — low, narrower
-    ( 0.20,  0.40, 0.30, 0.60),  # 5 rightstep — low, narrower
+    (-0.35, -0.10, 0.55, 1.05),  # 0 lefthand  — narrower, easier
+    ( 0.10,  0.35, 0.55, 1.05),  # 1 righthand — narrower, easier
+    (-0.35, -0.10, 0.90, 1.25),  # 2 leftjump  — high, narrower
+    ( 0.10,  0.35, 0.90, 1.25),  # 3 rightjump — high, narrower
+    (-0.35, -0.10, 0.30, 0.55),  # 4 leftstep  — low, narrower
+    ( 0.10,  0.35, 0.30, 0.55),  # 5 rightstep — low, narrower
 ]
 
 
@@ -58,6 +60,24 @@ class MultiMotionCommand(MotionCommand):
 
         self.motion_type_ids = torch.zeros(self.num_envs, dtype=torch.long, device=self.device)
         self._cycle_counter: int = 0
+
+        # Static permanent partitioning (mirrors G1 end_regions).
+        # If enabled, each env is permanently assigned to one motion type at init
+        # and never reassigned at episode reset. This matches G1's _init_buffers:
+        #   six = num_envs // 6; end_regions = cat([zeros(six), ones(six), ...])
+        # Benefit: each env specialises in one motion style → AMP discriminator for
+        # that style gets clean, consistent training signal from the same env group
+        # every rollout, rather than mixed signal from all envs cycling through styles.
+        if cfg.static_partition:
+            n = len(self.loaders)
+            six = self.num_envs // n
+            parts = []
+            for m_idx in range(n):
+                # Last group absorbs any remainder (num_envs % n extra envs).
+                count = six if m_idx < n - 1 else self.num_envs - six * (n - 1)
+                parts.append(torch.full((count,), m_idx, dtype=torch.long, device=self.device))
+            self.motion_type_ids = torch.cat(parts)
+            self._static_motion_type_ids = self.motion_type_ids.clone()
 
         self._time_step_totals = torch.tensor(
             [loader.time_step_total for loader in self.loaders],
@@ -142,7 +162,10 @@ class MultiMotionCommand(MotionCommand):
         return self._gather_anchor("body_ang_vel_w")
 
     def _resample_command(self, env_ids: torch.Tensor, reset_ball: bool = True) -> None:
-        if self.cfg.cycle_motions:
+        if self.cfg.static_partition:
+            # Restore permanent assignment — never re-randomise, even on mid-episode clip loops.
+            self.motion_type_ids[env_ids] = self._static_motion_type_ids[env_ids]
+        elif self.cfg.cycle_motions:
             n = len(self.loaders)
             assigned = torch.tensor(
                 [(self._cycle_counter + i) % n for i in range(len(env_ids))],
@@ -169,6 +192,9 @@ class MultiMotionCommand(MotionCommand):
                 )
 
         root_pos = self.body_pos_w[env_ids, 0].clone()
+        # Booster motion data ground reference is ~8 cm below simulation floor.
+        # Lifting root by 0.05 m puts feet at ~0.05 m clearance, preventing underground spawn.
+        root_pos[:, 2] += 0.05
         root_ori = self.body_quat_w[env_ids, 0].clone()
         root_lin_vel = self.body_lin_vel_w[env_ids, 0].clone()
         root_ang_vel = self.body_ang_vel_w[env_ids, 0].clone()
@@ -223,7 +249,7 @@ class MultiMotionCommand(MotionCommand):
         motion_types = self.motion_type_ids[env_ids]
 
         # Ball approaches from +X (forwards from robot).
-        x_start = sample_uniform(3.0, 5.0, (n,), device=self.device)
+        x_start = sample_uniform(3.0, 4.5, (n,), device=self.device)
 
         # Difficulty curriculum: linearly interpolate between easy and full ranges.
         # difficulty=0.0 (easy): narrow centre zone; difficulty=1.0: full range.
@@ -240,10 +266,16 @@ class MultiMotionCommand(MotionCommand):
 
         y_end = sample_uniform(per_env_ranges[:, 0], per_env_ranges[:, 1], (n,), device=self.device)
         z_end = sample_uniform(per_env_ranges[:, 2], per_env_ranges[:, 3], (n,), device=self.device)
-        y_start = sample_uniform(-1.8, 1.8, (n,), device=self.device)
-        z_start = sample_uniform(0.3, 1.8, (n,), device=self.device)
+        # Narrowed from ±1.8 m: wide y_start caused extreme curved trajectories that
+        # were physically impossible to intercept regardless of policy quality.
+        y_start = sample_uniform(-0.8, 0.8, (n,), device=self.device)
+        # Narrowed from (0.3, 1.8): extreme start heights produced very high vz,
+        # making ball timing unpredictable and the apex unreachable.
+        z_start = sample_uniform(0.5, 1.4, (n,), device=self.device)
 
-        t_flight = sample_uniform(0.4, 1.0, (n,), device=self.device)
+        # Minimum t_flight raised 0.4→0.5 s: at t=0.4 and x_start=4.5 m, vx=-9.6 m/s —
+        # too fast for a 50 Hz controller to react. 0.5 s keeps vx ≤ -9.6 m/s at worst.
+        t_flight = sample_uniform(0.5, 1.0, (n,), device=self.device)
 
         dx = -x_start - 0.3          # target X ≈ -0.3 (just behind goal line)
         dy = y_end - y_start
@@ -370,6 +402,11 @@ class MultiMotionCommandCfg(MotionCommandCfg):
     ball_name: str = "ball"
     cycle_motions: bool = False
     """If True, assign motion types round-robin across episodes instead of randomly."""
+    static_partition: bool = False
+    """If True, permanently assign each env to one motion type at init (like G1 end_regions).
+    Envs are split into equal groups: group 0 → motion 0 (lefthand), group 1 → motion 1, etc.
+    The assignment never changes at episode reset, giving each AMP discriminator a dedicated,
+    consistent env group that always trains the same motion style."""
 
     def __post_init__(self) -> None:
         if self.motion_files:

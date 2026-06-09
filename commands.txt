@@ -1,9 +1,2 @@
-# === SimpleGoalKeeper — spawn fix + speed-up applied. Run fresh training. ===
-
-# Train:
-cd /home/isaak/BEPImitationlearning/SimpleGoalKeeper
-uv run sgk_train Mjlab-BeyondAMP-Goalkeeper-T1 --num-envs 4096 --run-name phase1_v3
-
-# Re-convert motions (only needed when new PKL files arrive):
-cd /home/isaak/BEPImitationlearning/SimpleGoalKeeper
-uv run sgk_convert --input-dir Motions --output-dir src/simple_goalkeeper/motions/data
+# Static motion partition implemented — each env permanently assigned to one motion type
+cd /home/robocup/IsaakB/BEPImitationLearning/Imitationlearningbooster && env -u PYTHONPATH .venv/bin/train goalkeeper_booster_t1_amp

@@ -24,7 +24,7 @@ from imitationlearningbooster.mdp import MultiMotionCommandCfg
 import imitationlearningbooster.mdp.observations as gk_obs
 import imitationlearningbooster.mdp.rewards as gk_rew
 import imitationlearningbooster.mdp.resets as gk_resets
-from imitationlearningbooster.mdp.resets import ball_difficulty_curriculum
+from imitationlearningbooster.mdp.resets import adaptive_curriculum_update
 from imitationlearningbooster.robots.t1_constants import get_t1_robot_cfg, T1_ACTION_SCALE
 
 _HAND_CFG = SceneEntityCfg("robot", body_names=("left_hand_link", "right_hand_link"))
@@ -425,17 +425,10 @@ def goalkeeper_env_cfg(play: bool = False, num_steps_per_env: int = 24) -> Manag
                 ],
             },
         ),
-        # Feature P2A: Ball difficulty curriculum — expands shot range over training.
-        # Mirrors upstream command_ranges curriculum in reset_idx.
-        "ball_difficulty_curriculum": CurriculumTermCfg(
-            func=ball_difficulty_curriculum,
-            params={
-                "stages": [
-                    {"step": 0,            "difficulty": 0.0},
-                    {"step": stage1_step,  "difficulty": 0.5},
-                    {"step": stage2_step,  "difficulty": 1.0},
-                ],
-            },
+        # Feature P2A: Adaptive curriculum driver — episode-length-based, mirrors G1.
+        "adaptive_curriculum": CurriculumTermCfg(
+            func=adaptive_curriculum_update,
+            params={"min_gate": 500},
         ),
         # Feature P2B: dof_pos_limits and torque_limits scale up with training.
         # Mirrors upstream compute_reward():

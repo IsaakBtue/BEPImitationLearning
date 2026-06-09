@@ -60,39 +60,46 @@ def _shoot_ball(env: ManagerBasedRlEnv, env_ids: torch.Tensor, ball_name: str) -
     ball.write_root_link_velocity_to_sim(ball_velocity, env_ids=env_ids)
 
 
-class ball_difficulty_curriculum:
-    """Curriculum that ramps up ball shot difficulty over training.
+class adaptive_curriculum_update:
+    """Episode-length-based adaptive curriculum driver matching G1's mechanism exactly.
 
-    Mirrors the upstream assign_ball_states curriculum in Humanoid-Goalkeeper:
-        command_ranges[:, 0] = clip(command_ranges[:, 0] - 0.3 * curriculumupdate, bound)
-    The upstream expands the shot range over time; we do the same via a staged
-    difficulty float (0.0 → 1.0) stored on env._ball_difficulty.
+    G1 legged_robot.py line 329 (inside reset_idx, guarded by 500-step gate):
+        self.curriculumupdate = int(mean(episode_length_buf[env_ids].float()) / 50.)
 
-    Stages (matching upstream's stage1/stage2 thresholds):
-        step=0:           difficulty=0.0 (easy centre shots)
-        step=stage1_step: difficulty=0.5 (moderate range)
-        step=stage2_step: difficulty=1.0 (full range)
+    This fires at most once per 500 sim steps and uses the mean episode length of
+    currently-resetting envs. At max episode length (150 steps at 3 s / 0.02 s dt),
+    curriculumupdate saturates at int(150/50) = 3.
 
-    _reset_ball in commands.py reads env._ball_difficulty to interpolate ranges.
+    Sets on env:
+        _curriculumupdate: float in {0.0, 1.0, 2.0, 3.0} — mirrors G1 curriculumupdate
+        _ball_difficulty:  float in [0.0, 1.0] = _curriculumupdate / 3.0
+            → consumed by _reset_ball in commands.py to interpolate ball shot ranges
+            → consumed by eereach reward function for jump_scale
     """
 
     def __init__(self, cfg: "CurriculumTermCfg", env: ManagerBasedRlEnv) -> None:
-        self._stages = cfg.params["stages"]
+        if not hasattr(env, "_curriculumupdate"):
+            env._curriculumupdate = 0.0
         if not hasattr(env, "_ball_difficulty"):
             env._ball_difficulty = 0.0
+        if not hasattr(env, "_last_curriculum_step"):
+            env._last_curriculum_step = 0
 
     def __call__(
         self,
         env: ManagerBasedRlEnv,
         env_ids: torch.Tensor,
-        stages: list[dict],
+        min_gate: int = 500,
     ) -> dict:
-        current_difficulty = 0.0
-        for stage in self._stages:
-            if env.common_step_counter >= stage["step"]:
-                current_difficulty = stage["difficulty"]
-        env._ball_difficulty = current_difficulty
-        return {"ball_difficulty": torch.tensor(current_difficulty)}
+        if (env.common_step_counter - env._last_curriculum_step) > min_gate:
+            mean_ep_len = env.episode_length_buf[env_ids].float().mean().item()
+            env._curriculumupdate = float(int(mean_ep_len / 50.0))
+            env._ball_difficulty = min(1.0, env._curriculumupdate / 3.0)
+            env._last_curriculum_step = env.common_step_counter
+        return {
+            "curriculumupdate": torch.tensor(env._curriculumupdate),
+            "ball_difficulty": torch.tensor(env._ball_difficulty),
+        }
 
 
 def reset_ball_training(env: ManagerBasedRlEnv, env_ids: torch.Tensor, ball_name: str = "ball") -> None:

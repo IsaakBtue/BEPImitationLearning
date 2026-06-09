@@ -1,5 +1,46 @@
 # Divergence from Upstream (Humanoid-Goalkeeper)
 
+## 2026-06-09 — Eighth-pass: adaptive curriculum driver, stopball max, ball range
+
+### Change 1 — Adaptive curriculum driver replacing fixed-step `ball_difficulty_curriculum` (`resets.py`, `goalkeeper_amp_env_cfg.py`)
+**What changed:** Replaced the fixed-step `ball_difficulty_curriculum` (steps at 60k/120k) with `adaptive_curriculum_update`, an episode-length-based driver matching G1's exact mechanism. Every ~500 sim steps it computes `env._curriculumupdate = int(mean(episode_length_buf[env_ids]) / 50.0)` and `env._ball_difficulty = _curriculumupdate / 3.0`.
+**Why it was wrong:** G1's curriculum fires based on agent performance (mean episode length), not fixed wall-clock steps. A fixed schedule advances the curriculum even if the agent hasn't improved, potentially exposing shots that are too hard too early. The adaptive driver advances only when episodes are long (agent is surviving longer = improving).
+**Correct value:** Mirrors `legged_robot.py` line 329 exactly: `int(torch.mean(self.episode_length_buf[env_ids].float()) / 50.)`, gate every 500 sim steps.
+**Evidence:** G1 config `episode_length_s=3, dt=0.005, decimation=4` → max episode = 150 steps → max cu = int(150/50) = 3. Same logic.
+
+### Change 2 — Stopball curriculum max corrected 200→250 (`goalkeeper_amp_env_cfg.py`)
+**What changed:** Stopball stages changed from [100, 150, 200] to [100, 175, 250].
+**Why it was wrong:** G1 formula: `stop_init * (1 + 0.5 * curriculumupdate)` at max cu=3 gives `100 * 2.5 = 250`. Our previous max of 200 was 20% below the G1 peak, underselling the save-success signal at high difficulty.
+**Correct value:** [100, 175, 250] (cu=0, cu=1.5, cu=3 equivalents).
+**Evidence:** G1 `legged_robot.py` line 363: `self.stop_init * (1 + 0.5 * self.curriculumupdate)`; config `stopball=100.0`.
+
+### Change 3 — `eereach` reward reads `_curriculumupdate` directly (`rewards.py`)
+**What changed:** `curriculumupdate = difficulty * 3.0` → `curriculumupdate = float(getattr(env, "_curriculumupdate", 0.0))`. Now uses the adaptive curriculum variable directly instead of deriving it from `_ball_difficulty`.
+**Why it was wrong:** The `difficulty * 3.0` mapping was correct numerically (both produce 0→3) but created a dependency on `_ball_difficulty` existing when `_curriculumupdate` is now the authoritative source set by `adaptive_curriculum_update`.
+**Correct value:** Direct read of `env._curriculumupdate`; fallback to 0.0 if not set.
+
+## 2026-06-09 — Seventh-pass: fixed jump_scale curriculum range to match G1
+
+### Change 1 — Fixed `jump_scale` curriculum range in `eereach` (`rewards.py` line 146)
+**What changed:** `curriculumupdate = difficulty * 2.0` → `difficulty * 3.0`. Inside `eereach`, `jump_scale = 3.0 + 3.0 * curriculumupdate` for jump motions (types 2,3).
+**Why it was wrong:** G1's `curriculumupdate` ranges 0–3 (driven by episode length), giving `jump_scale` range 3–12. Our mapping `difficulty * 2.0` only reached curriculumupdate=2 at max difficulty, capping jump_scale at 9. The jump velocity bonus for high-ball saves was 25% weaker than upstream at end of training.
+**Correct value:** `difficulty * 3.0` → curriculumupdate 0→3 at difficulty 0→1 → jump_scale 3→12, matching G1 exactly.
+**Evidence:** G1 `legged_robot.py` line 1379: `jump_scale = 3.0 + 3.0 * self.curriculumupdate`; G1 `curriculumupdate = int(mean_ep_len / 50)` max = `int(150/50) = 3`.
+
+## 2026-06-09 — Sixth-pass: removed motion_body_pos, fixed AMP to 2-frame obs
+
+### Change 1 — Removed `motion_body_pos` reward (`goalkeeper_amp_env_cfg.py`)
+**What changed:** Removed `motion_body_pos` from rewards entirely (was at weight 1.5, added in 5th pass as early-training aid).
+**Why it was wrong:** The upstream Humanoid-Goalkeeper uses AMP as the sole arm guidance mechanism — `get_amp_observations()` returns all 29 DOF positions and the discriminator penalises unnatural joint sequences including arm joints. Adding an explicit body-position tracking reward on top is redundant double-counting. It also creates an implicit inference mismatch: motion_body_pos references world-frame body positions from reference motion data, which is only available during training.
+**Correct design:** AMP on all 23 T1 joint positions (arms included) is the only arm motion driver, matching upstream design. The `eereach` reward (20.0) directs the arm toward the ball; AMP ensures the motion looks natural.
+**Evidence:** Upstream g1_29_config.py confirms no motion tracking reward of any kind in G1 training. AMP config `obs_type='dof'`, `num_obs=58` (29*2 frames) is the sole arm mechanism.
+
+### Change 2 — AMP observation history reverted to 1-frame (`goalkeeper_amp_env_cfg.py`)
+**What happened:** Attempted `history_length=2` to match upstream G1's `num_obs=29*2=58` (two consecutive frames). Caused crash: obs group produced 46 dims (23×2), runner then concatenated current+previous 46 → 92 dims, normalizer expected 46. RuntimeError at normalize_torch.
+**Root cause:** `him_amp_runner.py` already stacks consecutive AMP obs frames itself. `history_length` in the obs group does the same thing — both applied = 4 frames total, breaking the normalizer.
+**Correct value:** `history_length=1` → 23-dim obs per step. Runner concatenates two consecutive steps → 46-dim discriminator input (23+23). Matches upstream G1's 2-frame design (runner stacks 29+29=58 there).
+**Evidence:** Training log with history_length=2 shows RuntimeError: tensor a (92) vs tensor b (46) in normalizer.
+
 ## 2026-06-06 — Fourth-pass audit: 5 bugs fixed (AMP normalizer, disc training loop, stopball threshold, eereach hand routing)
 
 ### Fix 1 — Variance collapse in `EmpiricalNormalization.update()` (`normalizer.py`)
@@ -1541,3 +1582,51 @@ The goal of this port is to replicate G1 goalkeeper behavior (IsaacGym + rsl_rl)
 - `SimpleGoalKeeper/src/simple_goalkeeper/mdp/observations.py` (add always_visible param)
 - `SimpleGoalKeeper/src/simple_goalkeeper/tasks/goalkeeper_env_cfg.py` (reward table, events, episode length)
 - `SimpleGoalKeeper/CLAUDE.md` (updated reward table)
+
+---
+
+## 2026-06-09 — AMP training fixes: spawn, arm movement, ball ranges
+
+### Bug 1: Robot spawns underground
+
+**What changed:** `commands.py` `_resample_command` — added `root_pos[:, 2] += 0.05` after reading the Trunk position from motion data.
+
+**Why it was wrong:** Booster motion data was converted with a ground reference ~8 cm lower than the simulation floor. At frame 0 (standing), foot bodies are at Z≈0.002–0.017 m. With the ±0.01 m Z jitter from `pose_range`, feet could go to Z=-0.008 m (8 mm underground), causing MuJoCo to push the robot violently upward.
+
+**Evidence:** `numpy.load` on all 6 motion files showed frame-0 foot bodies at Z=0.002–0.017 m (Imitationlearningbooster) vs Z=0.083–0.099 m (my_mjlab_project_booster_t1 which showed no spawn issue).
+
+**Correct value:** +0.05 m offset puts feet at ≥0.052 m at spawn (safely above ground). After 2–3 sim steps physics settles the robot on the ground.
+
+### Bug 2: Arm not moving toward ball
+
+**What changed:** `goalkeeper_amp_env_cfg.py` — kept `motion_body_pos` at weight 1.5 (was deleted entirely). Doubled eereach curriculum weights (10/15/20 → 20/28/36) and hand_proximity_strict (5/7.5/10 → 10/15/20).
+
+**Why it was wrong:** Removing all motion tracking rewards left the AMP discriminator as the sole arm guidance signal. At <2k iterations the discriminator is immature and cannot overcome regularisation terms that keep arms at default pose. The working `my_mjlab_project_booster_t1` repo used explicit `motion_body_pos` at weight 4.0.
+
+**Correct approach:** `motion_body_pos` at weight 1.5 (15% of upstream's 10.0) provides direct early-training arm gradient without dominating task rewards. Higher eereach weight gives stronger reaching signal in phase 2.
+
+### Bug 3: Ball ranges too large (~50% shots unreachable)
+
+**What changed:** `commands.py` — narrowed ball trajectory parameters:
+- `y_start`: ±1.8 m → ±0.8 m  
+- `z_start`: (0.3, 1.8) → (0.5, 1.4) m
+- `t_flight` min: 0.4 → 0.5 s (prevents vx > 9.6 m/s)
+- `x_start` max: 5.0 → 4.5 m
+- `_BALL_END_RANGES` full-difficulty lateral Y max: 0.84 → 0.65 m
+- `_BALL_END_RANGES_EASY` lateral Y max: 0.40 → 0.35 m
+
+**Why it was wrong:** At t_flight=0.4 s and x_start=5 m, vx=-13.25 m/s — physically impossible for T1 to react. y_start=±1.8 m required extreme trajectory curves with ball arriving from the wrong side. ~50% of episodes had unreachable targets, halving the effective learning signal.
+
+**Evidence:** User reported visually ~50% shots unreachable; vx calculation confirms.
+
+## 2026-06-09: Static env partitioning for motion types (mirrors G1 end_regions)
+
+**What changed:** Added `static_partition=True` to `MultiMotionCommandCfg` in `goalkeeper_amp_env_cfg.py`. Implemented in `MultiMotionCommand.__init__` and `_resample_command` in `commands.py`.
+
+**Why it was wrong:** Previously `motion_type_ids` was randomly re-assigned at every episode reset (`torch.randint(0, 6, ...)`). Each env cycled through all 6 motion styles over training. While ball target ranges already matched the motion type, no env specialised in any single style.
+
+**G1 upstream design:** `end_regions` is a static tensor created once in `_init_buffers` and never modified. Envs 0–(N/6−1) permanently train `lefthand`, next group permanently trains `righthand`, etc. Each AMP discriminator receives a dedicated, consistent env group every rollout.
+
+**What the correct value is:** `static_partition=True` → at init, env `i` gets `motion_type_ids[i] = (i * 6) // num_envs` (equal groups of `num_envs//6`, last group absorbs remainder). At episode reset, `_resample_command` restores the static assignment instead of re-randomising.
+
+**Evidence:** Two subagents confirmed G1's `end_regions` is permanently assigned in `_init_buffers` and read-only everywhere else. At step 800 of training, arm motions (lefthand/righthand) were weak while step motions worked — consistent with mixed-signal AMP discriminators not enforcing arm-extension styles. The G1 paper and code both rely on dedicated env groups per motion style.
