@@ -218,11 +218,11 @@ def goalkeeper_amp_env_cfg(play: bool = False, num_steps_per_env: int = 100) -> 
     _robot_cfg_all = SceneEntityCfg("robot")
     cfg.rewards.update({
         "eereach": RewardTermCfg(
-            func=gk_rew.eereach, weight=20.0,
+            func=gk_rew.eereach, weight=30.0,
             params={"ball_name": "ball", "asset_cfg": _HAND_CFG, "reach_th": 0.2},
         ),
         "hand_proximity_strict": RewardTermCfg(
-            func=gk_rew.hand_proximity_strict, weight=10.0,
+            func=gk_rew.hand_proximity_strict, weight=15.0,
             params={"ball_name": "ball", "asset_cfg": _HAND_CFG, "strict_th": 0.15},
         ),
         "stopball": RewardTermCfg(
@@ -400,12 +400,12 @@ def goalkeeper_amp_env_cfg(play: bool = False, num_steps_per_env: int = 100) -> 
                 func=mjlab_mdp.reward_curriculum,
                 params={
                     "reward_name": "eereach",
-                    # Doubled from (10/15/20): at 10 the arm signal was overwhelmed
-                    # by AMP + regularisation terms before 2k iterations.
+                    # Raised from (20/28/36): AMP penalises arm deviations so task arm
+                    # signals need more weight. Scales 30→42→54 matching G1's 1+0.5*cu factor.
                     "stages": [
-                        {"step": 0,           "weight": 20.0},
-                        {"step": stage1_step, "weight": 28.0},
-                        {"step": stage2_step, "weight": 36.0},
+                        {"step": 0,           "weight": 30.0},
+                        {"step": stage1_step, "weight": 42.0},
+                        {"step": stage2_step, "weight": 54.0},
                     ],
                 },
             ),
@@ -413,11 +413,11 @@ def goalkeeper_amp_env_cfg(play: bool = False, num_steps_per_env: int = 100) -> 
                 func=mjlab_mdp.reward_curriculum,
                 params={
                     "reward_name": "hand_proximity_strict",
-                    # Doubled from (5/7.5/10) for same reason as eereach.
+                    # Raised from (10/15/20) to match new base weight of 15.
                     "stages": [
-                        {"step": 0,           "weight": 10.0},
-                        {"step": stage1_step, "weight": 15.0},
-                        {"step": stage2_step, "weight": 20.0},
+                        {"step": 0,           "weight": 15.0},
+                        {"step": stage1_step, "weight": 22.5},
+                        {"step": stage2_step, "weight": 30.0},
                     ],
                 },
             ),

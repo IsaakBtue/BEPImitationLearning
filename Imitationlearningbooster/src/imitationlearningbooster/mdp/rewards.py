@@ -57,141 +57,92 @@ def eereach(
     reach_th: float = 0.3,
     sigma: float = 5.0,
 ) -> torch.Tensor:
-    """Sigmoid reach reward with velocity amplification, intercept target, and behind-ball boost.
+    """Sigmoid reach reward — pelvis velocity vel_sigma, region-based hand selection.
 
-    Mirrors the original isaacgym _reward_eereach faithfully:
+    Phase 1 (ball far, x_local > 1.5): body pre-positioning reward (lateral + vertical alignment).
+    Phase 2 (ball close, x_local ≤ 1.5): sigmoid(dist) × vel_sigma.
 
-    Phase 1 (ball far away, y_local > 1.5):
-      - Use _ball_end_target (predicted intercept point) for lateral pre-positioning.
-      - Compute aside = (end_target_x - robot_x) / 0.8, clamped ±1.
-      - phase1_rew = 1 - |aside| (reward being on the correct side of the goal).
+    Hand selection: even motion types (0,2,4 = left side) → left hand (idx 0);
+    odd types (1,3,5 = right side) → right hand (idx 1). Mirrors G1 region-based
+    selection (legged_robot.py lines 209-223: even regions → left, odd → right).
 
-    Phase 2 (ball close, y_local ≤ 1.5):
-      - Use current ball position OR end_target (if ball y_local > 0.5) for distance.
-      - Sigmoid reach reward × vel_sigma multiplier.
-      - Mirrors upstream: approachidx updates end_target when ball_x_local ∈ [0.1, 0.5].
-
-    vel_sigma computation (mirrors G1 _reward_eereach jump_scale mechanism):
-      - Non-jump envs (motion_type 0,1,4,5): vel_sigma = 1 + 3 × clamp(vel_toward, 0, 3)
-      - Jump envs (motion_type 2,3):         vel_sigma = 1 + jump_scale × clamp(vel_toward, 0, 3)
-        where jump_scale = 3 + 3 × curriculumupdate (3→12 as curriculumupdate 0→3).
-        curriculumupdate = env._curriculumupdate (set by adaptive_curriculum_update, range 0→3).
-
-    Post-pass (behind=True):
-      - vel_sigma set to flat 2.0 (mirrors G1 exactly; previous port incorrectly doubled).
-
-    Upright gate: multiply by (1 - clamp(grav_xy², 0, 1)) as in original.
+    vel_sigma: pelvis world-frame Y velocity for side saves, Z velocity for jumps.
+    Mirrors G1 legged_robot.py lines 1381-1388 exactly (upper_body_index = "pelvis").
+    Direction-coded: even types dive left (+Y → positive signal), odd types dive right
+    (-Y → negated so still a positive signal when moving in the correct direction).
     """
     robot: Entity = env.scene[asset_cfg.name]
     ball: Entity = env.scene[ball_name]
     ball_pos_w = ball.data.root_link_pos_w                              # (N, 3)
     hand_pos_w = robot.data.body_link_pos_w[:, asset_cfg.body_ids, :]  # (N, 2, 3)
 
-    # Ball distance from env origin (X axis = approach axis).
     ball_x_local = ball_pos_w[:, 0] - env.scene.env_origins[:, 0]      # (N,)
-
-    # Compute behind once; reused for phase1_mask guard and post-pass vel_sigma.
     behind = _ball_is_behind(env, ball_name)
-
-    # Retrieve predicted intercept point set by _reset_ball.
     end_target = getattr(env, "_ball_end_target", None)
 
-    # ---- Phase 1: pre-positioning when ball is far (x_local > 1.5) ----
-    # Mirrors upstream:
-    #   end_target_local = end_target - torso_pos
-    #   asidegoal = clip(end_target_local[:, 1], -1, 1)   [original Y is lateral]
-    #   asidegoal[|asidegoal| < 0.3] = 0
-    #   verticalgoal = clip(torso_z - clip(end_target_z, 0.3, 1.2), 0, 1)
-    #   phase1_rew = 1 - (verticalgoal + |asidegoal|) / 2
-    # New system: X = approach axis, Y = lateral axis, Z = vertical (same).
-    # Guard: phase1 must not fire for deflected balls still at x > 1.5 (mirrors G1 velocity check).
-    phase1_mask = (ball_x_local > 1.5) & ~behind                       # (N,)
-
+    # ---- Phase 1: pre-positioning ----
+    phase1_mask = (ball_x_local > 1.5) & ~behind
     if end_target is not None:
-        root_pos_w = robot.data.root_link_pos_w                         # (N, 3)
-        end_target_local = end_target - root_pos_w                      # (N, 3)
-
-        # Lateral (Y) alignment — mirrors original end_target_local[:, 1] (Y lateral in G1).
+        root_pos_w = robot.data.root_link_pos_w
+        end_target_local = end_target - root_pos_w
         asidegoal = end_target_local[:, 1].clamp(-1.0, 1.0)
         asidegoal = torch.where(asidegoal.abs() < 0.3, torch.zeros_like(asidegoal), asidegoal)
-
-        # Vertical (Z) — same in both port and original.
         torso_z = root_pos_w[:, 2]
         verticalgoal = (torso_z - end_target[:, 2].clamp(0.3, 1.2)).clamp(0.0, 1.0)
-
-        phase1_rew = 1.0 - (verticalgoal + asidegoal.abs()) / 2.0      # (N,)
+        phase1_rew = 1.0 - (verticalgoal + asidegoal.abs()) / 2.0
     else:
         phase1_rew = torch.zeros(env.num_envs, device=env.device)
 
-    # ---- Phase 2: sigmoid reach reward when ball is close ----
-    # Target point: use end_target when ball is between 0.5–1.5 m away (in-flight approach),
-    # snap to current ball position when ≤ 0.5 m (mirrors upstream approachidx update).
-    if end_target is not None:
-        use_end_target = (ball_x_local > 0.5) & ~phase1_mask           # 0.5 < x ≤ 1.5
-        target_pos = torch.where(
-            use_end_target.unsqueeze(-1),
-            end_target,
-            ball_pos_w,
-        )                                                                # (N, 3)
-    else:
-        target_pos = ball_pos_w
+    # ---- Phase 2: sigmoid reach toward frozen intercept target (updated by approachidx) ----
+    target_pos = end_target if end_target is not None else ball_pos_w   # (N, 3)
 
     to_target = target_pos[:, None, :] - hand_pos_w                    # (N, 2, 3)
     dist_to_target = torch.norm(to_target, dim=-1)                     # (N, 2)
 
-    # --- Jump-region-aware vel_sigma (mirrors G1 _reward_eereach) ---
-    # G1: upper-body world-Y lateral velocity for side-saves, world-Z for jumps.
-    # T1 faces +X (same as G1): world Y is the lateral axis, world Z is up.
-    # Read curriculumupdate directly from env (set by adaptive_curriculum_update).
-    # Range {0,1,2,3} matching G1's int(mean_ep_len/50), set every ~500 sim steps.
-    curriculumupdate = float(getattr(env, "_curriculumupdate", 0.0))
-    jump_scale = 3.0 + 3.0 * curriculumupdate                         # 3→12 across stages
-
-    torso_vel_w = robot.data.root_link_lin_vel_w                       # (N, 3)
-
-    # is_left/is_jump must be computed before min_dist so we can route to the correct hand.
+    # Region-based hand selection: even motion type → left hand (body_ids[0]),
+    # odd motion type → right hand (body_ids[1]). Mirrors G1 lines 209-223.
+    arange = torch.arange(env.num_envs, device=env.device)
     try:
         motion_cmd = env.command_manager._terms.get("motion", None)
         if motion_cmd is not None and hasattr(motion_cmd, "motion_type_ids"):
-            type_ids = motion_cmd.motion_type_ids                      # [N] long tensor
-            is_jump  = (type_ids == 2) | (type_ids == 3)
-            is_left  = (type_ids == 0) | (type_ids == 2) | (type_ids == 4)
+            type_ids = motion_cmd.motion_type_ids                       # (N,) long
+            is_jump = (type_ids == 2) | (type_ids == 3)
+            hand_idx = (type_ids % 2).long()                            # 0=left, 1=right
+            # Dive direction: even → +Y (left side), odd → -Y (right side)
+            direction = torch.where(
+                type_ids % 2 == 0,
+                torch.ones(env.num_envs, device=env.device),
+                -torch.ones(env.num_envs, device=env.device),
+            )
         else:
             is_jump = torch.zeros(env.num_envs, dtype=torch.bool, device=env.device)
-            is_left = torch.zeros(env.num_envs, dtype=torch.bool, device=env.device)
+            hand_idx = dist_to_target.argmin(dim=-1)
+            direction = torch.ones(env.num_envs, device=env.device)
     except Exception:
         is_jump = torch.zeros(env.num_envs, dtype=torch.bool, device=env.device)
-        is_left = torch.zeros(env.num_envs, dtype=torch.bool, device=env.device)
+        hand_idx = dist_to_target.argmin(dim=-1)
+        direction = torch.ones(env.num_envs, device=env.device)
 
-    # Route to the correct hand per motion type: left hand (idx 0) for types 0/2/4,
-    # right hand (idx 1) for types 1/3/5. Mirrors G1 which selects by save region.
-    min_dist = torch.where(is_left, dist_to_target[:, 0], dist_to_target[:, 1])
-
-    # Base sigmoid: 1 at dist=0, 0 far away.
+    min_dist = dist_to_target[arange, hand_idx]                        # (N,)
     rew = 1.0 - 1.0 / (1.0 + torch.exp(-sigma * (min_dist - reach_th)))
 
-    # Side-saves: reward lateral torso Y-velocity toward the ball target side.
-    # Mirrors G1 which rewards rigid_body_states[..., 8] = world-Y velocity.
-    # lefthand (types 0/2/4): ball end at -Y → reward negative Y velocity.
-    # righthand (types 1/3/5): ball end at +Y → reward positive Y velocity.
-    lateral_vel_y = torso_vel_w[:, 1]
-    base_vel_sigma = torch.where(
-        is_left,
-        1.0 + 3.0 * torch.clamp( lateral_vel_y, 0.0, 3.0),   # left (ball +Y): reward +Y motion
-        1.0 + 3.0 * torch.clamp(-lateral_vel_y, 0.0, 3.0),   # right (ball -Y): reward -Y motion
+    # ---- vel_sigma: pelvis Y velocity for side saves (G1 legged_robot.py:1381-1388) ----
+    curriculumupdate = float(getattr(env, "_curriculumupdate", 0.0))
+    jump_scale = 3.0 + 3.0 * curriculumupdate                         # 3→12
+
+    root_vel_w = robot.data.root_link_lin_vel_w                        # (N, 3)
+    # Pelvis Y: direction-coded so the reward is always 1 + 3*clamp(desired_vel, 0, 3).
+    base_vel_sigma = 1.0 + 3.0 * torch.clamp(
+        direction * root_vel_w[:, 1], 0.0, 3.0
     )
-    jump_vel_sigma = 1.0 + jump_scale * torch.clamp(torso_vel_w[:, 2], 0.0, 3.0)
-
+    jump_vel_sigma = 1.0 + jump_scale * torch.clamp(root_vel_w[:, 2], 0.0, 3.0)
     vel_sigma = torch.where(is_jump, jump_vel_sigma, base_vel_sigma)
-
-    # Post-pass: mirrors G1 which sets vel_sigma = 2.0 (flat) when behind.
     vel_sigma = torch.where(behind, torch.full_like(vel_sigma, 2.0), vel_sigma)
 
-    # Combine: phase1 when ball is far, phase2 when ball is close.
     taskrew = torch.where(phase1_mask, phase1_rew, rew * vel_sigma)
 
     projected_grav = env.scene["robot"].data.projected_gravity_b
-    upright = (1.0 - torch.clamp(torch.sum(projected_grav[:, :2] ** 2, dim=1), 0.0, 1.0))
+    upright = 1.0 - torch.clamp(torch.sum(projected_grav[:, :2] ** 2, dim=1), 0.0, 1.0)
     return taskrew * upright
 
 
@@ -587,20 +538,45 @@ def hand_proximity_strict(
     asset_cfg: SceneEntityCfg = _HAND_CFG,
     strict_th: float = 0.15,
 ) -> torch.Tensor:
-    """Continuous reward when nearest hand is within strict threshold of the ball.
+    """Dense reward when nearest hand is within strict threshold of the frozen intercept target.
 
-    Mirrors upstream _reward_success: fires every step the hand is within
-    strict_th (0.15 m) of the ball, providing dense gradient for precise hand
-    placement. Complements catch_success (0.5 m coarse threshold) by rewarding
-    the final approach. Weight: 5.0 (same as upstream success reward).
+    Mirrors G1's _reward_success exactly: measures distance to end_target (the frozen
+    intercept point), NOT to the live ball position. The live ball passes any 0.15 m
+    sphere in ~1-2 physics steps at 4 m/s — far too narrow a window for a gradient
+    signal. The frozen intercept target is a static 3D point the hand can reliably
+    reach. After stopball fires, multiplier doubles (mirrors G1's success_flag logic).
     """
     robot: Entity = env.scene[asset_cfg.name]
-    ball: Entity = env.scene[ball_name]
-    hand_pos_w = robot.data.body_link_pos_w[:, asset_cfg.body_ids, :]
-    dist = torch.norm(hand_pos_w - ball.data.root_link_pos_w[:, None, :], dim=-1).min(dim=-1).values
+    hand_pos_w = robot.data.body_link_pos_w[:, asset_cfg.body_ids, :]  # (N, 2, 3)
+
+    # Use frozen intercept target (set at episode reset by _reset_ball).
+    # Falls back to live ball position if end_target is not set yet.
+    end_target = getattr(env, "_ball_end_target", None)
+    if end_target is not None:
+        target = end_target                                              # (N, 3)
+    else:
+        ball: Entity = env.scene[ball_name]
+        target = ball.data.root_link_pos_w                              # (N, 3)
+
+    dist = torch.norm(hand_pos_w - target[:, None, :], dim=-1)        # (N, 2)
+
+    # Region-based hand selection: even motion type → left hand (0), odd → right hand (1).
+    # Mirrors G1 legged_robot.py lines 209-223 and _reward_success (line 1402-1403).
+    try:
+        motion_cmd = env.command_manager._terms.get("motion", None)
+        if motion_cmd is not None and hasattr(motion_cmd, "motion_type_ids"):
+            type_ids = motion_cmd.motion_type_ids
+            hand_idx = (type_ids % 2).long()
+            arange = torch.arange(env.num_envs, device=env.device)
+            dist_selected = dist[arange, hand_idx]
+        else:
+            dist_selected = dist.min(dim=-1).values
+    except Exception:
+        dist_selected = dist.min(dim=-1).values
+
     stopped = getattr(env, "_sb_flag", torch.zeros(env.num_envs, dtype=torch.bool, device=env.device))
     multiplier = 1.0 + stopped.float()
-    return (dist < strict_th).float() * multiplier
+    return (dist_selected < strict_th).float() * multiplier
 
 
 _T1_KP_MAP: dict[str, float] = {

@@ -162,7 +162,7 @@ class MultiMotionCommand(MotionCommand):
     def anchor_ang_vel_w(self) -> torch.Tensor:
         return self._gather_anchor("body_ang_vel_w")
 
-    def _resample_command(self, env_ids: torch.Tensor, reset_ball: bool = True) -> None:
+    def _resample_command(self, env_ids: torch.Tensor, reset_ball: bool = True, reset_robot: bool = True) -> None:
         if self.cfg.static_partition:
             # Restore permanent assignment — never re-randomise, even on mid-episode clip loops.
             self.motion_type_ids[env_ids] = self._static_motion_type_ids[env_ids]
@@ -192,41 +192,42 @@ class MultiMotionCommand(MotionCommand):
                     0, loader.time_step_total, (count,), device=self.device
                 )
 
-        root_pos = self.body_pos_w[env_ids, 0].clone()
-        # Booster motion data ground reference is ~8 cm below simulation floor.
-        # Lifting root by 0.05 m puts feet at ~0.05 m clearance, preventing underground spawn.
-        root_pos[:, 2] += 0.05
-        root_ori = self.body_quat_w[env_ids, 0].clone()
-        root_lin_vel = self.body_lin_vel_w[env_ids, 0].clone()
-        root_ang_vel = self.body_ang_vel_w[env_ids, 0].clone()
+        # G1 approach: always spawn from standing keyframe, not from motion data.
+        # Motion data is used only by the AMP discriminator (via the "amp" obs group),
+        # not for robot initialization. Mid-episode clip loops skip this block.
+        if reset_robot:
+            root_pos = self.robot.data.default_root_state[env_ids, :3].clone() + self._env.scene.env_origins[env_ids]
+            root_ori = self.robot.data.default_root_state[env_ids, 3:7].clone()
+            root_lin_vel = torch.zeros(len(env_ids), 3, device=self.device)
+            root_ang_vel = torch.zeros(len(env_ids), 3, device=self.device)
 
-        range_list = [self.cfg.pose_range.get(k, (0.0, 0.0)) for k in ["x", "y", "z", "roll", "pitch", "yaw"]]
-        ranges = torch.tensor(range_list, device=self.device)
-        rand_samples = sample_uniform(ranges[:, 0], ranges[:, 1], (len(env_ids), 6), device=self.device)
-        root_pos += rand_samples[:, :3]
-        root_ori = quat_mul(
-            quat_from_euler_xyz(rand_samples[:, 3], rand_samples[:, 4], rand_samples[:, 5]),
-            root_ori,
-        )
+            range_list = [self.cfg.pose_range.get(k, (0.0, 0.0)) for k in ["x", "y", "z", "roll", "pitch", "yaw"]]
+            ranges = torch.tensor(range_list, device=self.device)
+            rand_samples = sample_uniform(ranges[:, 0], ranges[:, 1], (len(env_ids), 6), device=self.device)
+            root_pos += rand_samples[:, :3]
+            root_ori = quat_mul(
+                quat_from_euler_xyz(rand_samples[:, 3], rand_samples[:, 4], rand_samples[:, 5]),
+                root_ori,
+            )
 
-        range_list = [self.cfg.velocity_range.get(k, (0.0, 0.0)) for k in ["x", "y", "z", "roll", "pitch", "yaw"]]
-        ranges = torch.tensor(range_list, device=self.device)
-        rand_samples = sample_uniform(ranges[:, 0], ranges[:, 1], (len(env_ids), 6), device=self.device)
-        root_lin_vel += rand_samples[:, :3]
-        root_ang_vel += rand_samples[:, 3:]
+            range_list = [self.cfg.velocity_range.get(k, (0.0, 0.0)) for k in ["x", "y", "z", "roll", "pitch", "yaw"]]
+            ranges = torch.tensor(range_list, device=self.device)
+            rand_samples = sample_uniform(ranges[:, 0], ranges[:, 1], (len(env_ids), 6), device=self.device)
+            root_lin_vel += rand_samples[:, :3]
+            root_ang_vel += rand_samples[:, 3:]
 
-        joint_pos = self.joint_pos[env_ids].clone()
-        joint_vel = self.joint_vel[env_ids]
-        joint_pos += sample_uniform(
-            lower=self.cfg.joint_position_range[0],
-            upper=self.cfg.joint_position_range[1],
-            size=joint_pos.shape,
-            device=joint_pos.device,
-        )
+            joint_pos = self.robot.data.default_joint_pos[env_ids].clone()
+            joint_vel = torch.zeros_like(joint_pos)
+            joint_pos += sample_uniform(
+                lower=self.cfg.joint_position_range[0],
+                upper=self.cfg.joint_position_range[1],
+                size=joint_pos.shape,
+                device=joint_pos.device,
+            )
 
-        self._write_reference_state_to_sim(
-            env_ids, root_pos, root_ori, root_lin_vel, root_ang_vel, joint_pos, joint_vel
-        )
+            self._write_reference_state_to_sim(
+                env_ids, root_pos, root_ori, root_lin_vel, root_ang_vel, joint_pos, joint_vel
+            )
 
         # Only reset the ball at true episode resets, not when the motion loops mid-episode.
         # Matches original: one ball per episode. Caller passes reset_ball=False for loops.
@@ -379,12 +380,46 @@ class MultiMotionCommand(MotionCommand):
         per_env_totals = self._time_step_totals[self.motion_type_ids]
         env_ids = torch.where(self.time_steps >= per_env_totals)[0]
         if env_ids.numel() > 0:
-            self._resample_command(env_ids, reset_ball=False)
+            self._resample_command(env_ids, reset_ball=False, reset_robot=False)
         self.update_relative_body_poses()
 
         # Decrement catchstep warmup counter each step (mirrors upstream post_physics_step).
         if hasattr(self._env, "_catchstep"):
             self._env._catchstep = (self._env._catchstep - 1).clamp(min=0)
+
+        # Approachidx snap: while ball is 0.1–0.5 m in front and not yet deflected,
+        # overwrite _ball_end_target with the live ball position every step.
+        # Mirrors G1 legged_robot.py post_physics_step lines 203–206:
+        #   approachidx = (balllocal < 0.5) & (balllocal > 0.1) & (vx_delta < 2.0)
+        #   end_target[approachidx] = ball_pos[approachidx]
+        # This corrects the Z-error from the parabolic arc that the frozen linear-
+        # interpolation estimate cannot account for, giving an accurate interception
+        # target during the critical approach window.
+        if self.cfg.ball_name and hasattr(self._env, "_ball_end_target"):
+            try:
+                ball: Entity = self._env.scene[self.cfg.ball_name]
+                ball_pos_w = ball.data.root_link_pos_w
+                ball_x_local = ball_pos_w[:, 0] - self._env.scene.env_origins[:, 0]
+                ball_x_vel = ball.data.root_link_lin_vel_w[:, 0]
+                init_vx = getattr(self._env, "_sb_init_vx", None)
+                if init_vx is not None:
+                    not_deflected = (ball_x_vel - init_vx) < 2.0
+                else:
+                    not_deflected = torch.ones(
+                        self._env.num_envs, dtype=torch.bool, device=self.device
+                    )
+                approachidx = (
+                    (ball_x_local > 0.1) & (ball_x_local < 0.5) & not_deflected
+                ).nonzero(as_tuple=False).flatten()
+                if approachidx.numel() > 0:
+                    self._env._ball_end_target[approachidx] = ball_pos_w[approachidx].clone()
+                    # Clip X so target stays within arm-reach zone (mirrors G1 clip).
+                    self._env._ball_end_target[:, 0] = self._env._ball_end_target[:, 0].clamp(
+                        self._env.scene.env_origins[:, 0] + 0.1,
+                        self._env.scene.env_origins[:, 0] + 1.0,
+                    )
+            except (KeyError, AttributeError):
+                pass
 
         if self.cfg.sampling_mode == "adaptive":
             self.bin_failed_count = (

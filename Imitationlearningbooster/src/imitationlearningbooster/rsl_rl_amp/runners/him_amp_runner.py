@@ -79,7 +79,10 @@ class GoalkeeperAmpRunner(MotionTrackingOnPolicyRunner):
         for disc in self.discriminators.values():
             disc_params.append({"params": disc.trunk.parameters(), "weight_decay": 1e-3})
             disc_params.append({"params": disc.amp_linear.parameters(), "weight_decay": 1e-1})
-        self.disc_optimizer = optim.Adam(disc_params, lr=1e-4)
+        # lr lowered 1e-4→1e-5: at 1e-4 the discriminator overtook the policy by iter ~700
+        # (disc_loss stuck at 4.2, AMP reward collapsed). G1 uses a shared optimizer with
+        # the same adaptive LR as PPO; a separate disc optimizer must be much slower.
+        self.disc_optimizer = optim.Adam(disc_params, lr=1e-5)
 
         # Buffer to store amp_obs and motion_ids during rollout
         num_steps = train_cfg.get("num_steps_per_env", 100)
@@ -230,10 +233,14 @@ class GoalkeeperAmpRunner(MotionTrackingOnPolicyRunner):
             # PPO update
             loss_dict = self.alg.update()
 
-            # Discriminator update — match G1's 20 gradient steps (5 epochs × 4 mini-batches)
+            # Discriminator update — 4 steps per iteration (not 20).
+            # G1's "20 steps" are joint actor-critic+discriminator steps inside the same
+            # optimizer. Our discriminator has a separate optimizer that runs AFTER the
+            # policy update, so 20 pure disc steps per iteration lets the discriminator
+            # overtake the policy before it can respond. 4 steps (one epoch) keeps the
+            # discriminator from getting too far ahead of the policy each iteration.
             num_mini_batches = self.cfg.get("algorithm", {}).get("num_mini_batches", 4)
-            num_learning_epochs = self.cfg.get("algorithm", {}).get("num_learning_epochs", 5)
-            num_disc_updates = num_mini_batches * num_learning_epochs
+            num_disc_updates = num_mini_batches  # 4 steps, not 5×4=20
             # Cap per-discriminator batch to avoid OOM in compute_grad_pen (create_graph=True
             # on 25k samples exhausts 31 GB VRAM; G1 upstream gets ~17k on an 8 GB GPU).
             # Default 4096 is close to G1's effective batch without the OOM risk.
@@ -278,6 +285,10 @@ class GoalkeeperAmpRunner(MotionTrackingOnPolicyRunner):
                 self.disc_optimizer.zero_grad()
                 if disc_loss_iter.requires_grad:
                     disc_loss_iter.backward()
+                    torch.nn.utils.clip_grad_norm_(
+                        [p for g in self.disc_optimizer.param_groups for p in g["params"]],
+                        max_norm=1.0,
+                    )
                     self.disc_optimizer.step()
                 disc_loss_total += disc_loss_iter.item()
 

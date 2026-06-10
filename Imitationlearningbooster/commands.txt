@@ -1,0 +1,1 @@
+cd /home/robocup/IsaakB/BEPImitationLearning/Imitationlearningbooster && env -u PYTHONPATH .venv/bin/train goalkeeper_booster_t1_amp

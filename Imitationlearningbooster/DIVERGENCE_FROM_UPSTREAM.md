@@ -1,5 +1,78 @@
 # Divergence from Upstream (Humanoid-Goalkeeper)
 
+## 2026-06-10 — Eleventh-pass: subagent audit corrects 3 bugs from tenth-pass
+
+### Bug A — Missing approachidx snap (`commands.py` `_update_command`)
+**What changed:** `_update_command` now overwrites `env._ball_end_target[approachidx]` with the live ball position every step while ball_x_local ∈ (0.1, 0.5) and the ball has not been deflected. Clips the X of `_ball_end_target` to [env_origin_x + 0.1, env_origin_x + 1.0].
+**Why it was wrong:** The frozen `_ball_end_target` is a linear interpolation along the ball's chord — it does not account for the parabolic Z drop from gravity. G1 lines 203–206 (`post_physics_step`) snap `end_target` to the live ball position during the approach window, correcting this error in real time. Without the snap, both `eereach` and `hand_proximity_strict` reward the hand for reaching a phantom intercept point that can be tens of centimetres from the actual ball at contact.
+**Correct value:** `_ball_end_target[approachidx] = ball.data.root_link_pos_w[approachidx].clone()` every step in `_update_command` when approach condition is met.
+**Evidence:** G1 `legged_robot.py` lines 203–206; independent subagent confirmed the linear interpolation Z-error and missing per-step correction.
+
+### Bug B — Hand selection must be region-based, not `min()` (`rewards.py` `eereach` and `hand_proximity_strict`)
+**What changed:** Both `eereach` and `hand_proximity_strict` now select the hand by motion type: `hand_idx = type_ids % 2` (0 = left, even types; 1 = right, odd types). The `min()` over both hands introduced in the tenth-pass has been reverted.
+**Why it was wrong:** `min()` allows mid-episode hand flips — if the off-hand becomes temporarily closer to the target, the reward switches to rewarding that arm. This contradicts the static-partition training setup where each env is locked to one motion type permanently. An env assigned to lefthand (type 0) may earn right-arm rewards if the right hand is briefly closer, sending contradictory gradients. G1 lines 209–223 use an explicit region mask: even regions → left hand, odd regions → right hand, fixed for the episode's duration.
+**Correct value:** `hand_idx = (type_ids % 2).long()`. Falls back to `argmin()` if `motion_type_ids` is unavailable.
+**Evidence:** G1 `legged_robot.py` lines 209–223; independent subagent identified three concrete scenarios where `min()` flips to the wrong hand.
+
+### Bug C — `eereach` vel_sigma must use pelvis Y velocity, not hand velocity (`rewards.py`)
+**What changed:** `vel_sigma` in `eereach` reverted to pelvis (root link) world-frame Y velocity for side saves, matching G1 `legged_robot.py` lines 1381–1388. Direction-coded: even motion types (left side, +Y) → `1 + 3*clamp(+vy, 0, 3)`; odd types (right side, −Y) → `1 + 3*clamp(−vy, 0, 3)`.
+**Why it was wrong:** The tenth-pass justification ("AMP creates adversarial pressure against arm deviations") is factually incorrect — G1 also trains under AMP with the same discriminator architecture and explicitly chose pelvis-Y velocity, never hand velocity. Hand velocity rewards arm extension but loses the full-body dive signal; pelvis-Y velocity rewards the whole-body lateral dive that goalkeeping motions require. The `my_mjlab_project_booster_t1` reference used hand velocity but that run had no AMP discriminator — not an equivalent context.
+**Correct value:** `base_vel_sigma = 1 + 3 * clamp(direction * root_link_lin_vel_w[:, 1], 0, 3)` where `direction = +1` for even types, `-1` for odd types. Jump saves keep torso-Z (unchanged, matches G1).
+**Evidence:** G1 `legged_robot.py` line 180: `upper_body_link = "pelvis"`; lines 1381–1388: `vel_sigma = 1 + 3*clip(pelvis_Y_vel, 0, 3)` for side regions; independent subagent confirmed the AMP argument does not hold since G1 has the same AMP training.
+
+### Minor — Fixed misleading docstring in `discriminator.py` `compute_grad_pen`
+The docstring claimed "Fix 2.1: removed erroneous * 0.1 multiplier that made effective lambda 0.5 instead of 5." The `* 0.1` multiplier was still present at the call site in the runner (effective lambda = 5.0 × 0.1 = 0.5, matching G1). The docstring has been corrected to state that effective lambda = 0.5 is intentional.
+
+## 2026-06-10 — Tenth-pass: fix hand use + AMP divergence (4 root causes)
+
+### Change 1 — `eereach` vel_sigma uses hand velocity toward target, not torso lateral velocity (`rewards.py`)
+**What changed:** `vel_sigma` in `eereach` now measures velocity of the nearest hand toward the frozen intercept target (dot product of hand velocity with unit vector to target). The previous implementation measured torso Y lateral velocity, giving no gradient for arm extension.
+**Why it was wrong:** Torso moving laterally rewards body positioning but the arm can stay retracted and still collect the same vel_sigma. A policy that body-slides to the right X/Y but never extends the arm gets full eereach credit. Hand velocity toward target directly rewards arm extension.
+**Correct value:** `closest_vel = (hand_vel_w * to_target_unit).sum(dim=-1)[closest_idx]`; `vel_sigma = 1 + 3 * clamp(closest_vel, 0, 3)`. Jump motions keep torso-Z amplification.
+**Evidence:** Successful single-motion run (`my_mjlab_project_booster_t1`) that showed active hand use used hand velocity toward ball. G1 uses torso velocity but G1 has no AMP adversarial pressure on arms; our AMP discriminator suppresses arm deviations so task arm signals need to be stronger.
+
+### Change 2 — `eereach` uses closest hand (min over both), not motion-type-routed hand (`rewards.py`)
+**What changed:** `min_dist, closest_idx = dist_to_target.min(dim=-1)` — always picks whichever hand is physically nearer to the intercept target. Previously routed to a fixed hand per motion type (left for types 0/2/4, right for 1/3/5).
+**Why it was wrong:** Fixed routing means if the robot's body position slightly favors the other hand, the reward doesn't reflect the better option, creating confusing gradients.
+**Correct value:** `min()` over both hands, matching the successful single-motion run.
+
+### Change 3 — `hand_proximity_strict` uses frozen intercept target, not live ball position (`rewards.py`)
+**What changed:** `hand_proximity_strict` now measures distance to `env._ball_end_target` (the parabolic intercept point set at episode reset) instead of `ball.data.root_link_pos_w` (live ball position).
+**Why it was wrong:** A ball traveling at 4 m/s passes through any 0.15 m sphere in ~37 ms (≈1-2 steps at 50 Hz). The reward almost never fires because the hand can't coincide with the flying ball at the right instant. G1's `_reward_success` measures distance to `end_target` (a frozen 3D point), not the moving ball.
+**Correct value:** `dist = norm(hand_pos - env._ball_end_target).min()`. Falls back to live ball if `_ball_end_target` not set.
+**Evidence:** G1 `legged_robot.py:1403`: `(self.dist < strict_th)` where `self.dist = norm(end_target - hand)`, `end_target` is set at reset and only updated (snapped to ball) when ball is within 0.1–0.5 m.
+
+### Change 4 — `eereach` weight 20→30, `hand_proximity_strict` weight 10→15, curriculum updated (`goalkeeper_amp_env_cfg.py`)
+**What changed:** Base weights raised; curriculum stages updated proportionally (eereach: 30/42/54; hand_proximity_strict: 15/22.5/30).
+**Why it was wrong:** At amp_coef=0.4, the AMP discriminator creates adversarial pressure against arm deviations from reference motion. The previous arm signal weights (20/10) were too weak to overcome this. G1 has no such adversarial pressure.
+
+### Change 5 — `amp_coef` 0.4→0.2 (`goalkeeper_amp_ppo_cfg.py`)
+**What changed:** AMP blending factor halved: blended_reward = 0.2*amp_reward + 0.8*task_reward.
+**Why it was wrong:** At 0.4, the AMP discriminator penalized arm deviations from reference motion at 40% of total reward. With the discriminator still learning (disc_loss at 4.2 after 1400 iterations), this suppressed arm use before the policy could discover that arm extension leads to stopball.
+**Correct value:** 0.2 — reduces AMP adversarial arm suppression while still encouraging natural motion.
+
+### Change 6 — discriminator LR 1e-4→1e-5, added grad clip, reduced updates 20→4 (`him_amp_runner.py`)
+**What changed:** `disc_optimizer` LR lowered from `1e-4` to `1e-5`. `clip_grad_norm_(max=1.0)` added after `disc_loss_iter.backward()`. `num_disc_updates` changed from `num_mini_batches * num_learning_epochs` (20) to `num_mini_batches` (4).
+**Why it was wrong:** G1's "20 discriminator steps" are joint actor-critic+discriminator steps inside one shared optimizer. Our separate disc optimizer does 20 pure disc updates after the policy has already updated — allowing the discriminator to overfit to the current policy before it can respond. By iter ~700 the discriminator was winning completely (disc_loss 4.2, AMP reward collapsed from 4.5 to 2.5). The high LR and no grad clip amplified this.
+**Evidence:** Rising entropy 22→26+, rising std 0.63→0.78, falling AMP reward after peak at iter 744.
+
+### Change 7 — `entropy_coef` 0.01→0.005 (`goalkeeper_amp_ppo_cfg.py`)
+**What changed:** PPO entropy coefficient halved.
+**Why it was wrong:** When AMP reward collapsed to near-zero, the entropy bonus at 0.01 became the dominant gradient signal, driving std upward. Halving it lets the surrogate loss and task rewards dominate.
+
+### Change 8 — removed `spectral_norm` from discriminator (`discriminator.py`)
+**What changed:** `spectral_norm(nn.Linear(...))` replaced with plain `nn.Linear(...)` for all discriminator layers.
+**Why it was wrong:** Spectral norm + gradient penalty is redundant — both enforce Lipschitz continuity via different mechanisms. The conflicting regularizers created unstable discriminator training. G1 upstream uses plain `nn.Linear` without spectral norm.
+
+## 2026-06-10 — Ninth-pass: adopt G1 standing-pose initialization (drop RSI)
+
+### Change 1 — Robot always spawns from standing keyframe, not motion data (`commands.py`)
+**What changed:** `MultiMotionCommand._resample_command` previously wrote motion-data frame 0 into the simulator at every episode reset (Reference State Initialization / RSI). Now it writes `robot.data.default_root_state` + `default_joint_pos` (i.e., T1_STANDING_KEYFRAME) instead. Mid-episode clip-loop calls pass `reset_robot=False` so the running robot is never teleported to standing mid-episode.
+**Why it was wrong:** RSI was inherited from the mjlab tracking framework, not from the upstream G1 goalkeeper design. G1 (`_reset_dofs` / `_reset_root_states`) always spawns from `self.standpos` (standing pose) and uses the motion dataset **only** for AMP discriminator "real" samples — never for initialization. RSI is not wrong in principle (it is the original AMP paper design), but it diverges from G1 and makes the policy harder to compare against the upstream baseline.
+**Correct value (G1 design):** `root_pos = env_origin + default_root_state[:3]`; `root_ori = default_root_state[3:7]`; `joint_pos = default_joint_pos`; all velocities zero before noise. Pose/velocity/joint-position noise ranges from `MultiMotionCommandCfg` still apply (zero in play mode).
+**Evidence:** G1 `legged_robot.py` line 677: `self.dof_pos[env_ids] = self.standpos`; line 702: `self.root_states[env_ids] = self.base_init_state`. Motion dataset is loaded into `MotionLib` at line 1056 and consumed only inside the AMP runner replay buffer — never written to sim at reset.
+**Retraining required:** YES. The policy trained with RSI (checkpoint at 1000 iterations) will have learned joint-position baselines relative to motion-data frame 0 poses. The new standing-pose initialization changes the observation distribution at step 0 of every episode. Retrain from scratch.
+
 ## 2026-06-09 — Eighth-pass: adaptive curriculum driver, stopball max, ball range
 
 ### Change 1 — Adaptive curriculum driver replacing fixed-step `ball_difficulty_curriculum` (`resets.py`, `goalkeeper_amp_env_cfg.py`)

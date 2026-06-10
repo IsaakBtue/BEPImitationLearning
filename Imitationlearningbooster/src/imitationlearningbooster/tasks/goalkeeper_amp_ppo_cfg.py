@@ -44,7 +44,7 @@ def goalkeeper_amp_ppo_runner_cfg() -> RslRlAmpRunnerCfg:
             value_loss_coef=1.0,
             use_clipped_value_loss=True,
             clip_param=0.2,
-            entropy_coef=0.01,
+            entropy_coef=0.005,  # lowered from 0.01: prevents entropy explosion when AMP reward collapses
             num_learning_epochs=5,
             num_mini_batches=4,
             learning_rate=1.0e-3,
@@ -58,7 +58,7 @@ def goalkeeper_amp_ppo_runner_cfg() -> RslRlAmpRunnerCfg:
         save_interval=200,
         num_steps_per_env=100,
         max_iterations=40_000,
-        amp_coef=0.4,
+        amp_coef=0.2,  # lowered from 0.4: reduces AMP adversarial pressure on arm deviations
         amp_discr_hidden_dims=[512, 256],
         amp_disc_mini_batch_size=4096,
     )
