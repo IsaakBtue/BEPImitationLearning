@@ -72,7 +72,7 @@ T1_ACTION_SCALE = {
 
 T1_STANDING_KEYFRAME = EntityCfg.InitialStateCfg(
     pos=(0.0, 0.0, 0.700),  # raised 3cm above ground so robot drops cleanly onto floor, avoiding underground spawn
-    rot=(0.7071068, 0.0, 0.0, 0.7071068),  # +90° yaw around Z to match G1 orientation
+    rot=(1.0, 0.0, 0.0, 0.0),  # identity: T1 URDF naturally faces +X (confirmed by motion data body_quat_w[0,0] ≈ identity)
     joint_pos={
         # Legs: kept bent for stability during early training
         r"(Left_Hip_Pitch|Right_Hip_Pitch)": -0.3,

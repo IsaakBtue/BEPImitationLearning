@@ -1,5 +1,14 @@
 # Divergence from Upstream (Humanoid-Goalkeeper)
 
+## 2026-06-10 — Thirteenth-pass: fix T1 spawn orientation facing +Y instead of +X
+
+### Bug — `T1_STANDING_KEYFRAME.rot` was +90° yaw (facing +Y) instead of identity (facing +X) (`t1_constants.py`)
+**What changed:** `T1_STANDING_KEYFRAME.rot` changed from `(0.7071068, 0.0, 0.0, 0.7071068)` (+90° around Z) to `(1.0, 0.0, 0.0, 0.0)` (identity).
+**Why it was wrong:** The +90° yaw was added to "match G1 orientation" but the quaternion was wrong. The T1 URDF naturally faces +X (Trunk geoms at pos.x=+0.055 = forward). Rotating +90° around Z maps +X → +Y, so the robot spawned facing +Y (sideways to the incoming ball). This was a latent bug from before the 11th-pass but was invisible then because `_resample_command` read orientation directly from the motion data (`body_quat_w[env_ids, 0]` ≈ identity ≈ +X facing) and never touched `T1_STANDING_KEYFRAME.rot`. The 11th-pass switched to `robot.data.default_root_state[3:7]` which reads from this keyframe, exposing the bug.
+**Correct value:** `rot=(1.0, 0.0, 0.0, 0.0)` — identity quaternion. Confirmed by motion data: `body_quat_w[0, 0] ≈ [0.9987, 0.038, 0.035, -0.0013]` (near-identity, T1 faces +X in its motion reference captures).
+**Evidence:** `T1_serial.xml` — Trunk child geoms at x=+0.055 confirm +X is forward. Motion data `lefthand_t1.npz` `body_quat_w[0, 0]` ≈ identity. User confirmed robot was facing +Y after 11th-pass commit.
+**Retraining required:** YES — observation distribution is different (gravity vector, contact normals all change). Stop any current training run and retrain from scratch.
+
 ## 2026-06-10 — Eleventh-pass: subagent audit corrects 3 bugs from tenth-pass
 
 ### Bug A — Missing approachidx snap (`commands.py` `_update_command`)
