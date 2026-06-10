@@ -79,10 +79,12 @@ class GoalkeeperAmpRunner(MotionTrackingOnPolicyRunner):
         for disc in self.discriminators.values():
             disc_params.append({"params": disc.trunk.parameters(), "weight_decay": 1e-3})
             disc_params.append({"params": disc.amp_linear.parameters(), "weight_decay": 1e-1})
-        # lr lowered 1e-4→1e-5: at 1e-4 the discriminator overtook the policy by iter ~700
-        # (disc_loss stuck at 4.2, AMP reward collapsed). G1 uses a shared optimizer with
-        # the same adaptive LR as PPO; a separate disc optimizer must be much slower.
-        self.disc_optimizer = optim.Adam(disc_params, lr=1e-5)
+        # lr=1e-4: same as before. The discriminator overtaking problem at 1e-4/20 steps was
+        # caused by running 20 PURE discriminator steps (now fixed to 4 steps). G1 runs the
+        # discriminator 4 joint steps at lr~1e-3; our separate optimizer at 1e-4 with 4 steps
+        # is ~10x slower overall — a reasonable conservative margin. 1e-5 (100x slower) was
+        # an overcorrection that makes AMP effectively a constant flat bonus (no motion signal).
+        self.disc_optimizer = optim.Adam(disc_params, lr=1e-4)
 
         # Buffer to store amp_obs and motion_ids during rollout
         num_steps = train_cfg.get("num_steps_per_env", 100)
