@@ -1630,3 +1630,31 @@ The goal of this port is to replicate G1 goalkeeper behavior (IsaacGym + rsl_rl)
 **What the correct value is:** `static_partition=True` → at init, env `i` gets `motion_type_ids[i] = (i * 6) // num_envs` (equal groups of `num_envs//6`, last group absorbs remainder). At episode reset, `_resample_command` restores the static assignment instead of re-randomising.
 
 **Evidence:** Two subagents confirmed G1's `end_regions` is permanently assigned in `_init_buffers` and read-only everywhere else. At step 800 of training, arm motions (lefthand/righthand) were weak while step motions worked — consistent with mixed-signal AMP discriminators not enforcing arm-extension styles. The G1 paper and code both rely on dedicated env groups per motion style.
+
+## 2026-06-10: Fix play-mode ball spawn axis mismatch (ball was invisible to policy)
+
+**What changed:** Rewrote `_shoot_ball` in `mdp/resets.py` to use the +X approach axis, matching the training `_reset_ball` in `commands.py`. Previously `_shoot_ball` launched the ball from the +Y direction (`y_start = sample_uniform(3.0, 5.0, ...)`).
+
+**Why it was wrong:** The ball visibility check in `observations.py:_compute_ball_visibility` gates on `ball_x_local > 0.05` (world X). With the +Y ball, `ball_x_local ≈ 0` at all times → ball was PERMANENTLY invisible to the policy during play → policy received zero ball observations → it just executed its default learned motion (lefthand) regardless of where the ball went.
+
+**What the correct value is:**
+```python
+x_start = sample_uniform(3.0, 4.5, ...)   # ball from +X (same as training)
+dx = -x_start - 0.3                        # target X ≈ -0.3 (goal line)
+```
+Full bilateral Y range (±0.65 m) so both hands are exercised during play.
+
+**Evidence:** User reported "ball only goes to the right where lefthand area is" — ball was flying past in +Y direction while the policy defaulted to lefthand saves. The old comment "rotated 90° vs original G1 +X setup" was incorrect; G1 training and this T1 training both use +X approach.
+
+## 2026-06-10: Fix ball Y-axis direction — left hand is at +Y, not -Y
+
+**What changed:** Swapped Y signs in `_BALL_END_RANGES` and `_BALL_END_RANGES_EASY` in `commands.py`. Swapped lateral velocity reward direction in `eereach` in `rewards.py`.
+
+**Why it was wrong:** Comments said "left hand at -Y, right hand at +Y". Empirically confirmed in MuJoCo viewer (green axis = +Y): the T1 left hand is at **+Y** and right hand at **-Y**. So lefthand/leftjump/leftstep motions had ball targets aimed at -Y — directly away from the left hand.
+
+**What the correct values are:**
+- lefthand/leftjump/leftstep: y_end ∈ [+0.15, +0.65] (full), [+0.10, +0.35] (easy)
+- righthand/rightjump/rightstep: y_end ∈ [-0.65, -0.15] (full), [-0.35, -0.10] (easy)
+- `eereach` lateral vel_sigma: left motions reward +Y torso motion, right motions reward -Y.
+
+**Evidence:** User confirmed by visual inspection in MuJoCo viewer: lefthand save happens on the green (+Y) axis side.

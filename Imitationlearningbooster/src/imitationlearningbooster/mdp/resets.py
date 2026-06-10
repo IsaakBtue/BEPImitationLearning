@@ -14,7 +14,13 @@ if TYPE_CHECKING:
 
 
 def _shoot_ball(env: ManagerBasedRlEnv, env_ids: torch.Tensor, ball_name: str) -> None:
-    """Shared ball-launch logic for autonomous play: spawn centered, aim toward goal line (Y≈0)."""
+    """Shared ball-launch logic for autonomous play.
+
+    Uses the same +X approach axis as _reset_ball in commands.py so that ball
+    observations and the visibility check (ball_x_local > 0.05) work correctly.
+    Ball spawns at x_start ∈ [3.0, 4.5] m and aims toward X ≈ -0.3 (goal line),
+    with random lateral Y and height Z targets covering the full save range.
+    """
     ball: Entity = env.scene[ball_name]
 
     if env_ids is None:
@@ -24,19 +30,18 @@ def _shoot_ball(env: ManagerBasedRlEnv, env_ids: torch.Tensor, ball_name: str) -
     n = len(env_ids)
     origins = env.scene.env_origins[env_ids]
 
-    # Ball comes from +Y direction (rotated 90° vs original G1 +X setup).
-    y_start = sample_uniform(3.0, 5.0, (n,), device=env.device)
-    # Spawn centered in X (small jitter) so the ball starts near the middle.
-    # Training uses per-motion _BALL_END_RANGES in commands.py — this path is play-only.
-    x_start = sample_uniform(-0.2, 0.2, (n,), device=env.device)
-    z_start = sample_uniform(0.5, 1.5, (n,), device=env.device)
-    x_end = sample_uniform(-0.6, 0.6, (n,), device=env.device)
-    z_end = sample_uniform(0.3, 1.4, (n,), device=env.device)
+    # Ball approaches from +X (same axis as training _reset_ball).
+    x_start = sample_uniform(3.0, 4.5, (n,), device=env.device)
+    y_start = sample_uniform(-0.8, 0.8, (n,), device=env.device)
+    z_start = sample_uniform(0.5, 1.4, (n,), device=env.device)
+    # End targets cover the full bilateral range so both hands are exercised in play.
+    y_end = sample_uniform(-0.65, 0.65, (n,), device=env.device)
+    z_end = sample_uniform(0.2, 1.4, (n,), device=env.device)
 
     t_flight = sample_uniform(0.5, 1.0, (n,), device=env.device)
 
-    dx = x_end - x_start
-    dy = -y_start - 0.3        # target Y ≈ -0.3 (just behind goal line)
+    dx = -x_start - 0.3       # target X ≈ -0.3 (just behind goal line)
+    dy = y_end - y_start
     dz = z_end - z_start
 
     vx = dx / t_flight
@@ -114,8 +119,96 @@ def reset_ball_training(env: ManagerBasedRlEnv, env_ids: torch.Tensor, ball_name
 
 
 def reset_ball_autonomous(env: ManagerBasedRlEnv, env_ids: torch.Tensor, ball_name: str = "ball") -> None:
-    """Reset ball with random trajectory for autonomous play."""
+    """Reset ball with random trajectory for autonomous play (symmetric, no motion-type routing)."""
     _shoot_ball(env, env_ids, ball_name)
+
+
+def reset_ball_per_motion(
+    env: ManagerBasedRlEnv,
+    env_ids: torch.Tensor,
+    ball_name: str = "ball",
+    difficulty_override: float = -1.0,
+) -> None:
+    """Reset ball using the motion-type-specific target zone.
+
+    Reads motion_type_ids from the 'motion' command manager term and routes
+    to the correct _BALL_END_RANGES entry — lefthand/jump/step motions target
+    +Y (left hand), righthand/jump/step target -Y (right hand).
+
+    Used in play mode so that --motion-file lefthand_t1.npz makes the ball
+    always fly to the +Y (green axis) side, matching training behaviour exactly.
+    Falls back to symmetric spawn if no motion command is registered.
+
+    Args:
+        difficulty_override: If >= 0, use this difficulty instead of env._ball_difficulty.
+            Pass 1.0 in play mode to use the full training range.
+    """
+    from imitationlearningbooster.mdp.commands import _BALL_END_RANGES, _BALL_END_RANGES_EASY
+
+    ball: Entity = env.scene[ball_name]
+
+    if env_ids is None:
+        env_ids = torch.arange(env.num_envs, device=env.device)
+
+    g = 9.81
+    n = len(env_ids)
+    origins = env.scene.env_origins[env_ids]
+
+    # Try to read motion_type_ids from command manager.
+    motion_types = None
+    try:
+        cmd = env.command_manager._terms.get("motion", None)
+        if cmd is not None and hasattr(cmd, "motion_type_ids"):
+            motion_types = cmd.motion_type_ids[env_ids]
+    except Exception:
+        pass
+
+    x_start = sample_uniform(3.0, 4.5, (n,), device=env.device)
+    y_start = sample_uniform(-0.8, 0.8, (n,), device=env.device)
+    z_start = sample_uniform(0.5, 1.4, (n,), device=env.device)
+
+    if motion_types is not None:
+        if difficulty_override >= 0.0:
+            difficulty = max(0.0, min(1.0, difficulty_override))
+        else:
+            difficulty = float(getattr(env, "_ball_difficulty", 0.0))
+        difficulty = max(0.0, min(1.0, difficulty))
+        end_ranges_full = torch.tensor(_BALL_END_RANGES, device=env.device)
+        end_ranges_easy = torch.tensor(_BALL_END_RANGES_EASY, device=env.device)
+        end_ranges = end_ranges_easy + difficulty * (end_ranges_full - end_ranges_easy)
+        per_env = end_ranges[motion_types]                                    # [n, 4]
+        y_end = sample_uniform(per_env[:, 0], per_env[:, 1], (n,), device=env.device)
+        z_end = sample_uniform(per_env[:, 2], per_env[:, 3], (n,), device=env.device)
+    else:
+        # Fallback: full bilateral range (no motion type info available).
+        y_end = sample_uniform(-0.65, 0.65, (n,), device=env.device)
+        z_end = sample_uniform(0.20, 1.40, (n,), device=env.device)
+
+    t_flight = sample_uniform(0.5, 1.0, (n,), device=env.device)
+
+    dx = -x_start - 0.3
+    dy = y_end - y_start
+    dz = z_end - z_start
+
+    vx = dx / t_flight
+    vy = dy / t_flight
+    vz = (dz + 0.5 * g * t_flight**2) / t_flight
+
+    ball_pos_w = torch.stack([
+        origins[:, 0] + x_start,
+        origins[:, 1] + y_start,
+        origins[:, 2] + z_start,
+    ], dim=1)
+    ball_quat_w = torch.zeros((n, 4), device=env.device)
+    ball_quat_w[:, 0] = 1.0
+    ball_pose = torch.cat([ball_pos_w, ball_quat_w], dim=-1)
+
+    ball_vel = torch.stack([vx, vy, vz], dim=1)
+    ball_ang_vel = torch.zeros((n, 3), device=env.device)
+    ball_velocity = torch.cat([ball_vel, ball_ang_vel], dim=-1)
+
+    ball.write_root_link_pose_to_sim(ball_pose, env_ids=env_ids)
+    ball.write_root_link_velocity_to_sim(ball_velocity, env_ids=env_ids)
 
 
 def sharpforce_termination(

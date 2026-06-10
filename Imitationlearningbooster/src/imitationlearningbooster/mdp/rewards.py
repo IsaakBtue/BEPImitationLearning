@@ -177,8 +177,8 @@ def eereach(
     lateral_vel_y = torso_vel_w[:, 1]
     base_vel_sigma = torch.where(
         is_left,
-        1.0 + 3.0 * torch.clamp(-lateral_vel_y, 0.0, 3.0),   # left (ball -Y): reward -Y motion
-        1.0 + 3.0 * torch.clamp( lateral_vel_y, 0.0, 3.0),   # right (ball +Y): reward +Y motion
+        1.0 + 3.0 * torch.clamp( lateral_vel_y, 0.0, 3.0),   # left (ball +Y): reward +Y motion
+        1.0 + 3.0 * torch.clamp(-lateral_vel_y, 0.0, 3.0),   # right (ball -Y): reward -Y motion
     )
     jump_vel_sigma = 1.0 + jump_scale * torch.clamp(torso_vel_w[:, 2], 0.0, 3.0)
 

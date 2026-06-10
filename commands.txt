@@ -1,1 +1,1 @@
-cd /home/isaak/BEPImitationlearning/Imitationlearningbooster && env -u PYTHONPATH .venv/bin/train goalkeeper_booster_t1_amp --env.scene.num-envs 2 --agent.max-iterations 3
+cd /home/robocup/IsaakB/BEPImitationLearning/Imitationlearningbooster && env -u PYTHONPATH .venv/bin/play goalkeeper_booster_t1_amp_withoverlay --agent zero --no-terminations True --motion-file src/imitationlearningbooster/motions/data/lefthand_t1.npz

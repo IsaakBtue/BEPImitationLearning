@@ -14,31 +14,32 @@ if TYPE_CHECKING:
     from mjlab.envs import ManagerBasedRlEnv
 
 # Ball end-target ranges per motion type (y_min, y_max, z_min, z_max) in env-local frame.
-# Ball approaches from +X (forwards); robot faces +X so left hand is at -Y, right hand at +Y.
+# Ball approaches from +X (forwards); robot faces +X.
+# T1 left hand is at +Y (green axis in MuJoCo viewer), right hand is at -Y.
 # Order matches MOTION_NAMES in rsl_rl_amp/utils/motion_loader.py:
 #   ["lefthand", "righthand", "leftjump", "rightjump", "leftstep", "rightstep"]
 # These are the FULL (difficulty=1.0) ranges — easy ranges are interpolated at runtime.
 # Lateral Y max reduced 0.84→0.65: at 0.84m the robot needs a lateral step + full arm
 # extension simultaneously — ~50% of shots were unreachable. 0.65m is within T1's reach.
 _BALL_END_RANGES = [
-    (-0.65, -0.15, 0.40, 1.15),  # 0 lefthand  — left side (-Y), mid-height arm catch
-    ( 0.15,  0.65, 0.40, 1.15),  # 1 righthand — right side (+Y), mid-height arm catch
-    (-0.65, -0.15, 0.85, 1.40),  # 2 leftjump  — left side (-Y), high (diving jump)
-    ( 0.15,  0.65, 0.85, 1.40),  # 3 rightjump — right side (+Y), high (diving jump)
-    (-0.65, -0.15, 0.20, 0.65),  # 4 leftstep  — left side (-Y), low (lateral step)
-    ( 0.15,  0.65, 0.20, 0.65),  # 5 rightstep — right side (+Y), low (lateral step)
+    ( 0.15,  0.90, 0.40, 1.15),  # 0 lefthand  — left side (+Y), mid-height arm catch
+    (-0.90, -0.15, 0.40, 1.15),  # 1 righthand — right side (-Y), mid-height arm catch
+    ( 0.15,  1.10, 0.85, 1.40),  # 2 leftjump  — left side (+Y), high (diving jump)
+    (-1.10, -0.15, 0.85, 1.40),  # 3 rightjump — right side (-Y), high (diving jump)
+    ( 0.15,  0.90, 0.20, 0.65),  # 4 leftstep  — left side (+Y), low (lateral step)
+    (-0.90, -0.15, 0.20, 0.65),  # 5 rightstep — right side (-Y), low (lateral step)
 ]
 
 # Easy (difficulty=0.0) end-target ranges, used as the lerp starting point.
 # difficulty=0: centre-ish shots easy to intercept.
 # difficulty=1: full range matching _BALL_END_RANGES.
 _BALL_END_RANGES_EASY = [
-    (-0.35, -0.10, 0.55, 1.05),  # 0 lefthand  — narrower, easier
-    ( 0.10,  0.35, 0.55, 1.05),  # 1 righthand — narrower, easier
-    (-0.35, -0.10, 0.90, 1.25),  # 2 leftjump  — high, narrower
-    ( 0.10,  0.35, 0.90, 1.25),  # 3 rightjump — high, narrower
-    (-0.35, -0.10, 0.30, 0.55),  # 4 leftstep  — low, narrower
-    ( 0.10,  0.35, 0.30, 0.55),  # 5 rightstep — low, narrower
+    ( 0.10,  0.45, 0.55, 1.05),  # 0 lefthand  — narrower, easier (+Y)
+    (-0.45, -0.10, 0.55, 1.05),  # 1 righthand — narrower, easier (-Y)
+    ( 0.10,  0.55, 0.90, 1.25),  # 2 leftjump  — high, narrower (+Y)
+    (-0.55, -0.10, 0.90, 1.25),  # 3 rightjump — high, narrower (-Y)
+    ( 0.10,  0.45, 0.30, 0.55),  # 4 leftstep  — low, narrower (+Y)
+    (-0.45, -0.10, 0.30, 0.55),  # 5 rightstep — low, narrower (-Y)
 ]
 
 

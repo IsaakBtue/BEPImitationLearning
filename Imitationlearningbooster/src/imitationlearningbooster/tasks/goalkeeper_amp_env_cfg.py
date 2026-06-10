@@ -470,9 +470,9 @@ def goalkeeper_amp_play_env_cfg(num_steps_per_env: int = 100) -> ManagerBasedRlE
     cfg.scene.entities["axes"] = EntityCfg(spec_fn=get_axes_spec)
 
     cfg.events["reset_ball_autonomous"] = EventTermCfg(
-        func=gk_resets.reset_ball_autonomous,
+        func=gk_resets.reset_ball_per_motion,
         mode="reset",
-        params={"ball_name": "ball"},
+        params={"ball_name": "ball", "difficulty_override": 1.0},
     )
 
     for _term in ["anchor_pos", "anchor_ori", "ee_body_pos"]:
