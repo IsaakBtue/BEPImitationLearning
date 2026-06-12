@@ -1,2 +1,2 @@
-# Retrain from scratch (17th-pass: wrong comment fixed, eval/train toggle, smoothness loss):
+# Retrain from scratch (18th-pass: curriculum fix + smoothness loss fix):
 cd /home/robocup/IsaakB/BEPImitationLearning/Imitationlearningbooster && env -u PYTHONPATH .venv/bin/train goalkeeper_booster_t1_amp

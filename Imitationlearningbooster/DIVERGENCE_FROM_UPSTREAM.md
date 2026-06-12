@@ -1,5 +1,20 @@
 # Divergence from Upstream (Humanoid-Goalkeeper)
 
+## 2026-06-12 — 18th-pass: curriculum uses reset_terminated + non-monotonic; smoothness loss fix
+
+### Fix A — Curriculum now uses `reset_terminated` and is non-monotonic (`resets.py`)
+**What changed:**
+1. `adaptive_curriculum_update` now filters `env_ids` to only truly-terminated (fallen) envs before computing `mean_ep_len`. If all envs timed out (no falls), curriculum holds current level.
+2. Removed `max()` monotonic lock — ball_difficulty now tracks actual performance and can decrease.
+**Why it was wrong:** T1's stable standing keyframe means all episodes time out at step 150 even with a random policy → `mean_ep_len = 150` on the first check at step ~300 → `ball_difficulty = 1.0` locked forever. The monotonic `max()` prevented any decrease, so the robot trained on maximum difficulty from step 300 onward regardless of skill.
+**Correct behavior:** Curriculum advances only when falls are decreasing (robot proving skill at current level), and decreases when falls increase (robot struggling). Passive/standing robot stays at level 0 until AMP motions cause actual falls that then recover.
+**G1 reference:** G1 didn't need this fix because G1's robot falls frequently early in training. T1's inherent stability makes the raw episode-length signal unreliable.
+
+### Fix B — Smoothness loss rewritten to use `self.alg.storage.observations` (`him_amp_runner.py`)
+**What changed:** `_apply_smoothness_loss` now reads consecutive obs pairs directly from `self.alg.storage.observations` (TensorDict, shape T×N×…, populated by the PPO rollout). Removed the broken `_rollout_policy_obs` tensor buffer and rollout-loop storage code. Fixed API: `policy.act_inference(obs)` → `policy(obs, stochastic_output=False)` matching rsl_rl's MLPModel forward signature.
+**Why it was wrong:** `obs_dict.get("policy", None)` returned None (wrong key structure) so the buffer was never filled. `act_inference` doesn't exist on rsl_rl's MLPModel — it uses `forward(obs_td, stochastic_output=False)`. Both bugs caused `_apply_smoothness_loss` to always return None silently, so `smooth_loss` never appeared in logs.
+**Correct value:** Reads from `storage.observations[t]` and `storage.observations[t+1]`, mixes with TensorDict.apply, calls `policy(mixed_td, stochastic_output=False)`.
+
 ## 2026-06-12 — 17th-pass: fix wrong comment, add eval/train toggle, add smoothness loss
 
 ### Fix A — Correct wrong comment on `* 0.5` multiplier (`him_amp_runner.py` line ~215)

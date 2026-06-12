@@ -97,7 +97,7 @@ class GoalkeeperAmpRunner(MotionTrackingOnPolicyRunner):
         # Coefficient: eps = lower/(upper-lower) ≈ 0.111; coef = upper * eps ≈ 0.111.
         self._smooth_lower = train_cfg.get("smoothness_lower_bound", 0.1)
         self._smooth_upper = train_cfg.get("smoothness_upper_bound", 1.0)
-        self._rollout_policy_obs: "torch.Tensor | None" = None  # lazy-init on first step
+        self._smooth_warned = False  # suppress repeated API-mismatch warnings
 
     def _get_motion_type_ids(self) -> torch.Tensor:
         """Read which motion class each env is currently tracking (0–5)."""
@@ -169,18 +169,6 @@ class GoalkeeperAmpRunner(MotionTrackingOnPolicyRunner):
             with torch.inference_mode():
                 for step in range(num_steps):
                     actions = self.alg.act(obs_dict)
-
-                    # Store policy obs for smoothness regularizer (Gap 3 — G1 him_ppo.py L231-242).
-                    _pol = obs_dict.get("policy", None)
-                    if _pol is not None:
-                        if hasattr(_pol, "get"):   # nested dict: unwrap first tensor
-                            _pol = next(iter(_pol.values()))
-                        _pol = _pol.to(self.device)
-                        if self._rollout_policy_obs is None:
-                            self._rollout_policy_obs = torch.zeros(
-                                num_steps, self.env.num_envs, _pol.shape[-1], device=self.device
-                            )
-                        self._rollout_policy_obs[step] = _pol
                     obs_dict_next, task_rewards, dones, infos = self.env.step(
                         actions.to(self.env.device)
                     )
@@ -370,59 +358,66 @@ class GoalkeeperAmpRunner(MotionTrackingOnPolicyRunner):
     def _apply_smoothness_loss(self) -> "float | None":
         """Policy smoothness regulariser — mirrors G1 him_ppo.py L231-242.
 
-        Penalises inconsistency of the policy on mixup-interpolated observations
-        between consecutive rollout steps. Runs as a separate backward pass after
-        the PPO update because T1's base PPO class owns its own update loop.
+        Reads consecutive observation pairs from self.alg.storage.observations
+        (TensorDict, shape T×N×…, already populated by the PPO rollout).
+        Mixes them with a random weight in [-1,1] and penalises inconsistency
+        of the policy's deterministic output.
 
-        G1 formula:
-            epsilon = lower / (upper - lower)          # 0.1/0.9 ≈ 0.111
-            coef    = upper * epsilon                  # 1.0 * 0.111 ≈ 0.111
-            mix_obs = obs + w*(next_obs - obs),  w ~ U(-1, 1)
-            loss    = coef * mean(||mu(obs) - mu(mix_obs)||²)
+        G1 formula (him_ppo.py L232-240):
+            eps  = lower / (upper - lower)   # 0.1/0.9 ≈ 0.111
+            coef = upper * eps               # ≈ 0.111
+            mix  = obs + w*(next_obs - obs), w ~ U(-1,1)
+            loss = coef * mean(||mu(obs) - mu(mix)||²)
         """
-        if self._rollout_policy_obs is None:
+        try:
+            storage = self.alg.storage
+            if storage is None or storage.observations is None:
+                return None
+            if not hasattr(self.alg, "optimizer"):
+                return None
+
+            obs_all = storage.observations   # TensorDict (T, N, …)
+            T = obs_all.shape[0]
+            if T < 2:
+                return None
+
+            # Pick one random consecutive pair (t, t+1) — avoids OOM from full pass
+            t = torch.randint(0, T - 1, (1,)).item()
+            obs_t  = obs_all[t]      # TensorDict (N, …)
+            obs_t1 = obs_all[t + 1]  # TensorDict (N, …)
+
+            N = obs_t.shape[0]
+            mix_w = (torch.rand(N, 1, device=self.device) - 0.5) * 2.0  # U(-1,1)
+
+            # Element-wise mixup across all TensorDict leaves
+            mix_obs = obs_t.apply(
+                lambda x, y: x + mix_w * (y - x), obs_t1
+            )
+
+            policy = self.alg.get_policy()
+            policy.train()
+            # rsl_rl MLPModel API: forward(obs_td, stochastic_output=False) = deterministic
+            mu_base = policy(obs_t,   stochastic_output=False)
+            mu_mix  = policy(mix_obs, stochastic_output=False)
+
+            eps  = self._smooth_lower / (self._smooth_upper - self._smooth_lower)
+            coef = self._smooth_upper * eps   # ≈ 0.111
+
+            smooth_loss = coef * torch.square(
+                torch.norm(mu_base - mu_mix, dim=-1)
+            ).mean()
+
+            self.alg.optimizer.zero_grad()
+            smooth_loss.backward()
+            torch.nn.utils.clip_grad_norm_(policy.parameters(), max_norm=1.0)
+            self.alg.optimizer.step()
+            return smooth_loss.item()
+
+        except Exception as exc:
+            if not self._smooth_warned:
+                self._smooth_warned = True
+                print(f"[AMP] smooth_loss disabled ({type(exc).__name__}: {exc})")
             return None
-        policy = self.alg.get_policy()
-        if not hasattr(policy, "act_inference"):
-            return None
-        if not hasattr(self.alg, "optimizer"):
-            return None
-
-        # Coefficient from G1 him_ppo.py L232-233
-        eps  = self._smooth_lower / (self._smooth_upper - self._smooth_lower)
-        coef = self._smooth_upper * eps   # ≈ 0.111
-
-        # Clone to escape inference_mode tensors; take consecutive step pairs
-        obs_all = self._rollout_policy_obs.clone()   # (T, N, D)
-        T, N, D = obs_all.shape
-        if T < 2:
-            return None
-        obs_s      = obs_all[:-1].reshape(-1, D)     # (T-1)*N rows
-        next_obs_s = obs_all[1:].reshape(-1, D)
-
-        # Cap to 4096 to bound compute (G1 used full mini-batch ≈ 1200 samples)
-        n = min(obs_s.shape[0], 4096)
-        idx        = torch.randint(0, obs_s.shape[0], (n,), device=self.device)
-        obs_s      = obs_s[idx]
-        next_obs_s = next_obs_s[idx]
-
-        # Mix weights ∈ [-1, 1] — G1 L235: (rand - 0.5) * 2.0
-        mix_w   = (torch.rand(n, 1, device=self.device) - 0.5) * 2.0
-        mix_obs = obs_s + mix_w * (next_obs_s - obs_s)
-
-        policy.train()
-        mu_base = policy.act_inference(obs_s)
-        mu_mix  = policy.act_inference(mix_obs)
-
-        smooth_loss = coef * torch.square(
-            torch.norm(mu_base - mu_mix, dim=-1)
-        ).mean()
-
-        self.alg.optimizer.zero_grad()
-        smooth_loss.backward()
-        torch.nn.utils.clip_grad_norm_(policy.parameters(), max_norm=1.0)
-        self.alg.optimizer.step()
-        return smooth_loss.item()
 
     def _extract_amp_obs(self, obs_dict) -> torch.Tensor:
         """Extract AMP joint-pos observation from an obs_dict (TensorDict or plain dict)."""

@@ -97,9 +97,31 @@ class adaptive_curriculum_update:
         min_gate: int = 500,
     ) -> dict:
         if (env.common_step_counter - env._last_curriculum_step) > min_gate:
-            mean_ep_len = env.episode_length_buf[env_ids].float().mean().item()
+            # Use only truly-terminated (fallen) envs, not timeouts.
+            # T1's stable standing keyframe means all episodes time out at step 150 even
+            # with a random policy → raw mean_ep_len = 150 on the very first check →
+            # ball_difficulty jumps to 1.0 before the policy has learned anything.
+            # Using reset_terminated (actual falls) means a passive robot (no falls)
+            # keeps curriculum at 0; advancement only happens as the policy takes AMP
+            # motions that occasionally topple the robot, then recovers.
+            terminated = env.reset_terminated[env_ids]  # True=fell, False=timeout
+            if terminated.any():
+                mean_ep_len = env.episode_length_buf[env_ids[terminated]].float().mean().item()
+            else:
+                # All envs timed out — passive or perfect robot; hold current difficulty.
+                env._last_curriculum_step = env.common_step_counter
+                return {
+                    "curriculumupdate": torch.tensor(env._curriculumupdate),
+                    "ball_difficulty": torch.tensor(env._ball_difficulty),
+                }
+
             env._curriculumupdate = float(int(mean_ep_len / 50.0))
-            env._ball_difficulty = min(1.0, env._curriculumupdate / 3.0)
+            new_difficulty = min(1.0, env._curriculumupdate / 3.0)
+            # Non-monotonic: curriculum tracks actual performance and can decrease.
+            # Previously locked with max() which caused ball_difficulty to freeze at 1.0
+            # from iteration ~300 onward. Now oscillates with skill — matches the user's
+            # intended design and avoids premature full-difficulty exposure.
+            env._ball_difficulty = new_difficulty
             env._last_curriculum_step = env.common_step_counter
         return {
             "curriculumupdate": torch.tensor(env._curriculumupdate),
