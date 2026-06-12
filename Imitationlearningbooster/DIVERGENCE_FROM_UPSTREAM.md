@@ -1,5 +1,30 @@
 # Divergence from Upstream (Humanoid-Goalkeeper)
 
+## 2026-06-12 — 19th-pass: full G1 architecture replication (single optimizer, joint backward)
+
+### Core change — `him_amp_runner.py` complete rewrite
+**What changed:** Replaced the two-optimizer, alternating-update design with a faithful port of G1's `HIMPPO.update()`:
+- **Single shared Adam** for actor + critic + all 6 disc trunks/heads (G1 HIMPPO L101-116).
+  Weight decay: trunk=1e-3, head=0.1 — exact match to G1's `10e-4` and `10e-2`.
+- **One backward per mini-batch step** covering surrogate + value + smooth + amp_disc loss (G1 HIMPPO L307-311).
+- **20 gradient steps per iteration** (5 epochs × 4 mini-batches, G1 default).
+- **Smooth loss inside the mini-batch loop** using consecutive (t, t+1) obs pairs shifted from `storage.observations` + `cont = 1 - dones` mask (G1 HIMPPO L231-242). Both policy and value smoothness computed (policy_coef≈0.111, value_coef=0.1×policy_coef).
+- **Expert obs sampled fresh** from motion loaders each mini-batch step (G1 HIMPPO L251-284 via `motion_buffer.get_expert_obs`).
+- **Normalizer updated with already-normalized data** (G1 HIMPPO L304-305 — G1 passes normalized tensors to `update()`; this converges the normalizer toward mean≈0, var≈1 over time, making it effectively an identity plus ±10 clamp).
+- **Actor-critic grad norm clipped only** (G1 HIMPPO L310); disc gradients unclipped.
+- **Removed**: separate `disc_optimizer`, `replay_buffers`, `_apply_smoothness_loss`.
+
+**Why it was wrong:** The previous design (separate disc Adam, alternating after PPO) means the policy never sees disc gradients in its backward pass. In G1 the disc and policy co-evolve in the same gradient step — the policy's gradient accounts for the adversarial disc signal at every step. This is the fundamental reason AMP never fully engaged in earlier runs.
+
+**G1 reference:** `him_ppo.py:173-326` (full `update()`), `him_on_policy_runner.py:83-105` (optimizer construction).
+
+### Remaining T1-specific adaptations (not divergences — necessary for mjlab framework):
+- 6 separate `Discriminator` objects (vs G1's 6 deepcopies of one `AMP` module) — functionally identical, required because G1's `AMP` class bundles storage + normalizer + disc, which T1 manages separately.
+- AMP obs from `infos["amp"]` group (mjlab API) vs `env.get_amp_observations()` (G1 Isaac Gym API).
+- Terminal-state amp_obs fix for reset envs (mjlab resets env before runner sees done flag).
+
+---
+
 ## 2026-06-12 — 18th-pass: curriculum reset_terminated filter + monotonic; smoothness loss fix
 
 ### Fix A — Curriculum uses `reset_terminated` + stays monotonic (`resets.py`)
