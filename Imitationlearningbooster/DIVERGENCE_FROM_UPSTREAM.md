@@ -1,5 +1,22 @@
 # Divergence from Upstream (Humanoid-Goalkeeper)
 
+## 2026-06-12 — 17th-pass: fix wrong comment, add eval/train toggle, add smoothness loss
+
+### Fix A — Correct wrong comment on `* 0.5` multiplier (`him_amp_runner.py` line ~215)
+**What changed:** Comment said "G1 does NOT have *0.5" — this is factually wrong. G1 `him_on_policy_runner.py` line 177 has `predict_reward(...).squeeze(1) * 0.5`. Comment corrected to reflect reality.
+**Why it was wrong:** Misleading documentation; future readers would assume T1 diverges here when it doesn't.
+**G1 reference:** `him_on_policy_runner.py:177`.
+
+### Fix B — Add `eval()`/`train()` toggle around disc reward prediction (`him_amp_runner.py`)
+**What changed:** `self.discriminators[name].eval()` now called before the reward forward pass; `self.discriminators[name].train()` called after. Mirrors G1 `amp.py` lines 187 and 205.
+**Why it was wrong:** T1 only used `torch.no_grad()` which disables gradient computation but does NOT switch the module to eval mode. With plain Linear+ReLU this is equivalent, but if BatchNorm is ever added T1 would silently produce wrong batch statistics during inference.
+**G1 reference:** `amp.py:187` (`self.eval()`), `amp.py:205` (`self.train()`).
+
+### Fix C — Add policy smoothness regulariser (`him_amp_runner.py` `_apply_smoothness_loss`)
+**What changed:** After each PPO update, a smoothness backward pass penalises inconsistency of the policy on mixup-interpolated observations between consecutive rollout steps. Coefficient ≈ 0.111 (G1: `upper * lower/(upper-lower) = 1.0 * 0.1/0.9`). Runs as a separate backward pass because T1's base PPO class owns its update loop.
+**Why it was wrong:** G1 `him_ppo.py` L231-242 includes `smooth_loss = policy_smooth_coef * policy_smooth_loss + value_smooth_coef * value_smooth_loss` inside the PPO update. T1 had no equivalent. The growing `action_rate_l2` penalty (-3.4 → -17.5 over 7400 iters) indicated the policy was finding jerky high-frequency solutions because nothing penalised action discontinuity at the policy-gradient level.
+**G1 reference:** `him_ppo.py:231-242`. Params: `smoothness_lower_bound=0.1`, `smoothness_upper_bound=1.0`, `value_smoothness_coef=0.1`.
+
 ## 2026-06-12 — 16th-pass: normalizer clamp ±10, discriminator weight init uniform(-1,1)
 
 ### Fix A — Add `clamp(-10, 10)` to AMP normalizer (`normalizer.py` `normalize_torch`)
