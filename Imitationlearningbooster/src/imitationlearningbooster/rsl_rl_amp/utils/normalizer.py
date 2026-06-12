@@ -40,7 +40,10 @@ class EmpiricalNormalization:
         """Normalize torch tensor using running statistics."""
         mean = self.mean.to(device)
         var = self.var.to(device)
-        return (values - mean) / torch.sqrt(var + 1e-8)
+        # Clamp to ±10 — mirrors G1 Normalizer.normalize_torch clip_obs=10.0.
+        # Prevents extreme outlier values (e.g. near-zero variance DOFs early in
+        # training) from destabilizing the discriminator.
+        return torch.clamp((values - mean) / torch.sqrt(var + 1e-8), -10.0, 10.0)
 
     def state_dict(self):
         return {

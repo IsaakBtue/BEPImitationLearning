@@ -24,6 +24,19 @@ class Discriminator(nn.Module):
             in_dim = h
         self.trunk = nn.Sequential(*amp_layers)
         self.amp_linear = nn.Linear(in_dim, 1)
+
+        # G1-style weight init: uniform(-1,1) + zero bias on every disc layer.
+        # PyTorch default Kaiming uniform is ~22× narrower for 512-wide layers,
+        # leaving the disc nearly blind at init (all logits near zero → flat AMP
+        # reward signal for the first 1000+ iterations).
+        # Mirrors amp.py DISC_LOGIT_INIT_SCALE=1.0 from commit 6ec719f.
+        for layer in self.trunk:
+            if isinstance(layer, nn.Linear):
+                nn.init.uniform_(layer.weight, -1.0, 1.0)
+                nn.init.zeros_(layer.bias)
+        nn.init.uniform_(self.amp_linear.weight, -1.0, 1.0)
+        nn.init.zeros_(self.amp_linear.bias)
+
         self.to(device)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:

@@ -1,5 +1,19 @@
 # Divergence from Upstream (Humanoid-Goalkeeper)
 
+## 2026-06-12 — 16th-pass: normalizer clamp ±10, discriminator weight init uniform(-1,1)
+
+### Fix A — Add `clamp(-10, 10)` to AMP normalizer (`normalizer.py` `normalize_torch`)
+**What changed:** `normalize_torch` now returns `torch.clamp((values - mean) / sqrt(var + 1e-8), -10.0, 10.0)`.
+**Why it was wrong:** T1 applied no clamp. G1's `Normalizer.normalize_torch` clamps to `clip_obs=10.0`. A DOF with near-zero variance (e.g. frozen Left_Knee_Pitch retargeting artifact) produces normalized values of ±100+, injecting extreme outliers into the discriminator — worst exactly at training start before the normalizer has accumulated enough samples.
+**Correct value:** clamp to ±10.0, matching G1 `utils.py` line 157.
+**Evidence:** Training run `2026-06-12_08-57-20` had `amp_disc_loss` drifting from 0.23 → 0.60; frozen Left_Knee_Pitch in all 6 motion clips is the likely source of the pathological near-zero-variance feature.
+
+### Fix B — G1-style `uniform_(-1, 1)` + `zeros_` weight init on all disc layers (`discriminator.py`)
+**What changed:** After building `trunk` and `amp_linear`, every `nn.Linear` now applies `nn.init.uniform_(weight, -1.0, 1.0)` and `nn.init.zeros_(bias)`.
+**Why it was wrong:** T1 used PyTorch default Kaiming uniform, which gives weight range `[-1/sqrt(fan_in), 1/sqrt(fan_in)]` — for a 512-wide layer this is ±0.044, ~22× narrower than G1. The disc starts with nearly all logits near zero → AMP reward near-flat for all policy states at init → effectively no AMP gradient signal for the first 1000+ iterations.
+**Correct value:** `uniform_(-1.0, 1.0)`, zero bias. Mirrors G1 `amp.py` `DISC_LOGIT_INIT_SCALE=1.0` from commit `6ec719f`.
+**Evidence:** Confirmed by independent subagent reading both codebases from scratch.
+
 ## 2026-06-12 — 15th-pass: restore `*0.5`, G1-style RSI (continue_keep), KL-adaptive disc LR, sampling entropy logging
 
 ### Fix A — Restore `* 0.5` on AMP noise-kernel reward (`him_amp_runner.py`)
