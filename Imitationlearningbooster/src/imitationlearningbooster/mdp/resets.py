@@ -117,11 +117,10 @@ class adaptive_curriculum_update:
 
             env._curriculumupdate = float(int(mean_ep_len / 50.0))
             new_difficulty = min(1.0, env._curriculumupdate / 3.0)
-            # Non-monotonic: curriculum tracks actual performance and can decrease.
-            # Previously locked with max() which caused ball_difficulty to freeze at 1.0
-            # from iteration ~300 onward. Now oscillates with skill — matches the user's
-            # intended design and avoids premature full-difficulty exposure.
-            env._ball_difficulty = new_difficulty
+            # Monotonic — mirrors G1's effective behaviour (command_ranges only expand,
+            # never shrink: legged_robot.py L333-336 accumulate via torch.clip each call).
+            # Once the robot has genuinely earned a difficulty level it is not pulled back.
+            env._ball_difficulty = max(getattr(env, "_ball_difficulty", 0.0), new_difficulty)
             env._last_curriculum_step = env.common_step_counter
         return {
             "curriculumupdate": torch.tensor(env._curriculumupdate),

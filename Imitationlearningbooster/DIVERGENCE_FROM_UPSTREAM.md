@@ -1,14 +1,12 @@
 # Divergence from Upstream (Humanoid-Goalkeeper)
 
-## 2026-06-12 — 18th-pass: curriculum uses reset_terminated + non-monotonic; smoothness loss fix
+## 2026-06-12 — 18th-pass: curriculum reset_terminated filter + monotonic; smoothness loss fix
 
-### Fix A — Curriculum now uses `reset_terminated` and is non-monotonic (`resets.py`)
-**What changed:**
-1. `adaptive_curriculum_update` now filters `env_ids` to only truly-terminated (fallen) envs before computing `mean_ep_len`. If all envs timed out (no falls), curriculum holds current level.
-2. Removed `max()` monotonic lock — ball_difficulty now tracks actual performance and can decrease.
-**Why it was wrong:** T1's stable standing keyframe means all episodes time out at step 150 even with a random policy → `mean_ep_len = 150` on the first check at step ~300 → `ball_difficulty = 1.0` locked forever. The monotonic `max()` prevented any decrease, so the robot trained on maximum difficulty from step 300 onward regardless of skill.
-**Correct behavior:** Curriculum advances only when falls are decreasing (robot proving skill at current level), and decreases when falls increase (robot struggling). Passive/standing robot stays at level 0 until AMP motions cause actual falls that then recover.
-**G1 reference:** G1 didn't need this fix because G1's robot falls frequently early in training. T1's inherent stability makes the raw episode-length signal unreliable.
+### Fix A — Curriculum uses `reset_terminated` + stays monotonic (`resets.py`)
+**What changed:** `adaptive_curriculum_update` filters `env_ids` to only truly-terminated (fallen) envs before computing `mean_ep_len`. If all envs timed out (no falls), curriculum holds current level. Monotonic `max()` preserved.
+**Why it was wrong:** T1's stable standing keyframe means all episodes time out at step 150 even with a random policy. Raw `mean_ep_len = 150` on the first check (~step 300) → `ball_difficulty = 1.0` immediately. G1 doesn't have this problem because G1's robot falls frequently early in training (short episodes → low curriculum). T1's inherent stability makes the raw episode-length signal unreliable as a skill proxy.
+**Correct behavior:** Passive robot (no falls) holds difficulty at 0. As AMP motions cause occasional falls, curriculum rises. Monotonic max() preserved — once a level is genuinely earned it is not pulled back, matching G1's effective monotonicity (G1 command_ranges only expand via accumulated torch.clip, never shrink).
+**G1 reference:** `legged_robot.py:329-336`. G1 uses no reset_terminated filter (not needed — G1 falls naturally) but is effectively monotonic.
 
 ### Fix B — Smoothness loss rewritten to use `self.alg.storage.observations` (`him_amp_runner.py`)
 **What changed:** `_apply_smoothness_loss` now reads consecutive obs pairs directly from `self.alg.storage.observations` (TensorDict, shape T×N×…, populated by the PPO rollout). Removed the broken `_rollout_policy_obs` tensor buffer and rollout-loop storage code. Fixed API: `policy.act_inference(obs)` → `policy(obs, stochastic_output=False)` matching rsl_rl's MLPModel forward signature.
