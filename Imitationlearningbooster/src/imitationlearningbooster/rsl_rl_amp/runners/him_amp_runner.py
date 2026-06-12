@@ -185,20 +185,37 @@ class GoalkeeperAmpRunner(MotionTrackingOnPolicyRunner):
                     motion_ids = self._get_motion_type_ids()  # (N,)
                     amp_r_all = torch.zeros_like(task_r)
 
-                    # Compute AMP reward per discriminator
+                    # Compute AMP reward per discriminator (noise-sampling kernel, matches G1).
+                    # G1 amp.py predict_reward: adds σ=0.3 Gaussian noise, draws 20 samples,
+                    # takes min(squared_error) across samples — prevents reward collapse when
+                    # the discriminator converges to d_policy→−1 (bare kernel = 0 there;
+                    # noisy min-kernel remains > 0 and keeps guiding the policy).
+                    _amp_noise_sigma = 0.3
+                    _amp_noise_samples = 20
                     for disc_idx, name in enumerate(MOTION_NAMES):
                         mask = (motion_ids == disc_idx)
                         if mask.any():
                             with torch.no_grad():
                                 obs_norm = self.amp_normalizer.normalize_torch(
                                     amp_obs_2frame[mask], self.device
-                                )
-                                d = self.discriminators[name](obs_norm)
+                                )  # (M, obs_dim)
+                                M, obs_dim = obs_norm.shape
+                                # Draw noisy perturbations and evaluate disc on each.
+                                noise = torch.randn(
+                                    M, _amp_noise_samples, obs_dim, device=self.device
+                                ) * _amp_noise_sigma
+                                perturbed = obs_norm.unsqueeze(1) + noise  # (M, S, obs_dim)
+                                d_all = self.discriminators[name](
+                                    perturbed.view(M * _amp_noise_samples, obs_dim)
+                                ).view(M, _amp_noise_samples)               # (M, S)
+                                sq_err = (d_all - 1.0).pow(2)               # (M, S)
                                 amp_r_all[mask] = torch.clamp(
-                                    1.0 - 0.25 * (d - 1.0).pow(2), min=0.0
-                                ).squeeze(-1) * 0.5  # matches G1 Goalkeeper
+                                    1.0 - 0.25 * sq_err.min(dim=-1).values, min=0.0
+                                ) * 0.5  # effective AMP = amp_coef * 0.5 = 0.20 — matches healthy 25c3e2e run.
+                                # G1 does NOT have *0.5 but T1's discriminator (23 DOF, no wrists)
+                                # converges faster; without this the disc loses within 800 iters.
 
-                    # Blend: amp_coef * AMP + (1 - amp_coef) * task = 0.4 * AMP + 0.6 * task
+                    # Blend: amp_coef * AMP + (1 - amp_coef) * task = 0.4 * 0.5 * AMP + 0.6 * task
                     blended_r = self._amp_coef * amp_r_all + (1.0 - self._amp_coef) * task_r
 
                     # Store for discriminator update
@@ -234,6 +251,13 @@ class GoalkeeperAmpRunner(MotionTrackingOnPolicyRunner):
 
             # PPO update
             loss_dict = self.alg.update()
+
+            # Sync disc LR to policy KL-adaptive LR.
+            # G1 uses a single shared optimizer for actor-critic + all 6 discriminators,
+            # so the KL-adaptive schedule governs disc LR automatically. T1 has a separate
+            # disc optimizer; mirror the coupling by syncing after each PPO update.
+            for _pg in self.disc_optimizer.param_groups:
+                _pg["lr"] = self.alg.learning_rate
 
             # Discriminator update — 4 steps per iteration (not 20).
             # G1's "20 steps" are joint actor-critic+discriminator steps inside the same

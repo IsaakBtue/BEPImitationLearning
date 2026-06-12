@@ -15,31 +15,32 @@ if TYPE_CHECKING:
 
 # Ball end-target ranges per motion type (y_min, y_max, z_min, z_max) in env-local frame.
 # Ball approaches from +X (forwards); robot faces +X.
-# T1 left hand is at +Y (green axis in MuJoCo viewer), right hand is at -Y.
+# T1 left hand is at +Y (AL1 pos y=+0.1063 in T1_serial_clean.xml), right hand at -Y.
 # Order matches MOTION_NAMES in rsl_rl_amp/utils/motion_loader.py:
 #   ["lefthand", "righthand", "leftjump", "rightjump", "leftstep", "rightstep"]
 # These are the FULL (difficulty=1.0) ranges — easy ranges are interpolated at runtime.
-# Lateral Y max reduced 0.84→0.65: at 0.84m the robot needs a lateral step + full arm
-# extension simultaneously — ~50% of shots were unreachable. 0.65m is within T1's reach.
+# Lateral Y capped at 0.65m: empirically T1's max reachable lateral distance from
+# a standing position. At 0.84m+ ~50% of shots are unreachable → no gradient signal.
+# Sign convention fixed 2026-06-10: lefthand → +Y (left hand IS at +Y), righthand → -Y.
 _BALL_END_RANGES = [
-    ( 0.15,  0.90, 0.40, 1.15),  # 0 lefthand  — left side (+Y), mid-height arm catch
-    (-0.90, -0.15, 0.40, 1.15),  # 1 righthand — right side (-Y), mid-height arm catch
-    ( 0.15,  1.10, 0.85, 1.40),  # 2 leftjump  — left side (+Y), high (diving jump)
-    (-1.10, -0.15, 0.85, 1.40),  # 3 rightjump — right side (-Y), high (diving jump)
-    ( 0.15,  0.90, 0.20, 0.65),  # 4 leftstep  — left side (+Y), low (lateral step)
-    (-0.90, -0.15, 0.20, 0.65),  # 5 rightstep — right side (-Y), low (lateral step)
+    ( 0.20,  0.65, 0.40, 1.15),  # 0 lefthand  — left side (+Y), mid-height arm catch
+    (-0.65, -0.20, 0.40, 1.15),  # 1 righthand — right side (-Y), mid-height arm catch
+    ( 0.20,  0.65, 0.85, 1.40),  # 2 leftjump  — left side (+Y), high (diving jump)
+    (-0.65, -0.20, 0.85, 1.40),  # 3 rightjump — right side (-Y), high (diving jump)
+    ( 0.20,  0.65, 0.20, 0.65),  # 4 leftstep  — left side (+Y), low (lateral step)
+    (-0.65, -0.20, 0.20, 0.65),  # 5 rightstep — right side (-Y), low (lateral step)
 ]
 
 # Easy (difficulty=0.0) end-target ranges, used as the lerp starting point.
 # difficulty=0: centre-ish shots easy to intercept.
 # difficulty=1: full range matching _BALL_END_RANGES.
 _BALL_END_RANGES_EASY = [
-    ( 0.10,  0.45, 0.55, 1.05),  # 0 lefthand  — narrower, easier (+Y)
-    (-0.45, -0.10, 0.55, 1.05),  # 1 righthand — narrower, easier (-Y)
-    ( 0.10,  0.55, 0.90, 1.25),  # 2 leftjump  — high, narrower (+Y)
-    (-0.55, -0.10, 0.90, 1.25),  # 3 rightjump — high, narrower (-Y)
-    ( 0.10,  0.45, 0.30, 0.55),  # 4 leftstep  — low, narrower (+Y)
-    (-0.45, -0.10, 0.30, 0.55),  # 5 rightstep — low, narrower (-Y)
+    ( 0.15,  0.35, 0.55, 1.05),  # 0 lefthand  — narrower, easier (+Y)
+    (-0.35, -0.15, 0.55, 1.05),  # 1 righthand — narrower, easier (-Y)
+    ( 0.15,  0.35, 0.90, 1.25),  # 2 leftjump  — high, narrower (+Y)
+    (-0.35, -0.15, 0.90, 1.25),  # 3 rightjump — high, narrower (-Y)
+    ( 0.15,  0.35, 0.30, 0.55),  # 4 leftstep  — low, narrower (+Y)
+    (-0.35, -0.15, 0.30, 0.55),  # 5 rightstep — low, narrower (-Y)
 ]
 
 
@@ -218,12 +219,27 @@ class MultiMotionCommand(MotionCommand):
 
             joint_pos = self.robot.data.default_joint_pos[env_ids].clone()
             joint_vel = torch.zeros_like(joint_pos)
-            joint_pos += sample_uniform(
-                lower=self.cfg.joint_position_range[0],
-                upper=self.cfg.joint_position_range[1],
-                size=joint_pos.shape,
-                device=joint_pos.device,
-            )
+            # G1 continue_keep: 80% of resets copy joint_pos from a random live env,
+            # giving implicit RSI — the policy starts from mid-motion states, not always
+            # at standing. 20%: standing keyframe + small noise (existing behavior).
+            # Mirrors g1_29_config.py continue_keep=True + legged_robot.py L669-674:
+            #   if continue_keep and torch.rand(1) > 0.2:
+            #       dof_pos[env_ids] = dof_pos[randint(0, num_envs, (len(env_ids),))]
+            keep_mask = torch.rand(len(env_ids), device=self.device) < 0.8
+            if keep_mask.any():
+                n_all = self.robot.data.joint_pos.shape[0]
+                rand_src = torch.randint(
+                    0, n_all, (int(keep_mask.sum().item()),), device=self.device
+                )
+                joint_pos[keep_mask] = self.robot.data.joint_pos[rand_src].clone()
+            if (~keep_mask).any():
+                noise = sample_uniform(
+                    lower=self.cfg.joint_position_range[0],
+                    upper=self.cfg.joint_position_range[1],
+                    size=(int((~keep_mask).sum().item()), joint_pos.shape[1]),
+                    device=joint_pos.device,
+                )
+                joint_pos[~keep_mask] += noise
 
             self._write_reference_state_to_sim(
                 env_ids, root_pos, root_ori, root_lin_vel, root_ang_vel, joint_pos, joint_vel
@@ -427,6 +443,27 @@ class MultiMotionCommand(MotionCommand):
                 + (1 - self.cfg.adaptive_alpha) * self.bin_failed_count
             )
             self._current_bin_failed.zero_()
+
+    def _update_metrics(self) -> None:
+        """Write sampling-distribution metrics so TB logs non-zero values.
+
+        The parent MotionCommand initializes self.metrics["sampling_entropy"] etc. to
+        zero tensors and never writes them (adaptive path is never entered with our
+        sampling_mode). This override computes the Shannon entropy of the motion-type
+        distribution across all envs and writes it each step, mirroring the upstream
+        beyondMimic _adaptive_sampling logging (tracking/mdp/commands.py L288-298).
+        """
+        n_motions = len(self.loaders)
+        counts = torch.bincount(self.motion_type_ids, minlength=n_motions).float()
+        probs = counts / counts.sum().clamp(min=1e-8)
+        probs_safe = probs.clamp(min=1e-8)
+        H = -(probs_safe * probs_safe.log()).sum()
+        H_max = torch.log(torch.tensor(float(n_motions), device=self.device))
+        H_norm = (H / H_max.clamp(min=1e-8)).clamp(0.0, 1.0)
+        pmax, imax = probs.max(dim=0)
+        self.metrics["sampling_entropy"][:] = float(H_norm.item())
+        self.metrics["sampling_top1_prob"][:] = float(pmax.item())
+        self.metrics["sampling_top1_bin"][:] = float(imax.item()) / n_motions
 
 
 @dataclass(kw_only=True)

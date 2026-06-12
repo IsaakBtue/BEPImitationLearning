@@ -1,5 +1,81 @@
 # Divergence from Upstream (Humanoid-Goalkeeper)
 
+## 2026-06-12 — 15th-pass: restore `*0.5`, G1-style RSI (continue_keep), KL-adaptive disc LR, sampling entropy logging
+
+### Fix A — Restore `* 0.5` on AMP noise-kernel reward (`him_amp_runner.py`)
+**What changed:** Re-added `* 0.5` multiplier to `torch.clamp(1.0 - 0.25 * sq_err.min(...), min=0.0)`.
+**Why it was wrong:** The 14th-pass removed `*0.5` under the assumption it should match G1 exactly. G1 doesn't have it — but G1 has 29 DOF and 3 wrist joints per arm, making the discriminator task naturally harder. T1 has 23 DOF with no wrists; the discriminator converges faster, and without the `*0.5` regularizer the discriminator collapses within 800–2000 iterations. Run `2026-06-11_20-51-41`: `amp_disc_loss` rose 0.39 → 1.19, `mean_amp_reward` rose 5.6 → 12.5, `error_joint_pos` rose 1.49 → 2.93 rad — policy completely ignoring motion reference. Healthy run `25c3e2e` (with `*0.5`) ran 15600+ iterations stably, disc recovered to +0.001 at iter 2800.
+**Correct value:** `* 0.5`. Deliberate T1 divergence from G1: effective AMP = amp_coef × 0.5 = 0.20 instead of G1's 0.40.
+**Evidence:** TensorBoard metrics from `2026-06-11_20-51-41`, comparison with healthy run `2026-06-10_14-40-50` (commit `25c3e2e`).
+
+### Fix B — G1-style `continue_keep` RSI in robot joint reset (`commands.py` `_resample_command`)
+**What changed:** Robot joint reset now uses G1's `continue_keep` mechanism: 80% of resets copy `joint_pos` from a random live environment; 20% reset to standing keyframe with small noise.
+**Why it was wrong:** T1 always reset to standing keyframe (`self.robot.data.default_joint_pos`). G1's `legged_robot.py` line 669: `if continue_keep and torch.rand(1) > 0.2: dof_pos[env_ids] = dof_pos[randint(0, num_envs)]`. This is implicit RSI — 80% of episodes start from mid-motion states (whatever other envs are currently doing), giving the policy experience from diverse joint configurations without needing to sample from the motion dataset directly. Without it, every episode starts from standing, the policy only experiences standing→save trajectories, and `error_joint_pos` stays high (1.5–2.9 rad) because the policy never "starts inside" the motion.
+**Correct value:** 80% copy from random live env, 20% standing + noise. Mirrors G1 exactly.
+**G1 reference:** `g1_29_config.py` L280 `continue_keep=True`; `legged_robot.py` L669-674.
+
+### Fix C — KL-adaptive disc LR coupling (`him_amp_runner.py`)
+**What changed:** After each PPO update, sync `disc_optimizer.param_groups[*]["lr"]` to `self.alg.learning_rate` (which is KL-adaptive).
+**Why it was wrong:** G1 uses a single shared Adam optimizer for actor-critic + all 6 discriminators. When policy KL is too high, `self.learning_rate` is halved — this automatically throttles the disc LR too, preventing the discriminator from running away when the policy is struggling. T1's separate disc optimizer ran at fixed 1e-4 regardless of policy state. During disc collapse (disc_loss rising from 0.39 → 1.19), the disc kept receiving full-strength gradient updates with no feedback from the policy's learning rate.
+**Correct value:** After `self.alg.update()`, do `for pg in self.disc_optimizer.param_groups: pg["lr"] = self.alg.learning_rate`. This couples disc LR to the KL schedule.
+**G1 reference:** `him_ppo.py` L116 (single optimizer), L197-209 (KL-adaptive LR applied to all param_groups including disc).
+
+### Fix D — Sampling entropy metrics now written (`commands.py` `_update_metrics`)
+**What changed:** Added `_update_metrics()` override to `MultiMotionCommand`. Computes normalized Shannon entropy of the motion-type distribution and writes to `self.metrics["sampling_entropy"]`, `sampling_top1_prob`, `sampling_top1_bin` each step.
+**Why it was wrong:** The parent `MotionCommand` (mjlab) initializes these metric tensors to zero and only writes them inside `_adaptive_sampling()`. T1's `MultiMotionCommand` never calls `_adaptive_sampling()` because `sampling_mode="start"` bypasses it. The metrics stayed at 0.0 for the entire training run — giving the illusion of broken sampling. Actual motion type distribution was correct (random/static assignment was working), but monitoring was blind.
+**Correct value:** `H_norm = entropy(motion_type_counts) / log(6)`. With random uniform assignment: H_norm ≈ 1.0 (max entropy, all 6 types equally represented). With static_partition: H_norm = 0.
+**G1 reference:** No direct G1 equivalent (G1 uses a single-motion-type env). This follows the upstream beyondMimic `tracking/mdp/commands.py` L288-298 pattern.
+
+## 2026-06-11 — 14th-pass: fix AMP 4× weakness, curriculum oscillation, elbow-vs-hand, ball min-Y
+
+### Fix 1 — Remove erroneous `* 0.5` from AMP noise-kernel reward (`him_amp_runner.py` line ~214)
+**What changed:** Removed `* 0.5` multiplier from `torch.clamp(1.0 - 0.25 * sq_err.min(...), min=0.0) * 0.5`.
+**Why it was wrong:** G1 `rsl_rl/modules/amp.py` `predict_reward` (line 185-204) is exactly `clamp(1 - 0.25*sq_err.min, 0)` — no `* 0.5`. Our version halved every AMP reward sample, effectively making the AMP signal 2× weaker than G1's.
+**Correct value:** No `* 0.5`. Matches G1 exactly.
+**Evidence:** Direct read of G1 `amp.py` lines 185-204. Paper subagent incorrectly claimed G1 has `* 0.5` — raw code check overrides.
+
+### Fix 2 — Restore `amp_coef=0.4` (`goalkeeper_amp_ppo_cfg.py`)
+**What changed:** `amp_coef=0.2` → `amp_coef=0.4`.
+**Why it was wrong:** G1 uses `amp_coef=0.4` (verified in `g1_29_config.py`). Our code regressed to 0.2 (half of G1). Combined with Fix 1's `*0.5` bug, effective AMP contribution was 0.2×0.5=0.10 vs G1's 0.40 — a 4× deficit. AMP was dying in training (WandB showed discriminator reward collapsing after 6000 iterations).
+**Correct value:** `amp_coef=0.4`. Matches G1.
+**Evidence:** Training run `2026-06-11_12-28-23` showed AMP reward decreasing monotonically after 3000 iterations. Commit `25c3e2e` comparison showed regression from 0.4→0.2.
+
+### Fix 3 — Reduce `eereach` weight 20→15, stages [15, 22, 30] (`goalkeeper_amp_env_cfg.py`)
+**What changed:** `eereach` curriculum stages changed from [20, 30, 40] to [15, 22, 30].
+**Why it was wrong:** Previous weights were doubled from G1 (G1 base=10, peak=25) to compensate for halved AMP. Now that AMP is restored to full strength (Fixes 1+2), the inflated eereach weight caused the robot to over-optimise for body positioning toward the ball at the expense of actual goalkeeping motion quality. The 13cm palm offset (Fix 6) also means the target point moves — lower weight is safer with a more correct reward signal.
+**Correct value:** stages=[15, 22, 30] (1.5× G1's 10/17/25, scaled for T1's different joint mapping).
+**G1 reference:** G1 `g1_29_config.py` eereach weight=10 base; reward `_reward_eereach` uses same sigmoid with peak amplified by curriculumupdate.
+
+### Fix 4 — Monotonic `ball_difficulty` (`resets.py` `adaptive_curriculum_update`)
+**What changed:** `env._ball_difficulty = min(1.0, env._curriculumupdate / 3.0)` → `env._ball_difficulty = max(getattr(env, "_ball_difficulty", 0.0), min(1.0, env._curriculumupdate / 3.0))`.
+**Why it was wrong:** `_curriculumupdate = int(mean_ep_len / 50)`. Max episode = 150 steps → `int(150/50)=3`. T1 never falls so ep_len oscillates 148-150 → curric oscillates 2-3 → `ball_difficulty` oscillated between 0.67 and 1.0 every curriculum update step. This caused ball targets to shrink/expand every few hundred iterations, creating an unstable training curriculum.
+**Correct value:** Monotonic: once `ball_difficulty` reaches a level, it never drops. Mirrors G1 `legged_robot.py` lines 333-336 where `command_ranges[:, 0]` and `[:, 1]` only expand (clip toward wider bounds), never contract.
+**Evidence:** WandB showed `ball_difficulty` oscillating at exactly the 2/3 ↔ 3/3 boundary throughout training. G1 oscillation in `curriculumupdate` value doesn't affect G1 because its ranges monotonically expand.
+
+### Fix 5 — Increase minimum ball lateral offset 0.15→0.20 m (easy: 0.10→0.15 m) (`commands.py`)
+**What changed:** `_BALL_END_RANGES` inner lateral bounds: 0.15→0.20 for all 6 types. `_BALL_END_RANGES_EASY` inner bounds: 0.10→0.15.
+**Why it was wrong:** At 0.15m lateral offset, the robot could intercept the ball by standing still and barely moving — torso width alone covers shots within ±0.15m. This trained a standing-blocker policy rather than diving saves. G1 uses 0.20m minimum lateral offset for its center-region shots.
+**Correct value:** 0.20m minimum. Matches the intended T1 arm reach geometry: at 0.20m, the robot must take a lateral step or dive to reach the intercept point.
+**G1 reference:** G1 `_init_command_ranges` — center region Y range starts at ±0.20m.
+
+### Fix 6 — Add 13cm palm offset to `eereach` and `hand_proximity_strict` (`rewards.py`)
+**What changed:** Both functions now apply a per-arm local offset ([0,+0.13,0] for left, [0,-0.13,0] for right) via `quat_apply` to get the palm center position instead of the elbow yaw joint position.
+**Why it was wrong:** `body_link_pos_w[:, hand_ids, :]` returns the `left_hand_link` BODY ORIGIN, which is the `Left_Elbow_Yaw` joint position (14.71cm from the elbow pitch joint). The physical hand collision capsule center is an additional 13cm along the arm from this origin. Training `2026-06-11_12-28-23` model_6000 showed the robot using elbows to deflect the ball — the reward was correctly maximised at the elbow joint position, not the hand.
+**Correct value:** `hand_pos_w = body_pos + quat_apply(body_quat, [0, ±0.13, 0])`. Verified from `T1_serial_clean.xml`: `left_hand` geom at `pos="0 0.13 0"` from `left_hand_link` origin; `right_hand` geom at `pos="0 -0.13 0"` from `right_hand_link` origin (mirrored).
+**Evidence:** XML lines 78, 100. Body frame orientation ≈ world frame in standing pose (no explicit quaternion on arm chain bodies → identity rotation at q=0). Visual inspection of training rollout model_6000 showed forearm/elbow contact with ball.
+
+### Fix 7 — Verification: hand vs elbow is confirmed real problem (no code change)
+**Confirmed:** `left_hand_link` body origin = `Left_Elbow_Yaw` joint (14.71cm from elbow pitch). Hand geom 13cm further. Reward was targeting elbow joint → elbow-save behaviour. Fix applied in Fix 6.
+
+## 2026-06-11 — Play config: fix `static_partition` overriding `cycle_motions` in 1-env play mode
+
+### Bug — `goalkeeper_amp_play_withoverlay_env_cfg` only showed lefthand motion type (`goalkeeper_amp_env_cfg.py`)
+**What changed:** Added `motion_cmd.static_partition = False` to the `withoverlay` play config before setting `cycle_motions = True`.
+**Why it was wrong:** `_resample_command` checks `if self.cfg.static_partition:` first (takes the branch and assigns the env's permanent static type ID) and only falls through to the `elif self.cfg.cycle_motions:` block if `static_partition` is False. With `static_partition=True` (from the base training config) and 1 env in play mode, `_static_motion_type_ids[0]` is permanently type 0 (lefthand). `cycle_motions` never fires. The user always saw lefthand saves regardless of which checkpoint was loaded.
+**Correct value:** Explicitly set `static_partition=False` in play configs that should cycle motions.
+**G1 reference:** G1 uses a single-task env (no static_partition concept) — this is a T1 multi-motion-specific issue with no direct G1 equivalent. The fix is consistent with the intended design: play mode should cycle all 6 motion types via `cycle_motions`.
+**Evidence:** With 1 env and 6 motion types, `envs_per = 1 // 6 = 0` under static_partition — the cycling never engages. Confirmed by reading `_resample_command` control flow.
+
 ## 2026-06-10 — Thirteenth-pass: fix T1 spawn orientation facing +Y instead of +X
 
 ### Bug — `T1_STANDING_KEYFRAME.rot` was +90° yaw (facing +Y) instead of identity (facing +X) (`t1_constants.py`)
@@ -1740,3 +1816,29 @@ Full bilateral Y range (±0.65 m) so both hands are exercised during play.
 - `eereach` lateral vel_sigma: left motions reward +Y torso motion, right motions reward -Y.
 
 **Evidence:** User confirmed by visual inspection in MuJoCo viewer: lefthand save happens on the green (+Y) axis side.
+
+## 2026-06-11: Restore ball Y range cap to 0.65 m (undo silent expansion)
+
+**What changed:** Reduced `_BALL_END_RANGES` Y-max from 0.90/1.10 m back to 0.65 m, and `_BALL_END_RANGES_EASY` Y-max from 0.45/0.55 m back to 0.35 m. Sign convention (+Y for left, -Y for right) preserved from 2026-06-10 fix.
+
+**Why it was wrong:** The 11th-pass commit (60f3893) expanded Y max from 0.65 → 0.90 m (regular) and 0.65 → 1.10 m (jumps) without documentation. TensorBoard analysis of run 2026-06-10_14-40-50 showed mean_reward plateau at iter ~4000 with no further improvement to iter 15600. Root cause: at 0.90 m lateral, a significant fraction of balls are physically unreachable by T1's arm from a standing position, providing zero gradient signal for those episodes.
+
+**What the correct values are:** 0.65 m max lateral was established empirically as T1's reachable limit. At 0.84 m, ~50% of shots were unreachable (noted in original comment). Restored to 0.65 m.
+
+**Evidence:** Training run 2026-06-10_14-40-50 metrics — reward plateau at iter 4000, curriculum at max by iter 2000, no eereach improvement despite 15k iterations. G1 upstream uses 1.2 m but G1 is a larger robot.
+
+## 2026-06-11: Confirmed RSI is correct for our port (mirrors G1 continue_keep)
+
+**What diverges:** G1 upstream `_reset_dofs` (legged_robot.py:673-677) uses `standpos` BUT with `continue_keep=True` (g1_29_config.py:280): 80% of resets copy DOF from a random active env (arbitrary mid-motion pose), 20% use scaled standpos. Our port uses motion-file RSI (Reference State Initialization) instead of standpos. This IS correct — motion-file RSI gives the same exploration diversity as G1's continue_keep mechanism.
+
+**Why RSI is kept:** With 40k training iterations vs G1's 200k, diverse initial conditions via RSI are essential for the policy to discover lateral diving behaviors quickly. Standing-pose-only initialization was tested and confirmed inferior by the user.
+
+## 2026-06-11: Fix AMP reward collapse — add noise-sampling kernel (matches G1 predict_reward)
+
+**What changed:** `him_amp_runner.py` AMP reward computation. Changed from bare quadratic kernel `0.5 * clamp(1 - 0.25*(d-1)^2, 0)` to G1's noise-sampling kernel: draw 20 Gaussian perturbations (σ=0.3) of the normalised obs, evaluate disc on all 20, take `min(squared_error)`, compute `0.5 * clamp(1 - 0.25 * min_sq_err, 0)`.
+
+**Why it was wrong:** When the discriminator converges (d_policy → −1), the bare kernel evaluates to exactly 0. Once the disc collapses in the first ~93 iterations, AMP reward is permanently 0 and provides no gradient signal to the policy. Evidence: TensorBoard `Loss/amp_disc_loss` drops to 0.16 by iter 93; `Metrics/motion/error_joint_pos` increases monotonically from 1.49 → 3.49 across 1k iterations, confirming the policy diverges from reference motion.
+
+**What the correct formula is:** G1 `amp.py predict_reward` (lines 183–204): noisy sampling + min squared error. Even at d_policy = −1 (converged disc), noisy samples land at d ≈ −0.7, giving reward ≈ 0.14 instead of 0 — enough gradient to keep guiding the policy toward natural motion.
+
+**Evidence:** G1 source `Humanoid-Goalkeeper/rsl_rl/rsl_rl/modules/amp.py` lines 183–204. The simple kernel (`return torch.clamp(1 - 0.25 * torch.square(d - 1), min=0)`) is explicitly commented out in G1's code and replaced with the noisy version.
