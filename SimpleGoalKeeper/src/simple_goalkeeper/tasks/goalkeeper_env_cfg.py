@@ -250,7 +250,7 @@ def goalkeeper_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
         ),
         "feetorientation": RewardTermCfg(
             func=gk_mdp.feetorientation,
-            weight=1.5,
+            weight=3.0,
             params={"asset_cfg": _FEET_CFG},
         ),
         # --- stability ---
@@ -285,9 +285,13 @@ def goalkeeper_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
             func=mjlab_mdp.action_rate_l2,
             weight=-0.3,
         ),
+        "action_acc_l2": RewardTermCfg(
+            func=mjlab_mdp.action_acc_l2,
+            weight=-0.1,
+        ),
         "dof_vel": RewardTermCfg(
             func=mjlab_mdp.joint_vel_l2,
-            weight=-0.001,
+            weight=-5e-4,
             params={"asset_cfg": _ALL_JOINTS_CFG},
         ),
     }
