@@ -251,12 +251,11 @@ def convert_one(
     for b in range(n_robot_bodies):
         body_ang_vel_w[:, b, :] = _quat_ang_vel(body_quat_w[:, b, :], 1.0 / output_fps)
 
-    # Strip head joints → 21-DOF headless, then subtract standing default so
-    # stored joint_pos matches what joint_pos_rel returns at runtime.
-    # The AMP discriminator trains on (env joint_pos_rel) vs (NPZ joint_pos); they
-    # must be in the same coordinate: relative to the T1 home keyframe.
-    joint_pos_abs = dof_pos_r[:, _HEAD_JOINT_COUNT:]
-    joint_pos = joint_pos_abs - _T1_HEADLESS_DEFAULT_JOINT_POS[np.newaxis, :]
+    # Strip head joints → 21-DOF headless. Store absolute joint angles so that
+    # MotionCommand._debug_vis_impl can write them directly to MuJoCo qpos and
+    # the ghost robot renders in the correct pose. AMP obs uses joint_pos_abs
+    # (absolute) on the robot side to match this convention.
+    joint_pos = dof_pos_r[:, _HEAD_JOINT_COUNT:]
     joint_vel = _finite_diff_vel(joint_pos, 1.0 / output_fps)
 
     output_path.parent.mkdir(parents=True, exist_ok=True)
@@ -269,7 +268,6 @@ def convert_one(
         body_quat_w=body_quat_w,
         body_lin_vel_w=body_lin_vel_w,
         body_ang_vel_w=body_ang_vel_w,
-        joint_pos_relative=np.array([1], dtype=np.int8),
     )
     print(f"  Saved → {output_path.name}  shape={joint_pos.shape}")
 

@@ -163,3 +163,25 @@ def base_lin_vel(
     """Robot base linear velocity in robot body frame. Shape (N, 3)."""
     robot: Entity = env.scene["robot"]
     return robot.data.root_link_lin_vel_b
+
+
+def joint_pos_abs(
+    env: "ManagerBasedRlEnv",
+    asset_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
+) -> torch.Tensor:
+    """Absolute joint positions (raw qpos). Shape (N, num_joints).
+
+    Used by AMP obs group to match NPZ joint_pos which is stored as
+    absolute DOF angles (same convention as Imitationlearningbooster).
+    """
+    robot: Entity = env.scene[asset_cfg.name]
+    return robot.data.joint_pos.clone()
+
+
+def joint_vel_abs(
+    env: "ManagerBasedRlEnv",
+    asset_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
+) -> torch.Tensor:
+    """Absolute joint velocities. Shape (N, num_joints)."""
+    robot: Entity = env.scene[asset_cfg.name]
+    return robot.data.joint_vel.clone()

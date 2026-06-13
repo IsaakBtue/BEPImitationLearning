@@ -1,2 +1,10 @@
-# 19th-pass training (G1-exact architecture: single optimizer, joint backward):
-cd /home/robocup/IsaakB/BEPImitationLearning/Imitationlearningbooster && env -u PYTHONPATH .venv/bin/train goalkeeper_booster_t1_amp
+# SimpleGoalKeeper commands (run from SimpleGoalKeeper/)
+
+# Play with overlay (check ghost motion):
+uv run sgk_play Mjlab-BeyondAMP-Goalkeeper-T1-WithOverlay --checkpoint-file logs/rsl_rl/simple_goalkeeper/<run>/model_0.pt
+
+# Train:
+uv run sgk_train Mjlab-BeyondAMP-Goalkeeper-T1 --num-envs 4096
+
+# Play (zero policy sanity check):
+uv run sgk_play Mjlab-BeyondAMP-Goalkeeper-T1 --agent zero --num-envs 1

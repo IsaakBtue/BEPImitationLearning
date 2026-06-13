@@ -181,8 +181,17 @@ def goalkeeper_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
     cfg.observations["actor"] = ObservationGroupCfg(terms=actor_terms, enable_corruption=True)
     cfg.observations["critic"] = ObservationGroupCfg(terms=critic_terms, enable_corruption=False)
 
-    # beyondAMP discriminator observes basic joint_pos + joint_vel (single frame).
-    cfg.observations["amp"] = amp_obs_basic_group()
+    # AMP discriminator uses absolute joint_pos + joint_vel to match NPZ convention.
+    # NPZ stores raw dof_pos (absolute), so the robot obs must also be absolute.
+    # Mirrors Imitationlearningbooster's joint_pos_amp approach.
+    cfg.observations["amp"] = ObservationGroupCfg(
+        terms={
+            "joint_pos": ObservationTermCfg(func=gk_mdp.joint_pos_abs, noise=None),
+            "joint_vel": ObservationTermCfg(func=gk_mdp.joint_vel_abs, noise=None),
+        },
+        concatenate_terms=True,
+        enable_corruption=False,
+    )
 
     # Observation history: 10 frames (matches G1 upstream num_actor_history=10).
     cfg.observations["actor"].history_length = 10
