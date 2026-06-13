@@ -104,6 +104,17 @@ def goalkeeper_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
                 ],
             },
         )
+        cfg.curriculum["stopball_curriculum"] = CurriculumTermCfg(
+            func=mjlab_mdp.reward_curriculum,
+            params={
+                "reward_name": "stopball",
+                "stages": [
+                    {"step": 0,                    "weight": 100.0},
+                    {"step": 600  * _num_steps,    "weight": 175.0},
+                    {"step": 1200 * _num_steps,    "weight": 250.0},
+                ],
+            },
+        )
 
     # ------------------------------------------------------------------
     # Observations

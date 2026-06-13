@@ -73,7 +73,7 @@ def goalkeeper_amp_runner_cfg() -> AMPRunnerCfg:
         ),
         amp_discr_hidden_dims=[512, 256, 128],
         amp_reward_coef=0.5,
-        amp_task_reward_lerp=0.7,
+        amp_task_reward_lerp=0.9,
         amp_min_normalized_std=0.05,
         video_interval=1000,
         video_n_steps=250,
