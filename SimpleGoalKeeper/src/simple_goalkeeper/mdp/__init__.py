@@ -6,5 +6,6 @@ from .rewards import (
     stayonline, noretreat, feetorientation, deviation_waist_joint,
     footreach, stopball,
     successland, penalize_kneeheight, dof_vel_limits,
+    postupperdofpos, postwaistdofpos,
 )
 from .commands import GhostMotionCommand, GhostMotionCommandCfg

@@ -37,6 +37,14 @@ _ALL_JOINTS_CFG = SceneEntityCfg("robot", joint_names=(".*",))
 _WAIST_JOINT_CFG = SceneEntityCfg("robot", joint_names=("Waist",))
 _ROBOT_CFG = SceneEntityCfg("robot")
 _KNEE_BODY_CFG = SceneEntityCfg("robot", body_names=("Shank_Left", "Shank_Right"))
+_RECOVERY_ARM_CFG = SceneEntityCfg(
+    "robot",
+    joint_names=(
+        "Left_Shoulder_Pitch", "Left_Shoulder_Roll", "Left_Elbow_Pitch", "Left_Elbow_Yaw",
+        "Right_Shoulder_Pitch", "Right_Shoulder_Roll", "Right_Elbow_Pitch", "Right_Elbow_Yaw",
+    ),
+)
+_RECOVERY_WAIST_CFG = SceneEntityCfg("robot", joint_names=("Waist",))
 
 
 def _make_ball_entity_cfg() -> EntityCfg:
@@ -255,6 +263,16 @@ def goalkeeper_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
             func=gk_mdp.deviation_waist_joint,
             weight=-0.001,
             params={"asset_cfg": _WAIST_JOINT_CFG},
+        ),
+        "postupperdofpos": RewardTermCfg(
+            func=gk_mdp.postupperdofpos,
+            weight=-1.0,
+            params={"ball_name": BALL_NAME, "asset_cfg": _RECOVERY_ARM_CFG},
+        ),
+        "postwaistdofpos": RewardTermCfg(
+            func=gk_mdp.postwaistdofpos,
+            weight=-1.0,
+            params={"ball_name": BALL_NAME, "asset_cfg": _RECOVERY_WAIST_CFG},
         ),
         # --- joint safety ---
         "dof_pos_limits": RewardTermCfg(

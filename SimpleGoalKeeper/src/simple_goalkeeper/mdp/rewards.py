@@ -15,6 +15,14 @@ if TYPE_CHECKING:
 _DEFAULT_FEET_CFG = SceneEntityCfg("robot", body_names=("left_foot_link", "right_foot_link"))
 _DEFAULT_ROBOT_CFG = SceneEntityCfg("robot")
 _DEFAULT_KNEE_CFG = SceneEntityCfg("robot", body_names=("Shank_Left", "Shank_Right"))
+_ARM_JOINT_CFG = SceneEntityCfg(
+    "robot",
+    joint_names=(
+        "Left_Shoulder_Pitch", "Left_Shoulder_Roll", "Left_Elbow_Pitch", "Left_Elbow_Yaw",
+        "Right_Shoulder_Pitch", "Right_Shoulder_Roll", "Right_Elbow_Pitch", "Right_Elbow_Yaw",
+    ),
+)
+_WAIST_JOINT_CFG_RECOVERY = SceneEntityCfg("robot", joint_names=("Waist",))
 
 
 def _ball_is_behind(env: "ManagerBasedRlEnv", ball_name: str) -> torch.Tensor:
@@ -315,3 +323,42 @@ def dof_vel_limits(
     vel = robot.data.joint_vel[:, asset_cfg.joint_ids]                  # (N, J)
     excess = torch.clamp(vel.abs() - vel_threshold, min=0.0)            # (N, J)
     return excess.pow(2).sum(dim=-1)
+
+
+def postupperdofpos(
+    env: "ManagerBasedRlEnv",
+    ball_name: str,
+    asset_cfg: SceneEntityCfg = _ARM_JOINT_CFG,
+) -> torch.Tensor:
+    """Penalise arm joint deviation from default AFTER ball is behind.
+
+    Encourages the robot to recover its arm pose after a save or failed save.
+    Active only when _ball_is_behind is True.
+    """
+    behind = _ball_is_behind(env, ball_name)
+    robot: Entity = env.scene[asset_cfg.name]
+    delta = (
+        robot.data.joint_pos[:, asset_cfg.joint_ids]
+        - robot.data.default_joint_pos[:, asset_cfg.joint_ids]
+    )
+    err = torch.sum(torch.square(delta), dim=-1)
+    return err * behind.float()
+
+
+def postwaistdofpos(
+    env: "ManagerBasedRlEnv",
+    ball_name: str,
+    asset_cfg: SceneEntityCfg = _WAIST_JOINT_CFG_RECOVERY,
+) -> torch.Tensor:
+    """Penalise waist deviation from default AFTER ball is behind.
+
+    Companion to postupperdofpos — encourages trunk recovery after save.
+    """
+    behind = _ball_is_behind(env, ball_name)
+    robot: Entity = env.scene[asset_cfg.name]
+    delta = (
+        robot.data.joint_pos[:, asset_cfg.joint_ids]
+        - robot.data.default_joint_pos[:, asset_cfg.joint_ids]
+    )
+    err = torch.sum(torch.square(delta), dim=-1)
+    return err * behind.float()
