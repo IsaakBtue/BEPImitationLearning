@@ -182,15 +182,18 @@ def goalkeeper_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
     # ------------------------------------------------------------------
     cfg.rewards = {
         # --- ball interception (feet-only) ---
-        "footreach": RewardTermCfg(
-            func=gk_mdp.footreach,
-            weight=10.0,
-            params={"ball_name": BALL_NAME, "reach_th": 0.3, "sigma": 5.0, "asset_cfg": _FEET_CFG},
-        ),
+        # stopball must come before footreach: footreach calls _ball_is_behind which reads
+        # env._sb_init_vx set by stopball. On the first step of every episode stopball must
+        # run first so _sb_init_vx is populated before footreach queries it.
         "stopball": RewardTermCfg(
             func=gk_mdp.stopball,
             weight=100.0,
             params={"ball_name": BALL_NAME, "delta_vel_threshold": 1.0},
+        ),
+        "footreach": RewardTermCfg(
+            func=gk_mdp.footreach,
+            weight=10.0,
+            params={"ball_name": BALL_NAME, "reach_th": 0.3, "sigma": 5.0, "asset_cfg": _FEET_CFG},
         ),
         "ball_positive_vx": RewardTermCfg(
             func=gk_mdp.ball_positive_vx,
