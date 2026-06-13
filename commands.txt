@@ -1,10 +1,1 @@
-# SimpleGoalKeeper commands (run from SimpleGoalKeeper/)
-
-# Play with overlay (check ghost motion):
-uv run sgk_play Mjlab-BeyondAMP-Goalkeeper-T1-WithOverlay --checkpoint-file logs/rsl_rl/simple_goalkeeper/<run>/model_0.pt
-
-# Train:
-uv run sgk_train Mjlab-BeyondAMP-Goalkeeper-T1 --num-envs 4096
-
-# Play (zero policy sanity check):
-uv run sgk_play Mjlab-BeyondAMP-Goalkeeper-T1 --agent zero --num-envs 1
+cd /home/isaak/BEPImitationlearning/SimpleGoalKeeper && uv run sgk_play Mjlab-BeyondAMP-Goalkeeper-T1-WithOverlay --checkpoint-file logs/rsl_rl/simple_goalkeeper/2026-06-13_18-18-45_phase1/model_500.pt

@@ -277,5 +277,9 @@ def main(
     print("Done.")
 
 
-if __name__ == "__main__":
+def cli() -> None:
     tyro.cli(main)
+
+
+if __name__ == "__main__":
+    cli()

@@ -399,35 +399,47 @@ _MOTIONS_DATA_DIR = Path(__file__).parents[1] / "motions" / "data"
 def goalkeeper_env_cfg_withoverlay(
     motion_file: str | None = None,
 ) -> ManagerBasedRlEnvCfg:
-    """Play-mode config with ghost-robot overlay showing a reference motion.
+    """Play-mode config with ghost-robot overlay cycling through all reference motions.
 
     The ghost follows the NPZ motion while the policy runs normally — no RSI
-    teleportation. Requires the NPZ files to be regenerated after the converter
-    fix (world body excluded from body_pos_w).
+    teleportation. Cycles through all NPZ files in motions/data/ in order.
 
     Args:
-        motion_file: Path to a specific NPZ file, or None to use the first one
-            found in motions/data/.
+        motion_file: Path to a specific NPZ file to pin to that motion only.
+            If None, cycles through all files in motions/data/.
     """
-    from simple_goalkeeper.mdp.commands import GhostMotionCommandCfg
+    from simple_goalkeeper.mdp.commands import (
+        CyclingGhostMotionCommandCfg,
+        GhostMotionCommandCfg,
+    )
 
     cfg = goalkeeper_env_cfg(play=True)
     cfg.scene.num_envs = 1
 
-    if motion_file is None:
+    if motion_file is not None:
+        cfg.commands["motion_ghost"] = GhostMotionCommandCfg(
+            motion_file=motion_file,
+            anchor_body_name="Trunk",
+            body_names=_T1_HEADLESS_BODY_NAMES,
+            entity_name="robot",
+            debug_vis=True,
+            resampling_time_range=(10.0, 10.0),
+            viz=MotionCommandCfg.VizCfg(mode="ghost", ghost_color=(0.3, 0.8, 0.4, 0.45)),
+        )
+    else:
         npz_files = sorted(_MOTIONS_DATA_DIR.glob("*.npz"))
         if not npz_files:
             raise FileNotFoundError(f"No NPZ files in {_MOTIONS_DATA_DIR}")
-        motion_file = str(npz_files[0])
-
-    cfg.commands["motion_ghost"] = GhostMotionCommandCfg(
-        motion_file=motion_file,
-        anchor_body_name="Trunk",
-        body_names=_T1_HEADLESS_BODY_NAMES,
-        entity_name="robot",
-        debug_vis=True,
-        resampling_time_range=(10.0, 10.0),  # ghost resamples every 10s (one full episode)
-        viz=MotionCommandCfg.VizCfg(mode="ghost", ghost_color=(0.3, 0.8, 0.4, 0.45)),
-    )
+        cmd = CyclingGhostMotionCommandCfg(
+            motion_file=str(npz_files[0]),  # required by parent cfg; overridden at build
+            anchor_body_name="Trunk",
+            body_names=_T1_HEADLESS_BODY_NAMES,
+            entity_name="robot",
+            debug_vis=True,
+            resampling_time_range=(10.0, 10.0),
+            viz=MotionCommandCfg.VizCfg(mode="ghost", ghost_color=(0.3, 0.8, 0.4, 0.45)),
+        )
+        cmd.motion_files = [str(f) for f in npz_files]
+        cfg.commands["motion_ghost"] = cmd
 
     return cfg

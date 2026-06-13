@@ -27,7 +27,7 @@ amp-tasks-mjlab = { path = "beyondAMP/source/amp_tasks_mjlab", editable = true }
 [project.scripts]
 sgk_train    = "simple_goalkeeper.scripts.train:main"
 sgk_play     = "simple_goalkeeper.scripts.play:main"
-sgk_convert  = "simple_goalkeeper.scripts.pkl_to_npz:main"
+sgk_convert  = "simple_goalkeeper.scripts.pkl_to_npz:cli"
 
 [build-system]
 requires = ["setuptools>=61"]
