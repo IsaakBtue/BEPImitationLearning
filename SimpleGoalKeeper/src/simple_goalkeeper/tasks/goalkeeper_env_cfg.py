@@ -296,6 +296,11 @@ def goalkeeper_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
             func=mjlab_mdp.root_height_below_minimum,
             params={"minimum_height": 0.4, "asset_cfg": _ROBOT_CFG},
         ),
+        "ball_exit": TerminationTermCfg(
+            func=gk_mdp.ball_exit_termination,
+            params={"ball_name": BALL_NAME, "behind_threshold": -0.5},
+            time_out=False,
+        ),
     }
 
     # ------------------------------------------------------------------

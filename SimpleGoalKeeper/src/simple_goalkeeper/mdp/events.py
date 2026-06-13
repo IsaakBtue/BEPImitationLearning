@@ -212,3 +212,30 @@ class ball_difficulty_curriculum:
                 current = stage["difficulty"]
         env._ball_difficulty = current
         return {"ball_difficulty": torch.tensor(current)}
+
+
+def ball_exit_termination(
+    env: "ManagerBasedRlEnv",
+    ball_name: str,
+    behind_threshold: float = -0.5,
+) -> torch.Tensor:
+    """Terminate when ball has clearly passed the goal line or been deflected.
+
+    Fires when:
+      - ball_x_local < behind_threshold (ball behind robot by > 0.5 m), OR
+      - stopball has fired (deflection registered) AND ball moving in +X (moving away)
+
+    This ends episodes quickly after the outcome is decided, freeing sim time.
+    """
+    ball: Entity = env.scene[ball_name]
+    ball_x_local = ball.data.root_link_pos_w[:, 0] - env.scene.env_origins[:, 0]
+    ball_x_vel = ball.data.root_link_lin_vel_w[:, 0]
+
+    passed = ball_x_local < behind_threshold
+    sb_flag = getattr(env, "_sb_flag", None)
+    if sb_flag is not None:
+        deflected_away = sb_flag & (ball_x_vel > 0.5)
+    else:
+        deflected_away = torch.zeros(env.num_envs, dtype=torch.bool, device=env.device)
+
+    return passed | deflected_away
