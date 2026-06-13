@@ -2,7 +2,7 @@ from legged_gym.envs.base.legged_robot_config import LeggedRobotCfg, LeggedRobot
 
 class G129Cfg(LeggedRobotCfg):
     class env(LeggedRobotCfg.env):
-        num_envs = 1020  # keep divisible by 6 to match region partitioning in legged_robot.py
+        num_envs = 6144
 
         num_actor_history = 10
         
@@ -378,7 +378,6 @@ class G129CfgPPO( LeggedRobotCfgPPO ):
         run_name = 'goalkeepper'
         experiment_name = 'g1'
         wandb_project = "goalkeepper"
-        wandb_entity = "i-p-b-bouwmeester-eindhoven-university-of-technology"
         logger = 'wandb'
         
         # load and resume

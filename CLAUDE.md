@@ -17,11 +17,12 @@ Adapt the **InternRobotics Humanoid-Goalkeeper** pipeline (originally targeting 
 
 1. **Do NOT modify `Humanoid-Goalkeeper/`** — treat it as a frozen upstream reference for G1 behavior. Read it for patterns; never edit it.
 2. **All Booster-specific code goes under `Imitationlearningbooster/`** — wrappers, forks, or vendored subtrees only.
-3. **Document every divergence** — append a dated entry to `Imitationlearningbooster/DIVERGENCE_FROM_UPSTREAM.md` for every substantive change.
-4. **Log changes inside `Humanoid-Goalkeeper/`** — if upstream context must be noted, append "what" and "why" to `Humanoid-Goalkeeper/changes.md`.
-5. **License is CC BY-NC-SA 4.0** — non-commercial research only.
-6. **Document every fix immediately** — after every bug fix, reward change, or config change, update `Imitationlearningbooster/DIVERGENCE_FROM_UPSTREAM.md` in the same commit. Include: what changed, why it was wrong, what the correct value is, and what evidence (training data, error messages) confirmed the fix was needed.
-7. **Do NOT modify anything inside `booster_deploy/`** — treat it as a frozen upstream deployment framework. Read it for patterns; never edit it. All goalkeeper-specific deployment code lives in `goalkeeper_deploy/`.
+3. **Every change in `Imitationlearningbooster/` must be explicitly justified against `Humanoid-Goalkeeper/`** — before making any design decision (reward weights, observation schema, training hyperparams, reset logic, command ranges), read the corresponding code in `Humanoid-Goalkeeper/` and document whether the change mirrors G1, adapts G1 for T1's different kinematics, or is a known deliberate divergence. If you cannot point to where in `Humanoid-Goalkeeper/` the decision comes from, treat it as a red flag requiring review.
+4. **Document every divergence** — append a dated entry to `Imitationlearningbooster/DIVERGENCE_FROM_UPSTREAM.md` for every substantive change.
+5. **Log changes inside `Humanoid-Goalkeeper/`** — if upstream context must be noted, append "what" and "why" to `Humanoid-Goalkeeper/changes.md`.
+6. **License is CC BY-NC-SA 4.0** — non-commercial research only.
+7. **Document every fix immediately** — after every bug fix, reward change, or config change, update `Imitationlearningbooster/DIVERGENCE_FROM_UPSTREAM.md` in the same commit. Include: what changed, why it was wrong, what the correct value is, and what evidence (training data, error messages) confirmed the fix was needed.
+8. **Do NOT modify anything inside `booster_deploy/`** — treat it as a frozen upstream deployment framework. Read it for patterns; never edit it. All goalkeeper-specific deployment code lives in `goalkeeper_deploy/`.
 
 ## Installation
 

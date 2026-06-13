@@ -74,7 +74,17 @@ def eereach(
     robot: Entity = env.scene[asset_cfg.name]
     ball: Entity = env.scene[ball_name]
     ball_pos_w = ball.data.root_link_pos_w                              # (N, 3)
-    hand_pos_w = robot.data.body_link_pos_w[:, asset_cfg.body_ids, :]  # (N, 2, 3)
+    # Palm offset: left_hand_link origin = elbow yaw joint; actual hand geom is
+    # 13cm further along the arm (local +Y for left, local -Y for right).
+    # Verified from T1_serial_clean.xml: left_hand geom pos="0 0.13 0",
+    # right_hand geom pos="0 -0.13 0". quat_apply handles arbitrary arm poses.
+    _body_pos = robot.data.body_link_pos_w[:, asset_cfg.body_ids, :]   # (N,2,3)
+    _body_quat = robot.data.body_link_quat_w[:, asset_cfg.body_ids, :] # (N,2,4)
+    _palm_off = torch.tensor([[0., 0.13, 0.], [0., -0.13, 0.]], device=env.device)
+    _palm_off_exp = _palm_off.unsqueeze(0).expand(_body_pos.shape[0], -1, -1)  # (N,2,3)
+    hand_pos_w = _body_pos + quat_apply(
+        _body_quat.reshape(-1, 4), _palm_off_exp.reshape(-1, 3)
+    ).reshape(_body_pos.shape)                                          # (N,2,3)
 
     ball_x_local = ball_pos_w[:, 0] - env.scene.env_origins[:, 0]      # (N,)
     behind = _ball_is_behind(env, ball_name)
@@ -547,7 +557,14 @@ def hand_proximity_strict(
     reach. After stopball fires, multiplier doubles (mirrors G1's success_flag logic).
     """
     robot: Entity = env.scene[asset_cfg.name]
-    hand_pos_w = robot.data.body_link_pos_w[:, asset_cfg.body_ids, :]  # (N, 2, 3)
+    # Palm offset — same geometry as eereach: elbow yaw joint + 13cm along arm.
+    _body_pos = robot.data.body_link_pos_w[:, asset_cfg.body_ids, :]   # (N,2,3)
+    _body_quat = robot.data.body_link_quat_w[:, asset_cfg.body_ids, :] # (N,2,4)
+    _palm_off = torch.tensor([[0., 0.13, 0.], [0., -0.13, 0.]], device=env.device)
+    _palm_off_exp = _palm_off.unsqueeze(0).expand(_body_pos.shape[0], -1, -1)
+    hand_pos_w = _body_pos + quat_apply(
+        _body_quat.reshape(-1, 4), _palm_off_exp.reshape(-1, 3)
+    ).reshape(_body_pos.shape)                                          # (N,2,3)
 
     # Use frozen intercept target (set at episode reset by _reset_ball).
     # Falls back to live ball position if end_target is not set yet.

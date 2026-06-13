@@ -23,7 +23,7 @@ ANKLE_L_IDX, HIP_L_IDX = 15, 11  # Left_Ankle_Pitch, Left_Hip_Pitch
 ANKLE_R_IDX, HIP_R_IDX = 21, 17  # Right_Ankle_Pitch, Right_Hip_Pitch
 
 _HERE = Path(__file__).parent
-_PKL_DIR = _HERE.parent.parent.parent  # Imitationlearningbooster/ root
+_PKL_DIR = _HERE / "data_pkl"  # new pkl files live here
 _XML = _HERE.parent / "assets" / "booster_t1" / "T1_serial_clean.xml"
 _OUT = _HERE / "data"
 _OUT.mkdir(exist_ok=True)

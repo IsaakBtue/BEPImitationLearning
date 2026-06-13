@@ -400,14 +400,15 @@ def goalkeeper_amp_env_cfg(play: bool = False, num_steps_per_env: int = 100) -> 
                 func=mjlab_mdp.reward_curriculum,
                 params={
                     "reward_name": "eereach",
-                    # 2× G1's base (10→20). G1 uses amp_coef=0.4; we use 0.2 (half AMP signal)
-                    # so arm task weights are doubled to compensate. G1 peak=25; our peak=40
-                    # stays above G1 peak but ratio eereach:stopball = 20:100 = 1:5 (vs G1's 1:10)
-                    # — proportionate to the halved AMP contribution.
+                    # G1 base=10, peak=25. Scaled to 15→30 (1.5×G1): AMP now at full strength
+                    # (amp_coef=0.4, no *0.5 bug) so arm weights return toward G1 ratio.
+                    # Ratio eereach:stopball = 15:100 = 3:20. T1 palm-offset fix means eereach
+                    # now targets actual hand geom center (+13cm from elbow yaw joint) vs. the
+                    # elbow joint that was previously targeted — lower absolute weight is safer.
                     "stages": [
-                        {"step": 0,           "weight": 20.0},
-                        {"step": stage1_step, "weight": 30.0},
-                        {"step": stage2_step, "weight": 40.0},
+                        {"step": 0,           "weight": 15.0},
+                        {"step": stage1_step, "weight": 22.0},
+                        {"step": stage2_step, "weight": 30.0},
                     ],
                 },
             ),
@@ -484,12 +485,19 @@ def goalkeeper_amp_play_env_cfg(num_steps_per_env: int = 100) -> ManagerBasedRlE
 
 
 def goalkeeper_amp_play_withoverlay_env_cfg(num_steps_per_env: int = 100) -> ManagerBasedRlEnvCfg:
-    """Play config for AMP goalkeeper with ghost-robot overlay cycling through all 6 motions."""
+    """Play config for AMP goalkeeper with ghost-robot overlay cycling through all 6 motions.
+
+    static_partition must be False here: with 1 env, static_partition assigns
+    env 0 permanently to motion type 0 (lefthand) — cycle_motions never fires
+    because the static_partition branch takes priority in _resample_command.
+    Setting static_partition=False lets cycle_motions round-robin all 6 types.
+    """
     cfg = goalkeeper_amp_play_env_cfg(num_steps_per_env=num_steps_per_env)
 
     motion_cmd = cfg.commands["motion"]
     assert isinstance(motion_cmd, MultiMotionCommandCfg)
     motion_cmd.debug_vis = True
+    motion_cmd.static_partition = False   # must be off so cycle_motions fires
     motion_cmd.cycle_motions = True
 
     return cfg

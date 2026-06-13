@@ -58,7 +58,7 @@ def goalkeeper_amp_ppo_runner_cfg() -> RslRlAmpRunnerCfg:
         save_interval=200,
         num_steps_per_env=100,
         max_iterations=40_000,
-        amp_coef=0.2,  # lowered from 0.4: reduces AMP adversarial pressure on arm deviations
+        amp_coef=0.4,  # G1 value; previously regressed to 0.2 (combined with *0.5 bug → 4× weaker than G1)
         amp_discr_hidden_dims=[512, 256],
         amp_disc_mini_batch_size=4096,
     )
