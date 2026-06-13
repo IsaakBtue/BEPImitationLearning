@@ -16,6 +16,22 @@ _DEFAULT_FEET_CFG = SceneEntityCfg("robot", body_names=("left_foot_link", "right
 _DEFAULT_ROBOT_CFG = SceneEntityCfg("robot")
 
 
+def _ball_is_behind(env: "ManagerBasedRlEnv", ball_name: str) -> torch.Tensor:
+    """Bool mask (N,): ball has passed goal line OR been deflected.
+
+    Mirrors Imitationlearningbooster exactly:
+      behind = (ball_x_local < 0) | (delta_vx > 1.0)
+    """
+    ball: Entity = env.scene[ball_name]
+    ball_x_local = ball.data.root_link_pos_w[:, 0] - env.scene.env_origins[:, 0]
+    ball_x_vel = ball.data.root_link_lin_vel_w[:, 0]
+    init_vx = getattr(env, "_sb_init_vx", None)
+    if init_vx is not None:
+        delta_vx = ball_x_vel - init_vx
+        return (ball_x_local < 0.0) | (delta_vx > 1.0)
+    return (ball_x_local < 0.0) | (ball_x_vel > 1.0)
+
+
 def footreach(
     env: "ManagerBasedRlEnv",
     ball_name: str,
@@ -68,7 +84,8 @@ def footreach(
     # Upright gate: suppress reward when robot is falling.
     projected_grav = robot.data.projected_gravity_b
     upright = 1.0 - torch.clamp(torch.sum(projected_grav[:, :2] ** 2, dim=1), 0.0, 1.0)
-    return taskrew * upright
+    behind = _ball_is_behind(env, ball_name)
+    return taskrew * upright * (~behind).float()
 
 
 def stopball(
