@@ -72,12 +72,18 @@ Phase 1 reward structure (ported from proven Imitationlearningbooster pattern):
 | `ball_positive_vx` | +10.0 | Continuous reward for sustained deflection back toward +X |
 | `stayonline` | -2.0 | Penalty for drifting away from goal line (X displacement) |
 | `noretreat` | -2.0 | Penalty for retreating backward (negative body-frame X velocity) |
-| `feetorientation` | +1.5 | Flat feet (gravity aligned with foot Z) |
+| `feetorientation` | +3.0 | Flat feet (gravity aligned with foot Z) |
+| `successland` | +4.0 | Dense reward: either foot within 12 cm of ball while ball is in front |
+| `penalize_kneeheight` | -100.0 | Penalty when shank drops below 15 cm above floor (prevents kneeling) |
+| `dof_vel_limits` | -2.0 | Penalty for joint velocity > 10 rad/s (sum of squared excess) |
+| `postupperdofpos` | -1.0 | Arm deviation from default pose, active only after ball passes (recovery) |
+| `postwaistdofpos` | -1.0 | Waist deviation from default pose, active only after ball passes (recovery) |
 | `ang_vel_xy` | -0.1 | Penalise rolling/pitching |
-| `deviation_waist_joint` | -0.001 | Waist joint regularisation |
+| `deviation_waist_joint` | -0.001 | Waist joint regularisation (always active) |
 | `dof_pos_limits` | -3.0 | Joint limit violation penalty |
 | `action_rate_l2` | -0.3 | Action smoothness |
-| `dof_vel` | -0.001 | Joint velocity regularisation |
+| `action_acc_l2` | -0.1 | Action jerk penalty (second-order smoothness) |
+| `dof_vel` | -5e-4 | Joint velocity regularisation |
 
 **Removed (created stand-still local optimum):**
 - `ball_vx_reduction`: peaked when ball stopped naturally — rewarded doing nothing
