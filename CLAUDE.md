@@ -30,6 +30,10 @@ Adapt the **InternRobotics Humanoid-Goalkeeper** pipeline (originally targeting 
 2. Write the command(s) into `commands.txt` at the repo root (`/home/isaak/BEPImitationlearning/commands.txt`).
 3. Also show the command in the chat response.
 
+## SSH / Git Push
+
+SSH key passphrase for this machine: `Isaak`
+
 ## Critical Constraints
 
 1. **Do NOT modify `Humanoid-Goalkeeper/`** — treat it as a frozen upstream reference for G1 behavior. Read it for patterns; never edit it.
