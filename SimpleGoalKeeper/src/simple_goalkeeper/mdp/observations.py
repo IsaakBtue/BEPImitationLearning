@@ -155,3 +155,11 @@ def right_foot_pos_b(
         quat_inv(robot.data.root_link_quat_w),
         foot_pos_w - robot.data.root_link_pos_w,
     )
+
+
+def base_lin_vel(
+    env: "ManagerBasedRlEnv",
+) -> torch.Tensor:
+    """Robot base linear velocity in robot body frame. Shape (N, 3)."""
+    robot: Entity = env.scene["robot"]
+    return robot.data.root_link_lin_vel_b

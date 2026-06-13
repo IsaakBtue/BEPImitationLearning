@@ -123,6 +123,10 @@ def goalkeeper_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
     # is left for play/sim2real evaluation.
     # ------------------------------------------------------------------
     actor_terms = {
+        "base_lin_vel": ObservationTermCfg(
+            func=gk_mdp.base_lin_vel,
+            noise=Unoise(n_min=-0.1, n_max=0.1),
+        ),
         "base_ang_vel": ObservationTermCfg(
             func=mjlab_mdp.base_ang_vel,
             noise=Unoise(n_min=-0.2, n_max=0.2),
