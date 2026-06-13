@@ -213,6 +213,20 @@ def ang_vel_xy_l2(
     return torch.sum(torch.square(asset.data.root_link_ang_vel_b[:, :2]), dim=1)
 
 
+def ang_vel_z_l2(
+    env: "ManagerBasedRlEnv",
+    asset_cfg: SceneEntityCfg = _DEFAULT_ROBOT_CFG,
+) -> torch.Tensor:
+    """Squared yaw angular velocity. Shape (N,).
+
+    A goalkeeper should face the field; spinning wastes reach radius and
+    delays re-positioning. Penalised separately from roll/pitch so the weight
+    can be tuned independently.
+    """
+    asset: Entity = env.scene[asset_cfg.name]
+    return torch.square(asset.data.root_link_ang_vel_b[:, 2])
+
+
 def stayonline(
     env: "ManagerBasedRlEnv",
     line_offset: float = 0.2,

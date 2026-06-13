@@ -267,6 +267,11 @@ def goalkeeper_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
             weight=-0.1,
             params={"asset_cfg": _ROBOT_CFG},
         ),
+        "ang_vel_z": RewardTermCfg(
+            func=gk_mdp.ang_vel_z_l2,
+            weight=-0.1,
+            params={"asset_cfg": _ROBOT_CFG},
+        ),
         "deviation_waist_joint": RewardTermCfg(
             func=gk_mdp.deviation_waist_joint,
             weight=-0.001,
@@ -323,16 +328,20 @@ def goalkeeper_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
     cfg.events["reset_base"].params["pose_range"]["y"] = (0.0, 0.0)
     cfg.events["reset_base"].params["pose_range"]["yaw"] = (-0.15, 0.15)
 
-    # Ball reset: spawn in robot local +X frame with parabolic arc to foot level.
+    # Ball reset: spawn from a variable lateral position, aimed at the goal area.
+    # y_start_range: wide lateral spawn — ball can approach from steep angles.
+    # y_end_range: goal target Y (±0.5 m covers full goal width at foot height).
+    # Velocity has both X and Y components so cross-goal shots are realistic.
     cfg.events["reset_ball"] = EventTermCfg(
         func=gk_mdp.reset_ball_local_frame,
         mode="reset",
         params={
             "ball_name": BALL_NAME,
             "dist_range": (2.0, 4.0),
-            "lateral_range": (-0.5, 0.5),
+            "y_start_range": (-1.5, 1.5),       # lateral spawn; wide for angle variety
+            "y_end_range": (-0.5, 0.5),          # goal target Y; foot-width goal coverage
             "spawn_height_range": (0.2, 0.7),   # m above floor at spawn
-            "arrive_height_range": (0.1, 0.4),  # m above floor at robot — feet/shins
+            "arrive_height_range": (0.1, 0.4),  # m above floor at goal line — feet/shins
             "speed_range": (3.0, 7.0),
         },
     )

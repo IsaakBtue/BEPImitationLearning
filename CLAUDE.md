@@ -2,6 +2,23 @@
 
 This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
+## Repository Overview
+
+This workspace contains two goalkeeper research tracks:
+
+### `Humanoid-Goalkeeper/` — Original paper implementation (G1, Isaac Gym)
+The original InternRobotics Humanoid-Goalkeeper from the research paper. Targets the **Unitree G1** robot using **Isaac Gym** and **HIM-PPO**. Uses **both hands** to catch balls. **Do NOT modify this directory** — it is the frozen upstream reference.
+
+### `Imitationlearningbooster/` — Booster T1 port of the paper (Isaac Gym + AMP)
+Adaptation of `Humanoid-Goalkeeper/` to target **Booster Robotics T1** using **Isaac Gym** and **AMP motion priors**. Still uses **hands** for goalkeeping. All changes must be justified against `Humanoid-Goalkeeper/` and documented in `DIVERGENCE_FROM_UPSTREAM.md`.
+
+### `SimpleGoalKeeper/` — Foot-only goalkeeper (MuJoCo-Warp + beyondAMP)
+A new, simplified goalkeeper experiment targeting **Booster T1** with **feet only** (no hand catching). Uses **mjlab** (MuJoCo-Warp) and **beyondAMP** instead of Isaac Gym. The goal is to achieve robust foot-based ball interception before adding arm motions. This track diverges intentionally from the paper approach: it uses a simpler single-discriminator AMP, MuJoCo physics, and foot-only rewards.
+
+**Key distinction**: `Humanoid-Goalkeeper/` and `Imitationlearningbooster/` use hands; `SimpleGoalKeeper/` uses feet only. When reading patterns from the upstream paper code, check whether a decision (reward weight, spawn range, observation term) was designed for hands and needs adaptation for feet.
+
+---
+
 ## Project Goal
 
 Adapt the **InternRobotics Humanoid-Goalkeeper** pipeline (originally targeting Unitree G1) to target the **Booster Robotics T1** humanoid instead.
@@ -16,6 +33,7 @@ Adapt the **InternRobotics Humanoid-Goalkeeper** pipeline (originally targeting 
 ## Critical Constraints
 
 1. **Do NOT modify `Humanoid-Goalkeeper/`** — treat it as a frozen upstream reference for G1 behavior. Read it for patterns; never edit it.
+0. **Always check `Humanoid-Goalkeeper/` first** — before adding or changing any reward, spawn range, observation, termination, or training hyperparameter in `Imitationlearningbooster/` or `SimpleGoalKeeper/`, read the corresponding G1 code and verify the decision. G1 is the proven baseline. Divergences must be explicitly justified and documented.
 2. **All Booster-specific code goes under `Imitationlearningbooster/`** — wrappers, forks, or vendored subtrees only.
 3. **Every change in `Imitationlearningbooster/` must be explicitly justified against `Humanoid-Goalkeeper/`** — before making any design decision (reward weights, observation schema, training hyperparams, reset logic, command ranges), read the corresponding code in `Humanoid-Goalkeeper/` and document whether the change mirrors G1, adapts G1 for T1's different kinematics, or is a known deliberate divergence. If you cannot point to where in `Humanoid-Goalkeeper/` the decision comes from, treat it as a red flag requiring review.
 4. **Document every divergence** — append a dated entry to `Imitationlearningbooster/DIVERGENCE_FROM_UPSTREAM.md` for every substantive change.

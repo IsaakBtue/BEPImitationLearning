@@ -13,6 +13,28 @@ Standalone, simplified goalkeeper training environment for the Booster T1 humano
 - **beyondAMP** (simplified AMP integration — no custom 6-discriminator runner)
 - **21-DOF headless T1** (head joints removed from action/observation space)
 
+## Project Origin
+
+`SimpleGoalKeeper` is a **foot-only** experimental track, distinct from `Humanoid-Goalkeeper` (the original paper) and `Imitationlearningbooster` (the T1 hand-catching port). Both of those use hands/arms; here the robot may only use its feet. AMP motion priors encourage natural bipedal motion while the task rewards focus entirely on foot-ball contact.
+
+## Design Rule: Always Check Humanoid-Goalkeeper First
+
+**Before adding, changing, or removing any reward term, spawn parameter, observation, or termination condition**, read the corresponding code in `Humanoid-Goalkeeper/legged_gym/legged_gym/envs/` (especially `g1/g1_29_config.py` and `base/legged_robot.py`). The G1 goalkeeper is the proven upstream reference. Every divergence from it must be:
+
+1. **Explicitly justified** — state WHY the upstream G1 behavior is wrong for feet-only goalkeeping.
+2. **Documented here** in the "Divergences from G1 Upstream" section below.
+
+If you cannot point to where in G1 the decision comes from, treat it as a red flag.
+
+## Divergences from G1 Upstream
+
+| Parameter | G1 value | SimpleGoalKeeper value | Justification |
+|-----------|----------|------------------------|---------------|
+| `ang_vel_xy` weight | -0.1 (roll+pitch only, `[:, :2]`) | -0.1 same | No change |
+| `ang_vel_z` (yaw) | **Not penalized** (free) | **-0.1** | G1 yaws to extend arm reach. Feet have ~10 cm reach radius — yawing does not help and was observed causing spinning in play. Kept light (-0.1) to match roll/pitch scale; not a dominant penalty. |
+| Ball spawn lateral velocity | Zero (ball always flies straight at robot in local -X) | **Non-zero** (ball aimed at goal Y target, cross-goal shots) | G1 shoots toward goal area; SimpleGoalKeeper now matches this with `y_start_range` + `y_end_range`. |
+| Effector type | Hands (arm joints rewarded) | Feet only (foot body IDs) | Phase 1 scope. |
+
 ## Frame Convention
 
 All reward and observation computations that involve direction use the **robot's local frame**:
@@ -21,7 +43,7 @@ All reward and observation computations that involve direction use the **robot's
 - +Y: robot left
 - +Z: up
 
-Ball always spawns in the robot's local +X frame (`reset_ball_local_frame` in `mdp/events.py`), ensuring goalkeeper behavior is world-orientation-independent.
+Ball spawning uses `reset_ball_local_frame` in `mdp/events.py`. The ball spawns at `(x_start, y_start)` in the robot's local frame and is aimed at `(0, y_end)` — the goal line — so velocity has both X and Y components. This produces realistic cross-goal shots including steep-angle approaches (~90°). Heights are floor-absolute; the pure-yaw robot quaternion is used so spawn geometry is correct even when the robot trunk tilts.
 
 ## Key Files
 
@@ -79,6 +101,7 @@ Phase 1 reward structure (ported from proven Imitationlearningbooster pattern):
 | `postupperdofpos` | -1.0 | Arm deviation from default pose, active only after ball passes (recovery) |
 | `postwaistdofpos` | -1.0 | Waist deviation from default pose, active only after ball passes (recovery) |
 | `ang_vel_xy` | -0.1 | Penalise rolling/pitching |
+| `ang_vel_z` | -0.5 | Penalise yaw rotation — a goalkeeper should face the field |
 | `deviation_waist_joint` | -0.001 | Waist joint regularisation (always active) |
 | `dof_pos_limits` | -3.0 | Joint limit violation penalty |
 | `action_rate_l2` | -0.3 | Action smoothness |

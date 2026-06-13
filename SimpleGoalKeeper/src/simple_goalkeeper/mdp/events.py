@@ -16,7 +16,8 @@ if TYPE_CHECKING:
 # Easy (difficulty=0.0) spawn ranges: short distance, centred, slow, low.
 # Hard (difficulty=1.0) ranges are passed as params to reset_ball_local_frame.
 _EASY_DIST    = (1.5, 2.5)
-_EASY_LATERAL = (-0.15, 0.15)
+_EASY_Y_START = (-0.2, 0.2)   # lateral spawn: narrow/centred on easy
+_EASY_Y_END   = (-0.1, 0.1)   # goal target Y: near centre on easy
 _EASY_Z_START = (0.1, 0.35)
 _EASY_Z_END   = (0.05, 0.2)
 _EASY_SPEED   = (2.0, 3.5)
@@ -54,32 +55,39 @@ def reset_ball_local_frame(
     env_ids: torch.Tensor | None,
     ball_name: str,
     dist_range: tuple[float, float] = (2.0, 4.0),
-    lateral_range: tuple[float, float] = (-0.5, 0.5),
+    y_start_range: tuple[float, float] = (-1.5, 1.5),
+    y_end_range: tuple[float, float] = (-0.5, 0.5),
     spawn_height_range: tuple[float, float] = (0.2, 0.7),
     arrive_height_range: tuple[float, float] = (0.1, 0.4),
     speed_range: tuple[float, float] = (3.0, 7.0),
 ) -> None:
-    """Spawn ball in front of robot, always approaching from +X direction.
+    """Spawn ball aimed at the goal area from a variable lateral position.
 
-    Ball spawns in front of the robot (local +X) and moves toward it (local -X).
-    Ball position and direction are world-orientation-independent (robot-local frame,
-    using yaw-only quaternion for XY rotation). Heights are floor-absolute so the
-    ball arc is unaffected by robot trunk height.
+    Ball spawns at (dist, y_start) in the robot's local frame and is aimed toward
+    (0, y_end) — the goal line at foot height. The velocity vector has both X and Y
+    components so the ball crosses the goal at a realistic angle, matching
+    Imitationlearningbooster's _reset_ball approach.
+
+    y_start is the lateral spawn position (wide: ball can come from the side).
+    y_end is the goal target Y (narrow: covers goal post-to-post width).
+    speed_range is the total horizontal speed (sqrt(vx^2 + vy^2)).
+
+    Heights are floor-absolute so the parabolic arc is unaffected by robot trunk height.
 
     When env._ball_difficulty is set (by ball_difficulty_curriculum), ranges are
     linearly interpolated from easy (difficulty=0.0) to the configured hard params
     (difficulty=1.0). Without the curriculum, difficulty defaults to 1.0 so the
     full configured ranges are used from the start.
 
-    Physics: vz is computed so the ball arrives at `arrive_height` when it reaches
-    the robot, following a parabolic arc matching Imitationlearningbooster's _shoot_ball.
-
     Args:
-        dist_range:          horizontal distance from robot to spawn (m)
-        lateral_range:       lateral offset in robot +Y (m); ±0.5 covers both posts
+        dist_range:          forward (local +X) distance from robot to spawn (m)
+        y_start_range:       lateral spawn offset in robot +Y (m); wide — ball can
+                             come from the side at steep angles
+        y_end_range:         goal target lateral position in robot +Y (m); ±0.5
+                             covers goal post-to-post for feet interception
         spawn_height_range:  ball height above floor at spawn (m)
-        arrive_height_range: target ball height above floor at robot position (m)
-        speed_range:         horizontal approach speed (m/s)
+        arrive_height_range: target ball height above floor at goal line (m)
+        speed_range:         total horizontal approach speed magnitude (m/s)
     """
     if env_ids is None:
         env_ids = torch.arange(env.num_envs, device=env.device, dtype=torch.int)
@@ -90,7 +98,8 @@ def reset_ball_local_frame(
     d = max(0.0, min(1.0, d))
 
     dist_r    = _lerp_range(_EASY_DIST,    dist_range,          d)
-    lateral_r = _lerp_range(_EASY_LATERAL, lateral_range,       d)
+    y_start_r = _lerp_range(_EASY_Y_START, y_start_range,       d)
+    y_end_r   = _lerp_range(_EASY_Y_END,   y_end_range,         d)
     z_start_r = _lerp_range(_EASY_Z_START, spawn_height_range,  d)
     z_end_r   = _lerp_range(_EASY_Z_END,   arrive_height_range, d)
     speed_r   = _lerp_range(_EASY_SPEED,   speed_range,         d)
@@ -105,29 +114,35 @@ def reset_ball_local_frame(
 
     floor_z = env.scene.env_origins[env_ids, 2]             # (n,) floor per env
 
-    dist    = sample_uniform(*dist_r,    (n,), env.device)
-    lateral = sample_uniform(*lateral_r, (n,), env.device)
+    x_start = sample_uniform(*dist_r,    (n,), env.device)   # forward distance
+    y_start = sample_uniform(*y_start_r, (n,), env.device)   # lateral spawn
+    y_end   = sample_uniform(*y_end_r,   (n,), env.device)   # goal target Y
     z_start = floor_z + sample_uniform(*z_start_r, (n,), env.device)
     z_end   = floor_z + sample_uniform(*z_end_r,   (n,), env.device)
-    speed_h = sample_uniform(*speed_r,  (n,), env.device)
+    speed_h = sample_uniform(*speed_r,   (n,), env.device)   # total horizontal speed
 
-    # Ball spawn: dist forward (+X) + lateral in robot yaw frame.
-    # Ball approaches robot from +X direction (in front).
-    local_xy = torch.stack([dist, lateral, torch.zeros_like(dist)], dim=-1)
-    world_xy = quat_apply(yaw_q, local_xy)
+    # Ball spawn position in local frame: forward x_start, lateral y_start.
+    local_spawn = torch.stack([x_start, y_start, torch.zeros_like(x_start)], dim=-1)
+    world_spawn_xy = quat_apply(yaw_q, local_spawn)
     ball_pos = torch.empty((n, 3), device=env.device)
-    ball_pos[:, 0] = robot_pos_w[:, 0] + world_xy[:, 0]
-    ball_pos[:, 1] = robot_pos_w[:, 1] + world_xy[:, 1]
+    ball_pos[:, 0] = robot_pos_w[:, 0] + world_spawn_xy[:, 0]
+    ball_pos[:, 1] = robot_pos_w[:, 1] + world_spawn_xy[:, 1]
     ball_pos[:, 2] = z_start
 
-    # Horizontal velocity: toward robot along -local_X.
-    local_vel_h = torch.stack(
-        [-speed_h, torch.zeros_like(speed_h), torch.zeros_like(speed_h)], dim=-1
-    )
+    # Velocity direction: from spawn (x_start, y_start) toward goal (0, y_end).
+    # Both components computed; speed_h is the total horizontal magnitude.
+    dx_local = -x_start            # negative: ball moves toward robot (−X)
+    dy_local = y_end - y_start     # lateral component; can be nonzero for angled shots
+    horiz_dist = torch.sqrt(dx_local ** 2 + dy_local ** 2)
+    t_flight = horiz_dist / speed_h
+
+    vx_local = dx_local / t_flight
+    vy_local = dy_local / t_flight
+
+    local_vel_h = torch.stack([vx_local, vy_local, torch.zeros_like(vx_local)], dim=-1)
     world_vel_h = quat_apply(yaw_q, local_vel_h)
 
     # Gravity-compensating vz: z_end = z_start + vz*t - 0.5*g*t^2
-    t_flight = dist / speed_h
     vz = ((z_end - z_start) + 0.5 * g * t_flight ** 2) / t_flight
 
     ball_vel = torch.empty((n, 3), device=env.device)
