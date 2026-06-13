@@ -219,23 +219,13 @@ def ball_exit_termination(
     ball_name: str,
     behind_threshold: float = -0.5,
 ) -> torch.Tensor:
-    """Terminate when ball has clearly passed the goal line or been deflected.
+    """Terminate when ball has clearly passed the goal line.
 
-    Fires when:
-      - ball_x_local < behind_threshold (ball behind robot by > 0.5 m), OR
-      - stopball has fired (deflection registered) AND ball moving in +X (moving away)
-
-    This ends episodes quickly after the outcome is decided, freeing sim time.
+    Previously also terminated on deflection (sb_flag & ball_x_vel > 0.5), which
+    ended episodes immediately after any body contact — before feet could reach the
+    ball. Now only the goal-line crossing terminates, giving feet time to contact
+    the ball even after a torso deflection.
     """
     ball: Entity = env.scene[ball_name]
     ball_x_local = ball.data.root_link_pos_w[:, 0] - env.scene.env_origins[:, 0]
-    ball_x_vel = ball.data.root_link_lin_vel_w[:, 0]
-
-    passed = ball_x_local < behind_threshold
-    sb_flag = getattr(env, "_sb_flag", None)
-    if sb_flag is not None:
-        deflected_away = sb_flag & (ball_x_vel > 0.5)
-    else:
-        deflected_away = torch.zeros(env.num_envs, dtype=torch.bool, device=env.device)
-
-    return passed | deflected_away
+    return ball_x_local < behind_threshold

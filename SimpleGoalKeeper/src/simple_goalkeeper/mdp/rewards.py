@@ -26,19 +26,17 @@ _WAIST_JOINT_CFG_RECOVERY = SceneEntityCfg("robot", joint_names=("Waist",))
 
 
 def _ball_is_behind(env: "ManagerBasedRlEnv", ball_name: str) -> torch.Tensor:
-    """Bool mask (N,): ball has passed goal line OR been deflected.
+    """Bool mask (N,): ball has crossed the goal line (x_local < 0).
 
-    Mirrors Imitationlearningbooster exactly:
-      behind = (ball_x_local < 0) | (delta_vx > 1.0)
+    Previously also fired on delta_vx > 1.0 (any deflection), which caused
+    footreach and successland to zero out the moment the torso deflected the ball —
+    before feet could ever reach it. Now only the goal-line crossing suppresses
+    foot rewards, so the robot can still be rewarded for foot contact after a
+    body deflection.
     """
     ball: Entity = env.scene[ball_name]
     ball_x_local = ball.data.root_link_pos_w[:, 0] - env.scene.env_origins[:, 0]
-    ball_x_vel = ball.data.root_link_lin_vel_w[:, 0]
-    init_vx = getattr(env, "_sb_init_vx", None)
-    if init_vx is not None:
-        delta_vx = ball_x_vel - init_vx
-        return (ball_x_local < 0.0) | (delta_vx > 1.0)
-    return (ball_x_local < 0.0) | (ball_x_vel > 1.0)
+    return ball_x_local < 0.0
 
 
 def footreach(
