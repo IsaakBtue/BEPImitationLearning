@@ -188,25 +188,6 @@ def convert_one(
     root_pos_r[:, 1] = s * xy[:, 0] + c * xy[:, 1]
     print(f"  yaw0 before snap: {np.degrees(yaw0):+.2f}°")
 
-    # Snap frame-0 pitch AND roll to 0° (upright trunk).
-    # PKL recordings use the real robot's natural standing pose, which has a
-    # forward trunk lean (~13°) different from the training HOME_KEYFRAME.
-    # Normalising roll/pitch makes the ghost start upright — matching the
-    # policy robot — so the overlay makes visual sense to the user.
-    # Relative joint motions are unaffected; only the world-frame root
-    # orientation reference changes.
-    w0, x0, y0, z0 = (root_rot_wxyz[0, i] for i in range(4))
-    pitch0 = np.arcsin(np.clip(2*(w0*y0 - z0*x0), -1.0, 1.0))
-    roll0  = np.arctan2(2*(w0*x0 + y0*z0), 1 - 2*(x0*x0 + y0*y0))
-    # Correct pitch around Y axis (apply -pitch0/2 around Y):
-    q_pitch_fix = np.array([[np.cos(-pitch0/2), 0.0, np.sin(-pitch0/2), 0.0]], dtype=np.float32)
-    root_rot_wxyz = _quat_mul_wxyz(q_pitch_fix, root_rot_wxyz)
-    # Re-read after pitch fix, then correct roll around X axis:
-    w0, x0, y0, z0 = (root_rot_wxyz[0, i] for i in range(4))
-    roll0 = np.arctan2(2*(w0*x0 + y0*z0), 1 - 2*(x0*x0 + y0*y0))
-    q_roll_fix = np.array([[np.cos(-roll0/2), np.sin(-roll0/2), 0.0, 0.0]], dtype=np.float32)
-    root_rot_wxyz = _quat_mul_wxyz(q_roll_fix, root_rot_wxyz)
-    print(f"  pitch/roll corrected: pitch0={np.degrees(pitch0):+.1f}°  roll0={np.degrees(roll0):+.1f}°")
 
     model = mujoco.MjModel.from_xml_path(str(_XML))
     mdata = mujoco.MjData(model)
