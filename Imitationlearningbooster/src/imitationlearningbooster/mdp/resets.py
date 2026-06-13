@@ -65,6 +65,44 @@ def _shoot_ball(env: ManagerBasedRlEnv, env_ids: torch.Tensor, ball_name: str) -
     ball.write_root_link_velocity_to_sim(ball_velocity, env_ids=env_ids)
 
 
+class task_reward_curriculum:
+    """Scale eereach / hand_proximity_strict / stopball weights with _curriculumupdate.
+
+    Mirrors G1 legged_robot.py lines 359-364 (called inside compute_reward() every step):
+        reward_scales["eereach"]  = eereach_init  * (1 + 0.5 * curriculumupdate)
+        reward_scales["success"]  = success_init  * (1 + 0.5 * curriculumupdate)
+        reward_scales["stopball"] = stop_init     * (1 + 0.5 * curriculumupdate)
+
+    curriculumupdate ∈ {0, 1, 2, 3}; at max the weights reach 2.5× their init value.
+    G1 config inits: eereach=10, success=5, stopball=100 → peak 25 / 12.5 / 250.
+    Our inits:       eereach=10, hand_proximity_strict=5, stopball=100 → same peak.
+
+    Must be listed AFTER adaptive_curriculum_update in cfg.curriculum so it reads
+    the _curriculumupdate value that was just set by that term.
+    """
+
+    _REWARD_NAMES = ("eereach", "hand_proximity_strict", "stopball")
+
+    def __init__(self, cfg: "CurriculumTermCfg", env: ManagerBasedRlEnv) -> None:
+        self._init_weights: dict[str, float] = {}
+        for name in self._REWARD_NAMES:
+            try:
+                term_cfg = env.reward_manager.get_term_cfg(name)
+                self._init_weights[name] = term_cfg.weight
+            except (ValueError, AttributeError):
+                pass
+
+    def __call__(self, env: ManagerBasedRlEnv, env_ids: torch.Tensor) -> dict:
+        cu = getattr(env, "_curriculumupdate", 0.0)
+        scale = 1.0 + 0.5 * cu  # 1.0 → 2.5 as curriculumupdate goes 0 → 3
+        for name, init_w in self._init_weights.items():
+            try:
+                env.reward_manager.get_term_cfg(name).weight = init_w * scale
+            except (ValueError, AttributeError):
+                pass
+        return {"task_reward_scale": torch.tensor(scale)}
+
+
 class adaptive_curriculum_update:
     """Episode-length-based adaptive curriculum driver matching G1's mechanism exactly.
 

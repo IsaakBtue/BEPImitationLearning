@@ -1,5 +1,49 @@
 # Divergence from Upstream (Humanoid-Goalkeeper)
 
+## 2026-06-13 — Restore G1 task reward curriculum + document curriculum_joints N/A
+
+**Context:** Training run `2026-06-13_22-55-38` was the baseline before this change.
+
+### Restored: eereach / hand_proximity_strict / stopball weight scaling with curriculumupdate
+
+**What changed:** Added `task_reward_curriculum` class (`mdp/resets.py`) and registered it in `cfg.curriculum` (`tasks/goalkeeper_amp_env_cfg.py`).
+
+**Why it was missing:** The 2026-06-12 "reset to G1 baseline" pass correctly fixed inflated base weights (20→10 eereach, 10→5 hand_proximity_strict) but incorrectly also stripped the curriculum scaling, leaving weights static at their init values. G1's `compute_reward()` dynamically scales all three every step:
+```
+reward_scales["eereach"]  = eereach_init  * (1 + 0.5 * curriculumupdate)   # 10 → 25
+reward_scales["success"]  = success_init  * (1 + 0.5 * curriculumupdate)   # 5  → 12.5
+reward_scales["stopball"] = stop_init     * (1 + 0.5 * curriculumupdate)   # 100 → 250
+```
+Without this, our eereach was stuck at 10 while G1 reaches 25 at max curriculum. AMP reward (max ~0.5/step) was proportionally over-weighted at high curriculum stages.
+
+**Correct behaviour:** `task_reward_curriculum.__call__` reads `env._curriculumupdate` (set by `adaptive_curriculum_update`) and applies `weight = init_weight * (1 + 0.5 * cu)`. Registered after `adaptive_curriculum` in the dict so curriculum manager processes them in that order.
+
+**G1 reference:** `legged_robot.py:359-364` (inside `compute_reward()`); init values snapshotted from `g1_29_config.py:299-301`.
+
+---
+
+### Not implemented: curriculum_joints actuation warmup (N/A for mjlab)
+
+**G1 mechanism:** G1 defines `curriculum_joints = ['waist_yaw_joint', 'left_shoulder_roll_joint', 'left_shoulder_yaw_joint', 'right_shoulder_roll_joint', 'right_shoulder_yaw_joint']`. At every episode reset it zeroes `joint_injection[:, curriculum_dof_indices]` and `actuation_offset[:, curriculum_dof_indices]` for those joints. These are HIM-PPO tensors that add per-joint noise to observations and action bias during training; zeroing them for shoulder/waist joints makes those joints easier to control early in training.
+
+**Why N/A:** Our mjlab framework has no equivalent of `joint_injection` or `actuation_offset`. We already removed all DR events (encoder_bias, base_com, foot_friction, push_robot) so there is no per-joint actuation noise to zero. The equivalent T1 joints would be `Waist`, `Left_Shoulder_Roll`, `Right_Shoulder_Roll`, `Left_Elbow_Yaw`, `Right_Elbow_Yaw`. This feature is a no-op in our setup and cannot be ported without introducing the underlying HIM-PPO noise injection mechanism.
+
+---
+
+## 2026-06-13 — RSI fix: match G1 single-batch coin flip + multiplicative scale
+
+**What changed:** `mdp/commands.py` `_resample_command` RSI block.
+
+**What was wrong (two bugs):**
+1. Per-env coin flip `torch.rand(len(env_ids)) < 0.8` — each environment independently got 80% RSI chance. G1 uses a single batch-level flip: if `torch.rand(1).item() > 0.2`, ALL env_ids in this reset batch get RSI; otherwise ALL get the standing-pose fallback.
+2. Missing multiplicative scale in the 20% fallback. G1 does `standpos * rand(0.5, 1.5) + rand(-0.1, 0.1)`. Booster was doing only `default_joint_pos + rand(-0.1, 0.1)` (no scale factor), producing a much narrower spread around the standing pose.
+
+**Fix:** Replaced with `if torch.rand(1).item() > 0.2:` (single flip) and `joint_pos = joint_pos * scale + offset` where `scale ~ U(0.5, 1.5)` and `offset ~ U(-0.1, 0.1)` — exact mirror of G1 `legged_robot.py:669-677`.
+
+**G1 reference:** `legged_gym/legged_gym/envs/base/legged_robot.py:657-682` (`_reset_dofs`), `g1_29_config.py:279-282` (`continue_keep=True`, `initial_joint_pos_scale=[0.5,1.5]`, `initial_joint_pos_offset=[-0.1,0.1]`).
+
+---
+
 ## 2026-06-12 — 19th-pass: full G1 architecture replication (single optimizer, joint backward)
 
 ### Core change — `him_amp_runner.py` complete rewrite
@@ -1911,3 +1955,19 @@ Full bilateral Y range (±0.65 m) so both hands are exercised during play.
 **What the correct formula is:** G1 `amp.py predict_reward` (lines 183–204): noisy sampling + min squared error. Even at d_policy = −1 (converged disc), noisy samples land at d ≈ −0.7, giving reward ≈ 0.14 instead of 0 — enough gradient to keep guiding the policy toward natural motion.
 
 **Evidence:** G1 source `Humanoid-Goalkeeper/rsl_rl/rsl_rl/modules/amp.py` lines 183–204. The simple kernel (`return torch.clamp(1 - 0.25 * torch.square(d - 1), min=0)`) is explicitly commented out in G1's code and replaced with the noisy version.
+
+## 2026-06-13: Fix AMP/task reward scale mismatch — match G1 weights exactly
+
+**What changed:** `goalkeeper_amp_env_cfg.py` and `goalkeeper_amp_ppo_cfg.py`.
+
+- `eereach` weight: 20.0 (base, curriculum to 30.0) → **10.0 static** (G1 `g1_29_config.py:299`)
+- `hand_proximity_strict` weight: 10.0 (base, curriculum to 20.0) → **5.0 static** (G1 `success=5.0`)
+- `stopball` weight: 100.0 (base, curriculum to 250.0) → **100.0 static** (G1 `stopball=100.0`, no curriculum)
+- Removed `stopball_curriculum`, `eereach_curriculum`, `hand_proximity_strict_curriculum` entries from `cfg.curriculum`.
+- `amp_coef`: kept at **0.4** (G1 value; now correct since task weights match G1).
+
+**Why it was wrong:** T1 had eereach at 2-3× G1 and a stopball curriculum ramping to 2.5× G1. The AMP reward is hardcoded to [0, 0.5]/step by the noise-sampling formula — it never scales with weights. TensorBoard analysis of run `2026-06-12_21-57-14` confirmed: at step 8400, task rewards were 3.2× implied vs logged (curriculum weights not reflected in episode logs). AMP contributed only 17% of the gradient signal instead of the intended 40%, so the policy learned to stop the ball by leaning forward rather than by performing the reference dives/jumps. Play mode confirmed: no motion mimicry despite 80% stopball success.
+
+**What the correct values are:** G1 `g1_29_config.py` with `amp_coef=0.4`: `eereach=10`, `success=5`, `stopball=100`, no reward curricula on these terms. At these weights the AMP reward (max 0.5/step) is in the same order of magnitude as the task rewards, giving the intended 40/60 AMP/task split.
+
+**Evidence:** TensorBoard run `2026-06-12_21-57-14`: `Loss/mean_amp_reward` dropped from 30→12 over 8400 steps; `Episode_Reward/eereach` = 21.57 with implied task total 40.2 vs direct log sum 12.57 (3.2× ratio explained by curriculum weights). G1 source `g1_29_config.py` lines 299-301, 363-364.

@@ -23,7 +23,7 @@ from imitationlearningbooster.mdp import MultiMotionCommandCfg
 import imitationlearningbooster.mdp.observations as gk_obs
 import imitationlearningbooster.mdp.rewards as gk_rew
 import imitationlearningbooster.mdp.resets as gk_resets
-from imitationlearningbooster.mdp.resets import adaptive_curriculum_update
+from imitationlearningbooster.mdp.resets import adaptive_curriculum_update, task_reward_curriculum
 from imitationlearningbooster.robots.t1_constants import get_t1_robot_cfg, T1_ACTION_SCALE
 from mjlab.managers.scene_entity_config import SceneEntityCfg
 from mjlab.sensor import ContactMatch, ContactSensorCfg
@@ -218,11 +218,11 @@ def goalkeeper_amp_env_cfg(play: bool = False, num_steps_per_env: int = 100) -> 
     _robot_cfg_all = SceneEntityCfg("robot")
     cfg.rewards.update({
         "eereach": RewardTermCfg(
-            func=gk_rew.eereach, weight=20.0,
+            func=gk_rew.eereach, weight=10.0,
             params={"ball_name": "ball", "asset_cfg": _HAND_CFG, "reach_th": 0.2},
         ),
         "hand_proximity_strict": RewardTermCfg(
-            func=gk_rew.hand_proximity_strict, weight=10.0,
+            func=gk_rew.hand_proximity_strict, weight=5.0,
             params={"ball_name": "ball", "asset_cfg": _HAND_CFG, "strict_th": 0.15},
         ),
         "stopball": RewardTermCfg(
@@ -383,47 +383,6 @@ def goalkeeper_amp_env_cfg(play: bool = False, num_steps_per_env: int = 100) -> 
         stage1_step = 600 * num_steps_per_env
         stage2_step = 1200 * num_steps_per_env
         cfg.curriculum = {
-            "stopball_curriculum": CurriculumTermCfg(
-                func=mjlab_mdp.reward_curriculum,
-                params={
-                    "reward_name": "stopball",
-                    # G1 peak: 100 * (1 + 0.5*3) = 250 at curriculumupdate=3.
-                    # Three stages approximate the continuous G1 scaling.
-                    "stages": [
-                        {"step": 0,           "weight": 100.0},
-                        {"step": stage1_step, "weight": 175.0},
-                        {"step": stage2_step, "weight": 250.0},
-                    ],
-                },
-            ),
-            "eereach_curriculum": CurriculumTermCfg(
-                func=mjlab_mdp.reward_curriculum,
-                params={
-                    "reward_name": "eereach",
-                    # G1 base=10, peak=25. Scaled to 15→30 (1.5×G1): AMP now at full strength
-                    # (amp_coef=0.4, no *0.5 bug) so arm weights return toward G1 ratio.
-                    # Ratio eereach:stopball = 15:100 = 3:20. T1 palm-offset fix means eereach
-                    # now targets actual hand geom center (+13cm from elbow yaw joint) vs. the
-                    # elbow joint that was previously targeted — lower absolute weight is safer.
-                    "stages": [
-                        {"step": 0,           "weight": 15.0},
-                        {"step": stage1_step, "weight": 22.0},
-                        {"step": stage2_step, "weight": 30.0},
-                    ],
-                },
-            ),
-            "hand_proximity_strict_curriculum": CurriculumTermCfg(
-                func=mjlab_mdp.reward_curriculum,
-                params={
-                    "reward_name": "hand_proximity_strict",
-                    # 2× G1's base (5→10). Same rationale as eereach.
-                    "stages": [
-                        {"step": 0,           "weight": 10.0},
-                        {"step": stage1_step, "weight": 15.0},
-                        {"step": stage2_step, "weight": 20.0},
-                    ],
-                },
-            ),
             "adaptive_curriculum": CurriculumTermCfg(
                 # Mirrors G1 legged_robot.py reset_idx curriculum driver exactly:
                 #   curriculumupdate = int(mean(episode_length_buf[env_ids]) / 50)
@@ -432,6 +391,11 @@ def goalkeeper_amp_env_cfg(play: bool = False, num_steps_per_env: int = 100) -> 
                 func=adaptive_curriculum_update,
                 params={"min_gate": 500},
             ),
+            # Must come after adaptive_curriculum (dict order = processing order) so it
+            # reads the _curriculumupdate just set above.
+            # Mirrors G1 legged_robot.py lines 359-364: eereach/success/stopball =
+            #   init * (1 + 0.5 * curriculumupdate) → 2.5× at max difficulty.
+            "task_reward_curriculum": CurriculumTermCfg(func=task_reward_curriculum),
             "dof_pos_limits_curriculum": CurriculumTermCfg(
                 func=mjlab_mdp.reward_curriculum,
                 params={
