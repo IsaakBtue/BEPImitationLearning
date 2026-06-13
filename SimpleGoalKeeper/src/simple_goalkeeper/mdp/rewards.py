@@ -14,6 +14,7 @@ if TYPE_CHECKING:
 
 _DEFAULT_FEET_CFG = SceneEntityCfg("robot", body_names=("left_foot_link", "right_foot_link"))
 _DEFAULT_ROBOT_CFG = SceneEntityCfg("robot")
+_DEFAULT_KNEE_CFG = SceneEntityCfg("robot", body_names=("Shank_Left", "Shank_Right"))
 
 
 def _ball_is_behind(env: "ManagerBasedRlEnv", ball_name: str) -> torch.Tensor:
@@ -258,3 +259,59 @@ def deviation_waist_joint(
     robot: Entity = env.scene[asset_cfg.name]
     delta = robot.data.joint_pos[:, asset_cfg.joint_ids] - robot.data.default_joint_pos[:, asset_cfg.joint_ids]
     return torch.sum(torch.square(delta), dim=-1)
+
+
+def successland(
+    env: "ManagerBasedRlEnv",
+    ball_name: str,
+    contact_th: float = 0.12,
+    asset_cfg: SceneEntityCfg = _DEFAULT_FEET_CFG,
+) -> torch.Tensor:
+    """Dense reward for foot proximity to ball before ball is behind.
+
+    Fires when either foot is within contact_th of the ball AND the ball
+    is still in front (not yet behind). Provides a denser gradient than
+    stopball alone — mirrors Imitationlearningbooster successland (w=4.0).
+    """
+    robot: Entity = env.scene[asset_cfg.name]
+    ball: Entity = env.scene[ball_name]
+    foot_pos_w = robot.data.body_link_pos_w[:, asset_cfg.body_ids, :]  # (N, 2, 3)
+    ball_pos_w = ball.data.root_link_pos_w                              # (N, 3)
+    dist = torch.norm(foot_pos_w - ball_pos_w[:, None, :], dim=-1)     # (N, 2)
+    min_dist = dist.min(dim=-1).values                                   # (N,)
+    behind = _ball_is_behind(env, ball_name)
+    return (min_dist < contact_th).float() * (~behind).float()
+
+
+def penalize_kneeheight(
+    env: "ManagerBasedRlEnv",
+    min_height: float = 0.15,
+    asset_cfg: SceneEntityCfg = _DEFAULT_KNEE_CFG,
+) -> torch.Tensor:
+    """Penalise shank bodies dropping below min_height above floor.
+
+    Detects kneeling/falling states that would damage real hardware.
+    Returns sum of excess below threshold across both shanks.
+    """
+    robot: Entity = env.scene[asset_cfg.name]
+    shank_pos_w = robot.data.body_link_pos_w[:, asset_cfg.body_ids, :]  # (N, 2, 3)
+    floor_z = env.scene.env_origins[:, 2]                                # (N,)
+    shank_z_local = shank_pos_w[:, :, 2] - floor_z[:, None]             # (N, 2)
+    violation = torch.clamp(min_height - shank_z_local, min=0.0)        # (N, 2)
+    return violation.sum(dim=-1)
+
+
+def dof_vel_limits(
+    env: "ManagerBasedRlEnv",
+    vel_threshold: float = 10.0,
+    asset_cfg: SceneEntityCfg = _DEFAULT_ROBOT_CFG,
+) -> torch.Tensor:
+    """Penalise joint velocities above vel_threshold (rad/s).
+
+    10 rad/s is below all T1 actuator velocity limits.
+    Returns sum of squared excess across all joints.
+    """
+    robot: Entity = env.scene[asset_cfg.name]
+    vel = robot.data.joint_vel[:, asset_cfg.joint_ids]                  # (N, J)
+    excess = torch.clamp(vel.abs() - vel_threshold, min=0.0)            # (N, J)
+    return excess.pow(2).sum(dim=-1)

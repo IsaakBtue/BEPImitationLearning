@@ -36,6 +36,7 @@ _FEET_CFG = SceneEntityCfg("robot", body_names=("left_foot_link", "right_foot_li
 _ALL_JOINTS_CFG = SceneEntityCfg("robot", joint_names=(".*",))
 _WAIST_JOINT_CFG = SceneEntityCfg("robot", joint_names=("Waist",))
 _ROBOT_CFG = SceneEntityCfg("robot")
+_KNEE_BODY_CFG = SceneEntityCfg("robot", body_names=("Shank_Left", "Shank_Right"))
 
 
 def _make_ball_entity_cfg() -> EntityCfg:
@@ -209,6 +210,21 @@ def goalkeeper_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
             func=gk_mdp.footreach,
             weight=10.0,
             params={"ball_name": BALL_NAME, "reach_th": 0.3, "sigma": 5.0, "asset_cfg": _FEET_CFG},
+        ),
+        "successland": RewardTermCfg(
+            func=gk_mdp.successland,
+            weight=4.0,
+            params={"ball_name": BALL_NAME, "contact_th": 0.12, "asset_cfg": _FEET_CFG},
+        ),
+        "penalize_kneeheight": RewardTermCfg(
+            func=gk_mdp.penalize_kneeheight,
+            weight=-100.0,
+            params={"min_height": 0.15, "asset_cfg": _KNEE_BODY_CFG},
+        ),
+        "dof_vel_limits": RewardTermCfg(
+            func=gk_mdp.dof_vel_limits,
+            weight=-2.0,
+            params={"vel_threshold": 10.0, "asset_cfg": _ALL_JOINTS_CFG},
         ),
         "ball_positive_vx": RewardTermCfg(
             func=gk_mdp.ball_positive_vx,
