@@ -16,14 +16,20 @@ _MOTIONS_DIR = Path(__file__).parents[1] / "motions" / "data"
 
 GOALKEEPER_ANCHOR_NAME: str = "Trunk"
 
-# Lower-body + waist key bodies — AMP discriminates natural leg movement,
-# ignoring arms (Phase 1 is foot-only).
+# Full-body key points for the AMP discriminator: torso + limb extremities.
+# Using the full body gives the discriminator a complete picture of motion
+# naturalness — not just lower-body, but also arm swing and trunk posture.
+# Follows KaydenKnapik/BoosterT1mjlab (proven working) extended to cover all
+# major segments: torso (Trunk, Waist), hands, shanks, feet.
 GOALKEEPER_KEY_BODY_NAMES: list[str] = [
-    "left_foot_link",
-    "right_foot_link",
+    "Trunk",
+    "Waist",
+    "left_hand_link",
+    "right_hand_link",
     "Shank_Left",
     "Shank_Right",
-    "Waist",
+    "left_foot_link",
+    "right_foot_link",
 ]
 
 
@@ -37,7 +43,7 @@ def goalkeeper_amp_runner_cfg() -> AMPRunnerCfg:
     return AMPRunnerCfg(
         num_steps_per_env=24,
         max_iterations=50_000,
-        save_interval=250,
+        save_interval=1000,
         experiment_name="simple_goalkeeper",
         run_name="phase1",
         empirical_normalization=True,
