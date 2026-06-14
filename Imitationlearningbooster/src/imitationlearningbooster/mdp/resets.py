@@ -318,11 +318,13 @@ def reset_robot_rsi(
             env_ids=rsi_indices,
         )
 
-    # Standing: use default home pose (all zeros in relative frame)
+    # Standing: use default home pose from robot config
     stand_indices = env_ids[~use_rsi]
     if len(stand_indices) > 0:
+        # Get home pose joint positions from robot config
+        home_joint_pos = robot.data.default_joint_pos[stand_indices]
         robot.write_joint_state_to_sim(
-            torch.zeros((len(stand_indices), 21), device=env.device),
+            home_joint_pos,
             torch.zeros((len(stand_indices), 21), device=env.device),
             env_ids=stand_indices,
         )
