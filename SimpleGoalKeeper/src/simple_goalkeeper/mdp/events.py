@@ -1,16 +1,21 @@
 """Event functions and curriculum helpers for SimpleGoalKeeper."""
 from __future__ import annotations
 
+from pathlib import Path
 from typing import TYPE_CHECKING
 
+import numpy as np
 import torch
 
 from mjlab.entity import Entity
+from mjlab.sensor import ContactSensor
 from mjlab.utils.lab_api.math import quat_apply, sample_uniform
 
 if TYPE_CHECKING:
     from mjlab.envs import ManagerBasedRlEnv
     from mjlab.managers.curriculum_manager import CurriculumTermCfg
+
+_MOTIONS_DIR = Path(__file__).parents[1] / "motions" / "data"
 
 
 # Easy (difficulty=0.0) spawn ranges: short distance, centred, slow, low.
@@ -50,12 +55,67 @@ def _yaw_only_quat(q_wxyz: torch.Tensor) -> torch.Tensor:
     return out
 
 
+def reset_robot_rsi(
+    env: "ManagerBasedRlEnv",
+    env_ids: torch.Tensor | None,
+) -> None:
+    """Reset robot to random state from motion capture data (RSI — Random State Initialization).
+
+    80% of resets sample a random frame from motion capture data; 20% reset to standing pose.
+    This exposes the policy to varied body poses (foot-based recovery, mid-motion reaction)
+    while ensuring it learns the deployment case (standing start).
+
+    Args:
+        env: RL environment
+        env_ids: Indices of envs to reset (if None, reset all)
+    """
+    if env_ids is None:
+        env_ids = torch.arange(env.num_envs, device=env.device, dtype=torch.int32)
+
+    # Load motion files (lazy, once per first call)
+    if not hasattr(env, "_motions_cache"):
+        motion_files = sorted(_MOTIONS_DIR.glob("*.npz"))
+        if not motion_files:
+            raise FileNotFoundError(f"No NPZ motion files in {_MOTIONS_DIR}")
+        motions_list = [np.load(str(f)) for f in motion_files]
+        # Pre-concatenate all motions into single arrays for O(1) random access
+        all_joint_pos = np.vstack([m["joint_pos"] for m in motions_list])
+        env._motions_cache = torch.from_numpy(all_joint_pos).float().to(env.device)
+
+    all_joint_pos = env._motions_cache
+    robot: Entity = env.scene["robot"]
+    n = len(env_ids)
+
+    # 80% RSI (random motion frames), 20% standing pose
+    use_rsi = np.random.random(n) < 0.8
+
+    # RSI: sample random frames
+    rsi_indices = env_ids[use_rsi]
+    if len(rsi_indices) > 0:
+        frame_indices = np.random.randint(0, len(all_joint_pos), size=len(rsi_indices))
+        rsi_positions = all_joint_pos[frame_indices]
+        robot.write_joint_state_to_sim(
+            rsi_positions,
+            torch.zeros((len(rsi_indices), 21), device=env.device),
+            env_ids=rsi_indices,
+        )
+
+    # Standing: use default home pose (all zeros in relative frame)
+    stand_indices = env_ids[~use_rsi]
+    if len(stand_indices) > 0:
+        robot.write_joint_state_to_sim(
+            torch.zeros((len(stand_indices), 21), device=env.device),
+            torch.zeros((len(stand_indices), 21), device=env.device),
+            env_ids=stand_indices,
+        )
+
+
 def reset_ball_local_frame(
     env: "ManagerBasedRlEnv",
     env_ids: torch.Tensor | None,
     ball_name: str,
     dist_range: tuple[float, float] = (2.0, 4.0),
-    y_start_range: tuple[float, float] = (-1.5, 1.5),
+    y_start_range: tuple[float, float] = (-0.8, 0.8),
     y_end_range: tuple[float, float] = (-0.5, 0.5),
     spawn_height_range: tuple[float, float] = (0.2, 0.7),
     arrive_height_range: tuple[float, float] = (0.1, 0.4),
@@ -64,27 +124,21 @@ def reset_ball_local_frame(
     """Spawn ball aimed at the goal area from a variable lateral position.
 
     Ball spawns at (dist, y_start) in the robot's local frame and is aimed toward
-    (0, y_end) — the goal line at foot height. The velocity vector has both X and Y
-    components so the ball crosses the goal at a realistic angle, matching
-    Imitationlearningbooster's _reset_ball approach.
+    (-0.3, y_end) — 0.3 m behind the goal line so the ball retains forward momentum
+    at interception (matches ILB). The velocity vector has both X and Y components so
+    the ball crosses the goal at a realistic angle.
 
-    y_start is the lateral spawn position (wide: ball can come from the side).
-    y_end is the goal target Y (narrow: covers goal post-to-post width).
-    speed_range is the total horizontal speed (sqrt(vx^2 + vy^2)).
+    Spawning in the robot's local frame means the policy is orientation-invariant:
+    the ball always arrives from the robot's front regardless of world yaw. The yaw
+    penalty (ang_vel_z) penalises spinning while keeping the coordinate system clean.
 
-    Heights are floor-absolute so the parabolic arc is unaffected by robot trunk height.
-
-    When env._ball_difficulty is set (by ball_difficulty_curriculum), ranges are
-    linearly interpolated from easy (difficulty=0.0) to the configured hard params
-    (difficulty=1.0). Without the curriculum, difficulty defaults to 1.0 so the
-    full configured ranges are used from the start.
+    y_start_range ±0.8 m matches ILB (narrowed from ±1.5 m to avoid >50° approach
+    angles that produce no gradient signal).
 
     Args:
         dist_range:          forward (local +X) distance from robot to spawn (m)
-        y_start_range:       lateral spawn offset in robot +Y (m); wide — ball can
-                             come from the side at steep angles
-        y_end_range:         goal target lateral position in robot +Y (m); ±0.5
-                             covers goal post-to-post for feet interception
+        y_start_range:       lateral spawn offset in robot +Y (m)
+        y_end_range:         goal target lateral position in robot +Y (m)
         spawn_height_range:  ball height above floor at spawn (m)
         arrive_height_range: target ball height above floor at goal line (m)
         speed_range:         total horizontal approach speed magnitude (m/s)
@@ -129,10 +183,11 @@ def reset_ball_local_frame(
     ball_pos[:, 1] = robot_pos_w[:, 1] + world_spawn_xy[:, 1]
     ball_pos[:, 2] = z_start
 
-    # Velocity direction: from spawn (x_start, y_start) toward goal (0, y_end).
-    # Both components computed; speed_h is the total horizontal magnitude.
-    dx_local = -x_start            # negative: ball moves toward robot (−X)
-    dy_local = y_end - y_start     # lateral component; can be nonzero for angled shots
+    # Velocity direction: from spawn (x_start, y_start) toward (-0.3, y_end).
+    # Aiming 0.3 m behind the goal line (matches ILB) so the ball still has forward
+    # momentum when it reaches the robot — avoids deceleration to zero right at x=0.
+    dx_local = -(x_start + 0.3)     # negative: ball moves toward robot then past it
+    dy_local = y_end - y_start       # lateral component; nonzero for angled shots
     horiz_dist = torch.sqrt(dx_local ** 2 + dy_local ** 2)
     t_flight = horiz_dist / speed_h
 
@@ -180,7 +235,7 @@ def _init_visibility_state(env: "ManagerBasedRlEnv", env_ids: torch.Tensor) -> N
     env._vanish_step[env_ids] = torch.randint(0, 30, (len(env_ids),), device=env.device)
 
     if not hasattr(env, "_ball_visible_step"):
-        env._ball_visible_step = torch.zeros(n, dtype=torch.long, device=env.device)
+        env._ball_visible_step = torch.zeros(n, device=env.device)
     env._ball_visible_step[env_ids] = 0
 
     if not hasattr(env, "_ball_obs_last_x"):
@@ -227,6 +282,25 @@ class ball_difficulty_curriculum:
                 current = stage["difficulty"]
         env._ball_difficulty = current
         return {"ball_difficulty": torch.tensor(current)}
+
+
+def sharpforce_termination(
+    env: "ManagerBasedRlEnv",
+    max_contact_force: float = 1500.0,
+) -> torch.Tensor:
+    """Terminate when mean foot contact force exceeds threshold.
+
+    Mirrors upstream Humanoid-Goalkeeper sharpforce_buf termination.
+    Requires feet_contact ContactSensor in the scene.
+    Geom layout (sorted by name): left_foot_1, left_foot_2, right_foot_1, right_foot_2.
+    Returns [B] bool tensor: True → terminate.
+    """
+    sensor: ContactSensor = env.scene["feet_contact"]
+    force_per_geom = sensor.data.force.norm(dim=-1)       # [B, 8]
+    left_max  = force_per_geom[:, :4].max(dim=-1).values  # left_foot1-4
+    right_max = force_per_geom[:, 4:].max(dim=-1).values  # right_foot1-4
+    mean_force = (left_max + right_max) / 2.0
+    return mean_force > max_contact_force
 
 
 def ball_exit_termination(

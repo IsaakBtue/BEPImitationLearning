@@ -1,11 +1,14 @@
 from . import observations, events, rewards, commands
 from .observations import ball_pos_b, ball_vel_b, left_foot_pos_b, right_foot_pos_b, base_lin_vel, joint_pos_abs, joint_vel_abs
-from .events import reset_ball_local_frame, tick_catchstep, ball_difficulty_curriculum, ball_exit_termination
+from .events import reset_robot_rsi, reset_ball_local_frame, tick_catchstep, ball_difficulty_curriculum, ball_exit_termination, sharpforce_termination
 from .rewards import (
-    foot_to_ball, ball_vx_reduction, ball_positive_vx, posture, ang_vel_xy_l2, ang_vel_z_l2,
+    ball_vx_reduction, posture, ang_vel_xy_l2, ang_vel_z_l2,
     stayonline, noretreat, feetorientation, deviation_waist_joint,
     footreach, stopball,
-    successland, penalize_kneeheight, dof_vel_limits,
+    penalize_kneeheight, dof_vel_limits,
+    postorientation, postangvel, postlinvel,
+    torques_normalized_l2, torque_limits,
     postupperdofpos, postwaistdofpos,
+    penalize_sharpcontact, penalize_self_collision, feet_slippage,
 )
 from .commands import GhostMotionCommand, GhostMotionCommandCfg

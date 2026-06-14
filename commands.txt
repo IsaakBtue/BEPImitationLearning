@@ -1,1 +1,1 @@
-cd /home/isaak/BEPImitationlearning/SimpleGoalKeeper && uv run sgk_play Mjlab-BeyondAMP-Goalkeeper-T1-WithOverlay --checkpoint-file logs/rsl_rl/simple_goalkeeper/2026-06-13_18-18-45_phase1/model_500.pt
+git pull --no-rebase
