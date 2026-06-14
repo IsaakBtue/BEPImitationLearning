@@ -374,6 +374,16 @@ def goalkeeper_env_cfg(play: bool = False, num_steps_per_env: int = 24) -> Manag
     # episode reset AND every motion loop via _resample_command. It uses _BALL_END_RANGES
     # to bias the ball toward the lefthand intercept zone. No separate event needed.
 
+    # Robot RSI (Random State Initialization): 80% random motion frames, 20% standing pose.
+    # Ensures policy learns from diverse body poses while refining standing behavior for deployment.
+    if not play:
+        from imitationlearningbooster.mdp import reset_robot_rsi
+        cfg.events.pop("reset_base", None)  # Remove default; replace with RSI
+        cfg.events["reset_robot_rsi"] = EventTermCfg(
+            func=reset_robot_rsi,
+            mode="reset",
+        )
+
     # Push robot: keep but at original shorter interval so it fires occasionally.
     # Episodes are currently <1 s so 15 s interval never fires — restore base default.
     cfg.events["push_robot"].interval_range_s = (10.0, 15.0)
