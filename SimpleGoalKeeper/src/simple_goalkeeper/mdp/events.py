@@ -100,13 +100,26 @@ def reset_robot_rsi(
             env_ids=rsi_indices,
         )
 
-    # Standing: use default home pose from robot config
+    # Standing: reset to HOME_KEYFRAME pose (21-DOF headless T1)
     stand_indices = env_ids[~use_rsi]
     if len(stand_indices) > 0:
-        # Get home pose joint positions from robot config
-        home_joint_pos = robot.data.default_joint_pos[stand_indices]
+        # Joint order: L_Shoulder_Pitch, L_Shoulder_Roll, L_Elbow_Pitch, L_Elbow_Yaw,
+        #             R_Shoulder_Pitch, R_Shoulder_Roll, R_Elbow_Pitch, R_Elbow_Yaw,
+        #             Waist,
+        #             L_Hip_Pitch, L_Hip_Roll, L_Hip_Yaw, L_Knee_Pitch, L_Ankle_Pitch, L_Ankle_Roll,
+        #             R_Hip_Pitch, R_Hip_Roll, R_Hip_Yaw, R_Knee_Pitch, R_Ankle_Pitch, R_Ankle_Roll
+        home_pos = torch.tensor([
+            0.0, -1.4, 0.0, -0.4,  # Left arm
+            0.0, 1.4, 0.0, 0.4,    # Right arm
+            0.0,                     # Waist
+            -0.2, 0.0, 0.0, 0.4, -0.2, 0.0,  # Left leg
+            -0.2, 0.0, 0.0, 0.4, -0.2, 0.0,  # Right leg
+        ], device=env.device, dtype=torch.float32)
+
+        # Expand to match number of standing envs
+        home_positions = home_pos.unsqueeze(0).expand(len(stand_indices), -1)
         robot.write_joint_state_to_sim(
-            home_joint_pos,
+            home_positions,
             torch.zeros((len(stand_indices), 21), device=env.device),
             env_ids=stand_indices,
         )
