@@ -157966,3 +157966,1818 @@ Mean episode Episode_Termination/time_out: 29.7917
                     Iteration time: 4.18s
                         Total time: 12127.45s
                                ETA: 199009.3s
+
+################################################################################
+                    [1m Learning iteration 2872/50000 [0m
+
+                       Computation: 35257 steps/s (collection: 3.370s, learning 0.812s)
+               Value function loss: 0.2629
+                    Surrogate loss: -0.0012
+                          AMP loss: 0.3755
+                 AMP grad pen loss: 0.2298
+              AMP mean policy pred: -0.4123
+              AMP mean expert pred: 0.4129
+             Mean action noise std: 0.22
+                       Mean reward: 54.23
+               Mean episode length: 196.81
+Mean episode Curriculum/ball_difficulty/ball_difficulty: 1.0000
+Mean episode Curriculum/dof_pos_limits_curriculum/weight: -9.0000
+Mean episode Curriculum/footreach_curriculum/weight: 20.0000
+Mean episode Curriculum/stopball_curriculum/weight: 250.0000
+Mean episode Curriculum/torque_limits_curriculum/weight: -9.0000
+Mean episode Episode_Metrics/mean_action_acc: 0.4327
+Mean episode Episode_Reward/action_acc_l2: -0.6106
+Mean episode Episode_Reward/action_rate_l2: -0.6267
+Mean episode Episode_Reward/ang_vel_xy: -0.0040
+Mean episode Episode_Reward/ang_vel_z: -0.0466
+Mean episode Episode_Reward/deviation_waist_joint: -0.0000
+Mean episode Episode_Reward/dof_acc: -0.0088
+Mean episode Episode_Reward/dof_pos_limits: -0.0139
+Mean episode Episode_Reward/dof_vel: -0.0014
+Mean episode Episode_Reward/dof_vel_limits: 0.0000
+Mean episode Episode_Reward/feet_slippage: 2.6219
+Mean episode Episode_Reward/feetorientation: 2.9343
+Mean episode Episode_Reward/footreach: 1.0465
+Mean episode Episode_Reward/noretreat: -0.0318
+Mean episode Episode_Reward/penalize_kneeheight: 0.0000
+Mean episode Episode_Reward/penalize_self_collision: 0.0000
+Mean episode Episode_Reward/penalize_sharpcontact: -0.0014
+Mean episode Episode_Reward/postangvel: 2.3370
+Mean episode Episode_Reward/postlinvel: 0.8285
+Mean episode Episode_Reward/postorientation: 2.4404
+Mean episode Episode_Reward/postupperdofpos: 0.5464
+Mean episode Episode_Reward/postwaistdofpos: 0.8245
+Mean episode Episode_Reward/stayonline: 0.0000
+Mean episode Episode_Reward/stopball: 1.2430
+Mean episode Episode_Reward/torque_limits: -0.0002
+Mean episode Episode_Reward/torques: -0.0000
+Mean episode Episode_Termination/bad_orientation: 0.0000
+Mean episode Episode_Termination/ball_exit: 1.0833
+Mean episode Episode_Termination/base_height: 0.0000
+Mean episode Episode_Termination/sharpforce: 0.0000
+Mean episode Episode_Termination/time_out: 27.9167
+--------------------------------------------------------------------------------
+                   Total timesteps: 423641088
+                    Iteration time: 4.18s
+                        Total time: 12131.63s
+                               ETA: 199004.4s
+
+################################################################################
+                    [1m Learning iteration 2873/50000 [0m
+
+                       Computation: 35094 steps/s (collection: 3.382s, learning 0.820s)
+               Value function loss: 0.2300
+                    Surrogate loss: -0.0056
+                          AMP loss: 0.3680
+                 AMP grad pen loss: 0.2201
+              AMP mean policy pred: -0.4190
+              AMP mean expert pred: 0.4204
+             Mean action noise std: 0.22
+                       Mean reward: 52.45
+               Mean episode length: 190.86
+Mean episode Curriculum/ball_difficulty/ball_difficulty: 1.0000
+Mean episode Curriculum/dof_pos_limits_curriculum/weight: -9.0000
+Mean episode Curriculum/footreach_curriculum/weight: 20.0000
+Mean episode Curriculum/stopball_curriculum/weight: 250.0000
+Mean episode Curriculum/torque_limits_curriculum/weight: -9.0000
+Mean episode Episode_Metrics/mean_action_acc: 0.4329
+Mean episode Episode_Reward/action_acc_l2: -0.6083
+Mean episode Episode_Reward/action_rate_l2: -0.6241
+Mean episode Episode_Reward/ang_vel_xy: -0.0040
+Mean episode Episode_Reward/ang_vel_z: -0.0464
+Mean episode Episode_Reward/deviation_waist_joint: -0.0000
+Mean episode Episode_Reward/dof_acc: -0.0089
+Mean episode Episode_Reward/dof_pos_limits: -0.0136
+Mean episode Episode_Reward/dof_vel: -0.0014
+Mean episode Episode_Reward/dof_vel_limits: 0.0000
+Mean episode Episode_Reward/feet_slippage: 2.6063
+Mean episode Episode_Reward/feetorientation: 2.9191
+Mean episode Episode_Reward/footreach: 1.0123
+Mean episode Episode_Reward/noretreat: -0.0325
+Mean episode Episode_Reward/penalize_kneeheight: 0.0000
+Mean episode Episode_Reward/penalize_self_collision: -0.0010
+Mean episode Episode_Reward/penalize_sharpcontact: -0.0021
+Mean episode Episode_Reward/postangvel: 2.3215
+Mean episode Episode_Reward/postlinvel: 0.8231
+Mean episode Episode_Reward/postorientation: 2.4228
+Mean episode Episode_Reward/postupperdofpos: 0.5418
+Mean episode Episode_Reward/postwaistdofpos: 0.8191
+Mean episode Episode_Reward/stayonline: -0.0001
+Mean episode Episode_Reward/stopball: 1.2402
+Mean episode Episode_Reward/torque_limits: -0.0007
+Mean episode Episode_Reward/torques: -0.0000
+Mean episode Episode_Termination/bad_orientation: 0.0000
+Mean episode Episode_Termination/ball_exit: 1.3333
+Mean episode Episode_Termination/base_height: 0.0833
+Mean episode Episode_Termination/sharpforce: 0.0000
+Mean episode Episode_Termination/time_out: 31.0833
+--------------------------------------------------------------------------------
+                   Total timesteps: 423788544
+                    Iteration time: 4.20s
+                        Total time: 12135.84s
+                               ETA: 198999.8s
+
+################################################################################
+                    [1m Learning iteration 2874/50000 [0m
+
+                       Computation: 34526 steps/s (collection: 3.428s, learning 0.842s)
+               Value function loss: 0.2646
+                    Surrogate loss: -0.0059
+                          AMP loss: 0.3494
+                 AMP grad pen loss: 0.2146
+              AMP mean policy pred: -0.4361
+              AMP mean expert pred: 0.4348
+             Mean action noise std: 0.22
+                       Mean reward: 53.17
+               Mean episode length: 192.77
+Mean episode Curriculum/ball_difficulty/ball_difficulty: 1.0000
+Mean episode Curriculum/dof_pos_limits_curriculum/weight: -9.0000
+Mean episode Curriculum/footreach_curriculum/weight: 20.0000
+Mean episode Curriculum/stopball_curriculum/weight: 250.0000
+Mean episode Curriculum/torque_limits_curriculum/weight: -9.0000
+Mean episode Episode_Metrics/mean_action_acc: 0.4332
+Mean episode Episode_Reward/action_acc_l2: -0.6075
+Mean episode Episode_Reward/action_rate_l2: -0.6239
+Mean episode Episode_Reward/ang_vel_xy: -0.0040
+Mean episode Episode_Reward/ang_vel_z: -0.0469
+Mean episode Episode_Reward/deviation_waist_joint: -0.0000
+Mean episode Episode_Reward/dof_acc: -0.0089
+Mean episode Episode_Reward/dof_pos_limits: -0.0142
+Mean episode Episode_Reward/dof_vel: -0.0014
+Mean episode Episode_Reward/dof_vel_limits: 0.0000
+Mean episode Episode_Reward/feet_slippage: 2.6011
+Mean episode Episode_Reward/feetorientation: 2.9166
+Mean episode Episode_Reward/footreach: 1.0732
+Mean episode Episode_Reward/noretreat: -0.0317
+Mean episode Episode_Reward/penalize_kneeheight: 0.0000
+Mean episode Episode_Reward/penalize_self_collision: -0.0010
+Mean episode Episode_Reward/penalize_sharpcontact: -0.0024
+Mean episode Episode_Reward/postangvel: 2.3197
+Mean episode Episode_Reward/postlinvel: 0.8223
+Mean episode Episode_Reward/postorientation: 2.4197
+Mean episode Episode_Reward/postupperdofpos: 0.5430
+Mean episode Episode_Reward/postwaistdofpos: 0.8184
+Mean episode Episode_Reward/stayonline: -0.0000
+Mean episode Episode_Reward/stopball: 1.2257
+Mean episode Episode_Reward/torque_limits: 0.0000
+Mean episode Episode_Reward/torques: -0.0000
+Mean episode Episode_Termination/bad_orientation: 0.0000
+Mean episode Episode_Termination/ball_exit: 1.3333
+Mean episode Episode_Termination/base_height: 0.0417
+Mean episode Episode_Termination/sharpforce: 0.0000
+Mean episode Episode_Termination/time_out: 31.5417
+--------------------------------------------------------------------------------
+                   Total timesteps: 423936000
+                    Iteration time: 4.27s
+                        Total time: 12140.11s
+                               ETA: 198996.4s
+
+################################################################################
+                    [1m Learning iteration 2875/50000 [0m
+
+                       Computation: 33680 steps/s (collection: 3.535s, learning 0.843s)
+               Value function loss: 0.2316
+                    Surrogate loss: -0.0047
+                          AMP loss: 0.3388
+                 AMP grad pen loss: 0.2070
+              AMP mean policy pred: -0.4428
+              AMP mean expert pred: 0.4451
+             Mean action noise std: 0.22
+                       Mean reward: 54.03
+               Mean episode length: 195.29
+Mean episode Curriculum/ball_difficulty/ball_difficulty: 1.0000
+Mean episode Curriculum/dof_pos_limits_curriculum/weight: -9.0000
+Mean episode Curriculum/footreach_curriculum/weight: 20.0000
+Mean episode Curriculum/stopball_curriculum/weight: 250.0000
+Mean episode Curriculum/torque_limits_curriculum/weight: -9.0000
+Mean episode Episode_Metrics/mean_action_acc: 0.4326
+Mean episode Episode_Reward/action_acc_l2: -0.6098
+Mean episode Episode_Reward/action_rate_l2: -0.6257
+Mean episode Episode_Reward/ang_vel_xy: -0.0039
+Mean episode Episode_Reward/ang_vel_z: -0.0454
+Mean episode Episode_Reward/deviation_waist_joint: -0.0000
+Mean episode Episode_Reward/dof_acc: -0.0089
+Mean episode Episode_Reward/dof_pos_limits: -0.0115
+Mean episode Episode_Reward/dof_vel: -0.0014
+Mean episode Episode_Reward/dof_vel_limits: 0.0000
+Mean episode Episode_Reward/feet_slippage: 2.6219
+Mean episode Episode_Reward/feetorientation: 2.9308
+Mean episode Episode_Reward/footreach: 1.0345
+Mean episode Episode_Reward/noretreat: -0.0318
+Mean episode Episode_Reward/penalize_kneeheight: 0.0000
+Mean episode Episode_Reward/penalize_self_collision: -0.0003
+Mean episode Episode_Reward/penalize_sharpcontact: -0.0031
+Mean episode Episode_Reward/postangvel: 2.3403
+Mean episode Episode_Reward/postlinvel: 0.8296
+Mean episode Episode_Reward/postorientation: 2.4389
+Mean episode Episode_Reward/postupperdofpos: 0.5527
+Mean episode Episode_Reward/postwaistdofpos: 0.8258
+Mean episode Episode_Reward/stayonline: -0.0000
+Mean episode Episode_Reward/stopball: 1.2408
+Mean episode Episode_Reward/torque_limits: -0.0005
+Mean episode Episode_Reward/torques: -0.0000
+Mean episode Episode_Termination/bad_orientation: 0.0000
+Mean episode Episode_Termination/ball_exit: 1.0417
+Mean episode Episode_Termination/base_height: 0.0417
+Mean episode Episode_Termination/sharpforce: 0.0000
+Mean episode Episode_Termination/time_out: 29.0833
+--------------------------------------------------------------------------------
+                   Total timesteps: 424083456
+                    Iteration time: 4.38s
+                        Total time: 12144.48s
+                               ETA: 198994.7s
+
+################################################################################
+                    [1m Learning iteration 2876/50000 [0m
+
+                       Computation: 34974 steps/s (collection: 3.398s, learning 0.818s)
+               Value function loss: 0.2123
+                    Surrogate loss: -0.0054
+                          AMP loss: 0.3269
+                 AMP grad pen loss: 0.2033
+              AMP mean policy pred: -0.4562
+              AMP mean expert pred: 0.4536
+             Mean action noise std: 0.22
+                       Mean reward: 53.61
+               Mean episode length: 196.06
+Mean episode Curriculum/ball_difficulty/ball_difficulty: 1.0000
+Mean episode Curriculum/dof_pos_limits_curriculum/weight: -9.0000
+Mean episode Curriculum/footreach_curriculum/weight: 20.0000
+Mean episode Curriculum/stopball_curriculum/weight: 250.0000
+Mean episode Curriculum/torque_limits_curriculum/weight: -9.0000
+Mean episode Episode_Metrics/mean_action_acc: 0.4325
+Mean episode Episode_Reward/action_acc_l2: -0.6030
+Mean episode Episode_Reward/action_rate_l2: -0.6194
+Mean episode Episode_Reward/ang_vel_xy: -0.0040
+Mean episode Episode_Reward/ang_vel_z: -0.0456
+Mean episode Episode_Reward/deviation_waist_joint: -0.0000
+Mean episode Episode_Reward/dof_acc: -0.0087
+Mean episode Episode_Reward/dof_pos_limits: -0.0125
+Mean episode Episode_Reward/dof_vel: -0.0014
+Mean episode Episode_Reward/dof_vel_limits: 0.0000
+Mean episode Episode_Reward/feet_slippage: 2.5986
+Mean episode Episode_Reward/feetorientation: 2.9054
+Mean episode Episode_Reward/footreach: 1.0374
+Mean episode Episode_Reward/noretreat: -0.0314
+Mean episode Episode_Reward/penalize_kneeheight: 0.0000
+Mean episode Episode_Reward/penalize_self_collision: -0.0077
+Mean episode Episode_Reward/penalize_sharpcontact: -0.0053
+Mean episode Episode_Reward/postangvel: 2.3058
+Mean episode Episode_Reward/postlinvel: 0.8183
+Mean episode Episode_Reward/postorientation: 2.4058
+Mean episode Episode_Reward/postupperdofpos: 0.5427
+Mean episode Episode_Reward/postwaistdofpos: 0.8142
+Mean episode Episode_Reward/stayonline: 0.0000
+Mean episode Episode_Reward/stopball: 1.2340
+Mean episode Episode_Reward/torque_limits: -0.0005
+Mean episode Episode_Reward/torques: -0.0000
+Mean episode Episode_Termination/bad_orientation: 0.0417
+Mean episode Episode_Termination/ball_exit: 1.3750
+Mean episode Episode_Termination/base_height: 0.0000
+Mean episode Episode_Termination/sharpforce: 0.0417
+Mean episode Episode_Termination/time_out: 30.2917
+--------------------------------------------------------------------------------
+                   Total timesteps: 424230912
+                    Iteration time: 4.22s
+                        Total time: 12148.70s
+                               ETA: 198990.4s
+
+################################################################################
+                    [1m Learning iteration 2877/50000 [0m
+
+                       Computation: 34614 steps/s (collection: 3.436s, learning 0.824s)
+               Value function loss: 0.2668
+                    Surrogate loss: -0.0053
+                          AMP loss: 0.3162
+                 AMP grad pen loss: 0.2084
+              AMP mean policy pred: -0.4705
+              AMP mean expert pred: 0.4627
+             Mean action noise std: 0.22
+                       Mean reward: 52.04
+               Mean episode length: 191.89
+Mean episode Curriculum/ball_difficulty/ball_difficulty: 1.0000
+Mean episode Curriculum/dof_pos_limits_curriculum/weight: -9.0000
+Mean episode Curriculum/footreach_curriculum/weight: 20.0000
+Mean episode Curriculum/stopball_curriculum/weight: 250.0000
+Mean episode Curriculum/torque_limits_curriculum/weight: -9.0000
+Mean episode Episode_Metrics/mean_action_acc: 0.4325
+Mean episode Episode_Reward/action_acc_l2: -0.6109
+Mean episode Episode_Reward/action_rate_l2: -0.6268
+Mean episode Episode_Reward/ang_vel_xy: -0.0039
+Mean episode Episode_Reward/ang_vel_z: -0.0452
+Mean episode Episode_Reward/deviation_waist_joint: -0.0000
+Mean episode Episode_Reward/dof_acc: -0.0087
+Mean episode Episode_Reward/dof_pos_limits: -0.0150
+Mean episode Episode_Reward/dof_vel: -0.0014
+Mean episode Episode_Reward/dof_vel_limits: 0.0000
+Mean episode Episode_Reward/feet_slippage: 2.6266
+Mean episode Episode_Reward/feetorientation: 2.9393
+Mean episode Episode_Reward/footreach: 1.0229
+Mean episode Episode_Reward/noretreat: -0.0322
+Mean episode Episode_Reward/penalize_kneeheight: 0.0000
+Mean episode Episode_Reward/penalize_self_collision: -0.0006
+Mean episode Episode_Reward/penalize_sharpcontact: -0.0009
+Mean episode Episode_Reward/postangvel: 2.3380
+Mean episode Episode_Reward/postlinvel: 0.8291
+Mean episode Episode_Reward/postorientation: 2.4369
+Mean episode Episode_Reward/postupperdofpos: 0.5455
+Mean episode Episode_Reward/postwaistdofpos: 0.8250
+Mean episode Episode_Reward/stayonline: 0.0000
+Mean episode Episode_Reward/stopball: 1.2392
+Mean episode Episode_Reward/torque_limits: -0.0002
+Mean episode Episode_Reward/torques: -0.0000
+Mean episode Episode_Termination/bad_orientation: 0.0000
+Mean episode Episode_Termination/ball_exit: 1.2500
+Mean episode Episode_Termination/base_height: 0.0000
+Mean episode Episode_Termination/sharpforce: 0.0000
+Mean episode Episode_Termination/time_out: 31.3750
+--------------------------------------------------------------------------------
+                   Total timesteps: 424378368
+                    Iteration time: 4.26s
+                        Total time: 12152.96s
+                               ETA: 198986.8s
+
+################################################################################
+                    [1m Learning iteration 2878/50000 [0m
+
+                       Computation: 33818 steps/s (collection: 3.453s, learning 0.907s)
+               Value function loss: 0.2369
+                    Surrogate loss: -0.0038
+                          AMP loss: 0.3133
+                 AMP grad pen loss: 0.2056
+              AMP mean policy pred: -0.4682
+              AMP mean expert pred: 0.4685
+             Mean action noise std: 0.22
+                       Mean reward: 53.54
+               Mean episode length: 195.01
+Mean episode Curriculum/ball_difficulty/ball_difficulty: 1.0000
+Mean episode Curriculum/dof_pos_limits_curriculum/weight: -9.0000
+Mean episode Curriculum/footreach_curriculum/weight: 20.0000
+Mean episode Curriculum/stopball_curriculum/weight: 250.0000
+Mean episode Curriculum/torque_limits_curriculum/weight: -9.0000
+Mean episode Episode_Metrics/mean_action_acc: 0.4325
+Mean episode Episode_Reward/action_acc_l2: -0.6063
+Mean episode Episode_Reward/action_rate_l2: -0.6223
+Mean episode Episode_Reward/ang_vel_xy: -0.0040
+Mean episode Episode_Reward/ang_vel_z: -0.0463
+Mean episode Episode_Reward/deviation_waist_joint: -0.0000
+Mean episode Episode_Reward/dof_acc: -0.0087
+Mean episode Episode_Reward/dof_pos_limits: -0.0134
+Mean episode Episode_Reward/dof_vel: -0.0014
+Mean episode Episode_Reward/dof_vel_limits: 0.0000
+Mean episode Episode_Reward/feet_slippage: 2.6041
+Mean episode Episode_Reward/feetorientation: 2.9144
+Mean episode Episode_Reward/footreach: 1.0297
+Mean episode Episode_Reward/noretreat: -0.0327
+Mean episode Episode_Reward/penalize_kneeheight: 0.0000
+Mean episode Episode_Reward/penalize_self_collision: -0.0004
+Mean episode Episode_Reward/penalize_sharpcontact: -0.0007
+Mean episode Episode_Reward/postangvel: 2.3246
+Mean episode Episode_Reward/postlinvel: 0.8245
+Mean episode Episode_Reward/postorientation: 2.4264
+Mean episode Episode_Reward/postupperdofpos: 0.5457
+Mean episode Episode_Reward/postwaistdofpos: 0.8212
+Mean episode Episode_Reward/stayonline: -0.0000
+Mean episode Episode_Reward/stopball: 1.2381
+Mean episode Episode_Reward/torque_limits: -0.0000
+Mean episode Episode_Reward/torques: -0.0000
+Mean episode Episode_Termination/bad_orientation: 0.0417
+Mean episode Episode_Termination/ball_exit: 1.2500
+Mean episode Episode_Termination/base_height: 0.0833
+Mean episode Episode_Termination/sharpforce: 0.0000
+Mean episode Episode_Termination/time_out: 29.7083
+--------------------------------------------------------------------------------
+                   Total timesteps: 424525824
+                    Iteration time: 4.36s
+                        Total time: 12157.32s
+                               ETA: 198984.8s
+
+################################################################################
+                    [1m Learning iteration 2879/50000 [0m
+
+                       Computation: 34842 steps/s (collection: 3.391s, learning 0.841s)
+               Value function loss: 0.2490
+                    Surrogate loss: -0.0013
+                          AMP loss: 0.3150
+                 AMP grad pen loss: 0.2081
+              AMP mean policy pred: -0.4649
+              AMP mean expert pred: 0.4677
+             Mean action noise std: 0.22
+                       Mean reward: 53.80
+               Mean episode length: 195.68
+Mean episode Curriculum/ball_difficulty/ball_difficulty: 1.0000
+Mean episode Curriculum/dof_pos_limits_curriculum/weight: -9.0000
+Mean episode Curriculum/footreach_curriculum/weight: 20.0000
+Mean episode Curriculum/stopball_curriculum/weight: 250.0000
+Mean episode Curriculum/torque_limits_curriculum/weight: -9.0000
+Mean episode Episode_Metrics/mean_action_acc: 0.4327
+Mean episode Episode_Reward/action_acc_l2: -0.6092
+Mean episode Episode_Reward/action_rate_l2: -0.6258
+Mean episode Episode_Reward/ang_vel_xy: -0.0040
+Mean episode Episode_Reward/ang_vel_z: -0.0478
+Mean episode Episode_Reward/deviation_waist_joint: -0.0000
+Mean episode Episode_Reward/dof_acc: -0.0089
+Mean episode Episode_Reward/dof_pos_limits: -0.0144
+Mean episode Episode_Reward/dof_vel: -0.0014
+Mean episode Episode_Reward/dof_vel_limits: 0.0000
+Mean episode Episode_Reward/feet_slippage: 2.6108
+Mean episode Episode_Reward/feetorientation: 2.9256
+Mean episode Episode_Reward/footreach: 1.0311
+Mean episode Episode_Reward/noretreat: -0.0323
+Mean episode Episode_Reward/penalize_kneeheight: 0.0000
+Mean episode Episode_Reward/penalize_self_collision: 0.0000
+Mean episode Episode_Reward/penalize_sharpcontact: -0.0044
+Mean episode Episode_Reward/postangvel: 2.3303
+Mean episode Episode_Reward/postlinvel: 0.8267
+Mean episode Episode_Reward/postorientation: 2.4321
+Mean episode Episode_Reward/postupperdofpos: 0.5462
+Mean episode Episode_Reward/postwaistdofpos: 0.8226
+Mean episode Episode_Reward/stayonline: -0.0000
+Mean episode Episode_Reward/stopball: 1.2396
+Mean episode Episode_Reward/torque_limits: -0.0001
+Mean episode Episode_Reward/torques: -0.0000
+Mean episode Episode_Termination/bad_orientation: 0.0000
+Mean episode Episode_Termination/ball_exit: 1.3333
+Mean episode Episode_Termination/base_height: 0.0417
+Mean episode Episode_Termination/sharpforce: 0.0000
+Mean episode Episode_Termination/time_out: 30.7917
+--------------------------------------------------------------------------------
+                   Total timesteps: 424673280
+                    Iteration time: 4.23s
+                        Total time: 12161.55s
+                               ETA: 198980.7s
+
+################################################################################
+                    [1m Learning iteration 2880/50000 [0m
+
+                       Computation: 34149 steps/s (collection: 3.453s, learning 0.865s)
+               Value function loss: 0.2932
+                    Surrogate loss: -0.0043
+                          AMP loss: 0.3120
+                 AMP grad pen loss: 0.2083
+              AMP mean policy pred: -0.4655
+              AMP mean expert pred: 0.4742
+             Mean action noise std: 0.22
+                       Mean reward: 53.01
+               Mean episode length: 194.27
+Mean episode Curriculum/ball_difficulty/ball_difficulty: 1.0000
+Mean episode Curriculum/dof_pos_limits_curriculum/weight: -9.0000
+Mean episode Curriculum/footreach_curriculum/weight: 20.0000
+Mean episode Curriculum/stopball_curriculum/weight: 250.0000
+Mean episode Curriculum/torque_limits_curriculum/weight: -9.0000
+Mean episode Episode_Metrics/mean_action_acc: 0.4326
+Mean episode Episode_Reward/action_acc_l2: -0.6077
+Mean episode Episode_Reward/action_rate_l2: -0.6240
+Mean episode Episode_Reward/ang_vel_xy: -0.0041
+Mean episode Episode_Reward/ang_vel_z: -0.0464
+Mean episode Episode_Reward/deviation_waist_joint: -0.0000
+Mean episode Episode_Reward/dof_acc: -0.0088
+Mean episode Episode_Reward/dof_pos_limits: -0.0136
+Mean episode Episode_Reward/dof_vel: -0.0014
+Mean episode Episode_Reward/dof_vel_limits: 0.0000
+Mean episode Episode_Reward/feet_slippage: 2.6120
+Mean episode Episode_Reward/feetorientation: 2.9213
+Mean episode Episode_Reward/footreach: 0.9974
+Mean episode Episode_Reward/noretreat: -0.0319
+Mean episode Episode_Reward/penalize_kneeheight: 0.0000
+Mean episode Episode_Reward/penalize_self_collision: -0.0055
+Mean episode Episode_Reward/penalize_sharpcontact: -0.0027
+Mean episode Episode_Reward/postangvel: 2.3269
+Mean episode Episode_Reward/postlinvel: 0.8255
+Mean episode Episode_Reward/postorientation: 2.4325
+Mean episode Episode_Reward/postupperdofpos: 0.5606
+Mean episode Episode_Reward/postwaistdofpos: 0.8222
+Mean episode Episode_Reward/stayonline: -0.0001
+Mean episode Episode_Reward/stopball: 1.2356
+Mean episode Episode_Reward/torque_limits: -0.0009
+Mean episode Episode_Reward/torques: -0.0000
+Mean episode Episode_Termination/bad_orientation: 0.0000
+Mean episode Episode_Termination/ball_exit: 0.9583
+Mean episode Episode_Termination/base_height: 0.0833
+Mean episode Episode_Termination/sharpforce: 0.0417
+Mean episode Episode_Termination/time_out: 28.3333
+--------------------------------------------------------------------------------
+                   Total timesteps: 424820736
+                    Iteration time: 4.32s
+                        Total time: 12165.87s
+                               ETA: 198978.1s
+
+################################################################################
+                    [1m Learning iteration 2881/50000 [0m
+
+                       Computation: 35096 steps/s (collection: 3.385s, learning 0.817s)
+               Value function loss: 0.2345
+                    Surrogate loss: -0.0045
+                          AMP loss: 0.3245
+                 AMP grad pen loss: 0.2182
+              AMP mean policy pred: -0.4505
+              AMP mean expert pred: 0.4658
+             Mean action noise std: 0.22
+                       Mean reward: 53.23
+               Mean episode length: 194.66
+Mean episode Curriculum/ball_difficulty/ball_difficulty: 1.0000
+Mean episode Curriculum/dof_pos_limits_curriculum/weight: -9.0000
+Mean episode Curriculum/footreach_curriculum/weight: 20.0000
+Mean episode Curriculum/stopball_curriculum/weight: 250.0000
+Mean episode Curriculum/torque_limits_curriculum/weight: -9.0000
+Mean episode Episode_Metrics/mean_action_acc: 0.4324
+Mean episode Episode_Reward/action_acc_l2: -0.6097
+Mean episode Episode_Reward/action_rate_l2: -0.6260
+Mean episode Episode_Reward/ang_vel_xy: -0.0040
+Mean episode Episode_Reward/ang_vel_z: -0.0470
+Mean episode Episode_Reward/deviation_waist_joint: -0.0000
+Mean episode Episode_Reward/dof_acc: -0.0088
+Mean episode Episode_Reward/dof_pos_limits: -0.0122
+Mean episode Episode_Reward/dof_vel: -0.0014
+Mean episode Episode_Reward/dof_vel_limits: -0.0000
+Mean episode Episode_Reward/feet_slippage: 2.6140
+Mean episode Episode_Reward/feetorientation: 2.9275
+Mean episode Episode_Reward/footreach: 1.0385
+Mean episode Episode_Reward/noretreat: -0.0319
+Mean episode Episode_Reward/penalize_kneeheight: 0.0000
+Mean episode Episode_Reward/penalize_self_collision: 0.0000
+Mean episode Episode_Reward/penalize_sharpcontact: -0.0039
+Mean episode Episode_Reward/postangvel: 2.3343
+Mean episode Episode_Reward/postlinvel: 0.8284
+Mean episode Episode_Reward/postorientation: 2.4391
+Mean episode Episode_Reward/postupperdofpos: 0.5566
+Mean episode Episode_Reward/postwaistdofpos: 0.8249
+Mean episode Episode_Reward/stayonline: -0.0000
+Mean episode Episode_Reward/stopball: 1.2401
+Mean episode Episode_Reward/torque_limits: -0.0005
+Mean episode Episode_Reward/torques: -0.0000
+Mean episode Episode_Termination/bad_orientation: 0.0417
+Mean episode Episode_Termination/ball_exit: 1.1250
+Mean episode Episode_Termination/base_height: 0.0000
+Mean episode Episode_Termination/sharpforce: 0.0000
+Mean episode Episode_Termination/time_out: 30.2083
+--------------------------------------------------------------------------------
+                   Total timesteps: 424968192
+                    Iteration time: 4.20s
+                        Total time: 12170.07s
+                               ETA: 198973.5s
+
+################################################################################
+                    [1m Learning iteration 2882/50000 [0m
+
+                       Computation: 35156 steps/s (collection: 3.380s, learning 0.814s)
+               Value function loss: 0.2887
+                    Surrogate loss: -0.0041
+                          AMP loss: 0.3334
+                 AMP grad pen loss: 0.2208
+              AMP mean policy pred: -0.4456
+              AMP mean expert pred: 0.4562
+             Mean action noise std: 0.22
+                       Mean reward: 53.70
+               Mean episode length: 195.12
+Mean episode Curriculum/ball_difficulty/ball_difficulty: 1.0000
+Mean episode Curriculum/dof_pos_limits_curriculum/weight: -9.0000
+Mean episode Curriculum/footreach_curriculum/weight: 20.0000
+Mean episode Curriculum/stopball_curriculum/weight: 250.0000
+Mean episode Curriculum/torque_limits_curriculum/weight: -9.0000
+Mean episode Episode_Metrics/mean_action_acc: 0.4325
+Mean episode Episode_Reward/action_acc_l2: -0.6107
+Mean episode Episode_Reward/action_rate_l2: -0.6273
+Mean episode Episode_Reward/ang_vel_xy: -0.0040
+Mean episode Episode_Reward/ang_vel_z: -0.0456
+Mean episode Episode_Reward/deviation_waist_joint: -0.0000
+Mean episode Episode_Reward/dof_acc: -0.0088
+Mean episode Episode_Reward/dof_pos_limits: -0.0149
+Mean episode Episode_Reward/dof_vel: -0.0014
+Mean episode Episode_Reward/dof_vel_limits: 0.0000
+Mean episode Episode_Reward/feet_slippage: 2.6203
+Mean episode Episode_Reward/feetorientation: 2.9372
+Mean episode Episode_Reward/footreach: 1.0653
+Mean episode Episode_Reward/noretreat: -0.0320
+Mean episode Episode_Reward/penalize_kneeheight: 0.0000
+Mean episode Episode_Reward/penalize_self_collision: -0.0005
+Mean episode Episode_Reward/penalize_sharpcontact: -0.0038
+Mean episode Episode_Reward/postangvel: 2.3411
+Mean episode Episode_Reward/postlinvel: 0.8312
+Mean episode Episode_Reward/postorientation: 2.4456
+Mean episode Episode_Reward/postupperdofpos: 0.5535
+Mean episode Episode_Reward/postwaistdofpos: 0.8272
+Mean episode Episode_Reward/stayonline: 0.0000
+Mean episode Episode_Reward/stopball: 1.2431
+Mean episode Episode_Reward/torque_limits: -0.0001
+Mean episode Episode_Reward/torques: -0.0000
+Mean episode Episode_Termination/bad_orientation: 0.0000
+Mean episode Episode_Termination/ball_exit: 1.2083
+Mean episode Episode_Termination/base_height: 0.0000
+Mean episode Episode_Termination/sharpforce: 0.0417
+Mean episode Episode_Termination/time_out: 32.4583
+--------------------------------------------------------------------------------
+                   Total timesteps: 425115648
+                    Iteration time: 4.19s
+                        Total time: 12174.27s
+                               ETA: 198968.8s
+
+################################################################################
+                    [1m Learning iteration 2883/50000 [0m
+
+                       Computation: 35108 steps/s (collection: 3.383s, learning 0.817s)
+               Value function loss: 0.2831
+                    Surrogate loss: -0.0063
+                          AMP loss: 0.3434
+                 AMP grad pen loss: 0.2213
+              AMP mean policy pred: -0.4446
+              AMP mean expert pred: 0.4415
+             Mean action noise std: 0.22
+                       Mean reward: 54.28
+               Mean episode length: 196.75
+Mean episode Curriculum/ball_difficulty/ball_difficulty: 1.0000
+Mean episode Curriculum/dof_pos_limits_curriculum/weight: -9.0000
+Mean episode Curriculum/footreach_curriculum/weight: 20.0000
+Mean episode Curriculum/stopball_curriculum/weight: 250.0000
+Mean episode Curriculum/torque_limits_curriculum/weight: -9.0000
+Mean episode Episode_Metrics/mean_action_acc: 0.4329
+Mean episode Episode_Reward/action_acc_l2: -0.6069
+Mean episode Episode_Reward/action_rate_l2: -0.6237
+Mean episode Episode_Reward/ang_vel_xy: -0.0042
+Mean episode Episode_Reward/ang_vel_z: -0.0471
+Mean episode Episode_Reward/deviation_waist_joint: -0.0000
+Mean episode Episode_Reward/dof_acc: -0.0088
+Mean episode Episode_Reward/dof_pos_limits: -0.0154
+Mean episode Episode_Reward/dof_vel: -0.0014
+Mean episode Episode_Reward/dof_vel_limits: 0.0000
+Mean episode Episode_Reward/feet_slippage: 2.6033
+Mean episode Episode_Reward/feetorientation: 2.9121
+Mean episode Episode_Reward/footreach: 1.0765
+Mean episode Episode_Reward/noretreat: -0.0323
+Mean episode Episode_Reward/penalize_kneeheight: 0.0000
+Mean episode Episode_Reward/penalize_self_collision: -0.0099
+Mean episode Episode_Reward/penalize_sharpcontact: -0.0046
+Mean episode Episode_Reward/postangvel: 2.3157
+Mean episode Episode_Reward/postlinvel: 0.8220
+Mean episode Episode_Reward/postorientation: 2.4206
+Mean episode Episode_Reward/postupperdofpos: 0.5491
+Mean episode Episode_Reward/postwaistdofpos: 0.8182
+Mean episode Episode_Reward/stayonline: -0.0001
+Mean episode Episode_Reward/stopball: 1.2362
+Mean episode Episode_Reward/torque_limits: -0.0000
+Mean episode Episode_Reward/torques: -0.0000
+Mean episode Episode_Termination/bad_orientation: 0.0417
+Mean episode Episode_Termination/ball_exit: 1.2917
+Mean episode Episode_Termination/base_height: 0.0833
+Mean episode Episode_Termination/sharpforce: 0.0000
+Mean episode Episode_Termination/time_out: 28.4583
+--------------------------------------------------------------------------------
+                   Total timesteps: 425263104
+                    Iteration time: 4.20s
+                        Total time: 12178.47s
+                               ETA: 198964.2s
+
+################################################################################
+                    [1m Learning iteration 2884/50000 [0m
+
+                       Computation: 33940 steps/s (collection: 3.482s, learning 0.863s)
+               Value function loss: 0.2327
+                    Surrogate loss: -0.0052
+                          AMP loss: 0.3356
+                 AMP grad pen loss: 0.2228
+              AMP mean policy pred: -0.4587
+              AMP mean expert pred: 0.4465
+             Mean action noise std: 0.22
+                       Mean reward: 53.64
+               Mean episode length: 194.97
+Mean episode Curriculum/ball_difficulty/ball_difficulty: 1.0000
+Mean episode Curriculum/dof_pos_limits_curriculum/weight: -9.0000
+Mean episode Curriculum/footreach_curriculum/weight: 20.0000
+Mean episode Curriculum/stopball_curriculum/weight: 250.0000
+Mean episode Curriculum/torque_limits_curriculum/weight: -9.0000
+Mean episode Episode_Metrics/mean_action_acc: 0.4326
+Mean episode Episode_Reward/action_acc_l2: -0.6048
+Mean episode Episode_Reward/action_rate_l2: -0.6217
+Mean episode Episode_Reward/ang_vel_xy: -0.0042
+Mean episode Episode_Reward/ang_vel_z: -0.0485
+Mean episode Episode_Reward/deviation_waist_joint: -0.0000
+Mean episode Episode_Reward/dof_acc: -0.0088
+Mean episode Episode_Reward/dof_pos_limits: -0.0168
+Mean episode Episode_Reward/dof_vel: -0.0014
+Mean episode Episode_Reward/dof_vel_limits: 0.0000
+Mean episode Episode_Reward/feet_slippage: 2.5877
+Mean episode Episode_Reward/feetorientation: 2.9048
+Mean episode Episode_Reward/footreach: 1.0777
+Mean episode Episode_Reward/noretreat: -0.0327
+Mean episode Episode_Reward/penalize_kneeheight: -0.0001
+Mean episode Episode_Reward/penalize_self_collision: -0.0012
+Mean episode Episode_Reward/penalize_sharpcontact: -0.0006
+Mean episode Episode_Reward/postangvel: 2.3085
+Mean episode Episode_Reward/postlinvel: 0.8191
+Mean episode Episode_Reward/postorientation: 2.4131
+Mean episode Episode_Reward/postupperdofpos: 0.5462
+Mean episode Episode_Reward/postwaistdofpos: 0.8157
+Mean episode Episode_Reward/stayonline: -0.0003
+Mean episode Episode_Reward/stopball: 1.2328
+Mean episode Episode_Reward/torque_limits: -0.0001
+Mean episode Episode_Reward/torques: -0.0000
+Mean episode Episode_Termination/bad_orientation: 0.1250
+Mean episode Episode_Termination/ball_exit: 1.1667
+Mean episode Episode_Termination/base_height: 0.2083
+Mean episode Episode_Termination/sharpforce: 0.0000
+Mean episode Episode_Termination/time_out: 30.9583
+--------------------------------------------------------------------------------
+                   Total timesteps: 425410560
+                    Iteration time: 4.34s
+                        Total time: 12182.81s
+                               ETA: 198962.0s
+
+################################################################################
+                    [1m Learning iteration 2885/50000 [0m
+
+                       Computation: 34115 steps/s (collection: 3.463s, learning 0.859s)
+               Value function loss: 0.2638
+                    Surrogate loss: -0.0043
+                          AMP loss: 0.3288
+                 AMP grad pen loss: 0.2202
+              AMP mean policy pred: -0.4572
+              AMP mean expert pred: 0.4524
+             Mean action noise std: 0.22
+                       Mean reward: 53.57
+               Mean episode length: 196.75
+Mean episode Curriculum/ball_difficulty/ball_difficulty: 1.0000
+Mean episode Curriculum/dof_pos_limits_curriculum/weight: -9.0000
+Mean episode Curriculum/footreach_curriculum/weight: 20.0000
+Mean episode Curriculum/stopball_curriculum/weight: 250.0000
+Mean episode Curriculum/torque_limits_curriculum/weight: -9.0000
+Mean episode Episode_Metrics/mean_action_acc: 0.4332
+Mean episode Episode_Reward/action_acc_l2: -0.6065
+Mean episode Episode_Reward/action_rate_l2: -0.6232
+Mean episode Episode_Reward/ang_vel_xy: -0.0041
+Mean episode Episode_Reward/ang_vel_z: -0.0478
+Mean episode Episode_Reward/deviation_waist_joint: -0.0000
+Mean episode Episode_Reward/dof_acc: -0.0091
+Mean episode Episode_Reward/dof_pos_limits: -0.0163
+Mean episode Episode_Reward/dof_vel: -0.0014
+Mean episode Episode_Reward/dof_vel_limits: 0.0000
+Mean episode Episode_Reward/feet_slippage: 2.5922
+Mean episode Episode_Reward/feetorientation: 2.9073
+Mean episode Episode_Reward/footreach: 1.0227
+Mean episode Episode_Reward/noretreat: -0.0328
+Mean episode Episode_Reward/penalize_kneeheight: 0.0000
+Mean episode Episode_Reward/penalize_self_collision: -0.0007
+Mean episode Episode_Reward/penalize_sharpcontact: -0.0032
+Mean episode Episode_Reward/postangvel: 2.3127
+Mean episode Episode_Reward/postlinvel: 0.8204
+Mean episode Episode_Reward/postorientation: 2.4191
+Mean episode Episode_Reward/postupperdofpos: 0.5501
+Mean episode Episode_Reward/postwaistdofpos: 0.8165
+Mean episode Episode_Reward/stayonline: -0.0000
+Mean episode Episode_Reward/stopball: 1.2364
+Mean episode Episode_Reward/torque_limits: -0.0006
+Mean episode Episode_Reward/torques: -0.0000
+Mean episode Episode_Termination/bad_orientation: 0.0000
+Mean episode Episode_Termination/ball_exit: 1.4167
+Mean episode Episode_Termination/base_height: 0.1250
+Mean episode Episode_Termination/sharpforce: 0.0000
+Mean episode Episode_Termination/time_out: 29.0833
+--------------------------------------------------------------------------------
+                   Total timesteps: 425558016
+                    Iteration time: 4.32s
+                        Total time: 12187.13s
+                               ETA: 198959.4s
+
+################################################################################
+                    [1m Learning iteration 2886/50000 [0m
+
+                       Computation: 34213 steps/s (collection: 3.447s, learning 0.863s)
+               Value function loss: 0.2628
+                    Surrogate loss: -0.0048
+                          AMP loss: 0.3228
+                 AMP grad pen loss: 0.2144
+              AMP mean policy pred: -0.4625
+              AMP mean expert pred: 0.4561
+             Mean action noise std: 0.22
+                       Mean reward: 54.25
+               Mean episode length: 198.55
+Mean episode Curriculum/ball_difficulty/ball_difficulty: 1.0000
+Mean episode Curriculum/dof_pos_limits_curriculum/weight: -9.0000
+Mean episode Curriculum/footreach_curriculum/weight: 20.0000
+Mean episode Curriculum/stopball_curriculum/weight: 250.0000
+Mean episode Curriculum/torque_limits_curriculum/weight: -9.0000
+Mean episode Episode_Metrics/mean_action_acc: 0.4326
+Mean episode Episode_Reward/action_acc_l2: -0.6067
+Mean episode Episode_Reward/action_rate_l2: -0.6237
+Mean episode Episode_Reward/ang_vel_xy: -0.0041
+Mean episode Episode_Reward/ang_vel_z: -0.0489
+Mean episode Episode_Reward/deviation_waist_joint: -0.0000
+Mean episode Episode_Reward/dof_acc: -0.0088
+Mean episode Episode_Reward/dof_pos_limits: -0.0159
+Mean episode Episode_Reward/dof_vel: -0.0014
+Mean episode Episode_Reward/dof_vel_limits: 0.0000
+Mean episode Episode_Reward/feet_slippage: 2.5984
+Mean episode Episode_Reward/feetorientation: 2.9165
+Mean episode Episode_Reward/footreach: 0.9904
+Mean episode Episode_Reward/noretreat: -0.0323
+Mean episode Episode_Reward/penalize_kneeheight: 0.0000
+Mean episode Episode_Reward/penalize_self_collision: 0.0000
+Mean episode Episode_Reward/penalize_sharpcontact: -0.0030
+Mean episode Episode_Reward/postangvel: 2.3293
+Mean episode Episode_Reward/postlinvel: 0.8264
+Mean episode Episode_Reward/postorientation: 2.4340
+Mean episode Episode_Reward/postupperdofpos: 0.5554
+Mean episode Episode_Reward/postwaistdofpos: 0.8223
+Mean episode Episode_Reward/stayonline: 0.0000
+Mean episode Episode_Reward/stopball: 1.2398
+Mean episode Episode_Reward/torque_limits: -0.0002
+Mean episode Episode_Reward/torques: -0.0000
+Mean episode Episode_Termination/bad_orientation: 0.0000
+Mean episode Episode_Termination/ball_exit: 1.5000
+Mean episode Episode_Termination/base_height: 0.0000
+Mean episode Episode_Termination/sharpforce: 0.0000
+Mean episode Episode_Termination/time_out: 32.4167
+--------------------------------------------------------------------------------
+                   Total timesteps: 425705472
+                    Iteration time: 4.31s
+                        Total time: 12191.44s
+                               ETA: 198956.6s
+
+################################################################################
+                    [1m Learning iteration 2887/50000 [0m
+
+                       Computation: 34613 steps/s (collection: 3.436s, learning 0.824s)
+               Value function loss: 0.2214
+                    Surrogate loss: -0.0054
+                          AMP loss: 0.3151
+                 AMP grad pen loss: 0.2057
+              AMP mean policy pred: -0.4689
+              AMP mean expert pred: 0.4623
+             Mean action noise std: 0.22
+                       Mean reward: 53.67
+               Mean episode length: 196.71
+Mean episode Curriculum/ball_difficulty/ball_difficulty: 1.0000
+Mean episode Curriculum/dof_pos_limits_curriculum/weight: -9.0000
+Mean episode Curriculum/footreach_curriculum/weight: 20.0000
+Mean episode Curriculum/stopball_curriculum/weight: 250.0000
+Mean episode Curriculum/torque_limits_curriculum/weight: -9.0000
+Mean episode Episode_Metrics/mean_action_acc: 0.4326
+Mean episode Episode_Reward/action_acc_l2: -0.6136
+Mean episode Episode_Reward/action_rate_l2: -0.6304
+Mean episode Episode_Reward/ang_vel_xy: -0.0041
+Mean episode Episode_Reward/ang_vel_z: -0.0497
+Mean episode Episode_Reward/deviation_waist_joint: -0.0000
+Mean episode Episode_Reward/dof_acc: -0.0089
+Mean episode Episode_Reward/dof_pos_limits: -0.0161
+Mean episode Episode_Reward/dof_vel: -0.0014
+Mean episode Episode_Reward/dof_vel_limits: -0.0002
+Mean episode Episode_Reward/feet_slippage: 2.6208
+Mean episode Episode_Reward/feetorientation: 2.9445
+Mean episode Episode_Reward/footreach: 1.0074
+Mean episode Episode_Reward/noretreat: -0.0323
+Mean episode Episode_Reward/penalize_kneeheight: -0.0000
+Mean episode Episode_Reward/penalize_self_collision: -0.0008
+Mean episode Episode_Reward/penalize_sharpcontact: -0.0021
+Mean episode Episode_Reward/postangvel: 2.3519
+Mean episode Episode_Reward/postlinvel: 0.8346
+Mean episode Episode_Reward/postorientation: 2.4598
+Mean episode Episode_Reward/postupperdofpos: 0.5628
+Mean episode Episode_Reward/postwaistdofpos: 0.8307
+Mean episode Episode_Reward/stayonline: -0.0001
+Mean episode Episode_Reward/stopball: 1.2418
+Mean episode Episode_Reward/torque_limits: -0.0004
+Mean episode Episode_Reward/torques: -0.0000
+Mean episode Episode_Termination/bad_orientation: 0.0417
+Mean episode Episode_Termination/ball_exit: 0.9167
+Mean episode Episode_Termination/base_height: 0.0833
+Mean episode Episode_Termination/sharpforce: 0.0000
+Mean episode Episode_Termination/time_out: 30.2500
+--------------------------------------------------------------------------------
+                   Total timesteps: 425852928
+                    Iteration time: 4.26s
+                        Total time: 12195.70s
+                               ETA: 198953.0s
+
+################################################################################
+                    [1m Learning iteration 2888/50000 [0m
+
+                       Computation: 33877 steps/s (collection: 3.431s, learning 0.921s)
+               Value function loss: 0.3480
+                    Surrogate loss: -0.0032
+                          AMP loss: 0.2921
+                 AMP grad pen loss: 0.2069
+              AMP mean policy pred: -0.4897
+              AMP mean expert pred: 0.4849
+             Mean action noise std: 0.22
+                       Mean reward: 53.76
+               Mean episode length: 194.06
+Mean episode Curriculum/ball_difficulty/ball_difficulty: 1.0000
+Mean episode Curriculum/dof_pos_limits_curriculum/weight: -9.0000
+Mean episode Curriculum/footreach_curriculum/weight: 20.0000
+Mean episode Curriculum/stopball_curriculum/weight: 250.0000
+Mean episode Curriculum/torque_limits_curriculum/weight: -9.0000
+Mean episode Episode_Metrics/mean_action_acc: 0.4329
+Mean episode Episode_Reward/action_acc_l2: -0.6025
+Mean episode Episode_Reward/action_rate_l2: -0.6188
+Mean episode Episode_Reward/ang_vel_xy: -0.0039
+Mean episode Episode_Reward/ang_vel_z: -0.0462
+Mean episode Episode_Reward/deviation_waist_joint: -0.0000
+Mean episode Episode_Reward/dof_acc: -0.0087
+Mean episode Episode_Reward/dof_pos_limits: -0.0126
+Mean episode Episode_Reward/dof_vel: -0.0014
+Mean episode Episode_Reward/dof_vel_limits: 0.0000
+Mean episode Episode_Reward/feet_slippage: 2.5809
+Mean episode Episode_Reward/feetorientation: 2.8967
+Mean episode Episode_Reward/footreach: 1.0261
+Mean episode Episode_Reward/noretreat: -0.0323
+Mean episode Episode_Reward/penalize_kneeheight: 0.0000
+Mean episode Episode_Reward/penalize_self_collision: -0.0004
+Mean episode Episode_Reward/penalize_sharpcontact: -0.0041
+Mean episode Episode_Reward/postangvel: 2.3111
+Mean episode Episode_Reward/postlinvel: 0.8199
+Mean episode Episode_Reward/postorientation: 2.4212
+Mean episode Episode_Reward/postupperdofpos: 0.5647
+Mean episode Episode_Reward/postwaistdofpos: 0.8162
+Mean episode Episode_Reward/stayonline: -0.0001
+Mean episode Episode_Reward/stopball: 1.2376
+Mean episode Episode_Reward/torque_limits: -0.0002
+Mean episode Episode_Reward/torques: -0.0000
+Mean episode Episode_Termination/bad_orientation: 0.0000
+Mean episode Episode_Termination/ball_exit: 1.5000
+Mean episode Episode_Termination/base_height: 0.0417
+Mean episode Episode_Termination/sharpforce: 0.0417
+Mean episode Episode_Termination/time_out: 28.7917
+--------------------------------------------------------------------------------
+                   Total timesteps: 426000384
+                    Iteration time: 4.35s
+                        Total time: 12200.06s
+                               ETA: 198950.9s
+
+################################################################################
+                    [1m Learning iteration 2889/50000 [0m
+
+                       Computation: 26326 steps/s (collection: 4.556s, learning 1.045s)
+               Value function loss: 0.2056
+                    Surrogate loss: -0.0052
+                          AMP loss: 0.2918
+                 AMP grad pen loss: 0.2087
+              AMP mean policy pred: -0.4870
+              AMP mean expert pred: 0.4836
+             Mean action noise std: 0.22
+                       Mean reward: 53.64
+               Mean episode length: 193.86
+Mean episode Curriculum/ball_difficulty/ball_difficulty: 1.0000
+Mean episode Curriculum/dof_pos_limits_curriculum/weight: -9.0000
+Mean episode Curriculum/footreach_curriculum/weight: 20.0000
+Mean episode Curriculum/stopball_curriculum/weight: 250.0000
+Mean episode Curriculum/torque_limits_curriculum/weight: -9.0000
+Mean episode Episode_Metrics/mean_action_acc: 0.4327
+Mean episode Episode_Reward/action_acc_l2: -0.6032
+Mean episode Episode_Reward/action_rate_l2: -0.6198
+Mean episode Episode_Reward/ang_vel_xy: -0.0040
+Mean episode Episode_Reward/ang_vel_z: -0.0475
+Mean episode Episode_Reward/deviation_waist_joint: -0.0000
+Mean episode Episode_Reward/dof_acc: -0.0088
+Mean episode Episode_Reward/dof_pos_limits: -0.0136
+Mean episode Episode_Reward/dof_vel: -0.0014
+Mean episode Episode_Reward/dof_vel_limits: 0.0000
+Mean episode Episode_Reward/feet_slippage: 2.5845
+Mean episode Episode_Reward/feetorientation: 2.8998
+Mean episode Episode_Reward/footreach: 1.0405
+Mean episode Episode_Reward/noretreat: -0.0317
+Mean episode Episode_Reward/penalize_kneeheight: -0.0000
+Mean episode Episode_Reward/penalize_self_collision: 0.0000
+Mean episode Episode_Reward/penalize_sharpcontact: -0.0035
+Mean episode Episode_Reward/postangvel: 2.3155
+Mean episode Episode_Reward/postlinvel: 0.8217
+Mean episode Episode_Reward/postorientation: 2.4247
+Mean episode Episode_Reward/postupperdofpos: 0.5653
+Mean episode Episode_Reward/postwaistdofpos: 0.8183
+Mean episode Episode_Reward/stayonline: -0.0001
+Mean episode Episode_Reward/stopball: 1.2392
+Mean episode Episode_Reward/torque_limits: -0.0005
+Mean episode Episode_Reward/torques: -0.0000
+Mean episode Episode_Termination/bad_orientation: 0.0833
+Mean episode Episode_Termination/ball_exit: 1.5000
+Mean episode Episode_Termination/base_height: 0.0417
+Mean episode Episode_Termination/sharpforce: 0.0000
+Mean episode Episode_Termination/time_out: 29.0000
+--------------------------------------------------------------------------------
+                   Total timesteps: 426147840
+                    Iteration time: 5.60s
+                        Total time: 12205.66s
+                               ETA: 198969.1s
+
+################################################################################
+                    [1m Learning iteration 2890/50000 [0m
+
+                       Computation: 24511 steps/s (collection: 4.978s, learning 1.038s)
+               Value function loss: 0.2051
+                    Surrogate loss: 0.0001
+                          AMP loss: 0.2897
+                 AMP grad pen loss: 0.2043
+              AMP mean policy pred: -0.4866
+              AMP mean expert pred: 0.4942
+             Mean action noise std: 0.22
+                       Mean reward: 54.19
+               Mean episode length: 196.97
+Mean episode Curriculum/ball_difficulty/ball_difficulty: 1.0000
+Mean episode Curriculum/dof_pos_limits_curriculum/weight: -9.0000
+Mean episode Curriculum/footreach_curriculum/weight: 20.0000
+Mean episode Curriculum/stopball_curriculum/weight: 250.0000
+Mean episode Curriculum/torque_limits_curriculum/weight: -9.0000
+Mean episode Episode_Metrics/mean_action_acc: 0.4328
+Mean episode Episode_Reward/action_acc_l2: -0.6053
+Mean episode Episode_Reward/action_rate_l2: -0.6218
+Mean episode Episode_Reward/ang_vel_xy: -0.0040
+Mean episode Episode_Reward/ang_vel_z: -0.0469
+Mean episode Episode_Reward/deviation_waist_joint: -0.0000
+Mean episode Episode_Reward/dof_acc: -0.0088
+Mean episode Episode_Reward/dof_pos_limits: -0.0147
+Mean episode Episode_Reward/dof_vel: -0.0014
+Mean episode Episode_Reward/dof_vel_limits: 0.0000
+Mean episode Episode_Reward/feet_slippage: 2.5884
+Mean episode Episode_Reward/feetorientation: 2.9091
+Mean episode Episode_Reward/footreach: 1.0634
+Mean episode Episode_Reward/noretreat: -0.0322
+Mean episode Episode_Reward/penalize_kneeheight: 0.0000
+Mean episode Episode_Reward/penalize_self_collision: -0.0011
+Mean episode Episode_Reward/penalize_sharpcontact: -0.0020
+Mean episode Episode_Reward/postangvel: 2.3152
+Mean episode Episode_Reward/postlinvel: 0.8216
+Mean episode Episode_Reward/postorientation: 2.4231
+Mean episode Episode_Reward/postupperdofpos: 0.5552
+Mean episode Episode_Reward/postwaistdofpos: 0.8173
+Mean episode Episode_Reward/stayonline: -0.0000
+Mean episode Episode_Reward/stopball: 1.2221
+Mean episode Episode_Reward/torque_limits: -0.0003
+Mean episode Episode_Reward/torques: -0.0000
+Mean episode Episode_Termination/bad_orientation: 0.0000
+Mean episode Episode_Termination/ball_exit: 1.5000
+Mean episode Episode_Termination/base_height: 0.0417
+Mean episode Episode_Termination/sharpforce: 0.0000
+Mean episode Episode_Termination/time_out: 31.4167
+--------------------------------------------------------------------------------
+                   Total timesteps: 426295296
+                    Iteration time: 6.02s
+                        Total time: 12211.67s
+                               ETA: 198994.1s
+
+################################################################################
+                    [1m Learning iteration 2891/50000 [0m
+
+                       Computation: 24529 steps/s (collection: 4.959s, learning 1.052s)
+               Value function loss: 0.2819
+                    Surrogate loss: -0.0044
+                          AMP loss: 0.2890
+                 AMP grad pen loss: 0.2024
+              AMP mean policy pred: -0.4906
+              AMP mean expert pred: 0.4923
+             Mean action noise std: 0.22
+                       Mean reward: 52.27
+               Mean episode length: 190.51
+Mean episode Curriculum/ball_difficulty/ball_difficulty: 1.0000
+Mean episode Curriculum/dof_pos_limits_curriculum/weight: -9.0000
+Mean episode Curriculum/footreach_curriculum/weight: 20.0000
+Mean episode Curriculum/stopball_curriculum/weight: 250.0000
+Mean episode Curriculum/torque_limits_curriculum/weight: -9.0000
+Mean episode Episode_Metrics/mean_action_acc: 0.4325
+Mean episode Episode_Reward/action_acc_l2: -0.6025
+Mean episode Episode_Reward/action_rate_l2: -0.6186
+Mean episode Episode_Reward/ang_vel_xy: -0.0039
+Mean episode Episode_Reward/ang_vel_z: -0.0463
+Mean episode Episode_Reward/deviation_waist_joint: -0.0000
+Mean episode Episode_Reward/dof_acc: -0.0088
+Mean episode Episode_Reward/dof_pos_limits: -0.0149
+Mean episode Episode_Reward/dof_vel: -0.0014
+Mean episode Episode_Reward/dof_vel_limits: 0.0000
+Mean episode Episode_Reward/feet_slippage: 2.5821
+Mean episode Episode_Reward/feetorientation: 2.8970
+Mean episode Episode_Reward/footreach: 1.0372
+Mean episode Episode_Reward/noretreat: -0.0323
+Mean episode Episode_Reward/penalize_kneeheight: -0.0000
+Mean episode Episode_Reward/penalize_self_collision: -0.0027
+Mean episode Episode_Reward/penalize_sharpcontact: -0.0038
+Mean episode Episode_Reward/postangvel: 2.3043
+Mean episode Episode_Reward/postlinvel: 0.8175
+Mean episode Episode_Reward/postorientation: 2.4143
+Mean episode Episode_Reward/postupperdofpos: 0.5667
+Mean episode Episode_Reward/postwaistdofpos: 0.8140
+Mean episode Episode_Reward/stayonline: -0.0000
+Mean episode Episode_Reward/stopball: 1.2337
+Mean episode Episode_Reward/torque_limits: -0.0005
+Mean episode Episode_Reward/torques: -0.0000
+Mean episode Episode_Termination/bad_orientation: 0.0417
+Mean episode Episode_Termination/ball_exit: 1.4583
+Mean episode Episode_Termination/base_height: 0.0417
+Mean episode Episode_Termination/sharpforce: 0.0417
+Mean episode Episode_Termination/time_out: 29.1250
+--------------------------------------------------------------------------------
+                   Total timesteps: 426442752
+                    Iteration time: 6.01s
+                        Total time: 12217.68s
+                               ETA: 199019.0s
+
+################################################################################
+                    [1m Learning iteration 2892/50000 [0m
+
+                       Computation: 24738 steps/s (collection: 4.919s, learning 1.042s)
+               Value function loss: 0.1642
+                    Surrogate loss: -0.0055
+                          AMP loss: 0.2911
+                 AMP grad pen loss: 0.2017
+              AMP mean policy pred: -0.4879
+              AMP mean expert pred: 0.4921
+             Mean action noise std: 0.22
+                       Mean reward: 54.42
+               Mean episode length: 198.14
+Mean episode Curriculum/ball_difficulty/ball_difficulty: 1.0000
+Mean episode Curriculum/dof_pos_limits_curriculum/weight: -9.0000
+Mean episode Curriculum/footreach_curriculum/weight: 20.0000
+Mean episode Curriculum/stopball_curriculum/weight: 250.0000
+Mean episode Curriculum/torque_limits_curriculum/weight: -9.0000
+Mean episode Episode_Metrics/mean_action_acc: 0.4327
+Mean episode Episode_Reward/action_acc_l2: -0.6085
+Mean episode Episode_Reward/action_rate_l2: -0.6251
+Mean episode Episode_Reward/ang_vel_xy: -0.0041
+Mean episode Episode_Reward/ang_vel_z: -0.0499
+Mean episode Episode_Reward/deviation_waist_joint: -0.0000
+Mean episode Episode_Reward/dof_acc: -0.0090
+Mean episode Episode_Reward/dof_pos_limits: -0.0145
+Mean episode Episode_Reward/dof_vel: -0.0014
+Mean episode Episode_Reward/dof_vel_limits: -0.0000
+Mean episode Episode_Reward/feet_slippage: 2.5972
+Mean episode Episode_Reward/feetorientation: 2.9207
+Mean episode Episode_Reward/footreach: 0.9771
+Mean episode Episode_Reward/noretreat: -0.0325
+Mean episode Episode_Reward/penalize_kneeheight: -0.0001
+Mean episode Episode_Reward/penalize_self_collision: -0.0009
+Mean episode Episode_Reward/penalize_sharpcontact: -0.0036
+Mean episode Episode_Reward/postangvel: 2.3320
+Mean episode Episode_Reward/postlinvel: 0.8275
+Mean episode Episode_Reward/postorientation: 2.4405
+Mean episode Episode_Reward/postupperdofpos: 0.5637
+Mean episode Episode_Reward/postwaistdofpos: 0.8236
+Mean episode Episode_Reward/stayonline: -0.0001
+Mean episode Episode_Reward/stopball: 1.2420
+Mean episode Episode_Reward/torque_limits: -0.0009
+Mean episode Episode_Reward/torques: -0.0000
+Mean episode Episode_Termination/bad_orientation: 0.0417
+Mean episode Episode_Termination/ball_exit: 1.2500
+Mean episode Episode_Termination/base_height: 0.0833
+Mean episode Episode_Termination/sharpforce: 0.0000
+Mean episode Episode_Termination/time_out: 29.6667
+--------------------------------------------------------------------------------
+                   Total timesteps: 426590208
+                    Iteration time: 5.96s
+                        Total time: 12223.64s
+                               ETA: 199043.0s
+
+################################################################################
+                    [1m Learning iteration 2893/50000 [0m
+
+                       Computation: 24522 steps/s (collection: 4.980s, learning 1.033s)
+               Value function loss: 0.3023
+                    Surrogate loss: -0.0045
+                          AMP loss: 0.2951
+                 AMP grad pen loss: 0.2046
+              AMP mean policy pred: -0.4901
+              AMP mean expert pred: 0.4824
+             Mean action noise std: 0.22
+                       Mean reward: 52.69
+               Mean episode length: 190.49
+Mean episode Curriculum/ball_difficulty/ball_difficulty: 1.0000
+Mean episode Curriculum/dof_pos_limits_curriculum/weight: -9.0000
+Mean episode Curriculum/footreach_curriculum/weight: 20.0000
+Mean episode Curriculum/stopball_curriculum/weight: 250.0000
+Mean episode Curriculum/torque_limits_curriculum/weight: -9.0000
+Mean episode Episode_Metrics/mean_action_acc: 0.4330
+Mean episode Episode_Reward/action_acc_l2: -0.6017
+Mean episode Episode_Reward/action_rate_l2: -0.6186
+Mean episode Episode_Reward/ang_vel_xy: -0.0039
+Mean episode Episode_Reward/ang_vel_z: -0.0483
+Mean episode Episode_Reward/deviation_waist_joint: -0.0000
+Mean episode Episode_Reward/dof_acc: -0.0089
+Mean episode Episode_Reward/dof_pos_limits: -0.0148
+Mean episode Episode_Reward/dof_vel: -0.0014
+Mean episode Episode_Reward/dof_vel_limits: 0.0000
+Mean episode Episode_Reward/feet_slippage: 2.5705
+Mean episode Episode_Reward/feetorientation: 2.8916
+Mean episode Episode_Reward/footreach: 1.0007
+Mean episode Episode_Reward/noretreat: -0.0325
+Mean episode Episode_Reward/penalize_kneeheight: 0.0000
+Mean episode Episode_Reward/penalize_self_collision: -0.0003
+Mean episode Episode_Reward/penalize_sharpcontact: -0.0050
+Mean episode Episode_Reward/postangvel: 2.3073
+Mean episode Episode_Reward/postlinvel: 0.8184
+Mean episode Episode_Reward/postorientation: 2.4157
+Mean episode Episode_Reward/postupperdofpos: 0.5649
+Mean episode Episode_Reward/postwaistdofpos: 0.8142
+Mean episode Episode_Reward/stayonline: -0.0000
+Mean episode Episode_Reward/stopball: 1.2323
+Mean episode Episode_Reward/torque_limits: -0.0005
+Mean episode Episode_Reward/torques: -0.0000
+Mean episode Episode_Termination/bad_orientation: 0.0000
+Mean episode Episode_Termination/ball_exit: 1.8333
+Mean episode Episode_Termination/base_height: 0.0000
+Mean episode Episode_Termination/sharpforce: 0.0417
+Mean episode Episode_Termination/time_out: 30.5833
+--------------------------------------------------------------------------------
+                   Total timesteps: 426737664
+                    Iteration time: 6.01s
+                        Total time: 12229.66s
+                               ETA: 199067.9s
+
+################################################################################
+                    [1m Learning iteration 2894/50000 [0m
+
+                       Computation: 24662 steps/s (collection: 4.937s, learning 1.042s)
+               Value function loss: 0.2534
+                    Surrogate loss: -0.0020
+                          AMP loss: 0.3080
+                 AMP grad pen loss: 0.2166
+              AMP mean policy pred: -0.4725
+              AMP mean expert pred: 0.4699
+             Mean action noise std: 0.22
+                       Mean reward: 55.51
+               Mean episode length: 200.00
+Mean episode Curriculum/ball_difficulty/ball_difficulty: 1.0000
+Mean episode Curriculum/dof_pos_limits_curriculum/weight: -9.0000
+Mean episode Curriculum/footreach_curriculum/weight: 20.0000
+Mean episode Curriculum/stopball_curriculum/weight: 250.0000
+Mean episode Curriculum/torque_limits_curriculum/weight: -9.0000
+Mean episode Episode_Metrics/mean_action_acc: 0.4320
+Mean episode Episode_Reward/action_acc_l2: -0.6099
+Mean episode Episode_Reward/action_rate_l2: -0.6262
+Mean episode Episode_Reward/ang_vel_xy: -0.0039
+Mean episode Episode_Reward/ang_vel_z: -0.0474
+Mean episode Episode_Reward/deviation_waist_joint: -0.0000
+Mean episode Episode_Reward/dof_acc: -0.0089
+Mean episode Episode_Reward/dof_pos_limits: -0.0132
+Mean episode Episode_Reward/dof_vel: -0.0014
+Mean episode Episode_Reward/dof_vel_limits: 0.0000
+Mean episode Episode_Reward/feet_slippage: 2.6163
+Mean episode Episode_Reward/feetorientation: 2.9374
+Mean episode Episode_Reward/footreach: 1.0646
+Mean episode Episode_Reward/noretreat: -0.0331
+Mean episode Episode_Reward/penalize_kneeheight: -0.0001
+Mean episode Episode_Reward/penalize_self_collision: 0.0000
+Mean episode Episode_Reward/penalize_sharpcontact: -0.0060
+Mean episode Episode_Reward/postangvel: 2.3382
+Mean episode Episode_Reward/postlinvel: 0.8288
+Mean episode Episode_Reward/postorientation: 2.4450
+Mean episode Episode_Reward/postupperdofpos: 0.5649
+Mean episode Episode_Reward/postwaistdofpos: 0.8241
+Mean episode Episode_Reward/stayonline: -0.0001
+Mean episode Episode_Reward/stopball: 1.2407
+Mean episode Episode_Reward/torque_limits: -0.0002
+Mean episode Episode_Reward/torques: -0.0000
+Mean episode Episode_Termination/bad_orientation: 0.0000
+Mean episode Episode_Termination/ball_exit: 1.0833
+Mean episode Episode_Termination/base_height: 0.0417
+Mean episode Episode_Termination/sharpforce: 0.0000
+Mean episode Episode_Termination/time_out: 31.7500
+--------------------------------------------------------------------------------
+                   Total timesteps: 426885120
+                    Iteration time: 5.98s
+                        Total time: 12235.64s
+                               ETA: 199092.2s
+
+################################################################################
+                    [1m Learning iteration 2895/50000 [0m
+
+                       Computation: 24598 steps/s (collection: 4.954s, learning 1.041s)
+               Value function loss: 0.3707
+                    Surrogate loss: -0.0054
+                          AMP loss: 0.3201
+                 AMP grad pen loss: 0.2143
+              AMP mean policy pred: -0.4575
+              AMP mean expert pred: 0.4615
+             Mean action noise std: 0.22
+                       Mean reward: 54.41
+               Mean episode length: 196.59
+Mean episode Curriculum/ball_difficulty/ball_difficulty: 1.0000
+Mean episode Curriculum/dof_pos_limits_curriculum/weight: -9.0000
+Mean episode Curriculum/footreach_curriculum/weight: 20.0000
+Mean episode Curriculum/stopball_curriculum/weight: 250.0000
+Mean episode Curriculum/torque_limits_curriculum/weight: -9.0000
+Mean episode Episode_Metrics/mean_action_acc: 0.4328
+Mean episode Episode_Reward/action_acc_l2: -0.6065
+Mean episode Episode_Reward/action_rate_l2: -0.6227
+Mean episode Episode_Reward/ang_vel_xy: -0.0039
+Mean episode Episode_Reward/ang_vel_z: -0.0467
+Mean episode Episode_Reward/deviation_waist_joint: -0.0000
+Mean episode Episode_Reward/dof_acc: -0.0089
+Mean episode Episode_Reward/dof_pos_limits: -0.0139
+Mean episode Episode_Reward/dof_vel: -0.0014
+Mean episode Episode_Reward/dof_vel_limits: 0.0000
+Mean episode Episode_Reward/feet_slippage: 2.5897
+Mean episode Episode_Reward/feetorientation: 2.9107
+Mean episode Episode_Reward/footreach: 0.9935
+Mean episode Episode_Reward/noretreat: -0.0330
+Mean episode Episode_Reward/penalize_kneeheight: -0.0000
+Mean episode Episode_Reward/penalize_self_collision: -0.0016
+Mean episode Episode_Reward/penalize_sharpcontact: -0.0025
+Mean episode Episode_Reward/postangvel: 2.3296
+Mean episode Episode_Reward/postlinvel: 0.8264
+Mean episode Episode_Reward/postorientation: 2.4359
+Mean episode Episode_Reward/postupperdofpos: 0.5639
+Mean episode Episode_Reward/postwaistdofpos: 0.8222
+Mean episode Episode_Reward/stayonline: -0.0000
+Mean episode Episode_Reward/stopball: 1.2384
+Mean episode Episode_Reward/torque_limits: -0.0004
+Mean episode Episode_Reward/torques: -0.0000
+Mean episode Episode_Termination/bad_orientation: 0.0417
+Mean episode Episode_Termination/ball_exit: 1.5833
+Mean episode Episode_Termination/base_height: 0.0417
+Mean episode Episode_Termination/sharpforce: 0.0000
+Mean episode Episode_Termination/time_out: 30.0833
+--------------------------------------------------------------------------------
+                   Total timesteps: 427032576
+                    Iteration time: 5.99s
+                        Total time: 12241.63s
+                               ETA: 199116.7s
+
+################################################################################
+                    [1m Learning iteration 2896/50000 [0m
+
+                       Computation: 24597 steps/s (collection: 4.955s, learning 1.040s)
+               Value function loss: 0.1952
+                    Surrogate loss: -0.0057
+                          AMP loss: 0.3308
+                 AMP grad pen loss: 0.2217
+              AMP mean policy pred: -0.4429
+              AMP mean expert pred: 0.4560
+             Mean action noise std: 0.22
+                       Mean reward: 53.43
+               Mean episode length: 194.33
+Mean episode Curriculum/ball_difficulty/ball_difficulty: 1.0000
+Mean episode Curriculum/dof_pos_limits_curriculum/weight: -9.0000
+Mean episode Curriculum/footreach_curriculum/weight: 20.0000
+Mean episode Curriculum/stopball_curriculum/weight: 250.0000
+Mean episode Curriculum/torque_limits_curriculum/weight: -9.0000
+Mean episode Episode_Metrics/mean_action_acc: 0.4328
+Mean episode Episode_Reward/action_acc_l2: -0.6060
+Mean episode Episode_Reward/action_rate_l2: -0.6225
+Mean episode Episode_Reward/ang_vel_xy: -0.0041
+Mean episode Episode_Reward/ang_vel_z: -0.0475
+Mean episode Episode_Reward/deviation_waist_joint: -0.0000
+Mean episode Episode_Reward/dof_acc: -0.0088
+Mean episode Episode_Reward/dof_pos_limits: -0.0136
+Mean episode Episode_Reward/dof_vel: -0.0014
+Mean episode Episode_Reward/dof_vel_limits: 0.0000
+Mean episode Episode_Reward/feet_slippage: 2.5897
+Mean episode Episode_Reward/feetorientation: 2.9101
+Mean episode Episode_Reward/footreach: 1.0435
+Mean episode Episode_Reward/noretreat: -0.0333
+Mean episode Episode_Reward/penalize_kneeheight: -0.0000
+Mean episode Episode_Reward/penalize_self_collision: -0.0012
+Mean episode Episode_Reward/penalize_sharpcontact: -0.0048
+Mean episode Episode_Reward/postangvel: 2.3144
+Mean episode Episode_Reward/postlinvel: 0.8213
+Mean episode Episode_Reward/postorientation: 2.4238
+Mean episode Episode_Reward/postupperdofpos: 0.5591
+Mean episode Episode_Reward/postwaistdofpos: 0.8175
+Mean episode Episode_Reward/stayonline: -0.0002
+Mean episode Episode_Reward/stopball: 1.2318
+Mean episode Episode_Reward/torque_limits: -0.0002
+Mean episode Episode_Reward/torques: -0.0000
+Mean episode Episode_Termination/bad_orientation: 0.1667
+Mean episode Episode_Termination/ball_exit: 1.2083
+Mean episode Episode_Termination/base_height: 0.1250
+Mean episode Episode_Termination/sharpforce: 0.0000
+Mean episode Episode_Termination/time_out: 30.1250
+--------------------------------------------------------------------------------
+                   Total timesteps: 427180032
+                    Iteration time: 5.99s
+                        Total time: 12247.63s
+                               ETA: 199141.2s
+
+################################################################################
+                    [1m Learning iteration 2897/50000 [0m
+
+                       Computation: 26928 steps/s (collection: 4.658s, learning 0.818s)
+               Value function loss: 0.2562
+                    Surrogate loss: -0.0057
+                          AMP loss: 0.3457
+                 AMP grad pen loss: 0.2286
+              AMP mean policy pred: -0.4317
+              AMP mean expert pred: 0.4392
+             Mean action noise std: 0.22
+                       Mean reward: 53.34
+               Mean episode length: 194.55
+Mean episode Curriculum/ball_difficulty/ball_difficulty: 1.0000
+Mean episode Curriculum/dof_pos_limits_curriculum/weight: -9.0000
+Mean episode Curriculum/footreach_curriculum/weight: 20.0000
+Mean episode Curriculum/stopball_curriculum/weight: 250.0000
+Mean episode Curriculum/torque_limits_curriculum/weight: -9.0000
+Mean episode Episode_Metrics/mean_action_acc: 0.4321
+Mean episode Episode_Reward/action_acc_l2: -0.6079
+Mean episode Episode_Reward/action_rate_l2: -0.6246
+Mean episode Episode_Reward/ang_vel_xy: -0.0040
+Mean episode Episode_Reward/ang_vel_z: -0.0477
+Mean episode Episode_Reward/deviation_waist_joint: -0.0000
+Mean episode Episode_Reward/dof_acc: -0.0089
+Mean episode Episode_Reward/dof_pos_limits: -0.0135
+Mean episode Episode_Reward/dof_vel: -0.0014
+Mean episode Episode_Reward/dof_vel_limits: 0.0000
+Mean episode Episode_Reward/feet_slippage: 2.6049
+Mean episode Episode_Reward/feetorientation: 2.9246
+Mean episode Episode_Reward/footreach: 0.9779
+Mean episode Episode_Reward/noretreat: -0.0336
+Mean episode Episode_Reward/penalize_kneeheight: -0.0001
+Mean episode Episode_Reward/penalize_self_collision: -0.0003
+Mean episode Episode_Reward/penalize_sharpcontact: -0.0034
+Mean episode Episode_Reward/postangvel: 2.3352
+Mean episode Episode_Reward/postlinvel: 0.8277
+Mean episode Episode_Reward/postorientation: 2.4420
+Mean episode Episode_Reward/postupperdofpos: 0.5663
+Mean episode Episode_Reward/postwaistdofpos: 0.8232
+Mean episode Episode_Reward/stayonline: -0.0002
+Mean episode Episode_Reward/stopball: 1.2450
+Mean episode Episode_Reward/torque_limits: 0.0000
+Mean episode Episode_Reward/torques: -0.0000
+Mean episode Episode_Termination/bad_orientation: 0.0417
+Mean episode Episode_Termination/ball_exit: 1.0833
+Mean episode Episode_Termination/base_height: 0.1250
+Mean episode Episode_Termination/sharpforce: 0.0000
+Mean episode Episode_Termination/time_out: 28.0833
+--------------------------------------------------------------------------------
+                   Total timesteps: 427327488
+                    Iteration time: 5.48s
+                        Total time: 12253.10s
+                               ETA: 199157.3s
+
+################################################################################
+                    [1m Learning iteration 2898/50000 [0m
+
+                       Computation: 35091 steps/s (collection: 3.380s, learning 0.822s)
+               Value function loss: 0.2313
+                    Surrogate loss: -0.0064
+                          AMP loss: 0.3768
+                 AMP grad pen loss: 0.2359
+              AMP mean policy pred: -0.4147
+              AMP mean expert pred: 0.4048
+             Mean action noise std: 0.22
+                       Mean reward: 53.33
+               Mean episode length: 194.81
+Mean episode Curriculum/ball_difficulty/ball_difficulty: 1.0000
+Mean episode Curriculum/dof_pos_limits_curriculum/weight: -9.0000
+Mean episode Curriculum/footreach_curriculum/weight: 20.0000
+Mean episode Curriculum/stopball_curriculum/weight: 250.0000
+Mean episode Curriculum/torque_limits_curriculum/weight: -9.0000
+Mean episode Episode_Metrics/mean_action_acc: 0.4318
+Mean episode Episode_Reward/action_acc_l2: -0.6055
+Mean episode Episode_Reward/action_rate_l2: -0.6222
+Mean episode Episode_Reward/ang_vel_xy: -0.0040
+Mean episode Episode_Reward/ang_vel_z: -0.0464
+Mean episode Episode_Reward/deviation_waist_joint: -0.0000
+Mean episode Episode_Reward/dof_acc: -0.0088
+Mean episode Episode_Reward/dof_pos_limits: -0.0122
+Mean episode Episode_Reward/dof_vel: -0.0014
+Mean episode Episode_Reward/dof_vel_limits: 0.0000
+Mean episode Episode_Reward/feet_slippage: 2.6016
+Mean episode Episode_Reward/feetorientation: 2.9189
+Mean episode Episode_Reward/footreach: 1.0298
+Mean episode Episode_Reward/noretreat: -0.0330
+Mean episode Episode_Reward/penalize_kneeheight: 0.0000
+Mean episode Episode_Reward/penalize_self_collision: -0.0009
+Mean episode Episode_Reward/penalize_sharpcontact: -0.0061
+Mean episode Episode_Reward/postangvel: 2.3257
+Mean episode Episode_Reward/postlinvel: 0.8247
+Mean episode Episode_Reward/postorientation: 2.4343
+Mean episode Episode_Reward/postupperdofpos: 0.5647
+Mean episode Episode_Reward/postwaistdofpos: 0.8196
+Mean episode Episode_Reward/stayonline: -0.0000
+Mean episode Episode_Reward/stopball: 1.2371
+Mean episode Episode_Reward/torque_limits: -0.0005
+Mean episode Episode_Reward/torques: -0.0000
+Mean episode Episode_Termination/bad_orientation: 0.0000
+Mean episode Episode_Termination/ball_exit: 1.3333
+Mean episode Episode_Termination/base_height: 0.0417
+Mean episode Episode_Termination/sharpforce: 0.0000
+Mean episode Episode_Termination/time_out: 30.8333
+--------------------------------------------------------------------------------
+                   Total timesteps: 427474944
+                    Iteration time: 4.20s
+                        Total time: 12257.30s
+                               ETA: 199152.6s
+
+################################################################################
+                    [1m Learning iteration 2899/50000 [0m
+
+                       Computation: 35260 steps/s (collection: 3.356s, learning 0.826s)
+               Value function loss: 0.3293
+                    Surrogate loss: -0.0044
+                          AMP loss: 0.3856
+                 AMP grad pen loss: 0.2336
+              AMP mean policy pred: -0.4132
+              AMP mean expert pred: 0.3977
+             Mean action noise std: 0.22
+                       Mean reward: 53.67
+               Mean episode length: 196.56
+Mean episode Curriculum/ball_difficulty/ball_difficulty: 1.0000
+Mean episode Curriculum/dof_pos_limits_curriculum/weight: -9.0000
+Mean episode Curriculum/footreach_curriculum/weight: 20.0000
+Mean episode Curriculum/stopball_curriculum/weight: 250.0000
+Mean episode Curriculum/torque_limits_curriculum/weight: -9.0000
+Mean episode Episode_Metrics/mean_action_acc: 0.4317
+Mean episode Episode_Reward/action_acc_l2: -0.6072
+Mean episode Episode_Reward/action_rate_l2: -0.6239
+Mean episode Episode_Reward/ang_vel_xy: -0.0041
+Mean episode Episode_Reward/ang_vel_z: -0.0467
+Mean episode Episode_Reward/deviation_waist_joint: -0.0000
+Mean episode Episode_Reward/dof_acc: -0.0089
+Mean episode Episode_Reward/dof_pos_limits: -0.0107
+Mean episode Episode_Reward/dof_vel: -0.0014
+Mean episode Episode_Reward/dof_vel_limits: 0.0000
+Mean episode Episode_Reward/feet_slippage: 2.6085
+Mean episode Episode_Reward/feetorientation: 2.9254
+Mean episode Episode_Reward/footreach: 0.9708
+Mean episode Episode_Reward/noretreat: -0.0331
+Mean episode Episode_Reward/penalize_kneeheight: -0.0000
+Mean episode Episode_Reward/penalize_self_collision: -0.0003
+Mean episode Episode_Reward/penalize_sharpcontact: -0.0019
+Mean episode Episode_Reward/postangvel: 2.3390
+Mean episode Episode_Reward/postlinvel: 0.8296
+Mean episode Episode_Reward/postorientation: 2.4484
+Mean episode Episode_Reward/postupperdofpos: 0.5664
+Mean episode Episode_Reward/postwaistdofpos: 0.8244
+Mean episode Episode_Reward/stayonline: -0.0001
+Mean episode Episode_Reward/stopball: 1.2378
+Mean episode Episode_Reward/torque_limits: -0.0002
+Mean episode Episode_Reward/torques: -0.0000
+Mean episode Episode_Termination/bad_orientation: 0.0833
+Mean episode Episode_Termination/ball_exit: 1.1250
+Mean episode Episode_Termination/base_height: 0.0417
+Mean episode Episode_Termination/sharpforce: 0.0417
+Mean episode Episode_Termination/time_out: 30.7917
+--------------------------------------------------------------------------------
+                   Total timesteps: 427622400
+                    Iteration time: 4.18s
+                        Total time: 12261.49s
+                               ETA: 199147.7s
+
+################################################################################
+                    [1m Learning iteration 2900/50000 [0m
+
+                       Computation: 29109 steps/s (collection: 4.038s, learning 1.027s)
+               Value function loss: 0.2068
+                    Surrogate loss: -0.0059
+                          AMP loss: 0.3820
+                 AMP grad pen loss: 0.2272
+              AMP mean policy pred: -0.4176
+              AMP mean expert pred: 0.3978
+             Mean action noise std: 0.22
+                       Mean reward: 52.54
+               Mean episode length: 192.13
+Mean episode Curriculum/ball_difficulty/ball_difficulty: 1.0000
+Mean episode Curriculum/dof_pos_limits_curriculum/weight: -9.0000
+Mean episode Curriculum/footreach_curriculum/weight: 20.0000
+Mean episode Curriculum/stopball_curriculum/weight: 250.0000
+Mean episode Curriculum/torque_limits_curriculum/weight: -9.0000
+Mean episode Episode_Metrics/mean_action_acc: 0.4323
+Mean episode Episode_Reward/action_acc_l2: -0.6010
+Mean episode Episode_Reward/action_rate_l2: -0.6175
+Mean episode Episode_Reward/ang_vel_xy: -0.0041
+Mean episode Episode_Reward/ang_vel_z: -0.0481
+Mean episode Episode_Reward/deviation_waist_joint: -0.0000
+Mean episode Episode_Reward/dof_acc: -0.0089
+Mean episode Episode_Reward/dof_pos_limits: -0.0142
+Mean episode Episode_Reward/dof_vel: -0.0014
+Mean episode Episode_Reward/dof_vel_limits: -0.0000
+Mean episode Episode_Reward/feet_slippage: 2.5755
+Mean episode Episode_Reward/feetorientation: 2.8938
+Mean episode Episode_Reward/footreach: 1.0202
+Mean episode Episode_Reward/noretreat: -0.0330
+Mean episode Episode_Reward/penalize_kneeheight: -0.0000
+Mean episode Episode_Reward/penalize_self_collision: -0.0032
+Mean episode Episode_Reward/penalize_sharpcontact: -0.0027
+Mean episode Episode_Reward/postangvel: 2.2994
+Mean episode Episode_Reward/postlinvel: 0.8167
+Mean episode Episode_Reward/postorientation: 2.4082
+Mean episode Episode_Reward/postupperdofpos: 0.5503
+Mean episode Episode_Reward/postwaistdofpos: 0.8122
+Mean episode Episode_Reward/stayonline: -0.0002
+Mean episode Episode_Reward/stopball: 1.2317
+Mean episode Episode_Reward/torque_limits: -0.0003
+Mean episode Episode_Reward/torques: -0.0000
+Mean episode Episode_Termination/bad_orientation: 0.0833
+Mean episode Episode_Termination/ball_exit: 1.5417
+Mean episode Episode_Termination/base_height: 0.1667
+Mean episode Episode_Termination/sharpforce: 0.0000
+Mean episode Episode_Termination/time_out: 28.9583
+--------------------------------------------------------------------------------
+                   Total timesteps: 427769856
+                    Iteration time: 5.07s
+                        Total time: 12266.55s
+                               ETA: 199157.0s
+
+################################################################################
+                    [1m Learning iteration 2901/50000 [0m
+
+                       Computation: 28002 steps/s (collection: 4.431s, learning 0.834s)
+               Value function loss: 0.2353
+                    Surrogate loss: -0.0044
+                          AMP loss: 0.3794
+                 AMP grad pen loss: 0.2203
+              AMP mean policy pred: -0.4170
+              AMP mean expert pred: 0.4020
+             Mean action noise std: 0.22
+                       Mean reward: 53.81
+               Mean episode length: 195.72
+Mean episode Curriculum/ball_difficulty/ball_difficulty: 1.0000
+Mean episode Curriculum/dof_pos_limits_curriculum/weight: -9.0000
+Mean episode Curriculum/footreach_curriculum/weight: 20.0000
+Mean episode Curriculum/stopball_curriculum/weight: 250.0000
+Mean episode Curriculum/torque_limits_curriculum/weight: -9.0000
+Mean episode Episode_Metrics/mean_action_acc: 0.4319
+Mean episode Episode_Reward/action_acc_l2: -0.6064
+Mean episode Episode_Reward/action_rate_l2: -0.6234
+Mean episode Episode_Reward/ang_vel_xy: -0.0039
+Mean episode Episode_Reward/ang_vel_z: -0.0472
+Mean episode Episode_Reward/deviation_waist_joint: -0.0000
+Mean episode Episode_Reward/dof_acc: -0.0090
+Mean episode Episode_Reward/dof_pos_limits: -0.0136
+Mean episode Episode_Reward/dof_vel: -0.0014
+Mean episode Episode_Reward/dof_vel_limits: 0.0000
+Mean episode Episode_Reward/feet_slippage: 2.6039
+Mean episode Episode_Reward/feetorientation: 2.9234
+Mean episode Episode_Reward/footreach: 0.9924
+Mean episode Episode_Reward/noretreat: -0.0327
+Mean episode Episode_Reward/penalize_kneeheight: 0.0000
+Mean episode Episode_Reward/penalize_self_collision: -0.0006
+Mean episode Episode_Reward/penalize_sharpcontact: -0.0048
+Mean episode Episode_Reward/postangvel: 2.3334
+Mean episode Episode_Reward/postlinvel: 0.8275
+Mean episode Episode_Reward/postorientation: 2.4418
+Mean episode Episode_Reward/postupperdofpos: 0.5670
+Mean episode Episode_Reward/postwaistdofpos: 0.8223
+Mean episode Episode_Reward/stayonline: 0.0000
+Mean episode Episode_Reward/stopball: 1.2414
+Mean episode Episode_Reward/torque_limits: -0.0001
+Mean episode Episode_Reward/torques: -0.0000
+Mean episode Episode_Termination/bad_orientation: 0.0000
+Mean episode Episode_Termination/ball_exit: 1.1667
+Mean episode Episode_Termination/base_height: 0.0000
+Mean episode Episode_Termination/sharpforce: 0.0000
+Mean episode Episode_Termination/time_out: 31.0833
+--------------------------------------------------------------------------------
+                   Total timesteps: 427917312
+                    Iteration time: 5.27s
+                        Total time: 12271.82s
+                               ETA: 199169.6s
+
+################################################################################
+                    [1m Learning iteration 2902/50000 [0m
+
+                       Computation: 35040 steps/s (collection: 3.387s, learning 0.821s)
+               Value function loss: 0.2672
+                    Surrogate loss: -0.0063
+                          AMP loss: 0.3625
+                 AMP grad pen loss: 0.2100
+              AMP mean policy pred: -0.4359
+              AMP mean expert pred: 0.4143
+             Mean action noise std: 0.22
+                       Mean reward: 55.04
+               Mean episode length: 198.89
+Mean episode Curriculum/ball_difficulty/ball_difficulty: 1.0000
+Mean episode Curriculum/dof_pos_limits_curriculum/weight: -9.0000
+Mean episode Curriculum/footreach_curriculum/weight: 20.0000
+Mean episode Curriculum/stopball_curriculum/weight: 250.0000
+Mean episode Curriculum/torque_limits_curriculum/weight: -9.0000
+Mean episode Episode_Metrics/mean_action_acc: 0.4314
+Mean episode Episode_Reward/action_acc_l2: -0.6083
+Mean episode Episode_Reward/action_rate_l2: -0.6250
+Mean episode Episode_Reward/ang_vel_xy: -0.0038
+Mean episode Episode_Reward/ang_vel_z: -0.0443
+Mean episode Episode_Reward/deviation_waist_joint: -0.0000
+Mean episode Episode_Reward/dof_acc: -0.0088
+Mean episode Episode_Reward/dof_pos_limits: -0.0103
+Mean episode Episode_Reward/dof_vel: -0.0014
+Mean episode Episode_Reward/dof_vel_limits: 0.0000
+Mean episode Episode_Reward/feet_slippage: 2.6222
+Mean episode Episode_Reward/feetorientation: 2.9379
+Mean episode Episode_Reward/footreach: 1.0316
+Mean episode Episode_Reward/noretreat: -0.0328
+Mean episode Episode_Reward/penalize_kneeheight: 0.0000
+Mean episode Episode_Reward/penalize_self_collision: -0.0008
+Mean episode Episode_Reward/penalize_sharpcontact: -0.0024
+Mean episode Episode_Reward/postangvel: 2.3478
+Mean episode Episode_Reward/postlinvel: 0.8319
+Mean episode Episode_Reward/postorientation: 2.4557
+Mean episode Episode_Reward/postupperdofpos: 0.5707
+Mean episode Episode_Reward/postwaistdofpos: 0.8269
+Mean episode Episode_Reward/stayonline: 0.0000
+Mean episode Episode_Reward/stopball: 1.2399
+Mean episode Episode_Reward/torque_limits: 0.0000
+Mean episode Episode_Reward/torques: -0.0000
+Mean episode Episode_Termination/bad_orientation: 0.0000
+Mean episode Episode_Termination/ball_exit: 1.2500
+Mean episode Episode_Termination/base_height: 0.0000
+Mean episode Episode_Termination/sharpforce: 0.0000
+Mean episode Episode_Termination/time_out: 31.2083
+--------------------------------------------------------------------------------
+                   Total timesteps: 428064768
+                    Iteration time: 4.21s
+                        Total time: 12276.02s
+                               ETA: 199165.1s
+
+################################################################################
+                    [1m Learning iteration 2903/50000 [0m
+
+                       Computation: 35016 steps/s (collection: 3.370s, learning 0.841s)
+               Value function loss: 0.3021
+                    Surrogate loss: -0.0044
+                          AMP loss: 0.3473
+                 AMP grad pen loss: 0.2065
+              AMP mean policy pred: -0.4477
+              AMP mean expert pred: 0.4293
+             Mean action noise std: 0.22
+                       Mean reward: 53.47
+               Mean episode length: 194.32
+Mean episode Curriculum/ball_difficulty/ball_difficulty: 1.0000
+Mean episode Curriculum/dof_pos_limits_curriculum/weight: -9.0000
+Mean episode Curriculum/footreach_curriculum/weight: 20.0000
+Mean episode Curriculum/stopball_curriculum/weight: 250.0000
+Mean episode Curriculum/torque_limits_curriculum/weight: -9.0000
+Mean episode Episode_Metrics/mean_action_acc: 0.4316
+Mean episode Episode_Reward/action_acc_l2: -0.6060
+Mean episode Episode_Reward/action_rate_l2: -0.6228
+Mean episode Episode_Reward/ang_vel_xy: -0.0039
+Mean episode Episode_Reward/ang_vel_z: -0.0468
+Mean episode Episode_Reward/deviation_waist_joint: -0.0000
+Mean episode Episode_Reward/dof_acc: -0.0088
+Mean episode Episode_Reward/dof_pos_limits: -0.0117
+Mean episode Episode_Reward/dof_vel: -0.0014
+Mean episode Episode_Reward/dof_vel_limits: -0.0002
+Mean episode Episode_Reward/feet_slippage: 2.6083
+Mean episode Episode_Reward/feetorientation: 2.9262
+Mean episode Episode_Reward/footreach: 1.0023
+Mean episode Episode_Reward/noretreat: -0.0326
+Mean episode Episode_Reward/penalize_kneeheight: -0.0000
+Mean episode Episode_Reward/penalize_self_collision: -0.0007
+Mean episode Episode_Reward/penalize_sharpcontact: -0.0028
+Mean episode Episode_Reward/postangvel: 2.3368
+Mean episode Episode_Reward/postlinvel: 0.8288
+Mean episode Episode_Reward/postorientation: 2.4432
+Mean episode Episode_Reward/postupperdofpos: 0.5632
+Mean episode Episode_Reward/postwaistdofpos: 0.8235
+Mean episode Episode_Reward/stayonline: -0.0001
+Mean episode Episode_Reward/stopball: 1.2404
+Mean episode Episode_Reward/torque_limits: -0.0003
+Mean episode Episode_Reward/torques: -0.0000
+Mean episode Episode_Termination/bad_orientation: 0.0833
+Mean episode Episode_Termination/ball_exit: 1.2083
+Mean episode Episode_Termination/base_height: 0.0000
+Mean episode Episode_Termination/sharpforce: 0.0417
+Mean episode Episode_Termination/time_out: 30.1667
+--------------------------------------------------------------------------------
+                   Total timesteps: 428212224
+                    Iteration time: 4.21s
+                        Total time: 12280.24s
+                               ETA: 199160.6s
+
+################################################################################
+                    [1m Learning iteration 2904/50000 [0m
+
+                       Computation: 28432 steps/s (collection: 4.156s, learning 1.030s)
+               Value function loss: 0.2216
+                    Surrogate loss: -0.0055
+                          AMP loss: 0.3293
+                 AMP grad pen loss: 0.2029
+              AMP mean policy pred: -0.4603
+              AMP mean expert pred: 0.4465
+             Mean action noise std: 0.22
+                       Mean reward: 53.76
+               Mean episode length: 196.08
+Mean episode Curriculum/ball_difficulty/ball_difficulty: 1.0000
+Mean episode Curriculum/dof_pos_limits_curriculum/weight: -9.0000
+Mean episode Curriculum/footreach_curriculum/weight: 20.0000
+Mean episode Curriculum/stopball_curriculum/weight: 250.0000
+Mean episode Curriculum/torque_limits_curriculum/weight: -9.0000
+Mean episode Episode_Metrics/mean_action_acc: 0.4324
+Mean episode Episode_Reward/action_acc_l2: -0.6023
+Mean episode Episode_Reward/action_rate_l2: -0.6189
+Mean episode Episode_Reward/ang_vel_xy: -0.0041
+Mean episode Episode_Reward/ang_vel_z: -0.0471
+Mean episode Episode_Reward/deviation_waist_joint: -0.0000
+Mean episode Episode_Reward/dof_acc: -0.0087
+Mean episode Episode_Reward/dof_pos_limits: -0.0127
+Mean episode Episode_Reward/dof_vel: -0.0014
+Mean episode Episode_Reward/dof_vel_limits: 0.0000
+Mean episode Episode_Reward/feet_slippage: 2.5852
+Mean episode Episode_Reward/feetorientation: 2.8994
+Mean episode Episode_Reward/footreach: 0.9943
+Mean episode Episode_Reward/noretreat: -0.0322
+Mean episode Episode_Reward/penalize_kneeheight: -0.0001
+Mean episode Episode_Reward/penalize_self_collision: 0.0000
+Mean episode Episode_Reward/penalize_sharpcontact: -0.0032
+Mean episode Episode_Reward/postangvel: 2.3135
+Mean episode Episode_Reward/postlinvel: 0.8207
+Mean episode Episode_Reward/postorientation: 2.4190
+Mean episode Episode_Reward/postupperdofpos: 0.5561
+Mean episode Episode_Reward/postwaistdofpos: 0.8158
+Mean episode Episode_Reward/stayonline: -0.0003
+Mean episode Episode_Reward/stopball: 1.2273
+Mean episode Episode_Reward/torque_limits: -0.0005
+Mean episode Episode_Reward/torques: -0.0000
+Mean episode Episode_Termination/bad_orientation: 0.1250
+Mean episode Episode_Termination/ball_exit: 1.4167
+Mean episode Episode_Termination/base_height: 0.1250
+Mean episode Episode_Termination/sharpforce: 0.0417
+Mean episode Episode_Termination/time_out: 29.5000
+--------------------------------------------------------------------------------
+                   Total timesteps: 428359680
+                    Iteration time: 5.19s
+                        Total time: 12285.42s
+                               ETA: 199171.8s

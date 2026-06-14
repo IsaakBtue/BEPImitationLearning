@@ -91,8 +91,8 @@ def reset_robot_rsi(
         # Set joint positions from motion
         target_pos = torch.from_numpy(joint_pos[frame_idx]).float().to(env.device)
         robot.write_joint_state_to_sim(
-            pos=target_pos.unsqueeze(0),
-            vel=torch.zeros((1, 21), device=env.device),
+            target_pos.unsqueeze(0),
+            torch.zeros((1, 21), device=env.device),
             env_ids=env_id.unsqueeze(0),
         )
 
