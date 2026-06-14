@@ -138,16 +138,6 @@ def goalkeeper_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
                 ],
             },
         )
-        cfg.curriculum["rsi_curriculum"] = CurriculumTermCfg(
-            func=gk_mdp.rsi_curriculum,
-            params={
-                "stages": [
-                    {"step": 0,                    "rsi_prob": 0.8},
-                    {"step": 600  * _num_steps,    "rsi_prob": 0.4},
-                    {"step": 1200 * _num_steps,    "rsi_prob": 0.0},
-                ],
-            },
-        )
         cfg.curriculum["stopball_curriculum"] = CurriculumTermCfg(
             func=mjlab_mdp.reward_curriculum,
             params={
