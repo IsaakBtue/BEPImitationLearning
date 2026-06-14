@@ -161,7 +161,8 @@ class AMPOnPolicyRunner:
             learn_time = stop - start
             if self.log_dir is not None:
                 self.log(locals())
-            if it % self.save_interval == 0:
+            effective_save_interval = 200 if it < 1000 else self.save_interval
+            if it % effective_save_interval == 0:
                 self.save(os.path.join(self.log_dir, 'model_{}.pt'.format(it)))
 
             video_interval = self.cfg.get("video_interval", 0)

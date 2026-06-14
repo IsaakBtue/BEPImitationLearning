@@ -58,6 +58,9 @@ Imitationlearningbooster/logs/
 goalkeeper_deploy/tasks/goalkeeper/models/*.pt
 zzgifs/
 
+# wandb binary protocol files (large, already synced to wandb.ai cloud)
+SimpleGoalKeeper/logs/rsl_rl/simple_goalkeeper/wandb/**/*.wandb
+
 # Local overrides
 .local/
 .env.local

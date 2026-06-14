@@ -7,6 +7,7 @@ import torch
 
 from mjlab.entity import Entity
 from mjlab.managers.scene_entity_config import SceneEntityCfg
+from mjlab.sensor import ContactSensor
 from mjlab.utils.lab_api.math import quat_apply, quat_inv
 
 if TYPE_CHECKING:
@@ -23,20 +24,67 @@ _ARM_JOINT_CFG = SceneEntityCfg(
     ),
 )
 _WAIST_JOINT_CFG_RECOVERY = SceneEntityCfg("robot", joint_names=("Waist",))
+_ALL_JOINTS_CFG = SceneEntityCfg("robot")
+
+# Per-joint stiffness (kp) for torque normalisation. Source: ILB _T1_KP_MAP,
+# which was validated on real T1 hardware via KaydenKnapik/BoosterT1mjlab.
+_T1_KP_MAP: dict[str, float] = {
+    "Left_Shoulder_Pitch": 15.0, "Left_Shoulder_Roll": 15.0,
+    "Left_Elbow_Pitch":    15.0, "Left_Elbow_Yaw":     15.0,
+    "Right_Shoulder_Pitch": 15.0, "Right_Shoulder_Roll": 15.0,
+    "Right_Elbow_Pitch":   15.0, "Right_Elbow_Yaw":    15.0,
+    "Waist":               80.0,
+    "Left_Hip_Pitch":     120.0, "Right_Hip_Pitch":    120.0,
+    "Left_Hip_Roll":       80.0, "Left_Hip_Yaw":        80.0,
+    "Right_Hip_Roll":      80.0, "Right_Hip_Yaw":       80.0,
+    "Left_Knee_Pitch":    200.0, "Right_Knee_Pitch":   200.0,
+    "Left_Ankle_Pitch":    50.0, "Right_Ankle_Pitch":   50.0,
+    "Left_Ankle_Roll":     40.0, "Right_Ankle_Roll":    40.0,
+}
+
+# Per-joint effort limits from T1_serial_clean.xml actuatorfrcrange.
+# Source: ILB _T1_EFFORT_MAP (same hardware-validated values).
+_T1_EFFORT_MAP: dict[str, float] = {
+    "Left_Shoulder_Pitch": 36.0, "Left_Shoulder_Roll": 36.0,
+    "Left_Elbow_Pitch":    36.0, "Left_Elbow_Yaw":     36.0,
+    "Right_Shoulder_Pitch": 36.0, "Right_Shoulder_Roll": 36.0,
+    "Right_Elbow_Pitch":   36.0, "Right_Elbow_Yaw":    36.0,
+    "Waist":               40.0,
+    "Left_Hip_Pitch":      55.0, "Right_Hip_Pitch":     55.0,
+    "Left_Hip_Roll":       40.0, "Left_Hip_Yaw":        40.0,
+    "Right_Hip_Roll":      40.0, "Right_Hip_Yaw":       40.0,
+    "Left_Knee_Pitch":     65.0, "Right_Knee_Pitch":    65.0,
+    "Left_Ankle_Pitch":    50.0, "Right_Ankle_Pitch":   50.0,
+    "Left_Ankle_Roll":     50.0, "Right_Ankle_Roll":    50.0,
+}
 
 
 def _ball_is_behind(env: "ManagerBasedRlEnv", ball_name: str) -> torch.Tensor:
-    """Bool mask (N,): ball has crossed the goal line (x_local < 0).
+    """Bool mask (N,): ball has been deflected OR has crossed the goal line.
 
-    Previously also fired on delta_vx > 1.0 (any deflection), which caused
-    footreach and successland to zero out the moment the torso deflected the ball —
-    before feet could ever reach it. Now only the goal-line crossing suppresses
-    foot rewards, so the robot can still be rewarded for foot contact after a
-    body deflection.
+    Mirrors ILB / upstream Humanoid-Goalkeeper exactly:
+        behind = (ball_x < 0) | (delta_vx > 1.0)
+    delta_vx > 1.0 fires the moment stopball fires — deactivates footreach
+    (no more chasing) and activates post-save recovery rewards immediately.
+    Reuses _sb_init_vx set by stopball; falls back to absolute threshold on
+    the very first step before stopball has run.
     """
     ball: Entity = env.scene[ball_name]
     ball_x_local = ball.data.root_link_pos_w[:, 0] - env.scene.env_origins[:, 0]
-    return ball_x_local < 0.0
+    ball_x_vel = ball.data.root_link_lin_vel_w[:, 0]
+    init_vx = getattr(env, "_sb_init_vx", None)
+    if init_vx is not None:
+        delta_vx = ball_x_vel - init_vx
+        return (ball_x_local < 0.0) | (delta_vx > 1.0)
+    return (ball_x_local < 0.0) | (ball_x_vel > 1.0)
+
+
+def _robot_x_axis_w(env: "ManagerBasedRlEnv") -> torch.Tensor:
+    """Robot local +X unit vector in world frame. Shape (N, 3)."""
+    robot: Entity = env.scene["robot"]
+    x_local = torch.zeros(env.num_envs, 3, device=env.device)
+    x_local[:, 0] = 1.0
+    return quat_apply(robot.data.root_link_quat_w, x_local)
 
 
 def footreach(
@@ -125,36 +173,6 @@ def stopball(
     return fired.float()
 
 
-def _robot_x_axis_w(env: "ManagerBasedRlEnv") -> torch.Tensor:
-    """Robot local +X unit vector in world frame. Shape (N, 3)."""
-    robot: Entity = env.scene["robot"]
-    x_local = torch.zeros(env.num_envs, 3, device=env.device)
-    x_local[:, 0] = 1.0
-    return quat_apply(robot.data.root_link_quat_w, x_local)
-
-
-def foot_to_ball(
-    env: "ManagerBasedRlEnv",
-    ball_name: str,
-    std: float = 0.15,
-    asset_cfg: SceneEntityCfg = _DEFAULT_FEET_CFG,
-) -> torch.Tensor:
-    """Gaussian reward: foot midpoint XY proximity to ball. Shape (N,).
-
-    Provides a dense signal from episode start — reward peaks when either
-    foot is directly under the ball in the XY plane.
-    """
-    robot: Entity = env.scene["robot"]
-    ball: Entity = env.scene[ball_name]
-
-    foot_pos_w = robot.data.body_link_pos_w[:, asset_cfg.body_ids, :2]  # (N, 2, 2)
-    feet_mid_xy = foot_pos_w.mean(dim=1)                                  # (N, 2)
-    ball_xy = ball.data.root_link_pos_w[:, :2]                           # (N, 2)
-
-    dist = torch.norm(ball_xy - feet_mid_xy, dim=-1)
-    return torch.exp(-(dist ** 2) / (std ** 2))
-
-
 def ball_vx_reduction(
     env: "ManagerBasedRlEnv",
     ball_name: str,
@@ -179,14 +197,15 @@ def ball_positive_vx(
     ball_name: str,
     target_speed: float = 5.0,
 ) -> torch.Tensor:
-    """Reward ball deflected back along robot +X axis. Shape (N,).
+    """Reward ball deflected back along robot local +X axis. Shape (N,).
 
+    Uses robot-local +X (not world +X) to stay consistent with local-frame ball
+    spawning: a save means the ball travels back in the direction it came from,
+    which is the robot's local +X.
     Returns clamp(vx_local / target_speed, 0, 1) — normalised to [0, 1].
-    Saturates at target_speed m/s. Only active when ball has positive local-X velocity.
     """
     ball: Entity = env.scene[ball_name]
     x_axis_w = _robot_x_axis_w(env)
-
     vx_local = (ball.data.root_link_lin_vel_w * x_axis_w).sum(dim=-1)
     return (vx_local / target_speed).clamp(0.0, 1.0)
 
@@ -271,6 +290,39 @@ def feetorientation(
     return torch.exp(-sigma * err)
 
 
+def postorientation(
+    env: "ManagerBasedRlEnv",
+    ball_name: str,
+) -> torch.Tensor:
+    """Upright posture reward — active only when ball is behind. Mirrors ILB postorientation."""
+    behind = _ball_is_behind(env, ball_name)
+    grav_b = env.scene["robot"].data.projected_gravity_b
+    err = torch.sum(grav_b[:, :2] ** 2, dim=1)
+    return torch.exp(-3.0 * err) * behind.float()
+
+
+def postangvel(
+    env: "ManagerBasedRlEnv",
+    ball_name: str,
+) -> torch.Tensor:
+    """Low XY angular velocity reward — active when ball is behind. Mirrors ILB postangvel."""
+    behind = _ball_is_behind(env, ball_name)
+    ang_vel = env.scene["robot"].data.root_link_ang_vel_b
+    err = torch.sum(ang_vel[:, :2] ** 2, dim=1)
+    return torch.exp(-3.0 * err) * behind.float()
+
+
+def postlinvel(
+    env: "ManagerBasedRlEnv",
+    ball_name: str,
+) -> torch.Tensor:
+    """Low forward velocity reward — active when ball is behind. Mirrors ILB postlinvel."""
+    behind = _ball_is_behind(env, ball_name)
+    lin_vel = env.scene["robot"].data.root_link_lin_vel_b
+    err = lin_vel[:, 0] ** 2
+    return torch.exp(-3.0 * err) * behind.float()
+
+
 def deviation_waist_joint(
     env: "ManagerBasedRlEnv",
     asset_cfg: SceneEntityCfg = _DEFAULT_ROBOT_CFG,
@@ -279,28 +331,6 @@ def deviation_waist_joint(
     robot: Entity = env.scene[asset_cfg.name]
     delta = robot.data.joint_pos[:, asset_cfg.joint_ids] - robot.data.default_joint_pos[:, asset_cfg.joint_ids]
     return torch.sum(torch.square(delta), dim=-1)
-
-
-def successland(
-    env: "ManagerBasedRlEnv",
-    ball_name: str,
-    contact_th: float = 0.12,
-    asset_cfg: SceneEntityCfg = _DEFAULT_FEET_CFG,
-) -> torch.Tensor:
-    """Dense reward for foot proximity to ball before ball is behind.
-
-    Fires when either foot is within contact_th of the ball AND the ball
-    is still in front (not yet behind). Provides a denser gradient than
-    stopball alone — mirrors Imitationlearningbooster successland (w=4.0).
-    """
-    robot: Entity = env.scene[asset_cfg.name]
-    ball: Entity = env.scene[ball_name]
-    foot_pos_w = robot.data.body_link_pos_w[:, asset_cfg.body_ids, :]  # (N, 2, 3)
-    ball_pos_w = ball.data.root_link_pos_w                              # (N, 3)
-    dist = torch.norm(foot_pos_w - ball_pos_w[:, None, :], dim=-1)     # (N, 2)
-    min_dist = dist.min(dim=-1).values                                   # (N,)
-    behind = _ball_is_behind(env, ball_name)
-    return (min_dist < contact_th).float() * (~behind).float()
 
 
 def penalize_kneeheight(
@@ -337,15 +367,65 @@ def dof_vel_limits(
     return excess.pow(2).sum(dim=-1)
 
 
+def torques_normalized_l2(
+    env: "ManagerBasedRlEnv",
+    asset_cfg: SceneEntityCfg = _ALL_JOINTS_CFG,
+) -> torch.Tensor:
+    """Penalize torques normalized by per-joint stiffness (kp). Mirrors ILB.
+
+    sum(square(torque / kp)) — dimensionless position-error proxy comparable
+    across joints. Without normalization, high-stiffness leg joints (kp=200)
+    dominate the penalty over soft arm joints (kp=15).
+    """
+    robot: Entity = env.scene[asset_cfg.name]
+    torques = robot.data.qfrc_actuator[:, asset_cfg.joint_ids]
+
+    if not hasattr(env, "_t1_kp_inv"):
+        all_names = robot.joint_names
+        kp_all = torch.ones(len(all_names), device=env.device)
+        for i, name in enumerate(all_names):
+            if name in _T1_KP_MAP:
+                kp_all[i] = _T1_KP_MAP[name]
+        env._t1_kp_inv = 1.0 / kp_all
+
+    kp_inv = env._t1_kp_inv[asset_cfg.joint_ids]
+    return torch.sum(torch.square(torques * kp_inv), dim=-1)
+
+
+def torque_limits(
+    env: "ManagerBasedRlEnv",
+    asset_cfg: SceneEntityCfg = _ALL_JOINTS_CFG,
+    soft_factor: float = 0.95,
+) -> torch.Tensor:
+    """Penalize actuator torques exceeding per-joint soft torque limit. Mirrors ILB.
+
+    Uses _T1_EFFORT_MAP instead of a universal cap so arms (36 Nm) and
+    hip-yaw joints (40 Nm) are penalised at their actual limits.
+    """
+    robot: Entity = env.scene[asset_cfg.name]
+    torques = robot.data.qfrc_actuator[:, asset_cfg.joint_ids].abs()
+
+    if not hasattr(env, "_t1_effort_limits"):
+        all_names = robot.joint_names
+        effort_all = torch.ones(len(all_names), device=env.device) * 50.0
+        for i, name in enumerate(all_names):
+            if name in _T1_EFFORT_MAP:
+                effort_all[i] = _T1_EFFORT_MAP[name]
+        env._t1_effort_limits = effort_all
+
+    effort_limits = env._t1_effort_limits[asset_cfg.joint_ids]
+    out_of_limit = (torques - effort_limits * soft_factor).clamp(min=0.0)
+    return out_of_limit.sum(dim=-1)
+
+
 def postupperdofpos(
     env: "ManagerBasedRlEnv",
     ball_name: str,
     asset_cfg: SceneEntityCfg = _ARM_JOINT_CFG,
 ) -> torch.Tensor:
-    """Penalise arm joint deviation from default AFTER ball is behind.
+    """Reward arm joints returning to default pose after ball is behind. Mirrors ILB.
 
-    Encourages the robot to recover its arm pose after a save or failed save.
-    Active only when _ball_is_behind is True.
+    exp(-1 * sum_sq_err) × behind — bounded [0, 1], reward peaks at default pose.
     """
     behind = _ball_is_behind(env, ball_name)
     robot: Entity = env.scene[asset_cfg.name]
@@ -354,7 +434,7 @@ def postupperdofpos(
         - robot.data.default_joint_pos[:, asset_cfg.joint_ids]
     )
     err = torch.sum(torch.square(delta), dim=-1)
-    return err * behind.float()
+    return torch.exp(-1.0 * err) * behind.float()
 
 
 def postwaistdofpos(
@@ -362,9 +442,9 @@ def postwaistdofpos(
     ball_name: str,
     asset_cfg: SceneEntityCfg = _WAIST_JOINT_CFG_RECOVERY,
 ) -> torch.Tensor:
-    """Penalise waist deviation from default AFTER ball is behind.
+    """Reward waist joint returning to default pose after ball is behind. Mirrors ILB.
 
-    Companion to postupperdofpos — encourages trunk recovery after save.
+    exp(-3 * sum_sq_err) × behind — bounded [0, 1], reward peaks at default pose.
     """
     behind = _ball_is_behind(env, ball_name)
     robot: Entity = env.scene[asset_cfg.name]
@@ -373,4 +453,61 @@ def postwaistdofpos(
         - robot.data.default_joint_pos[:, asset_cfg.joint_ids]
     )
     err = torch.sum(torch.square(delta), dim=-1)
-    return err * behind.float()
+    return torch.exp(-3.0 * err) * behind.float()
+
+
+def penalize_sharpcontact(
+    env: "ManagerBasedRlEnv",
+    force_threshold: float = 1000.0,
+) -> torch.Tensor:
+    """Binary penalty when mean foot contact force exceeds force_threshold.
+
+    Mirrors ILB / upstream Humanoid-Goalkeeper _reward_penalize_sharpcontact.
+    Geom layout in feet_contact sensor (sorted by name):
+        0: left_foot_1, 1: left_foot_2  → left foot
+        2: right_foot_1, 3: right_foot_2 → right foot
+    Per-foot max over geoms, then mean — matches upstream 2-body mean.
+    Weight: -100.0.
+    """
+    sensor: ContactSensor = env.scene["feet_contact"]
+    force_per_geom = sensor.data.force.norm(dim=-1)          # [B, 8]
+    left_max  = force_per_geom[:, :4].max(dim=-1).values     # left_foot1-4
+    right_max = force_per_geom[:, 4:].max(dim=-1).values     # right_foot1-4
+    mean_force = (left_max + right_max) / 2.0
+    return (mean_force > force_threshold).float()
+
+
+def penalize_self_collision(env: "ManagerBasedRlEnv") -> torch.Tensor:
+    """Binary penalty when any self-collision is detected in the Trunk subtree.
+
+    Reads from the self_collision ContactSensor. data.found shape: [B, 1].
+    Weight: -50.0.
+    """
+    sensor: ContactSensor = env.scene["self_collision"]
+    return (sensor.data.found > 0).any(dim=-1).float()
+
+
+def feet_slippage(
+    env: "ManagerBasedRlEnv",
+    asset_cfg: SceneEntityCfg = _DEFAULT_FEET_CFG,
+) -> torch.Tensor:
+    """Reward feet not slipping while in ground contact.
+
+    Mirrors upstream _reward_feet_slippage: exp(-10 * sum(foot_speed * in_contact)).
+    Returns 1.0 when airborne or no slip; approaches 0 with high slip velocity.
+    Geom layout in feet_contact sensor (sorted by name):
+        0: left_foot_1, 1: left_foot_2 → left foot
+        2: right_foot_1, 3: right_foot_2 → right foot
+    Weight: +3.0.
+    """
+    sensor: ContactSensor = env.scene["feet_contact"]
+    found = sensor.data.found  # [B, 8]
+    left_in_contact  = (found[:, :4] > 0).any(dim=-1)       # any of left_foot1-4
+    right_in_contact = (found[:, 4:] > 0).any(dim=-1)       # any of right_foot1-4
+    in_contact = torch.stack([left_in_contact, right_in_contact], dim=-1).float()  # [B, 2]
+
+    robot: Entity = env.scene[asset_cfg.name]
+    foot_vel_w = robot.data.body_link_lin_vel_w[:, asset_cfg.body_ids, :]  # [B, 2, 3]
+    foot_speed = torch.norm(foot_vel_w, dim=-1)                             # [B, 2]
+    contactvel = torch.sum(foot_speed * in_contact, dim=-1)
+    return torch.exp(-10.0 * contactvel)
