@@ -1,8 +1,10 @@
 """Reset functions and curriculum helpers for Booster T1 goalkeeper."""
 from __future__ import annotations
 
+from pathlib import Path
 from typing import TYPE_CHECKING
 
+import numpy as np
 import torch
 
 from mjlab.entity import Entity
@@ -268,6 +270,62 @@ def reset_ball_per_motion(
 
     ball.write_root_link_pose_to_sim(ball_pose, env_ids=env_ids)
     ball.write_root_link_velocity_to_sim(ball_velocity, env_ids=env_ids)
+
+
+def reset_robot_rsi(
+    env: ManagerBasedRlEnv,
+    env_ids: torch.Tensor | None,
+) -> None:
+    """Reset robot to random state from motion capture data (RSI — Random State Initialization).
+
+    80% of resets sample a random frame from motion capture data; 20% reset to standing pose.
+    This exposes the policy to varied body poses while ensuring it learns the deployment case
+    (standing start).
+
+    Args:
+        env: RL environment
+        env_ids: Indices of envs to reset (if None, reset all)
+    """
+    if env_ids is None:
+        env_ids = torch.arange(env.num_envs, device=env.device, dtype=torch.int32)
+
+    # Load motion files (lazy, once per first call)
+    if not hasattr(env, "_motions_cache"):
+        _motions_dir = Path(__file__).parents[1] / "motions" / "data"
+        motion_files = sorted(_motions_dir.glob("*.npz"))
+        if not motion_files:
+            raise FileNotFoundError(f"No NPZ motion files in {_motions_dir}")
+        motions_list = [np.load(str(f)) for f in motion_files]
+        # Pre-concatenate all motions into single arrays for O(1) random access
+        all_joint_pos = np.vstack([m["joint_pos"] for m in motions_list])
+        env._motions_cache = torch.from_numpy(all_joint_pos).float().to(env.device)
+
+    all_joint_pos = env._motions_cache
+    robot: Entity = env.scene["robot"]
+    n = len(env_ids)
+
+    # 80% RSI (random motion frames), 20% standing pose
+    use_rsi = np.random.random(n) < 0.8
+
+    # RSI: sample random frames
+    rsi_indices = env_ids[use_rsi]
+    if len(rsi_indices) > 0:
+        frame_indices = np.random.randint(0, len(all_joint_pos), size=len(rsi_indices))
+        rsi_positions = all_joint_pos[frame_indices]
+        robot.write_joint_state_to_sim(
+            rsi_positions,
+            torch.zeros((len(rsi_indices), 21), device=env.device),
+            env_ids=rsi_indices,
+        )
+
+    # Standing: use default home pose (all zeros in relative frame)
+    stand_indices = env_ids[~use_rsi]
+    if len(stand_indices) > 0:
+        robot.write_joint_state_to_sim(
+            torch.zeros((len(stand_indices), 21), device=env.device),
+            torch.zeros((len(stand_indices), 21), device=env.device),
+            env_ids=stand_indices,
+        )
 
 
 def sharpforce_termination(
