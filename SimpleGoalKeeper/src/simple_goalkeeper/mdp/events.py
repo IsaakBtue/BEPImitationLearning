@@ -81,20 +81,21 @@ def reset_robot_rsi(
 
     motions = env._motions_cache
     robot: Entity = env.scene["robot"]
+    n = len(env_ids)
 
-    for env_id in env_ids:
-        # Pick random motion and random frame within it
+    # Vectorized: sample all frames at once
+    target_positions = torch.zeros((n, 21), device=env.device, dtype=torch.float32)
+    for i in range(n):
         motion = motions[np.random.randint(len(motions))]
         joint_pos = motion["joint_pos"]  # (T, 21)
         frame_idx = np.random.randint(len(joint_pos))
+        target_positions[i] = torch.from_numpy(joint_pos[frame_idx]).float().to(env.device)
 
-        # Set joint positions from motion
-        target_pos = torch.from_numpy(joint_pos[frame_idx]).float().to(env.device)
-        robot.write_joint_state_to_sim(
-            target_pos.unsqueeze(0),
-            torch.zeros((1, 21), device=env.device),
-            env_ids=env_id.unsqueeze(0),
-        )
+    robot.write_joint_state_to_sim(
+        target_positions,
+        torch.zeros((n, 21), device=env.device),
+        env_ids=env_ids,
+    )
 
 
 def reset_ball_local_frame(
