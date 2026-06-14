@@ -65,6 +65,9 @@ def reset_robot_rsi(
     joint configuration to that frame. This exposes the policy to varied body poses during
     training so it learns to react from mid-motion states, not just from standing.
 
+    Curriculum: start at 80% RSI (varied poses) early, decay to 0% RSI (standing only) late.
+    This forces early learning of dynamics robustness, then specializes for deployment (standing).
+
     Args:
         env: RL environment
         env_ids: Indices of envs to reset (if None, reset all)
@@ -86,15 +89,31 @@ def reset_robot_rsi(
     robot: Entity = env.scene["robot"]
     n = len(env_ids)
 
-    # Vectorized sampling: pick n random frames from concatenated motion tensor
-    frame_indices = np.random.randint(0, len(all_joint_pos), size=n)
-    target_positions = all_joint_pos[frame_indices]
+    # RSI curriculum: decay from 80% early to 0% late
+    rsi_prob = float(getattr(env, "_rsi_probability", 0.8))
+    use_rsi = np.random.random(n) < rsi_prob
 
-    robot.write_joint_state_to_sim(
-        target_positions,
-        torch.zeros((n, 21), device=env.device),
-        env_ids=env_ids,
-    )
+    # Split envs: RSI and standing
+    rsi_indices = env_ids[use_rsi]
+    stand_indices = env_ids[~use_rsi]
+
+    # RSI: sample random frames
+    if len(rsi_indices) > 0:
+        frame_indices = np.random.randint(0, len(all_joint_pos), size=len(rsi_indices))
+        rsi_positions = all_joint_pos[frame_indices]
+        robot.write_joint_state_to_sim(
+            rsi_positions,
+            torch.zeros((len(rsi_indices), 21), device=env.device),
+            env_ids=rsi_indices,
+        )
+
+    # Standing: use default home pose (all zeros in relative frame)
+    if len(stand_indices) > 0:
+        robot.write_joint_state_to_sim(
+            torch.zeros((len(stand_indices), 21), device=env.device),
+            torch.zeros((len(stand_indices), 21), device=env.device),
+            env_ids=stand_indices,
+        )
 
 
 def reset_ball_local_frame(
@@ -269,6 +288,38 @@ class ball_difficulty_curriculum:
                 current = stage["difficulty"]
         env._ball_difficulty = current
         return {"ball_difficulty": torch.tensor(current)}
+
+
+class rsi_curriculum:
+    """RSI (Random State Initialization) decay curriculum: 80% RSI early → 0% RSI late.
+
+    Start training with varied poses (80% RSI) to learn robust body dynamics, then decay
+    to standing-only (0% RSI) late to specialize for the deployment case. This ensures
+    the policy generalizes from diverse training states while refining standing behavior.
+
+    Stages (example with num_steps_per_env=24):
+        step=0:        rsi_prob=0.8  (majority varied, minority standing)
+        step=stage1:   rsi_prob=0.4  (mixed)
+        step=stage2:   rsi_prob=0.0  (standing only)
+    """
+
+    def __init__(self, cfg: "CurriculumTermCfg", env: "ManagerBasedRlEnv") -> None:
+        self._stages = cfg.params["stages"]
+        if not hasattr(env, "_rsi_probability"):
+            env._rsi_probability = 0.8
+
+    def __call__(
+        self,
+        env: "ManagerBasedRlEnv",
+        env_ids: torch.Tensor,
+        stages: list[dict],
+    ) -> dict:
+        current = 0.8
+        for stage in self._stages:
+            if env.common_step_counter >= stage["step"]:
+                current = stage["rsi_prob"]
+        env._rsi_probability = current
+        return {"rsi_probability": torch.tensor(current)}
 
 
 def sharpforce_termination(
