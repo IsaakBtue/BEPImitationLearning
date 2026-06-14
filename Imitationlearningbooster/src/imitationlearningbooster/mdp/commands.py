@@ -219,27 +219,22 @@ class MultiMotionCommand(MotionCommand):
 
             joint_pos = self.robot.data.default_joint_pos[env_ids].clone()
             joint_vel = torch.zeros_like(joint_pos)
-            # G1 continue_keep: 80% of resets copy joint_pos from a random live env,
-            # giving implicit RSI — the policy starts from mid-motion states, not always
-            # at standing. 20%: standing keyframe + small noise (existing behavior).
-            # Mirrors g1_29_config.py continue_keep=True + legged_robot.py L669-674:
-            #   if continue_keep and torch.rand(1) > 0.2:
-            #       dof_pos[env_ids] = dof_pos[randint(0, num_envs, (len(env_ids),))]
-            keep_mask = torch.rand(len(env_ids), device=self.device) < 0.8
-            if keep_mask.any():
+            # Mirrors G1 legged_robot.py L669-682 exactly:
+            #   single batch coin flip (not per-env) — 80% ALL envs get RSI,
+            #   20% ALL envs get standpos * scale(0.5,1.5) + offset(-0.1,0.1)
+            if torch.rand(1).item() > 0.2:
                 n_all = self.robot.data.joint_pos.shape[0]
-                rand_src = torch.randint(
-                    0, n_all, (int(keep_mask.sum().item()),), device=self.device
-                )
-                joint_pos[keep_mask] = self.robot.data.joint_pos[rand_src].clone()
-            if (~keep_mask).any():
-                noise = sample_uniform(
-                    lower=self.cfg.joint_position_range[0],
-                    upper=self.cfg.joint_position_range[1],
-                    size=(int((~keep_mask).sum().item()), joint_pos.shape[1]),
+                rand_src = torch.randint(0, n_all, (len(env_ids),), device=self.device)
+                joint_pos = self.robot.data.joint_pos[rand_src].clone()
+            else:
+                scale = sample_uniform(0.5, 1.5, joint_pos.shape, device=joint_pos.device)
+                offset = sample_uniform(
+                    self.cfg.joint_position_range[0],
+                    self.cfg.joint_position_range[1],
+                    joint_pos.shape,
                     device=joint_pos.device,
                 )
-                joint_pos[~keep_mask] += noise
+                joint_pos = joint_pos * scale + offset
 
             self._write_reference_state_to_sim(
                 env_ids, root_pos, root_ori, root_lin_vel, root_ang_vel, joint_pos, joint_vel
