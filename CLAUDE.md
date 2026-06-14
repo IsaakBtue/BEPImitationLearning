@@ -37,6 +37,7 @@ SSH key passphrase for this machine: `Isaak`
 ## Critical Constraints
 
 1. **Do NOT modify `Humanoid-Goalkeeper/`** — treat it as a frozen upstream reference for G1 behavior. Read it for patterns; never edit it.
+1b. **Do NOT modify `Imitationlearningbooster/`** — this is the user's active project. Do not change it without explicit permission.
 0. **Always check `Humanoid-Goalkeeper/` first** — before adding or changing any reward, spawn range, observation, termination, or training hyperparameter in `Imitationlearningbooster/` or `SimpleGoalKeeper/`, read the corresponding G1 code and verify the decision. G1 is the proven baseline. Divergences must be explicitly justified and documented.
 2. **All Booster-specific code goes under `Imitationlearningbooster/`** — wrappers, forks, or vendored subtrees only.
 3. **Every change in `Imitationlearningbooster/` must be explicitly justified against `Humanoid-Goalkeeper/`** — before making any design decision (reward weights, observation schema, training hyperparams, reset logic, command ranges), read the corresponding code in `Humanoid-Goalkeeper/` and document whether the change mirrors G1, adapts G1 for T1's different kinematics, or is a known deliberate divergence. If you cannot point to where in `Humanoid-Goalkeeper/` the decision comes from, treat it as a red flag requiring review.
