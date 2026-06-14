@@ -294,11 +294,15 @@ def postorientation(
     env: "ManagerBasedRlEnv",
     ball_name: str,
 ) -> torch.Tensor:
-    """Upright posture reward — active only when ball is behind. Mirrors ILB postorientation."""
-    behind = _ball_is_behind(env, ball_name)
+    """Upright posture reward — always active.
+
+    AMP only sees joint_pos/joint_vel, not root orientation, so it cannot push
+    the root upright. Gating on ball-is-behind means no upright signal during
+    ball approach (80% of episode), causing the policy to drift into backward lean.
+    """
     grav_b = env.scene["robot"].data.projected_gravity_b
     err = torch.sum(grav_b[:, :2] ** 2, dim=1)
-    return torch.exp(-3.0 * err) * behind.float()
+    return torch.exp(-3.0 * err)
 
 
 def postangvel(

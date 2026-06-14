@@ -22,12 +22,12 @@ _DEFAULT_ROBOT_CFG = SceneEntityCfg("robot")
 
 # Easy (difficulty=0.0) spawn ranges: short distance, centred, slow, low.
 # Hard (difficulty=1.0) ranges are passed as params to reset_ball_local_frame.
-_EASY_DIST    = (1.5, 2.5)
+_EASY_DIST    = (2.0, 3.0)
 _EASY_Y_START = (-0.2, 0.2)   # lateral spawn: narrow/centred on easy
 _EASY_Y_END   = (-0.1, 0.1)   # goal target Y: near centre on easy
 _EASY_Z_START = (0.1, 0.35)
 _EASY_Z_END   = (0.05, 0.2)
-_EASY_SPEED   = (2.0, 3.5)
+_EASY_SPEED   = (1.5, 2.5)
 
 
 def _lerp_range(

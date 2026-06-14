@@ -411,12 +411,11 @@ def goalkeeper_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
     # Goalkeeper spawn: robot is reset to a random pose from motion data (RSI).
     # This exposes the policy to varied body configurations during training,
     # so it learns to react from mid-motion states, not just standing.
-    # Initialize motion loader (startup event, once)
-    if not play:
-        cfg.events["init_motion_loader"] = EventTermCfg(
-            func=gk_mdp.init_motion_loader,
-            mode="startup",
-        )
+    # Initialize motion loader (startup event, once) — needed in both train and play
+    cfg.events["init_motion_loader"] = EventTermCfg(
+        func=gk_mdp.init_motion_loader,
+        mode="startup",
+    )
 
     # Reset robot to random motion frames (100% RSI, BoosterT1mjlab approach)
     cfg.events.pop("reset_base", None)
@@ -438,7 +437,7 @@ def goalkeeper_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
             "y_end_range": (-1.5, 1.5),          # goal target Y; widened to force lateral stepping
             "spawn_height_range": (0.05, 0.35),  # m above floor at spawn — foot to shin height
             "arrive_height_range": (0.05, 0.25), # m above floor at goal line — lower for feet interception
-            "speed_range": (3.0, 7.0),
+            "speed_range": (2.5, 5.0),
         },
     )
 
