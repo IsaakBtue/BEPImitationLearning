@@ -8,6 +8,7 @@ import numpy as np
 import torch
 
 from mjlab.entity import Entity
+from mjlab.managers.scene_entity_config import SceneEntityCfg
 from mjlab.sensor import ContactSensor
 from mjlab.utils.lab_api.math import quat_apply, sample_uniform
 
@@ -16,6 +17,7 @@ if TYPE_CHECKING:
     from mjlab.managers.curriculum_manager import CurriculumTermCfg
 
 _MOTIONS_DIR = Path(__file__).parents[1] / "motions" / "data"
+_DEFAULT_ROBOT_CFG = SceneEntityCfg("robot")
 
 
 # Easy (difficulty=0.0) spawn ranges: short distance, centred, slow, low.
@@ -55,74 +57,81 @@ def _yaw_only_quat(q_wxyz: torch.Tensor) -> torch.Tensor:
     return out
 
 
-def reset_robot_rsi(
-    env: "ManagerBasedRlEnv",
-    env_ids: torch.Tensor | None,
-) -> None:
-    """Reset robot to random state from motion capture data (RSI — Random State Initialization).
+class MotionResetManager:
+    """Manages motion frame data for 100% RSI (BoosterT1mjlab approach)."""
 
-    80% of resets sample a random frame from motion capture data; 20% reset to standing pose.
-    This exposes the policy to varied body poses (foot-based recovery, mid-motion reaction)
-    while ensuring it learns the deployment case (standing start).
+    _instance: MotionResetManager | None = None
 
-    Args:
-        env: RL environment
-        env_ids: Indices of envs to reset (if None, reset all)
-    """
-    if env_ids is None:
-        env_ids = torch.arange(env.num_envs, device=env.device, dtype=torch.int32)
+    def __init__(self) -> None:
+        self.frames: dict[str, torch.Tensor] = {}
 
-    # Load motion files (lazy, once per first call)
-    if not hasattr(env, "_motions_cache"):
+    @classmethod
+    def get(cls) -> MotionResetManager:
+        if cls._instance is None:
+            cls._instance = cls()
+        return cls._instance
+
+    def init(self, env: "ManagerBasedRlEnv") -> None:
+        """Load and concatenate all motion NPZ files."""
+        if "joint_pos" in self.frames:
+            return
+
         motion_files = sorted(_MOTIONS_DIR.glob("*.npz"))
         if not motion_files:
             raise FileNotFoundError(f"No NPZ motion files in {_MOTIONS_DIR}")
-        motions_list = [np.load(str(f)) for f in motion_files]
-        # Pre-concatenate all motions into single arrays for O(1) random access
-        all_joint_pos = np.vstack([m["joint_pos"] for m in motions_list])
-        env._motions_cache = torch.from_numpy(all_joint_pos).float().to(env.device)
 
-    all_joint_pos = env._motions_cache
-    robot: Entity = env.scene["robot"]
-    n = len(env_ids)
+        joint_pos_list = []
+        joint_vel_list = []
+        for f in motion_files:
+            data = np.load(str(f))
+            joint_pos_list.append(data["joint_pos"])
+            joint_vel_list.append(data["joint_vel"])
 
-    # 80% RSI (random motion frames), 20% standing pose
-    use_rsi = np.random.random(n) < 0.8
+        self.frames["joint_pos"] = torch.from_numpy(np.vstack(joint_pos_list)).float().to(env.device)
+        self.frames["joint_vel"] = torch.from_numpy(np.vstack(joint_vel_list)).float().to(env.device)
+        total_frames = self.frames["joint_pos"].shape[0]
+        print(f"[MotionResetManager] Loaded {len(motion_files)} motion files, {total_frames} total frames")
 
-    # RSI: sample random frames
-    rsi_indices = env_ids[use_rsi]
-    if len(rsi_indices) > 0:
-        frame_indices = np.random.randint(0, len(all_joint_pos), size=len(rsi_indices))
-        rsi_positions = all_joint_pos[frame_indices]
+    def reset(
+        self,
+        env: "ManagerBasedRlEnv",
+        env_ids: torch.Tensor | None,
+        asset_cfg: SceneEntityCfg = _DEFAULT_ROBOT_CFG,
+    ) -> None:
+        """Reset envs to random motion frames (100% RSI)."""
+        if env_ids is None:
+            env_ids = torch.arange(env.num_envs, device=env.device, dtype=torch.int32)
+
+        if len(env_ids) == 0:
+            return
+
+        joint_pos = self.frames["joint_pos"]
+        joint_vel = self.frames["joint_vel"]
+        total_frames = joint_pos.shape[0]
+
+        # Sample random frame indices
+        idx = torch.randint(0, total_frames, (len(env_ids),), device=env.device)
+
+        robot: Entity = env.scene[asset_cfg.name]
         robot.write_joint_state_to_sim(
-            rsi_positions,
-            torch.zeros((len(rsi_indices), 21), device=env.device),
-            env_ids=rsi_indices,
+            joint_pos[idx],
+            joint_vel[idx],
+            env_ids=env_ids,
         )
 
-    # Standing: reset to HOME_KEYFRAME pose (21-DOF headless T1)
-    stand_indices = env_ids[~use_rsi]
-    if len(stand_indices) > 0:
-        # Joint order: L_Shoulder_Pitch, L_Shoulder_Roll, L_Elbow_Pitch, L_Elbow_Yaw,
-        #             R_Shoulder_Pitch, R_Shoulder_Roll, R_Elbow_Pitch, R_Elbow_Yaw,
-        #             Waist,
-        #             L_Hip_Pitch, L_Hip_Roll, L_Hip_Yaw, L_Knee_Pitch, L_Ankle_Pitch, L_Ankle_Roll,
-        #             R_Hip_Pitch, R_Hip_Roll, R_Hip_Yaw, R_Knee_Pitch, R_Ankle_Pitch, R_Ankle_Roll
-        home_pos = torch.tensor([
-            0.0, -1.4, 0.0, -0.4,  # Left arm
-            0.0, 1.4, 0.0, 0.4,    # Right arm
-            0.0,                     # Waist
-            -0.2, 0.0, 0.0, 0.4, -0.2, 0.0,  # Left leg
-            -0.2, 0.0, 0.0, 0.4, -0.2, 0.0,  # Right leg
-        ], device=env.device, dtype=torch.float32)
 
-        # Expand to match number of standing envs
-        home_positions = home_pos.unsqueeze(0).expand(len(stand_indices), -1)
-        robot.write_joint_state_to_sim(
-            home_positions,
-            torch.zeros((len(stand_indices), 21), device=env.device),
-            env_ids=stand_indices,
-        )
+def init_motion_loader(env: "ManagerBasedRlEnv", env_ids: torch.Tensor | None) -> None:
+    """Startup event: load motion data."""
+    MotionResetManager.get().init(env)
+
+
+def reset_from_motion_data(
+    env: "ManagerBasedRlEnv",
+    env_ids: torch.Tensor | None,
+    asset_cfg: SceneEntityCfg = _DEFAULT_ROBOT_CFG,
+) -> None:
+    """Reset event: reset envs to random motion frames (100% RSI)."""
+    MotionResetManager.get().reset(env, env_ids, asset_cfg)
 
 
 def reset_ball_local_frame(

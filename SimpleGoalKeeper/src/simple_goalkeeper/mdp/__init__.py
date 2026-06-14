@@ -1,6 +1,6 @@
 from . import observations, events, rewards, commands
 from .observations import ball_pos_b, ball_vel_b, left_foot_pos_b, right_foot_pos_b, base_lin_vel, joint_pos_abs, joint_vel_abs
-from .events import reset_robot_rsi, reset_ball_local_frame, tick_catchstep, ball_difficulty_curriculum, ball_exit_termination, sharpforce_termination
+from .events import init_motion_loader, reset_from_motion_data, reset_ball_local_frame, tick_catchstep, ball_difficulty_curriculum, ball_exit_termination, sharpforce_termination
 from .rewards import (
     ball_vx_reduction, posture, ang_vel_xy_l2, ang_vel_z_l2,
     stayonline, noretreat, feetorientation, deviation_waist_joint,
