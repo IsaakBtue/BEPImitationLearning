@@ -98,26 +98,37 @@ class MotionResetManager:
         env_ids: torch.Tensor | None,
         asset_cfg: SceneEntityCfg = _DEFAULT_ROBOT_CFG,
     ) -> None:
-        """Reset envs to random motion frames (100% RSI)."""
+        """Reset envs using ILB-style RSI: 80% live-env copy, 20% perturbed standing keyframe.
+
+        Mirrors Imitationlearningbooster MultiMotionCommand L225-237:
+          - 80%: copy joint_pos from a random live env (all envs start at standing
+            keyframe so this IS the T-pose early in training; diversifies as policy trains)
+          - 20%: default_joint_pos * U(0.5,1.5) + U(-0.1,0.1)
+        This matches the ILB visual: robot resets to standing pose early in training.
+        """
         if env_ids is None:
             env_ids = torch.arange(env.num_envs, device=env.device, dtype=torch.int32)
 
         if len(env_ids) == 0:
             return
 
-        joint_pos = self.frames["joint_pos"]
-        joint_vel = self.frames["joint_vel"]
-        total_frames = joint_pos.shape[0]
-
-        # Sample random frame indices
-        idx = torch.randint(0, total_frames, (len(env_ids),), device=env.device)
-
         robot: Entity = env.scene[asset_cfg.name]
-        robot.write_joint_state_to_sim(
-            joint_pos[idx],
-            joint_vel[idx],
-            env_ids=env_ids,
-        )
+        n = len(env_ids)
+
+        if torch.rand(1).item() > 0.2:
+            # 80%: copy from a random live env (ILB L225-228)
+            n_all = robot.data.joint_pos.shape[0]
+            rand_src = torch.randint(0, n_all, (n,), device=env.device)
+            joint_pos = robot.data.joint_pos[rand_src].clone()
+        else:
+            # 20%: perturbed standing keyframe (ILB L229-237)
+            joint_pos = robot.data.default_joint_pos[env_ids].clone()
+            scale = torch.empty_like(joint_pos).uniform_(0.5, 1.5)
+            offset = torch.empty_like(joint_pos).uniform_(-0.1, 0.1)
+            joint_pos = joint_pos * scale + offset
+
+        joint_vel = torch.zeros_like(joint_pos)
+        robot.write_joint_state_to_sim(joint_pos, joint_vel, env_ids=env_ids)
 
 
 def init_motion_loader(env: "ManagerBasedRlEnv", env_ids: torch.Tensor | None) -> None:
