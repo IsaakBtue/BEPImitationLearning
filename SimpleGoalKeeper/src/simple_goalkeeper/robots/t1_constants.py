@@ -79,11 +79,18 @@ T1_ACTUATOR_ANKLE = BuiltinPositionActuatorCfg(
 )
 
 HOME_KEYFRAME = EntityCfg.InitialStateCfg(
-    pos=(0.0, 0.0, 0.665),
+    pos=(0.0, 0.0, 0.700),
+    rot=(1.0, 0.0, 0.0, 0.0),
     joint_pos={
-        "Left_Shoulder_Roll": -1.4, "Left_Elbow_Yaw": -0.4,
-        "Right_Shoulder_Roll": 1.4, "Right_Elbow_Yaw": 0.4,
-        ".*_Hip_Pitch": -0.2, ".*_Knee_Pitch": 0.4, ".*_Ankle_Pitch": -0.2,
+        r"(Left_Hip_Pitch|Right_Hip_Pitch)": -0.3,
+        r"(Left_Knee_Pitch|Right_Knee_Pitch)": 0.6,
+        r"(Left_Ankle_Pitch|Right_Ankle_Pitch)": -0.3,
+        r"Left_Shoulder_Pitch": -0.21,
+        r"Left_Shoulder_Roll": -0.41,
+        r"Right_Shoulder_Pitch": -0.11,
+        r"Right_Shoulder_Roll": 1.07,
+        r"Right_Elbow_Pitch": -0.13,
+        r"Right_Elbow_Yaw": 0.21,
     },
     joint_vel={".*": 0.0},
 )
