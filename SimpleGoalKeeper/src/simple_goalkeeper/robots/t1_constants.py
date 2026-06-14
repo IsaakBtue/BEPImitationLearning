@@ -79,7 +79,7 @@ T1_ACTUATOR_ANKLE = BuiltinPositionActuatorCfg(
 )
 
 HOME_KEYFRAME = EntityCfg.InitialStateCfg(
-    pos=(0.0, 0.0, 0.700),
+    pos=(0.0, 0.0, 0.665),  # ~1 cm clearance above foot-geom bottom for headless XML (0.700 floats feet 4.5 cm)
     rot=(1.0, 0.0, 0.0, 0.0),
     joint_pos={
         r"(Left_Hip_Pitch|Right_Hip_Pitch)": -0.3,
