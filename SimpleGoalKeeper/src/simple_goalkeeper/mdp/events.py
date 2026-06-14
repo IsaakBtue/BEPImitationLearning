@@ -77,19 +77,18 @@ def reset_robot_rsi(
         motion_files = sorted(_MOTIONS_DIR.glob("*.npz"))
         if not motion_files:
             raise FileNotFoundError(f"No NPZ motion files in {_MOTIONS_DIR}")
-        env._motions_cache = [np.load(str(f)) for f in motion_files]
+        motions_list = [np.load(str(f)) for f in motion_files]
+        # Pre-concatenate all motions into single arrays for O(1) random access
+        all_joint_pos = np.vstack([m["joint_pos"] for m in motions_list])
+        env._motions_cache = torch.from_numpy(all_joint_pos).float().to(env.device)
 
-    motions = env._motions_cache
+    all_joint_pos = env._motions_cache
     robot: Entity = env.scene["robot"]
     n = len(env_ids)
 
-    # Vectorized: sample all frames at once
-    target_positions = torch.zeros((n, 21), device=env.device, dtype=torch.float32)
-    for i in range(n):
-        motion = motions[np.random.randint(len(motions))]
-        joint_pos = motion["joint_pos"]  # (T, 21)
-        frame_idx = np.random.randint(len(joint_pos))
-        target_positions[i] = torch.from_numpy(joint_pos[frame_idx]).float().to(env.device)
+    # Vectorized sampling: pick n random frames from concatenated motion tensor
+    frame_indices = np.random.randint(0, len(all_joint_pos), size=n)
+    target_positions = all_joint_pos[frame_indices]
 
     robot.write_joint_state_to_sim(
         target_positions,
