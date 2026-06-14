@@ -115,17 +115,23 @@ class MotionResetManager:
         robot: Entity = env.scene[asset_cfg.name]
         n = len(env_ids)
 
-        if torch.rand(1).item() > 0.2:
-            # 80%: copy from a random live env (ILB L225-228)
+        # Per-env coin flip so training shows BOTH types simultaneously.
+        use_live = torch.rand(n, device=env.device) > 0.2  # True → live copy, False → standing
+        joint_pos = robot.data.default_joint_pos[env_ids].clone()
+
+        # 80% branch: copy joint_pos from a random live env
+        live_ids = use_live.nonzero(as_tuple=True)[0]
+        if live_ids.numel() > 0:
             n_all = robot.data.joint_pos.shape[0]
-            rand_src = torch.randint(0, n_all, (n,), device=env.device)
-            joint_pos = robot.data.joint_pos[rand_src].clone()
-        else:
-            # 20%: perturbed standing keyframe (ILB L229-237)
-            joint_pos = robot.data.default_joint_pos[env_ids].clone()
-            scale = torch.empty_like(joint_pos).uniform_(0.5, 1.5)
-            offset = torch.empty_like(joint_pos).uniform_(-0.1, 0.1)
-            joint_pos = joint_pos * scale + offset
+            rand_src = torch.randint(0, n_all, (live_ids.numel(),), device=env.device)
+            joint_pos[live_ids] = robot.data.joint_pos[rand_src]
+
+        # 20% branch: perturbed standing keyframe (already in joint_pos for these envs)
+        stand_ids = (~use_live).nonzero(as_tuple=True)[0]
+        if stand_ids.numel() > 0:
+            scale = torch.empty(stand_ids.numel(), joint_pos.shape[-1], device=env.device).uniform_(0.5, 1.5)
+            offset = torch.empty(stand_ids.numel(), joint_pos.shape[-1], device=env.device).uniform_(-0.1, 0.1)
+            joint_pos[stand_ids] = joint_pos[stand_ids] * scale + offset
 
         joint_vel = torch.zeros_like(joint_pos)
         robot.write_joint_state_to_sim(joint_pos, joint_vel, env_ids=env_ids)
