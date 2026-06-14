@@ -503,12 +503,34 @@ class GoalkeeperAmpRunner(MotionTrackingOnPolicyRunner):
         }
         super().save(path, infos={**(infos or {}), "amp": amp_state})
 
+    @staticmethod
+    def _strip_spectral_norm(state: dict) -> dict:
+        """Convert spectral-norm checkpoint keys (weight_orig/u/v) to plain weight keys.
+
+        Old checkpoints saved with torch.nn.utils.spectral_norm have three keys per
+        weight matrix. The current discriminator uses plain weights, so strip the
+        auxiliary tensors and rename weight_orig → weight.
+        """
+        out = {}
+        suffixes = ("_orig", "_u", "_v")
+        for k, v in state.items():
+            if k.endswith("_orig"):
+                out[k[: -len("_orig")]] = v   # weight_orig → weight
+            elif any(k.endswith(s) for s in ("_u", "_v")):
+                pass  # drop auxiliary tensors
+            else:
+                out[k] = v
+        return out
+
     def load(self, path, load_cfg=None, strict=True, map_location=None):
         infos = super().load(path, load_cfg, strict, map_location)
         if infos and "amp" in infos:
             amp = infos["amp"]
             for name, state in amp.get("discriminators", {}).items():
                 if name in self.discriminators:
+                    # Old checkpoints used spectral_norm; strip auxiliary keys if present.
+                    if any(k.endswith("_orig") for k in state):
+                        state = self._strip_spectral_norm(state)
                     self.discriminators[name].load_state_dict(state)
             if "amp_normalizer" in amp:
                 self.amp_normalizer.load_state_dict(amp["amp_normalizer"])
