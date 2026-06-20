@@ -662,67 +662,87 @@ def airborne_at_save(
     return fired.float()
 
 
-def inner_face_at_save(
+def inner_face_orientation_save(
     env: "ManagerBasedRlEnv",
     ball_name: str,
     asset_cfg: SceneEntityCfg = _DEFAULT_FEET_CFG,
-    ball_proximity: float = 0.35,
+    alignment_threshold: float = 0.4,
 ) -> torch.Tensor:
-    """One-time bonus when softstop fires and the ball contacted the inner/medial face.
+    """One-time bonus when softstop fires and the closest foot's inner face points at the ball.
 
-    softstop fires unconditionally; this fires on top of it when the inner face
-    geoms of either foot had contact with the ball (ball within ball_proximity) at
-    any point up to and including the softstop frame. Tracked cumulatively so a
-    1-2 frame gap between contact and the delta_vx threshold is tolerated.
+    Replaces geom-contact detection with foot orientation checking, which is more
+    robust: instead of asking "which geom was hit?", we ask "was the foot rotated
+    correctly so its medial face faced the ball?".
 
-    The proximity gate (0.35 m) separates ball contact from ground contact — the
-    ball is 1-2 m away when a foot is just standing on the ground.
+    The inner face of each foot is its local -Y axis (left) or +Y axis (right):
+      Left foot:  inner face normal in local frame = (0, -1, 0)
+      Right foot: inner face normal in local frame = (0, +1, 0)
+    (From XML: left inner geoms at y=-0.03/-0.01, right inner at y=+0.03/+0.01.)
 
-    inner_foot_contact sensor slot order (alphabetical geom names):
-      slot 0: left_foot1_collision  (left  inner, y=-0.03)
-      slot 1: left_foot3_collision  (left  inner, y=-0.01)
-      slot 2: right_foot2_collision (right inner, y=+0.03)
-      slot 3: right_foot4_collision (right inner, y=+0.01)
+    Fires once per episode when softstop transitions False→True, if at the save
+    frame the foot closest to the ball has its inner-face normal aligned with the
+    foot→ball direction by at least alignment_threshold (dot product, 0.4 ≈ 66°).
+
+    No sensor needed — uses foot quaternions directly.
     Weight: +15.0.
     """
-    if not hasattr(env, "_ifas_ss_prev"):
-        env._ifas_ss_prev = torch.zeros(env.num_envs, dtype=torch.bool, device=env.device)
-        env._ifas_flag    = torch.zeros(env.num_envs, dtype=torch.bool, device=env.device)
-        env._ifas_hit     = torch.zeros(env.num_envs, dtype=torch.bool, device=env.device)
+    if not hasattr(env, "_ifos_ss_prev"):
+        env._ifos_ss_prev = torch.zeros(env.num_envs, dtype=torch.bool, device=env.device)
+        env._ifos_flag    = torch.zeros(env.num_envs, dtype=torch.bool, device=env.device)
 
     just_reset = env.episode_length_buf <= 1
-    env._ifas_ss_prev[just_reset] = False
-    env._ifas_flag[just_reset]    = False
-    env._ifas_hit[just_reset]     = False
+    env._ifos_ss_prev[just_reset] = False
+    env._ifos_flag[just_reset]    = False
 
     softstop_fired = getattr(env, "_softstop_flag", None)
     if softstop_fired is None:
         return torch.zeros(env.num_envs, device=env.device)
 
-    # Inner-face contact (inner_foot_contact sensor, 4 slots).
-    ic = env.scene["inner_foot_contact"].data.found                # (B, 4)
-    left_inner  = (ic[:, :2] > 0).any(dim=-1)
-    right_inner = (ic[:, 2:] > 0).any(dim=-1)
+    just_fired = softstop_fired & ~env._ifos_ss_prev
+    env._ifos_ss_prev[:] = softstop_fired
 
-    # Ball proximity gate — distinguishes ball contact from ground contact.
+    if not just_fired.any():
+        return torch.zeros(env.num_envs, device=env.device)
+
     robot: Entity = env.scene[asset_cfg.name]
     ball: Entity  = env.scene[ball_name]
-    foot_pos_w = robot.data.body_link_pos_w[:, asset_cfg.body_ids, :]
-    ball_pos_w = ball.data.root_link_pos_w
-    dist = torch.norm(foot_pos_w - ball_pos_w[:, None, :], dim=-1)     # (N, 2)
-    inner_ball = (
-        (left_inner  & (dist[:, 0] < ball_proximity)) |
-        (right_inner & (dist[:, 1] < ball_proximity))
-    )
 
-    # Accumulate until this reward fires (stops updating once _ifas_flag is set).
-    env._ifas_hit |= (inner_ball & ~env._ifas_flag)
+    foot_pos_w  = robot.data.body_link_pos_w[:, asset_cfg.body_ids, :]   # (N, 2, 3)
+    foot_quat_w = robot.data.body_link_quat_w[:, asset_cfg.body_ids, :]  # (N, 2, 4)
+    ball_pos_w  = ball.data.root_link_pos_w                               # (N, 3)
 
-    just_fired = softstop_fired & ~env._ifas_ss_prev
-    env._ifas_ss_prev[:] = softstop_fired
+    # Find which foot is closer to the ball.
+    dist = torch.norm(foot_pos_w - ball_pos_w[:, None, :], dim=-1)        # (N, 2)
+    left_closer = dist[:, 0] <= dist[:, 1]                                 # (N,)
 
-    fired = just_fired & env._ifas_hit & ~env._ifas_flag
-    env._ifas_flag |= fired
+    # Inner face normal in local foot frame:
+    #   left foot  → (0, -1, 0)  (medial = negative local Y)
+    #   right foot → (0, +1, 0)  (medial = positive local Y)
+    left_local_y  = torch.tensor([0.0, -1.0, 0.0], device=env.device).expand(env.num_envs, -1)
+    right_local_y = torch.tensor([0.0,  1.0, 0.0], device=env.device).expand(env.num_envs, -1)
+
+    # Rotate local normal into world frame using foot quaternion.
+    left_inner_w  = quat_apply(foot_quat_w[:, 0, :], left_local_y)        # (N, 3)
+    right_inner_w = quat_apply(foot_quat_w[:, 1, :], right_local_y)       # (N, 3)
+
+    # Pick the closer foot's inner-face world normal.
+    inner_normal_w = torch.where(
+        left_closer[:, None], left_inner_w, right_inner_w
+    )                                                                       # (N, 3)
+
+    # Unit vector from chosen foot to ball.
+    closer_foot_pos = torch.where(
+        left_closer[:, None], foot_pos_w[:, 0, :], foot_pos_w[:, 1, :]
+    )                                                                       # (N, 3)
+    foot_to_ball = ball_pos_w - closer_foot_pos                            # (N, 3)
+    foot_to_ball = foot_to_ball / (foot_to_ball.norm(dim=-1, keepdim=True) + 1e-6)
+
+    # Alignment: dot product of inner face normal and foot→ball direction.
+    alignment = (inner_normal_w * foot_to_ball).sum(dim=-1)                # (N,)
+    oriented_correctly = alignment > alignment_threshold
+
+    fired = just_fired & oriented_correctly & ~env._ifos_flag
+    env._ifos_flag |= fired
     return fired.float()
 
 

@@ -96,22 +96,6 @@ def goalkeeper_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
             reduce="netforce",
             history_length=0,
         ),
-        # Inner/medial face only: left_foot1(-0.03y), left_foot3(-0.01y),
-        # right_foot2(+0.03y), right_foot4(+0.01y). Used by inner_face_save
-        # to detect ball contact on the medial side of an airborne foot.
-        ContactSensorCfg(
-            name="inner_foot_contact",
-            primary=ContactMatch(
-                mode="geom",
-                pattern=r"^(left_foot[13]|right_foot[24])_collision$",
-                entity="robot",
-            ),
-            secondary=None,
-            fields=("found",),
-            reduce="none",
-            num_slots=4,
-            history_length=0,
-        ),
         ContactSensorCfg(
             name="self_collision",
             primary=ContactMatch(mode="subtree", pattern="Trunk", entity="robot"),
@@ -291,10 +275,10 @@ def goalkeeper_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
             weight=15.0,
             params={"ball_name": BALL_NAME},
         ),
-        "inner_face_at_save": RewardTermCfg(
-            func=gk_mdp.inner_face_at_save,
+        "inner_face_orientation_save": RewardTermCfg(
+            func=gk_mdp.inner_face_orientation_save,
             weight=15.0,
-            params={"ball_name": BALL_NAME, "ball_proximity": 0.35, "asset_cfg": _FEET_CFG},
+            params={"ball_name": BALL_NAME, "alignment_threshold": 0.4, "asset_cfg": _FEET_CFG},
         ),
         # --- ball interception (feet-only) ---
         "footreach": RewardTermCfg(
