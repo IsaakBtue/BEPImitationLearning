@@ -300,9 +300,14 @@ def goalkeeper_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
             weight=25.0,
             params={"ball_name": BALL_NAME, "speed_threshold": 0.25},
         ),
-        # --- airborne inner-face save bonus ---
-        "inner_face_save": RewardTermCfg(
-            func=gk_mdp.inner_face_save,
+        # --- save quality bonuses (fire on top of softstop, not as a gate) ---
+        "airborne_at_save": RewardTermCfg(
+            func=gk_mdp.airborne_at_save,
+            weight=15.0,
+            params={"ball_name": BALL_NAME},
+        ),
+        "inner_face_at_save": RewardTermCfg(
+            func=gk_mdp.inner_face_at_save,
             weight=15.0,
             params={"ball_name": BALL_NAME, "ball_proximity": 0.35, "asset_cfg": _FEET_CFG},
         ),
