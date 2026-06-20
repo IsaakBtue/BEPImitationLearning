@@ -148,9 +148,9 @@ def goalkeeper_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
             params={
                 "reward_name": "stopball",
                 "stages": [
-                    {"step": 0,        "weight": 100.0},
-                    {"step": _stage1,  "weight": 175.0},
-                    {"step": _stage2,  "weight": 250.0},
+                    {"step": 0,        "weight": 50.0},
+                    {"step": _stage1,  "weight": 87.0},
+                    {"step": _stage2,  "weight": 125.0},
                 ],
             },
         )
@@ -269,7 +269,7 @@ def goalkeeper_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
         # --- primary task signal ---
         "stopball": RewardTermCfg(
             func=gk_mdp.stopball,
-            weight=100.0,
+            weight=50.0,
             params={"ball_name": BALL_NAME, "delta_vel_threshold": 2.0},
         ),
         # --- partial deflection signal (fires before stopball; gates _ball_is_behind) ---

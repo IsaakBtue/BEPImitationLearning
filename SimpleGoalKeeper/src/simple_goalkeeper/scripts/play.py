@@ -55,6 +55,98 @@ class PlayConfig:
     """Override ball difficulty (0.0 = easiest, 1.0 = hardest). Default: use curriculum value."""
     no_rsi: bool = False
     """Disable Random State Initialization — every episode starts from the standing keyframe."""
+    analytics: bool = False
+    """Print ball velocity, delta_vx, foot heights, and stopball/softstop state to stdout each step.
+    Also toggleable at runtime with the V key."""
+
+
+class AnalyticsPolicy:
+    """Wraps a policy to print per-step ball/foot/reward analytics to stdout.
+
+    Toggle with the V key in the viewer or pass --analytics True on the CLI.
+    Prints a single overwriting line while active; outputs a separator on episode end.
+    """
+
+    def __init__(self, policy, env, enabled: bool = False) -> None:
+        self._policy = policy
+        self._env = env
+        self.enabled = enabled
+        self._step = 0
+        self._ep = 0
+        self._prev_ep_buf: "torch.Tensor | None" = None
+
+    def toggle(self) -> None:
+        self.enabled = not self.enabled
+        status = "ON" if self.enabled else "OFF"
+        print(f"\n[Analytics] {status}")
+
+    def __call__(self, obs: "torch.Tensor") -> "torch.Tensor":
+        import torch as _torch
+        actions = self._policy(obs)
+        self._step += 1
+
+        env = self._env.unwrapped
+        ep_buf = env.episode_length_buf
+
+        # Detect episode reset (any env reset → print separator for env 0).
+        if self._prev_ep_buf is not None and (ep_buf[0] < self._prev_ep_buf[0]).item():
+            if self.enabled:
+                print()  # newline after overwriting line
+            self._ep += 1
+        self._prev_ep_buf = ep_buf.clone()
+
+        if not self.enabled:
+            return actions
+
+        ball = env.scene["ball"]
+        robot = env.scene["robot"]
+
+        bv = ball.data.root_link_lin_vel_w[0]        # ball velocity world frame
+        bp = ball.data.root_link_pos_w[0]            # ball position world frame
+        bx_local = (bp[0] - env.scene.env_origins[0, 0]).item()
+
+        init_vx = getattr(env, "_sb_init_vx", None)
+        sb_flag  = getattr(env, "_sb_flag", None)
+        ss_flag  = getattr(env, "_softstop_flag", None)
+        cs_flag  = getattr(env, "_cleanstop_flag", None)
+
+        delta_vx = (bv[0] - init_vx[0]).item() if init_vx is not None else float("nan")
+        stopball_fired  = sb_flag[0].item()  if sb_flag  is not None else False
+        softstop_fired  = ss_flag[0].item()  if ss_flag  is not None else False
+        cleanstop_fired = cs_flag[0].item()  if cs_flag  is not None else False
+
+        # Foot heights above floor.
+        from simple_goalkeeper.robots.t1_constants import HOME_KEYFRAME  # noqa: F401 (unused val)
+        foot_ids = robot.find_bodies(["left_foot_link", "right_foot_link"])[0]
+        foot_z = robot.data.body_link_pos_w[0, foot_ids, 2]
+        floor_z = env.scene.env_origins[0, 2]
+        lf_h = (foot_z[0] - floor_z).item()
+        rf_h = (foot_z[1] - floor_z).item()
+
+        ball_speed = bv.norm().item()
+
+        flags = (
+            f"{'SB✓' if stopball_fired else 'SB·'} "
+            f"{'SS✓' if softstop_fired else 'SS·'} "
+            f"{'CS✓' if cleanstop_fired else 'CS·'}"
+        )
+        print(
+            f"\rEp{self._ep:3d} | "
+            f"bvx={bv[0].item():+6.2f} bvy={bv[1].item():+5.2f} spd={ball_speed:.2f} "
+            f"bx={bx_local:+5.2f} | "
+            f"dvx={delta_vx:+5.2f} | "
+            f"LF={lf_h:.3f} RF={rf_h:.3f} | "
+            f"{flags}",
+            end="",
+            flush=True,
+        )
+        return actions
+
+    # Allow duck-typing with plain callables (reset hook used by runner).
+    def reset(self) -> None:
+        reset_fn = getattr(self._policy, "reset", None)
+        if reset_fn is not None:
+            reset_fn()
 
 
 def run_play(task_id: str, cfg: PlayConfig) -> None:
@@ -126,6 +218,10 @@ def run_play(task_id: str, cfg: PlayConfig) -> None:
         runner.load(str(resume_path), load_optimizer=False)
         policy = runner.get_inference_policy(device=device)
 
+    # Wrap policy with analytics printer (always constructed, enabled by flag).
+    analytics = AnalyticsPolicy(policy, env, enabled=cfg.analytics)
+    final_policy = analytics
+
     if cfg.viewer == "auto":
         has_display = bool(os.environ.get("DISPLAY") or os.environ.get("WAYLAND_DISPLAY"))
         resolved_viewer = "native" if has_display else "viser"
@@ -133,9 +229,13 @@ def run_play(task_id: str, cfg: PlayConfig) -> None:
         resolved_viewer = cfg.viewer
 
     if resolved_viewer == "native":
-        NativeMujocoViewer(env, policy).run()
+        from mjlab.viewer.native.keys import KEY_V
+        def _key_cb(key: int) -> None:
+            if key == KEY_V:
+                analytics.toggle()
+        NativeMujocoViewer(env, final_policy, key_callback=_key_cb).run()
     elif resolved_viewer == "viser":
-        ViserPlayViewer(env, policy).run()
+        ViserPlayViewer(env, final_policy).run()
     else:
         raise RuntimeError(f"Unsupported viewer: {resolved_viewer}")
 
