@@ -270,7 +270,7 @@ def goalkeeper_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
         "stopball": RewardTermCfg(
             func=gk_mdp.stopball,
             weight=50.0,
-            params={"ball_name": BALL_NAME, "delta_vel_threshold": 2.0},
+            params={"ball_name": BALL_NAME, "delta_vel_threshold": 1.5},
         ),
         # --- partial deflection signal (fires before stopball; gates _ball_is_behind) ---
         "softstop": RewardTermCfg(
