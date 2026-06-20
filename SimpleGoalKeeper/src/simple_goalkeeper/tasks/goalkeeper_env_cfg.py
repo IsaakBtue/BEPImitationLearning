@@ -536,7 +536,7 @@ def goalkeeper_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
         ),
         "sharpforce": TerminationTermCfg(
             func=gk_mdp.sharpforce_termination,
-            params={"max_contact_force": 1500.0},
+            params={"max_contact_force": 2500.0},
             time_out=False,
         ),
     }
