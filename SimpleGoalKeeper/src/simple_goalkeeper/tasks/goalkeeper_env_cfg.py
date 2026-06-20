@@ -181,7 +181,6 @@ def goalkeeper_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
                 "update_interval": 500,
                 "ep_len_divisor":  50,
             },
-            },
         )
 
     # ------------------------------------------------------------------
