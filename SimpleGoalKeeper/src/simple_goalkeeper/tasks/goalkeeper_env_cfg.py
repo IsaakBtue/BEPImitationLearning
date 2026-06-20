@@ -369,7 +369,7 @@ def goalkeeper_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
         "penalize_sharpcontact": RewardTermCfg(
             func=gk_mdp.penalize_sharpcontact,
             weight=-100.0,
-            params={"force_threshold": 1450.0},
+            params={"force_threshold": 1700.0},
         ),
         "penalize_self_collision": RewardTermCfg(
             func=gk_mdp.penalize_self_collision,
