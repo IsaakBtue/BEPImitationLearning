@@ -96,6 +96,23 @@ def goalkeeper_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
             reduce="netforce",
             history_length=0,
         ),
+        # Inner/medial face only: left_foot1(-0.03y), left_foot3(-0.01y),
+        # right_foot2(+0.03y), right_foot4(+0.01y). Used by outer_foot_airborne_save
+        # to verify the ball hit the inside of the intercepting foot (not just
+        # any collision with the outer edge or tip).
+        ContactSensorCfg(
+            name="inner_foot_contact",
+            primary=ContactMatch(
+                mode="geom",
+                pattern=r"^(left_foot[13]|right_foot[24])_collision$",
+                entity="robot",
+            ),
+            secondary=None,
+            fields=("found",),
+            reduce="none",
+            num_slots=4,
+            history_length=0,
+        ),
         ContactSensorCfg(
             name="self_collision",
             primary=ContactMatch(mode="subtree", pattern="Trunk", entity="robot"),

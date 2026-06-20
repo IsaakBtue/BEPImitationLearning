@@ -631,54 +631,72 @@ def outer_foot_airborne_save(
     asset_cfg: SceneEntityCfg = _DEFAULT_FEET_CFG,
     center_dead_zone: float = 0.15,
 ) -> torch.Tensor:
-    """One-time bonus when the ball is deflected with the outer foot airborne.
+    """One-time bonus when the ball is deflected with the outer foot's inner face while airborne.
 
     "Outer foot" = foot on the same side as the ball's frozen crossing Y.
-    Fires once per episode at the exact step softstop first fires, if:
-      - The outer foot has no ground contact at that moment (it was lifted/swung)
-      - The ball is not aimed at the center (|crossing_y - robot_y| > center_dead_zone)
+    "Inner face" = medial geoms of that foot:
+        left  foot inner → left_foot1 (y=−0.03), left_foot3 (y=−0.01)
+        right foot inner → right_foot2 (y=+0.03), right_foot4 (y=+0.01)
 
-    Rationale: lifting the outer foot and sweeping it into the ball is the canonical
-    diving/stepping motion. If the robot shuffles flat-footed, the outer foot stays
-    in contact with the ground and this reward does not fire.
+    Fires once per episode when softstop transitions False→True, provided:
+      1. The outer foot has no ground contact at that moment (lifted/swung).
+      2. Before softstop fired, the inner face of the outer foot made contact (ball
+         hit the inside of the foot). Tracked cumulatively because contact and the
+         softstop delta_vx threshold may be reached 1–2 frames apart.
+      3. The ball is not aimed at center (|crossing_y − robot_y| > center_dead_zone).
+
+    inner_foot_contact sensor slot order (alphabetical geom names):
+      slot 0: left_foot1_collision  (left  inner, y=−0.03)
+      slot 1: left_foot3_collision  (left  inner, y=−0.01)
+      slot 2: right_foot2_collision (right inner, y=+0.03)
+      slot 3: right_foot4_collision (right inner, y=+0.01)
     Weight: +30.0.
     """
     if not hasattr(env, "_ofa_ss_prev"):
-        env._ofa_ss_prev = torch.zeros(env.num_envs, dtype=torch.bool, device=env.device)
-        env._ofa_flag = torch.zeros(env.num_envs, dtype=torch.bool, device=env.device)
+        env._ofa_ss_prev   = torch.zeros(env.num_envs, dtype=torch.bool, device=env.device)
+        env._ofa_flag      = torch.zeros(env.num_envs, dtype=torch.bool, device=env.device)
+        env._ofa_inner_hit = torch.zeros(env.num_envs, dtype=torch.bool, device=env.device)
 
     just_reset = env.episode_length_buf <= 1
-    env._ofa_ss_prev[just_reset] = False
-    env._ofa_flag[just_reset] = False
+    env._ofa_ss_prev[just_reset]   = False
+    env._ofa_flag[just_reset]      = False
+    env._ofa_inner_hit[just_reset] = False
 
     softstop_fired = getattr(env, "_softstop_flag", None)
     if softstop_fired is None:
         return torch.zeros(env.num_envs, device=env.device)
 
-    # Detect the single frame softstop transitions False → True.
+    # Which foot is outer (same side as crossing Y)?
+    crossing_y = _get_ball_crossing_y(env, ball_name)              # (N,)
+    robot_y = env.scene["robot"].data.root_link_pos_w[:, 1]        # (N,)
+    lateral_err = crossing_y - robot_y                              # positive → ball on right
+    significant_side = lateral_err.abs() > center_dead_zone
+    ball_on_right = lateral_err > 0
+
+    # Outer foot airborne check (full feet_contact sensor, 8 geoms).
+    all_contact: ContactSensor = env.scene["feet_contact"]
+    fc = all_contact.data.found                                     # (B, 8)
+    left_grounded  = (fc[:, :4] > 0).any(dim=-1)
+    right_grounded = (fc[:, 4:] > 0).any(dim=-1)
+    outer_grounded = torch.where(ball_on_right, right_grounded, left_grounded)
+    outer_airborne = ~outer_grounded
+
+    # Inner-face contact on the outer foot (inner_foot_contact sensor, 4 slots).
+    inner_sensor: ContactSensor = env.scene["inner_foot_contact"]
+    ic = inner_sensor.data.found                                    # (B, 4)
+    left_inner_contact  = (ic[:, :2] > 0).any(dim=-1)             # left_foot1 + left_foot3
+    right_inner_contact = (ic[:, 2:] > 0).any(dim=-1)             # right_foot2 + right_foot4
+    outer_inner_contact = torch.where(ball_on_right, right_inner_contact, left_inner_contact)
+
+    # Accumulate: outer foot airborne AND its inner face in contact = ball hit inside of foot.
+    # Only accumulate while softstop hasn't fired yet (ball still in play).
+    env._ofa_inner_hit |= (outer_airborne & outer_inner_contact & ~softstop_fired)
+
+    # Detect softstop transition False → True.
     just_fired = softstop_fired & ~env._ofa_ss_prev
     env._ofa_ss_prev[:] = softstop_fired
 
-    if not just_fired.any():
-        return torch.zeros(env.num_envs, device=env.device)
-
-    # Which side is the ball arriving from?
-    crossing_y = _get_ball_crossing_y(env, ball_name)                   # (N,)
-    robot_y = env.scene["robot"].data.root_link_pos_w[:, 1]             # (N,)
-    lateral_err = crossing_y - robot_y                                   # positive → ball on right
-
-    significant_side = lateral_err.abs() > center_dead_zone             # ignore center shots
-    ball_on_right = lateral_err > 0                                      # True → right is outer
-
-    # Is the outer foot in the air (no ground contact)?
-    sensor: ContactSensor = env.scene["feet_contact"]
-    found = sensor.data.found                                            # (B, 8)
-    left_grounded  = (found[:, :4] > 0).any(dim=-1)                    # (B,)
-    right_grounded = (found[:, 4:] > 0).any(dim=-1)                    # (B,)
-    outer_grounded = torch.where(ball_on_right, right_grounded, left_grounded)
-    outer_airborne = ~outer_grounded                                     # (B,)
-
-    fired = just_fired & outer_airborne & significant_side & ~env._ofa_flag
+    fired = just_fired & env._ofa_inner_hit & significant_side & ~env._ofa_flag
     env._ofa_flag |= fired
     return fired.float()
 
