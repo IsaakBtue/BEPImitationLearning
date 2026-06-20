@@ -167,11 +167,11 @@
                       diaginertia="0.00269786 0.002385 0.00218714"/>
                     <joint name="Left_Ankle_Roll" axis="1 0 0" range="-0.44 0.44"/>
                     <geom class="visual" mesh="left_foot_link"/>
-                    <geom name="left_foot1_collision" type="capsule" size="0.02" class="collision"
+                    <geom name="left_foot1_collision" type="capsule" size="0.02" class="collision" rgba="0 0.6 1 0.8"
                       fromto="-0.08 -0.03 -0.01 0.09 -0.03 -0.01"/>
                     <geom name="left_foot2_collision" type="capsule" size="0.02" class="collision"
                       fromto="-0.08 0.03 -0.01 0.09 0.03 -0.01"/>
-                    <geom name="left_foot3_collision" type="capsule" size="0.02" class="collision"
+                    <geom name="left_foot3_collision" type="capsule" size="0.02" class="collision" rgba="0 0.6 1 0.8"
                       fromto="-0.08 -0.01 -0.01 0.105 -0.01 -0.01"/>
                     <geom name="left_foot4_collision" type="capsule" size="0.02" class="collision"
                       fromto="-0.08 0.01 -0.01 0.105 0.01 -0.01"/>
@@ -217,11 +217,11 @@
                     <geom class="visual" mesh="right_foot_link"/>
                     <geom name="right_foot1_collision" type="capsule" size="0.02" class="collision"
                       fromto="-0.08 -0.03 -0.01 0.09 -0.03 -0.01"/>
-                    <geom name="right_foot2_collision" type="capsule" size="0.02" class="collision"
+                    <geom name="right_foot2_collision" type="capsule" size="0.02" class="collision" rgba="0 0.6 1 0.8"
                       fromto="-0.08 0.03 -0.01 0.09 0.03 -0.01"/>
                     <geom name="right_foot3_collision" type="capsule" size="0.02" class="collision"
                       fromto="-0.08 -0.01 -0.01 0.105 -0.01 -0.01"/>
-                    <geom name="right_foot4_collision" type="capsule" size="0.02" class="collision"
+                    <geom name="right_foot4_collision" type="capsule" size="0.02" class="collision" rgba="0 0.6 1 0.8"
                       fromto="-0.08 0.01 -0.01 0.105 0.01 -0.01"/>
                     <site name="right_foot"/>
                   </body>
