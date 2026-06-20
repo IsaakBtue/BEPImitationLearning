@@ -35,7 +35,7 @@ ANKLE_ACTUATOR = ElectricActuator(
     velocity_limit=_rpm(117), effort_limit=50.0,
 )
 
-NATURAL_FREQ = 5.0 * 2.0 * 3.14159265
+NATURAL_FREQ = 5.0 * 2.0 * 3.14159265   # 5 Hz natural frequency
 DAMPING_RATIO = 2.0
 
 def _kp(act: ElectricActuator) -> float:
@@ -125,3 +125,17 @@ for _a in T1_ARTICULATION_HEADLESS.actuators:
     assert isinstance(_a, BuiltinPositionActuatorCfg)
     for _n in _a.target_names_expr:
         T1_ACTION_SCALE_HEADLESS[_n] = 0.25 * _a.effort_limit / _a.stiffness
+
+# Explicit KP/KD values for each joint group (useful for deployment verification).
+# Computed from NATURAL_FREQ=5 Hz, DAMPING_RATIO=2.0, motor specs above.
+#   ARM:   kp=27.88  kd=3.55   effort=36 N·m   action_scale≈0.323
+#   WAIST: kp=47.19  kd=6.01   effort=40 N·m   action_scale≈0.212
+#   HIP_P: kp=51.71  kd=6.58   effort=55 N·m   action_scale≈0.266
+#   KNEE:  kp=62.77  kd=7.99   effort=65 N·m   action_scale≈0.259
+#   ANKLE: kp=33.51  kd=4.27   effort=50 N·m   action_scale≈0.373
+T1_KP: dict[str, float] = {n: a.stiffness for a in T1_ARTICULATION_HEADLESS.actuators
+                             if isinstance(a, BuiltinPositionActuatorCfg)
+                             for n in a.target_names_expr}
+T1_KD: dict[str, float] = {n: a.damping for a in T1_ARTICULATION_HEADLESS.actuators
+                             if isinstance(a, BuiltinPositionActuatorCfg)
+                             for n in a.target_names_expr}

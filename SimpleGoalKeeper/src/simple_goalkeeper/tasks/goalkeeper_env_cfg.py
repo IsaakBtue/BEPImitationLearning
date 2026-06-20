@@ -126,16 +126,21 @@ def goalkeeper_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
     # (num_steps_per_env=24 by default → same thresholds as Imitationlearningbooster).
     # ------------------------------------------------------------------
     _num_steps = 24
+    # Reward-weight curriculum stages (fixed schedule, independent of ball difficulty).
+    _stage1 = 1000 * _num_steps   # step 24000 → iter 1000
+    _stage2 = 2000 * _num_steps   # step 48000 → iter 2000
     cfg.curriculum.clear()
     if not play:
         cfg.curriculum["ball_difficulty"] = CurriculumTermCfg(
             func=gk_mdp.ball_difficulty_curriculum,
             params={
-                "stages": [
-                    {"step": 0,                    "difficulty": 0.0},
-                    {"step": 600  * _num_steps,    "difficulty": 0.5},
-                    {"step": 1200 * _num_steps,    "difficulty": 1.0},
-                ],
+                # Adaptive curriculum: mirrors Humanoid-Goalkeeper G1 (legged_robot.py:325-336).
+                # difficulty += step_size × int(mean_ep_len / ep_len_divisor)
+                # every update_interval per-env steps. Longer episodes → faster advance.
+                "update_interval": 500,   # per-env steps between updates (same as G1)
+                "ep_len_divisor":  50,    # same divisor as G1
+                "step_size":       0.01,  # difficulty units per curriculumupdate per check
+                #   → at ep_len=144 curriculumupdate=2: reaches 1.0 in ~50 checks ≈ 1000 iters
             },
         )
         cfg.curriculum["stopball_curriculum"] = CurriculumTermCfg(
@@ -143,42 +148,36 @@ def goalkeeper_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
             params={
                 "reward_name": "stopball",
                 "stages": [
-                    {"step": 0,                    "weight": 100.0},
-                    {"step": 600  * _num_steps,    "weight": 175.0},
-                    {"step": 1200 * _num_steps,    "weight": 250.0},
+                    {"step": 0,        "weight": 100.0},
+                    {"step": _stage1,  "weight": 175.0},
+                    {"step": _stage2,  "weight": 250.0},
                 ],
             },
         )
-        cfg.curriculum["torque_limits_curriculum"] = CurriculumTermCfg(
+        cfg.curriculum["softstop_curriculum"] = CurriculumTermCfg(
             func=mjlab_mdp.reward_curriculum,
             params={
-                "reward_name": "torque_limits",
+                "reward_name": "softstop",
                 "stages": [
-                    {"step": 0,                    "weight": -3.0},
-                    {"step": 600  * _num_steps,    "weight": -6.0},
-                    {"step": 1200 * _num_steps,    "weight": -9.0},
+                    {"step": 0,        "weight": 100.0},
+                    {"step": _stage1,  "weight": 150.0},
+                    {"step": _stage2,  "weight": 200.0},
                 ],
             },
         )
-        cfg.curriculum["dof_pos_limits_curriculum"] = CurriculumTermCfg(
-            func=mjlab_mdp.reward_curriculum,
-            params={
-                "reward_name": "dof_pos_limits",
-                "stages": [
-                    {"step": 0,                    "weight": -3.0},
-                    {"step": 600  * _num_steps,    "weight": -6.0},
-                    {"step": 1200 * _num_steps,    "weight": -9.0},
-                ],
-            },
-        )
+        # NOTE: torque_limits and dof_pos_limits intentionally NOT in curriculum.
+        # Tripling the torque penalty at the same time balls get harder (wider y range)
+        # forces the robot into low-torque yaw strategies instead of lateral steps.
+        # Keep both fixed at -3.0 throughout so the robot can use full joint effort
+        # for aggressive saves at hard difficulty without extra penalty.
         cfg.curriculum["footreach_curriculum"] = CurriculumTermCfg(
             func=mjlab_mdp.reward_curriculum,
             params={
                 "reward_name": "footreach",
                 "stages": [
-                    {"step": 0,                    "weight": 10.0},
-                    {"step": 600  * _num_steps,    "weight": 15.0},
-                    {"step": 1200 * _num_steps,    "weight": 20.0},
+                    {"step": 0,        "weight": 10.0},
+                    {"step": _stage1,  "weight": 15.0},
+                    {"step": _stage2,  "weight": 20.0},
                 ],
             },
         )
@@ -271,13 +270,36 @@ def goalkeeper_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
         "stopball": RewardTermCfg(
             func=gk_mdp.stopball,
             weight=100.0,
-            params={"ball_name": BALL_NAME, "delta_vel_threshold": 1.0},
+            params={"ball_name": BALL_NAME, "delta_vel_threshold": 2.0},
+        ),
+        # --- partial deflection signal (fires before stopball; gates _ball_is_behind) ---
+        "softstop": RewardTermCfg(
+            func=gk_mdp.softstop,
+            weight=100.0,
+            params={"ball_name": BALL_NAME, "velocity_threshold": 0.2},
+        ),
+        # --- clean-trap bonus: ball nearly dead after deflection ---
+        "cleanstop": RewardTermCfg(
+            func=gk_mdp.cleanstop,
+            weight=25.0,
+            params={"ball_name": BALL_NAME, "speed_threshold": 0.25},
         ),
         # --- ball interception (feet-only) ---
         "footreach": RewardTermCfg(
             func=gk_mdp.footreach,
             weight=10.0,
             params={"ball_name": BALL_NAME, "reach_th": 0.3, "sigma": 5.0, "asset_cfg": _FEET_CFG},
+        ),
+        "foot_proximity": RewardTermCfg(
+            func=gk_mdp.foot_proximity,
+            weight=5.0,
+            params={"ball_name": BALL_NAME, "sigma": 5.0, "asset_cfg": _FEET_CFG},
+        ),
+        # --- active stepping: reward lifting feet during approach ---
+        "foot_clearance": RewardTermCfg(
+            func=gk_mdp.foot_clearance,
+            weight=2.0,
+            params={"ball_name": BALL_NAME, "target_height": 0.10, "asset_cfg": _FEET_CFG},
         ),
         # --- goalkeeper stance ---
         "stayonline": RewardTermCfg(
@@ -319,6 +341,12 @@ def goalkeeper_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
             weight=1.0,
             params={"ball_name": BALL_NAME, "asset_cfg": _RECOVERY_WAIST_CFG},
         ),
+        # --- full-body T-pose recovery (all 21 joints → home keyframe default) ---
+        "post_default_pose": RewardTermCfg(
+            func=gk_mdp.post_default_pose,
+            weight=5.0,
+            params={"ball_name": BALL_NAME, "asset_cfg": _ALL_JOINTS_CFG, "std": 0.5},
+        ),
         # --- hardware safety ---
         "penalize_kneeheight": RewardTermCfg(
             func=gk_mdp.penalize_kneeheight,
@@ -328,7 +356,7 @@ def goalkeeper_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
         "penalize_sharpcontact": RewardTermCfg(
             func=gk_mdp.penalize_sharpcontact,
             weight=-100.0,
-            params={"force_threshold": 1000.0},
+            params={"force_threshold": 1200.0},
         ),
         "penalize_self_collision": RewardTermCfg(
             func=gk_mdp.penalize_self_collision,
@@ -337,7 +365,7 @@ def goalkeeper_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
         "feet_slippage": RewardTermCfg(
             func=gk_mdp.feet_slippage,
             weight=3.0,
-            params={"asset_cfg": _FEET_CFG},
+            params={"ball_name": BALL_NAME, "asset_cfg": _FEET_CFG},
         ),
         # --- joint limits ---
         "dof_pos_limits": RewardTermCfg(
@@ -352,7 +380,7 @@ def goalkeeper_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
         ),
         "torque_limits": RewardTermCfg(
             func=gk_mdp.torque_limits,
-            weight=-3.0,  # ramped to -9.0 via torque_limits_curriculum
+            weight=-3.0,
             params={"asset_cfg": _ALL_JOINTS_CFG},
         ),
         # --- stability ---
@@ -363,7 +391,7 @@ def goalkeeper_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
         ),
         "ang_vel_z": RewardTermCfg(
             func=gk_mdp.ang_vel_z_l2,
-            weight=-0.5,
+            weight=-2.0,
             params={"asset_cfg": _ROBOT_CFG},
         ),
         "deviation_waist_joint": RewardTermCfg(
@@ -398,35 +426,74 @@ def goalkeeper_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
     }
 
     # ------------------------------------------------------------------
-    # Events
+    # Events — Domain Randomisation (mirrors BoosterT1mjlab kick task)
     # ------------------------------------------------------------------
-    # Remove DR events not needed for Phase 1 (no domain randomization yet).
-    cfg.events.pop("foot_friction", None)
-    cfg.events.pop("encoder_bias", None)
-    cfg.events.pop("base_com", None)
-    # Remove push_robot: random impulses disrupt the goalkeeper stance and prevent
-    # the policy from learning to react to the ball during early training.
-    cfg.events.pop("push_robot", None)
+    # foot_friction: randomise foot-ground friction per episode (startup).
+    # Same geom names as kick task: (left|right)_foot{1-4}_collision.
+    _foot_geoms = tuple(
+        f"{side}_foot{i}_collision"
+        for side in ("left", "right")
+        for i in range(1, 5)
+    )
+    cfg.events["foot_friction"].params["asset_cfg"].geom_names = _foot_geoms
 
-    # Robot resets to HOME_KEYFRAME via the base reset_robot_joints event.
-    # Mirrors ILB exactly: no custom RSI event, just the base standing-keyframe reset.
-    cfg.events.pop("reset_base", None)
+    # encoder_bias: per-joint position sensor offset at startup (±0.015 rad).
+    # Already configured correctly by base make_velocity_env_cfg — no changes.
 
-    # Ball reset: spawn in robot local +X frame so policy is orientation-invariant.
-    # Spawn heights are lowered to foot-to-shin level (0.05–0.35 m) so the robot
-    # can intercept with feet rather than requiring upper body contact.
-    cfg.events["reset_ball"] = EventTermCfg(
-        func=gk_mdp.reset_ball_local_frame,
+    # base_com: randomise trunk CoM position at startup (±2.5 cm XY, ±3 cm Z).
+    cfg.events["base_com"].params["asset_cfg"].body_names = ("Trunk",)
+
+    # push_robot: random velocity impulse every 1-3 s during training.
+    # Required for sim2real robustness — goalkeeper must maintain stance
+    # under external disturbances. Kept at the same magnitude as kick task.
+
+    # Reset robot root to HOME position at the goal line, robot facing +X.
+    # CRITICAL: without this, the root position and yaw never reset between episodes.
+    # Drifting yaw breaks all world-X reward terms (stopball, ball_exit_termination,
+    # stayonline) because ball spawns in robot-local +X but checks use world +X.
+    # Keep x=(0,0) and y=(0,0): goalkeeper stays centred on the goal line.
+    # Small yaw=(−0.1, 0.1) adds ±5° robustness without breaking world-X assumptions.
+    cfg.events["reset_base"] = EventTermCfg(
+        func=mjlab_mdp.reset_root_state_uniform,
         mode="reset",
         params={
-            "ball_name": BALL_NAME,
-            "dist_range": (2.0, 4.0),
-            "y_start_range": (-1.0, 1.0),        # lateral spawn; widened to force varied approach angles
-            "y_end_range": (-1.5, 1.5),          # goal target Y; widened to force lateral stepping
-            "spawn_height_range": (0.05, 0.35),  # m above floor at spawn — foot to shin height
-            "arrive_height_range": (0.05, 0.25), # m above floor at goal line — lower for feet interception
-            "speed_range": (2.5, 5.0),
+            "pose_range": {
+                "x": (0.0, 0.0),
+                "y": (0.0, 0.0),
+                "z": (0.0, 0.0),
+                "yaw": (-0.1, 0.1),
+            },
+            "velocity_range": {},
         },
+    )
+
+    # RSI: after reset_robot_joints sets joints to default, overwrite with a random
+    # NPZ frame. This exposes the policy to mid-motion dynamics from episode start,
+    # preventing the standing-still local optimum seen without RSI.
+    cfg.events["init_motion_loader"] = EventTermCfg(
+        func=gk_mdp.init_motion_loader,
+        mode="startup",
+        params={},
+    )
+    # Ball reset fires BEFORE RSI so MotionResetManager can read the new ball
+    # velocity and select the matching motion tier (single/double/triple step).
+    cfg.events["reset_ball"] = EventTermCfg(
+        func=gk_mdp.reset_ball_rolling,
+        mode="reset",
+        params={
+            "ball_name":      BALL_NAME,
+            "dist_range":     (1.5, 2.5),
+            "y_start_range":  (-0.3, 0.3),
+            "y_end_range":    (-1.0, 1.0),
+            "speed_range":    (2.0, 3.5),
+            "spawn_z":        0.12,
+        },
+    )
+
+    cfg.events["reset_from_motion_data"] = EventTermCfg(
+        func=gk_mdp.reset_from_motion_data,
+        mode="reset",
+        params={},
     )
 
     # Per-step catchstep decrement for ball visibility warmup.
@@ -464,7 +531,10 @@ def goalkeeper_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
     # ------------------------------------------------------------------
     # Episode length
     # ------------------------------------------------------------------
-    cfg.episode_length_s = 10.0 if play else 4.0
+    # Play: 10 s for evaluation. Training: 3 s matches ILB (goalkeeper_amp_env_cfg.py:422).
+    # 6 s was wasted compute: post-save steps all have footreach=0 (behind gate) and
+    # dilute the stopball per-step signal by 2× vs 3 s (max stopball/step 0.33→0.67).
+    cfg.episode_length_s = 10.0 if play else 3.0
 
     # ------------------------------------------------------------------
     # Play-mode overrides
@@ -472,6 +542,25 @@ def goalkeeper_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
     if play:
         cfg.observations["actor"].enable_corruption = False
         cfg.terminations.pop("out_of_terrain_bounds", None)
+        # No disturbance pushes during play/eval — mirrors kick task play mode.
+        cfg.events.pop("push_robot", None)
+        # RSI is kept in play mode so each episode starts from a random motion frame,
+        # matching the training distribution. init_motion_loader is registered
+        # unconditionally above; reset_from_motion_data is NOT popped here.
+        # Play: rolling ball — same function as training so visualisation matches
+        # the distribution the policy was trained on. vz=0 keeps ball at foot level.
+        cfg.events["reset_ball"] = EventTermCfg(
+            func=gk_mdp.reset_ball_rolling,
+            mode="reset",
+            params={
+                "ball_name":     BALL_NAME,
+                "dist_range":    (1.5, 2.5),
+                "y_start_range": (-0.3, 0.3),
+                "y_end_range":   (-1.0, 1.0),
+                "speed_range":   (2.0, 3.5),
+                "spawn_z":       0.12,
+            },
+        )
 
     return cfg
 

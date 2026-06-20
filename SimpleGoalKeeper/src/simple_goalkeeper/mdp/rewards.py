@@ -62,21 +62,35 @@ _T1_EFFORT_MAP: dict[str, float] = {
 def _ball_is_behind(env: "ManagerBasedRlEnv", ball_name: str) -> torch.Tensor:
     """Bool mask (N,): ball has been deflected OR has crossed the goal line.
 
-    Mirrors ILB / upstream Humanoid-Goalkeeper exactly:
-        behind = (ball_x < 0) | (delta_vx > 1.0)
-    delta_vx > 1.0 fires the moment stopball fires — deactivates footreach
-    (no more chasing) and activates post-save recovery rewards immediately.
-    Reuses _sb_init_vx set by stopball; falls back to absolute threshold on
-    the very first step before stopball has run.
+    Fires when ANY of:
+      - ball_x < 0 (crossed goal line)
+      - _softstop_flag is set (delta_vx > 0.2 — partial contact)
+      - delta_vx > 1.0 from _sb_init_vx (full stopball deflection)
+
+    Checking _softstop_flag (0.2 m/s threshold) means partial contacts also
+    deactivate footreach and activate post-save recovery immediately, preventing
+    the robot from standing still in a T-pose while tracking a ball it already
+    touched.
     """
     ball: Entity = env.scene[ball_name]
     ball_x_local = ball.data.root_link_pos_w[:, 0] - env.scene.env_origins[:, 0]
     ball_x_vel = ball.data.root_link_lin_vel_w[:, 0]
+
+    # Persistent flag: softstop fires once at delta_vx > 0.2 m/s.
+    softstop_fired = getattr(env, "_softstop_flag", None)
+    already_deflected = (
+        softstop_fired
+        if softstop_fired is not None
+        else torch.zeros(env.num_envs, dtype=torch.bool, device=env.device)
+    )
+
+    # Also check real-time delta_vx against stopball threshold (mirrors old behaviour).
     init_vx = getattr(env, "_sb_init_vx", None)
     if init_vx is not None:
         delta_vx = ball_x_vel - init_vx
-        return (ball_x_local < 0.0) | (delta_vx > 1.0)
-    return (ball_x_local < 0.0) | (ball_x_vel > 1.0)
+        already_deflected = already_deflected | (delta_vx > 1.0)
+
+    return (ball_x_local < 0.0) | already_deflected
 
 
 def _robot_x_axis_w(env: "ManagerBasedRlEnv") -> torch.Tensor:
@@ -85,6 +99,30 @@ def _robot_x_axis_w(env: "ManagerBasedRlEnv") -> torch.Tensor:
     x_local = torch.zeros(env.num_envs, 3, device=env.device)
     x_local[:, 0] = 1.0
     return quat_apply(robot.data.root_link_quat_w, x_local)
+
+
+def _get_ball_crossing_y(env: "ManagerBasedRlEnv", ball_name: str) -> torch.Tensor:
+    """Frozen Y coordinate where the ball will cross the goal line (x_local = 0).
+
+    Computed once per episode at reset from the ball's initial position and velocity.
+    Both footreach (phase1) and foot_proximity read this so the robot pre-positions
+    toward where the ball WILL arrive, not where it currently is. Mirrors ILB's
+    _ball_end_target frozen intercept pattern.
+    """
+    ball: Entity = env.scene[ball_name]
+    ball_pos_w = ball.data.root_link_pos_w
+    ball_vel_w = ball.data.root_link_lin_vel_w
+    ball_x_local = ball_pos_w[:, 0] - env.scene.env_origins[:, 0]
+
+    just_reset = env.episode_length_buf <= 1
+    if not hasattr(env, "_ball_crossing_y"):
+        env._ball_crossing_y = ball_pos_w[:, 1].clone()
+    if just_reset.any():
+        bvx = ball_vel_w[just_reset, 0].clamp(max=-0.1)   # approaching → negative
+        bvy = ball_vel_w[just_reset, 1]
+        t_cross = ball_x_local[just_reset] / (-bvx)
+        env._ball_crossing_y[just_reset] = ball_pos_w[just_reset, 1] + bvy * t_cross
+    return env._ball_crossing_y
 
 
 def footreach(
@@ -96,13 +134,14 @@ def footreach(
 ) -> torch.Tensor:
     """Reach reward adapted from Imitationlearningbooster eereach, for feet instead of hands.
 
-    Phase 1 (ball x_local > 1.5 m): reward lateral alignment with ball Y position so the
-    robot pre-positions in front of the incoming ball's trajectory.
+    Phase 1 (ball x_local > 1.5 m): reward lateral alignment with the FROZEN crossing Y
+    (where the ball will cross the goal line), not the live ball Y. This gives a stable
+    pre-positioning target even for angled shots where live ball Y != arrival Y.
 
     Phase 2 (ball x_local <= 1.5 m): sigmoid reach reward × lateral vel_sigma so actively
     diving/stepping toward the ball gives up to 10× the static reach reward.
 
-    vel_sigma = 1 + 3 * clamp(vel_toward_ball_side, 0, 3).
+    vel_sigma = 1 + 3 * clamp(vel_toward_crossing_side, 0, 3).
 
     Upright gate suppresses reward when falling (mirrors eereach upright gate).
     """
@@ -113,21 +152,31 @@ def footreach(
     foot_pos_w = robot.data.body_link_pos_w[:, asset_cfg.body_ids, :]  # (N, 2, 3)
 
     ball_x_local = ball_pos_w[:, 0] - env.scene.env_origins[:, 0]     # (N,)
-    ball_y_w = ball_pos_w[:, 1]                                         # (N,)
     robot_y_w = robot.data.root_link_pos_w[:, 1]                       # (N,)
 
+    # Frozen crossing Y: where the ball will arrive at the goal line.
+    crossing_y = _get_ball_crossing_y(env, ball_name)                  # (N,)
+
     # Phase 1: pre-position laterally when ball is far (> 1.5 m in front).
-    lateral_error = ball_y_w - robot_y_w                                # positive → ball right
+    lateral_error = crossing_y - robot_y_w                             # positive → target right
     asidegoal = lateral_error.clamp(-1.0, 1.0)
     asidegoal = torch.where(asidegoal.abs() < 0.3, torch.zeros_like(asidegoal), asidegoal)
     phase1_rew = 1.0 - asidegoal.abs()                                  # 1=aligned, 0=1 m off
 
-    # Phase 2: sigmoid reach when ball is close.
-    dist_to_ball = torch.norm(foot_pos_w - ball_pos_w[:, None, :], dim=-1)  # (N, 2)
-    min_dist = dist_to_ball.min(dim=-1).values                          # (N,)
-    reach_rew = 1.0 - 1.0 / (1.0 + torch.exp(-sigma * (min_dist - reach_th)))
+    # Phase 2: sigmoid reach to frozen crossing point (where ball WILL arrive at goal line).
+    # Mirrors ILB eereach end_target: robot must pre-position foot at intercept, not
+    # chase the live ball. Using live ball caused free reward when ball rolled through center.
+    goal_x_w  = env.scene.env_origins[:, 0]       # (N,)
+    floor_z_w = env.scene.env_origins[:, 2]       # (N,)
+    crossing_point = torch.stack(
+        [goal_x_w, crossing_y, floor_z_w + 0.12], dim=-1
+    )                                                                     # (N, 3)
+    dist_to_crossing = torch.norm(
+        foot_pos_w - crossing_point[:, None, :], dim=-1
+    ).min(dim=-1).values                                                  # (N,)
+    reach_rew = 1.0 - 1.0 / (1.0 + torch.exp(-sigma * (dist_to_crossing - reach_th)))
 
-    # Lateral velocity toward ball side amplifies the reach reward (mirrors eereach vel_sigma).
+    # Lateral velocity toward crossing side amplifies the reach reward.
     lateral_vel_y = robot.data.root_link_lin_vel_w[:, 1]
     vel_toward = torch.where(lateral_error > 0, lateral_vel_y, -lateral_vel_y)
     vel_sigma = 1.0 + 3.0 * vel_toward.clamp(0.0, 3.0)                # 1–10×
@@ -141,6 +190,38 @@ def footreach(
     upright = 1.0 - torch.clamp(torch.sum(projected_grav[:, :2] ** 2, dim=1), 0.0, 1.0)
     behind = _ball_is_behind(env, ball_name)
     return taskrew * upright * (~behind).float()
+
+
+def foot_proximity(
+    env: "ManagerBasedRlEnv",
+    ball_name: str,
+    asset_cfg: SceneEntityCfg = _DEFAULT_FEET_CFG,
+    sigma: float = 5.0,
+) -> torch.Tensor:
+    """Dense continuous reward for foot near the frozen ball crossing point.
+
+    Uses the frozen goal-line crossing point (env._ball_crossing_y, set by
+    _get_ball_crossing_y) as the target. Rewards exp(-sigma * dist) so there is
+    always a gradient pulling the foot toward the arrival point, unlike the
+    one-shot stopball. Analogous to ILB's hand_proximity_strict (weight 5.0).
+    Deactivates once the ball is behind (same gate as footreach).
+    Weight: +5.0.
+    """
+    robot: Entity = env.scene[asset_cfg.name]
+
+    crossing_y = _get_ball_crossing_y(env, ball_name)                  # (N,)
+    goal_x_w = env.scene.env_origins[:, 0]
+    env_z    = env.scene.env_origins[:, 2]
+    crossing_point = torch.stack(
+        [goal_x_w, crossing_y, env_z + 0.12], dim=-1                   # (N, 3) — ball radius
+    )
+
+    foot_pos_w = robot.data.body_link_pos_w[:, asset_cfg.body_ids, :]  # (N, 2, 3)
+    dist = torch.norm(foot_pos_w - crossing_point[:, None, :], dim=-1)  # (N, 2)
+    min_dist = dist.min(dim=-1).values                                   # (N,)
+
+    behind = _ball_is_behind(env, ball_name)
+    return torch.exp(-sigma * min_dist) * (~behind).float()
 
 
 def stopball(
@@ -167,9 +248,39 @@ def stopball(
     env._sb_init_vx[just_reset] = ball_x_vel[just_reset].clone()
 
     delta_vx = ball_x_vel - env._sb_init_vx
-    in_front = ball_x_local > 0.0
+    in_front = ball_x_local > -0.3  # allow 0.3 m past goal line: deflection accumulates gradually
     fired = (delta_vx > delta_vel_threshold) & in_front & ~env._sb_flag
     env._sb_flag |= fired
+    return fired.float()
+
+
+def softstop(
+    env: "ManagerBasedRlEnv",
+    ball_name: str,
+    velocity_threshold: float = 0.2,
+) -> torch.Tensor:
+    """One-time reward when ball world-X velocity exceeds velocity_threshold (m/s).
+
+    The ball must actually reverse direction and be rolling back into the field (+X).
+    This is a genuine save: foot contact deflected the ball away from the goal.
+    Uses its own _softstop_flag, independent of stopball.
+
+    Also gates _ball_is_behind: once this flag is set, footreach deactivates and
+    post-save recovery rewards activate immediately.
+    """
+    ball: Entity = env.scene[ball_name]
+    ball_x_vel = ball.data.root_link_lin_vel_w[:, 0]
+    ball_x_local = ball.data.root_link_pos_w[:, 0] - env.scene.env_origins[:, 0]
+
+    if not hasattr(env, "_softstop_flag"):
+        env._softstop_flag = torch.zeros(env.num_envs, dtype=torch.bool, device=env.device)
+
+    just_reset = env.episode_length_buf <= 1
+    env._softstop_flag[just_reset] = False
+
+    in_front = ball_x_local > -0.3  # match stopball tolerance: deflection may complete just past line
+    fired = (ball_x_vel > velocity_threshold) & in_front & ~env._softstop_flag
+    env._softstop_flag |= fired
     return fired.float()
 
 
@@ -460,9 +571,32 @@ def postwaistdofpos(
     return torch.exp(-3.0 * err) * behind.float()
 
 
+def post_default_pose(
+    env: "ManagerBasedRlEnv",
+    ball_name: str,
+    asset_cfg: SceneEntityCfg = _DEFAULT_ROBOT_CFG,
+    std: float = 0.5,
+) -> torch.Tensor:
+    """Reward ALL joints returning to home-keyframe default after ball is deflected.
+
+    Covers legs, arms, and waist together — encourages the robot to stand in its
+    standard goalkeeper stance (T-like pose) once the save is complete.
+    exp(-sum_sq_err / std^2) × behind — bounded [0, 1].
+    std=0.5 rad means reward = 0.37 when RMS joint error is 0.5 rad (≈ 28°).
+    """
+    behind = _ball_is_behind(env, ball_name)
+    robot: Entity = env.scene[asset_cfg.name]
+    delta = (
+        robot.data.joint_pos[:, asset_cfg.joint_ids]
+        - robot.data.default_joint_pos[:, asset_cfg.joint_ids]
+    )
+    err = torch.sum(torch.square(delta), dim=-1)
+    return torch.exp(-err / (std ** 2)) * behind.float()
+
+
 def penalize_sharpcontact(
     env: "ManagerBasedRlEnv",
-    force_threshold: float = 1000.0,
+    force_threshold: float = 1200.0,
 ) -> torch.Tensor:
     """Binary penalty when mean foot contact force exceeds force_threshold.
 
@@ -491,8 +625,64 @@ def penalize_self_collision(env: "ManagerBasedRlEnv") -> torch.Tensor:
     return (sensor.data.found > 0).any(dim=-1).float()
 
 
+def cleanstop(
+    env: "ManagerBasedRlEnv",
+    ball_name: str,
+    speed_threshold: float = 0.25,
+) -> torch.Tensor:
+    """One-time reward when ball nearly stops after deflection.
+
+    Fires once per episode when softstop has already triggered AND the ball's total
+    speed drops below speed_threshold (0.25 m/s). Rewards a clean foot-trap style
+    save over a hard uncontrolled deflection.
+    Weight: +25.0.
+    """
+    ball: Entity = env.scene[ball_name]
+    ball_speed = ball.data.root_link_lin_vel_w.norm(dim=-1)  # (N,)
+
+    if not hasattr(env, "_cleanstop_flag"):
+        env._cleanstop_flag = torch.zeros(env.num_envs, dtype=torch.bool, device=env.device)
+
+    just_reset = env.episode_length_buf <= 1
+    env._cleanstop_flag[just_reset] = False
+
+    softstop_fired = getattr(env, "_softstop_flag", None)
+    if softstop_fired is None:
+        return torch.zeros(env.num_envs, device=env.device)
+
+    fired = softstop_fired & (ball_speed < speed_threshold) & ~env._cleanstop_flag
+    env._cleanstop_flag |= fired
+    return fired.float()
+
+
+def foot_clearance(
+    env: "ManagerBasedRlEnv",
+    ball_name: str,
+    asset_cfg: SceneEntityCfg = _DEFAULT_FEET_CFG,
+    target_height: float = 0.10,
+) -> torch.Tensor:
+    """Reward for lifting feet during ball approach — encourages active stepping.
+
+    Returns max foot height above floor normalized to [0, 1], clamped at target_height (10 cm).
+    Deactivates once the ball is behind to avoid rewarding post-save hopping.
+
+    The robot sometimes shuffles without lifting feet (keeps both grounded), producing
+    a slide rather than a committed step or dive. This reward creates a gradient for any
+    foot-lift, making stepping/diving strictly better than shuffling.
+    Weight: +2.0.
+    """
+    behind = _ball_is_behind(env, ball_name)
+    robot: Entity = env.scene[asset_cfg.name]
+    foot_pos_w = robot.data.body_link_pos_w[:, asset_cfg.body_ids, :]        # (N, 2, 3)
+    floor_z = env.scene.env_origins[:, 2]                                     # (N,)
+    foot_z_above_floor = (foot_pos_w[:, :, 2] - floor_z[:, None]).clamp(0.0, target_height)  # (N, 2)
+    max_foot_height = foot_z_above_floor.max(dim=-1).values                   # (N,)
+    return (max_foot_height / target_height) * (~behind).float()
+
+
 def feet_slippage(
     env: "ManagerBasedRlEnv",
+    ball_name: str = "ball",
     asset_cfg: SceneEntityCfg = _DEFAULT_FEET_CFG,
 ) -> torch.Tensor:
     """Reward feet not slipping while in ground contact.
@@ -502,16 +692,28 @@ def feet_slippage(
     Geom layout in feet_contact sensor (sorted by name):
         0: left_foot_1, 1: left_foot_2 → left foot
         2: right_foot_1, 3: right_foot_2 → right foot
+
+    Suppressed (returns 1.0) when ball is within 0.5 m of either foot: the
+    contact sensor cannot distinguish ground from ball, so without this gate
+    the policy learns to plant feet passively rather than sweep into the ball,
+    preventing the force needed for stopball (delta_vx > 1 m/s).
     Weight: +3.0.
     """
     sensor: ContactSensor = env.scene["feet_contact"]
     found = sensor.data.found  # [B, 8]
-    left_in_contact  = (found[:, :4] > 0).any(dim=-1)       # any of left_foot1-4
-    right_in_contact = (found[:, 4:] > 0).any(dim=-1)       # any of right_foot1-4
+    left_in_contact  = (found[:, :4] > 0).any(dim=-1)
+    right_in_contact = (found[:, 4:] > 0).any(dim=-1)
     in_contact = torch.stack([left_in_contact, right_in_contact], dim=-1).float()  # [B, 2]
 
     robot: Entity = env.scene[asset_cfg.name]
     foot_vel_w = robot.data.body_link_lin_vel_w[:, asset_cfg.body_ids, :]  # [B, 2, 3]
     foot_speed = torch.norm(foot_vel_w, dim=-1)                             # [B, 2]
     contactvel = torch.sum(foot_speed * in_contact, dim=-1)
-    return torch.exp(-10.0 * contactvel)
+    slippage_rew = torch.exp(-10.0 * contactvel)
+
+    ball: Entity = env.scene[ball_name]
+    foot_pos_w = robot.data.body_link_pos_w[:, asset_cfg.body_ids, :]      # [B, 2, 3]
+    ball_pos_w = ball.data.root_link_pos_w                                   # [B, 3]
+    min_dist = torch.norm(foot_pos_w - ball_pos_w[:, None, :], dim=-1).min(dim=-1).values
+    ball_near_foot = min_dist < 0.5
+    return torch.where(ball_near_foot, torch.ones_like(slippage_rew), slippage_rew)

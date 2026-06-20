@@ -51,6 +51,10 @@ class PlayConfig:
     device: str | None = None
     no_terminations: bool = False
     viewer: Literal["auto", "native", "viser"] = "auto"
+    difficulty: float | None = None
+    """Override ball difficulty (0.0 = easiest, 1.0 = hardest). Default: use curriculum value."""
+    no_rsi: bool = False
+    """Disable Random State Initialization — every episode starts from the standing keyframe."""
 
 
 def run_play(task_id: str, cfg: PlayConfig) -> None:
@@ -68,6 +72,9 @@ def run_play(task_id: str, cfg: PlayConfig) -> None:
     if cfg.no_terminations:
         env_cfg.terminations = {}
         print("[INFO]: Terminations disabled")
+    if cfg.no_rsi:
+        env_cfg.events.pop("reset_from_motion_data", None)
+        print("[INFO]: RSI disabled — episodes start from standing keyframe")
 
     # Override motion file for WithOverlay task if specified on CLI.
     if cfg.motion_file is not None and "motion_ghost" in env_cfg.commands:
@@ -94,6 +101,9 @@ def run_play(task_id: str, cfg: PlayConfig) -> None:
 
     os.environ.setdefault("MUJOCO_GL", "egl")
     env = ManagerBasedRlEnv(cfg=env_cfg, device=device)
+    if cfg.difficulty is not None:
+        env._ball_difficulty = float(cfg.difficulty)
+        print(f"[INFO]: Ball difficulty overridden to {cfg.difficulty} (0=easy, 1=hard)")
     env = AMPEnvWrapper(env, clip_actions=agent_cfg.clip_actions, motion_dataset=agent_cfg.amp_data)
 
     DUMMY_MODE = cfg.agent in {"zero", "random"}
