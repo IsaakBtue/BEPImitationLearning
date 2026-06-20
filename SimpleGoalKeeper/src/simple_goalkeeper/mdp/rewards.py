@@ -625,6 +625,64 @@ def penalize_self_collision(env: "ManagerBasedRlEnv") -> torch.Tensor:
     return (sensor.data.found > 0).any(dim=-1).float()
 
 
+def outer_foot_airborne_save(
+    env: "ManagerBasedRlEnv",
+    ball_name: str,
+    asset_cfg: SceneEntityCfg = _DEFAULT_FEET_CFG,
+    center_dead_zone: float = 0.15,
+) -> torch.Tensor:
+    """One-time bonus when the ball is deflected with the outer foot airborne.
+
+    "Outer foot" = foot on the same side as the ball's frozen crossing Y.
+    Fires once per episode at the exact step softstop first fires, if:
+      - The outer foot has no ground contact at that moment (it was lifted/swung)
+      - The ball is not aimed at the center (|crossing_y - robot_y| > center_dead_zone)
+
+    Rationale: lifting the outer foot and sweeping it into the ball is the canonical
+    diving/stepping motion. If the robot shuffles flat-footed, the outer foot stays
+    in contact with the ground and this reward does not fire.
+    Weight: +30.0.
+    """
+    if not hasattr(env, "_ofa_ss_prev"):
+        env._ofa_ss_prev = torch.zeros(env.num_envs, dtype=torch.bool, device=env.device)
+        env._ofa_flag = torch.zeros(env.num_envs, dtype=torch.bool, device=env.device)
+
+    just_reset = env.episode_length_buf <= 1
+    env._ofa_ss_prev[just_reset] = False
+    env._ofa_flag[just_reset] = False
+
+    softstop_fired = getattr(env, "_softstop_flag", None)
+    if softstop_fired is None:
+        return torch.zeros(env.num_envs, device=env.device)
+
+    # Detect the single frame softstop transitions False → True.
+    just_fired = softstop_fired & ~env._ofa_ss_prev
+    env._ofa_ss_prev[:] = softstop_fired
+
+    if not just_fired.any():
+        return torch.zeros(env.num_envs, device=env.device)
+
+    # Which side is the ball arriving from?
+    crossing_y = _get_ball_crossing_y(env, ball_name)                   # (N,)
+    robot_y = env.scene["robot"].data.root_link_pos_w[:, 1]             # (N,)
+    lateral_err = crossing_y - robot_y                                   # positive → ball on right
+
+    significant_side = lateral_err.abs() > center_dead_zone             # ignore center shots
+    ball_on_right = lateral_err > 0                                      # True → right is outer
+
+    # Is the outer foot in the air (no ground contact)?
+    sensor: ContactSensor = env.scene["feet_contact"]
+    found = sensor.data.found                                            # (B, 8)
+    left_grounded  = (found[:, :4] > 0).any(dim=-1)                    # (B,)
+    right_grounded = (found[:, 4:] > 0).any(dim=-1)                    # (B,)
+    outer_grounded = torch.where(ball_on_right, right_grounded, left_grounded)
+    outer_airborne = ~outer_grounded                                     # (B,)
+
+    fired = just_fired & outer_airborne & significant_side & ~env._ofa_flag
+    env._ofa_flag |= fired
+    return fired.float()
+
+
 def cleanstop(
     env: "ManagerBasedRlEnv",
     ball_name: str,

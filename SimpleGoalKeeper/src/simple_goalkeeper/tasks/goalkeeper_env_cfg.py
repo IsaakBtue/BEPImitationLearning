@@ -284,6 +284,12 @@ def goalkeeper_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
             weight=25.0,
             params={"ball_name": BALL_NAME, "speed_threshold": 0.25},
         ),
+        # --- diving bonus: outer foot airborne at moment of deflection ---
+        "outer_foot_airborne_save": RewardTermCfg(
+            func=gk_mdp.outer_foot_airborne_save,
+            weight=30.0,
+            params={"ball_name": BALL_NAME, "center_dead_zone": 0.15, "asset_cfg": _FEET_CFG},
+        ),
         # --- ball interception (feet-only) ---
         "footreach": RewardTermCfg(
             func=gk_mdp.footreach,
