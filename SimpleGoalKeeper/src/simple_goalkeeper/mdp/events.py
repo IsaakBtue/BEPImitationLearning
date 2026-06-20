@@ -612,7 +612,7 @@ def reset_ball_rolling(
     y_start_range: tuple[float, float] = (-0.5, 0.5),
     y_end_range: tuple[float, float] = (-0.5, 0.5),
     speed_range: tuple[float, float] = (2.0, 3.5),
-    spawn_z: float = 0.12,
+    spawn_z: float = 0.10,
 ) -> None:
     """Spawn ball at ground level in world (global) frame — rolling ground pass.
 

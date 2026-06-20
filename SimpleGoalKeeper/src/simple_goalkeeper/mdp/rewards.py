@@ -169,7 +169,7 @@ def footreach(
     goal_x_w  = env.scene.env_origins[:, 0]       # (N,)
     floor_z_w = env.scene.env_origins[:, 2]       # (N,)
     crossing_point = torch.stack(
-        [goal_x_w, crossing_y, floor_z_w + 0.12], dim=-1
+        [goal_x_w, crossing_y, floor_z_w + 0.10], dim=-1
     )                                                                     # (N, 3)
     dist_to_crossing = torch.norm(
         foot_pos_w - crossing_point[:, None, :], dim=-1
@@ -213,7 +213,7 @@ def foot_proximity(
     goal_x_w = env.scene.env_origins[:, 0]
     env_z    = env.scene.env_origins[:, 2]
     crossing_point = torch.stack(
-        [goal_x_w, crossing_y, env_z + 0.12], dim=-1                   # (N, 3) — ball radius
+        [goal_x_w, crossing_y, env_z + 0.10], dim=-1                   # (N, 3) — ball radius
     )
 
     foot_pos_w = robot.data.body_link_pos_w[:, asset_cfg.body_ids, :]  # (N, 2, 3)
