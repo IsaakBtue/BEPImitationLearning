@@ -81,6 +81,6 @@ def goalkeeper_amp_runner_cfg() -> AMPRunnerCfg:
         amp_reward_coef=1.0,
         amp_task_reward_lerp=0.5,
         amp_min_normalized_std=0.05,
-        video_interval=1000,
+        video_interval=0,
         video_n_steps=250,
     )
