@@ -175,10 +175,10 @@
                       fromto="-0.08 0.0 -0.01 0.105 0.0 -0.01"/>
                     <geom name="left_foot4_collision" type="capsule" size="0.02" class="collision"
                       fromto="-0.08 0.01 -0.01 0.105 0.01 -0.01"/>
-                    <!-- inner-face visual markers: protrude from medial side (y<0 in foot frame = toward body centre) -->
-                    <geom name="left_inner_vis_rear" type="sphere" size="0.012" pos="-0.06 -0.06 -0.01"
+                    <!-- inner-face visual markers: sit just inside the foot mesh on the medial side -->
+                    <geom name="left_inner_vis_rear" type="sphere" size="0.012" pos="-0.06 -0.04 -0.01"
                       rgba="0 0.6 1 1" contype="0" conaffinity="0" group="2"/>
-                    <geom name="left_inner_vis_front" type="sphere" size="0.012" pos="0.07 -0.06 -0.01"
+                    <geom name="left_inner_vis_front" type="sphere" size="0.012" pos="0.07 -0.04 -0.01"
                       rgba="0 0.6 1 1" contype="0" conaffinity="0" group="2"/>
                     <site name="left_foot"/>
                   </body>
@@ -229,9 +229,9 @@
                     <geom name="right_foot4_collision" type="capsule" size="0.02" class="collision" rgba="0 0.6 1 0.8"
                       fromto="-0.08 0.0 -0.01 0.105 0.0 -0.01"/>
                     <!-- inner-face visual markers: protrude from medial side (y>0 in foot frame = toward body centre) -->
-                    <geom name="right_inner_vis_rear" type="sphere" size="0.012" pos="-0.06 0.06 -0.01"
+                    <geom name="right_inner_vis_rear" type="sphere" size="0.012" pos="-0.06 0.04 -0.01"
                       rgba="0 0.6 1 1" contype="0" conaffinity="0" group="2"/>
-                    <geom name="right_inner_vis_front" type="sphere" size="0.012" pos="0.07 0.06 -0.01"
+                    <geom name="right_inner_vis_front" type="sphere" size="0.012" pos="0.07 0.04 -0.01"
                       rgba="0 0.6 1 1" contype="0" conaffinity="0" group="2"/>
                     <site name="right_foot"/>
                   </body>

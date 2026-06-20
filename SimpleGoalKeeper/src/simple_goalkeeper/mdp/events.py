@@ -481,6 +481,55 @@ def tick_catchstep(
         env._catchstep = (env._catchstep - 1).clamp(min=0)
 
 
+class reward_curriculum_ep_len:
+    """G1-style episode-length-driven reward weight curriculum.
+
+    Mirrors G1 legged_robot.py:325-364 exactly:
+        every 500 env steps:
+            curriculumupdate = int(mean_episode_length / ep_len_divisor)  # integer 0-3
+        then per reward:
+            weight = base_weight * (1 + 0.5 * curriculumupdate)
+
+    All instances share env._curriculumupdate so the episode-length sampling
+    is identical across all ramped rewards (same as G1's single class variable).
+
+    G1 extremes: ep_len=150 (full episode) → curriculumupdate=3 → weight = 2.5 × base.
+    """
+
+    def __init__(self, cfg: "CurriculumTermCfg", env: "ManagerBasedRlEnv") -> None:
+        p = cfg.params
+        self._reward_name     = p["reward_name"]
+        self._base_weight     = p["base_weight"]
+        self._update_interval = p.get("update_interval", 500)
+        self._ep_len_divisor  = p.get("ep_len_divisor",   50)
+        self._last_update     = -(self._update_interval)  # fire immediately on first call
+        self._term_cfg        = env.reward_manager.get_term_cfg(self._reward_name)
+        if not hasattr(env, "_curriculumupdate"):
+            env._curriculumupdate = 0
+
+    def __call__(
+        self,
+        env: "ManagerBasedRlEnv",
+        env_ids: torch.Tensor,
+        reward_name: str,
+        base_weight: float,
+        **kwargs,
+    ) -> dict:
+        # Update shared curriculumupdate once per window (first term to run wins).
+        if env.common_step_counter - self._last_update >= self._update_interval:
+            self._last_update = env.common_step_counter
+            if len(env_ids) > 0:
+                mean_ep_len = env.episode_length_buf[env_ids].float().mean().item()
+            else:
+                mean_ep_len = 0.0
+            env._curriculumupdate = int(mean_ep_len / self._ep_len_divisor)
+
+        # G1 formula — weight = base * (1 + 0.5 * cu), cu capped at 3 naturally by ep_len.
+        new_weight = self._base_weight * (1.0 + 0.5 * env._curriculumupdate)
+        self._term_cfg.weight = new_weight
+        return {"weight": torch.tensor(float(new_weight))}
+
+
 class ball_difficulty_curriculum:
     """Adaptive difficulty curriculum — direct port of Humanoid-Goalkeeper (G1) approach.
 

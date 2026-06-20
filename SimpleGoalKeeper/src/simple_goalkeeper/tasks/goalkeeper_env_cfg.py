@@ -142,9 +142,6 @@ def goalkeeper_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
     # (num_steps_per_env=24 by default → same thresholds as Imitationlearningbooster).
     # ------------------------------------------------------------------
     _num_steps = 24
-    # Reward-weight curriculum stages (fixed schedule, independent of ball difficulty).
-    _stage1 = 1000 * _num_steps   # step 24000 → iter 1000
-    _stage2 = 2000 * _num_steps   # step 48000 → iter 2000
     cfg.curriculum.clear()
     if not play:
         cfg.curriculum["ball_difficulty"] = CurriculumTermCfg(
@@ -156,29 +153,19 @@ def goalkeeper_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
                 "update_interval": 500,   # per-env steps between updates (same as G1)
                 "ep_len_divisor":  50,    # same divisor as G1
                 "step_size":       0.01,  # difficulty units per curriculumupdate per check
-                #   → at ep_len=144 curriculumupdate=2: reaches 1.0 in ~50 checks ≈ 1000 iters
             },
         )
-        cfg.curriculum["stopball_curriculum"] = CurriculumTermCfg(
-            func=mjlab_mdp.reward_curriculum,
-            params={
-                "reward_name": "stopball",
-                "stages": [
-                    {"step": 0,        "weight": 50.0},
-                    {"step": _stage1,  "weight": 87.0},
-                    {"step": _stage2,  "weight": 125.0},
-                ],
-            },
-        )
+        # Episode-length-driven weight curriculum — mirrors G1 compute_reward() lines 359-364:
+        #   weight = base * (1 + 0.5 * curriculumupdate)  where cu = int(mean_ep_len / 50)
+        # All three terms share env._curriculumupdate (set by whichever runs first each window).
+        # G1 max (cu=3, ep_len=150): softstop 100→250, footreach 10→25.
         cfg.curriculum["softstop_curriculum"] = CurriculumTermCfg(
-            func=mjlab_mdp.reward_curriculum,
+            func=gk_mdp.reward_curriculum_ep_len,
             params={
                 "reward_name": "softstop",
-                "stages": [
-                    {"step": 0,        "weight": 100.0},
-                    {"step": _stage1,  "weight": 150.0},
-                    {"step": _stage2,  "weight": 200.0},
-                ],
+                "base_weight": 100.0,    # G1 stop_init=100  → max 250 at cu=3
+                "update_interval": 500,
+                "ep_len_divisor":  50,
             },
         )
         # NOTE: torque_limits and dof_pos_limits intentionally NOT in curriculum.
@@ -187,14 +174,13 @@ def goalkeeper_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
         # Keep both fixed at -3.0 throughout so the robot can use full joint effort
         # for aggressive saves at hard difficulty without extra penalty.
         cfg.curriculum["footreach_curriculum"] = CurriculumTermCfg(
-            func=mjlab_mdp.reward_curriculum,
+            func=gk_mdp.reward_curriculum_ep_len,
             params={
                 "reward_name": "footreach",
-                "stages": [
-                    {"step": 0,        "weight": 10.0},
-                    {"step": _stage1,  "weight": 15.0},
-                    {"step": _stage2,  "weight": 20.0},
-                ],
+                "base_weight": 10.0,     # G1 eereach_init=10 → max 25 at cu=3
+                "update_interval": 500,
+                "ep_len_divisor":  50,
+            },
             },
         )
 
@@ -285,8 +271,8 @@ def goalkeeper_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
         # --- primary task signal ---
         "stopball": RewardTermCfg(
             func=gk_mdp.stopball,
-            weight=50.0,
-            params={"ball_name": BALL_NAME, "delta_vel_threshold": 1.5},
+            weight=20.0,
+            params={"ball_name": BALL_NAME, "delta_vel_threshold": 1.0},
         ),
         # --- partial deflection signal (fires before stopball; gates _ball_is_behind) ---
         "softstop": RewardTermCfg(
