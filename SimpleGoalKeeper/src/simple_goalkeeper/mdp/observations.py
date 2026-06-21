@@ -169,19 +169,39 @@ def joint_pos_abs(
     env: "ManagerBasedRlEnv",
     asset_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
 ) -> torch.Tensor:
-    """Absolute joint positions (raw qpos). Shape (N, num_joints).
+    """Absolute joint positions for AMP discriminator — gated by softstop.
 
-    Used by AMP obs group to match NPZ joint_pos which is stored as
-    absolute DOF angles (same convention as Imitationlearningbooster).
+    After softstop fires the ball is deflected and the robot is recovering.
+    No reference motion covers the recovery phase, so the discriminator would
+    assign near-zero style reward anyway. Freezing the AMP obs to HOME_KEYFRAME
+    after softstop prevents the discriminator from receiving confusing transitions
+    during recovery, keeping its training signal clean.
+
+    Before softstop: real joint positions (dive/save motion — reference covers this).
+    After softstop:  default joint positions (standing — neutral for discriminator).
     """
     robot: Entity = env.scene[asset_cfg.name]
-    return robot.data.joint_pos.clone()
+    joint_pos = robot.data.joint_pos.clone()
+    softstop_fired = getattr(env, "_softstop_flag", None)
+    if softstop_fired is not None and softstop_fired.any():
+        default_pos = robot.data.default_joint_pos
+        joint_pos[softstop_fired] = default_pos[softstop_fired]
+    return joint_pos
 
 
 def joint_vel_abs(
     env: "ManagerBasedRlEnv",
     asset_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
 ) -> torch.Tensor:
-    """Absolute joint velocities. Shape (N, num_joints)."""
+    """Absolute joint velocities for AMP discriminator — gated by softstop.
+
+    After softstop fires, return zero velocities (standing still) so the
+    discriminator sees a static default-pose state rather than arbitrary
+    recovery motion. Mirrors joint_pos_abs gating logic.
+    """
     robot: Entity = env.scene[asset_cfg.name]
-    return robot.data.joint_vel.clone()
+    joint_vel = robot.data.joint_vel.clone()
+    softstop_fired = getattr(env, "_softstop_flag", None)
+    if softstop_fired is not None and softstop_fired.any():
+        joint_vel[softstop_fired] = 0.0
+    return joint_vel
