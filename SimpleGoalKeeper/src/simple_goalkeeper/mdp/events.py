@@ -118,6 +118,12 @@ class MotionResetManager:
         dev = env.device
 
         # Classify each file by (side, step-count) from its stem name.
+        # New motion naming convention:
+        #   *Far*    → triple (wide, far lateral save)
+        #   *Medium* → double (medium lateral save)
+        #   *Step*   → single (old step motions, close range)
+        #   *Safe*   → single (close/front single-step saves)
+        #   *Front*  → single (frontal save)
         bucket: dict[tuple[str, str], list] = {
             ("left",  "single"): [], ("left",  "double"): [], ("left",  "triple"): [],
             ("right", "single"): [], ("right", "double"): [], ("right", "triple"): [],
@@ -125,8 +131,13 @@ class MotionResetManager:
         all_files = []
         for f in motion_files:
             stem = f.stem.lower()
-            side  = "left"   if "left"   in stem else "right"
-            steps = "triple" if "triple" in stem else ("double" if "double" in stem else "single")
+            side  = "left"  if "left"  in stem else "right"
+            if "far" in stem:
+                steps = "triple"
+            elif "medium" in stem:
+                steps = "double"
+            else:
+                steps = "single"
             bucket[(side, steps)].append(f)
             all_files.append(f)
 
