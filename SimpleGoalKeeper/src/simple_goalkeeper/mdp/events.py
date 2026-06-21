@@ -27,7 +27,7 @@ _EASY_Y_START = (-0.05, 0.05)  # lateral spawn: very centred on easy (hard = ±1
 _EASY_Y_END   = (-0.05, 0.05)  # goal target Y: dead centre on easy
 _EASY_Z_START = (0.1, 0.25)
 _EASY_Z_END   = (0.05, 0.15)
-_EASY_SPEED   = (1.0, 1.5)     # slow on easy → longer t_flight, more reaction time
+_EASY_SPEED   = (0.5, 1.0)     # slow on easy → longer t_flight, more reaction time
 
 
 def _lerp_range(
