@@ -194,8 +194,9 @@ def goalkeeper_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
             noise=Unoise(n_min=-1.5, n_max=1.5),
         ),
         "actions": ObservationTermCfg(func=mjlab_mdp.last_action),
+        # XY only — matches BoosterT1mjlab kick task for deployment compatibility.
         "ball_pos_b": ObservationTermCfg(
-            func=gk_mdp.ball_pos_b,
+            func=gk_mdp.ball_pos_xy_b,
             params={"ball_name": BALL_NAME, "always_visible": not play},
             noise=Unoise(n_min=-0.05, n_max=0.05),
         ),
@@ -203,10 +204,15 @@ def goalkeeper_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
     # Critic: actor terms + privileged info not available at deployment.
     # base_lin_vel, ball_vel_b, foot_pos_b help the value function during training
     # but are thrown away at deployment — only the actor network is used.
+    # Critic also uses full 3D ball_pos_b for richer value estimation.
     critic_terms = {
         k: ObservationTermCfg(func=v.func, params=v.params)
         for k, v in actor_terms.items()
     }
+    critic_terms["ball_pos_b"] = ObservationTermCfg(
+        func=gk_mdp.ball_pos_b,
+        params={"ball_name": BALL_NAME, "always_visible": not play},
+    )
     critic_terms.update({
         "base_lin_vel": ObservationTermCfg(func=gk_mdp.base_lin_vel),
         "ball_vel_b": ObservationTermCfg(
@@ -238,9 +244,11 @@ def goalkeeper_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
         enable_corruption=False,
     )
 
-    # Observation history: 10 frames (matches G1 upstream num_actor_history=10).
-    cfg.observations["actor"].history_length = 10
-    cfg.observations["critic"].history_length = 10
+    # Observation history: 1 (no stacking) to match BoosterT1mjlab kick task
+    # for deployment compatibility. Critic keeps 1 as well (consistent).
+    # Restore to 10 if deployment issues are resolved.
+    cfg.observations["actor"].history_length = 1
+    cfg.observations["critic"].history_length = 1
 
     # Observation delay (training only): 0–2 steps = 0–40 ms at 50 Hz.
     if not play:

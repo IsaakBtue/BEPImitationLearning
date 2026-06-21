@@ -88,6 +88,27 @@ def _compute_ball_visibility(env: "ManagerBasedRlEnv", ball_name: str) -> torch.
     return visible
 
 
+def ball_pos_xy_b(
+    env: "ManagerBasedRlEnv",
+    ball_name: str = "ball",
+    always_visible: bool = False,
+) -> torch.Tensor:
+    """Ball XY position in robot body frame (no Z). Shape (N, 2).
+
+    Matches BoosterT1mjlab kick task observation space for deployment compatibility.
+    """
+    robot: Entity = env.scene["robot"]
+    ball: Entity = env.scene[ball_name]
+    ball_pos_b_val = quat_apply(
+        quat_inv(robot.data.root_link_quat_w),
+        ball.data.root_link_pos_w - robot.data.root_link_pos_w,
+    )
+    if always_visible:
+        return ball_pos_b_val[:, :2]
+    visible = _compute_ball_visibility(env, ball_name)
+    return ball_pos_b_val[:, :2] * visible.float().unsqueeze(-1)
+
+
 def ball_pos_b(
     env: "ManagerBasedRlEnv",
     ball_name: str = "ball",
@@ -172,20 +193,19 @@ def joint_pos_abs(
     """Absolute joint positions for AMP discriminator — gated by softstop.
 
     After softstop fires the ball is deflected and the robot is recovering.
-    No reference motion covers the recovery phase, so the discriminator would
-    assign near-zero style reward anyway. Freezing the AMP obs to HOME_KEYFRAME
-    after softstop prevents the discriminator from receiving confusing transitions
-    during recovery, keeping its training signal clean.
+    Freezing AMP obs to HOME_KEYFRAME post-softstop removes the recovery
+    phase from discriminator training, keeping its signal focused on the
+    save-motion phase where reference data exists. This pushes d toward 0
+    (higher style reward) vs letting recovery transitions drag it negative.
 
-    Before softstop: real joint positions (dive/save motion — reference covers this).
-    After softstop:  default joint positions (standing — neutral for discriminator).
+    Before softstop: real joint positions (save motion — reference covers this).
+    After softstop:  default joint positions (neutral — excluded from training).
     """
     robot: Entity = env.scene[asset_cfg.name]
     joint_pos = robot.data.joint_pos.clone()
     softstop_fired = getattr(env, "_softstop_flag", None)
     if softstop_fired is not None and softstop_fired.any():
-        default_pos = robot.data.default_joint_pos
-        joint_pos[softstop_fired] = default_pos[softstop_fired]
+        joint_pos[softstop_fired] = robot.data.default_joint_pos[softstop_fired]
     return joint_pos
 
 
@@ -195,9 +215,7 @@ def joint_vel_abs(
 ) -> torch.Tensor:
     """Absolute joint velocities for AMP discriminator — gated by softstop.
 
-    After softstop fires, return zero velocities (standing still) so the
-    discriminator sees a static default-pose state rather than arbitrary
-    recovery motion. Mirrors joint_pos_abs gating logic.
+    Returns zero velocities after softstop fires. Mirrors joint_pos_abs gating.
     """
     robot: Entity = env.scene[asset_cfg.name]
     joint_vel = robot.data.joint_vel.clone()
