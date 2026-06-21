@@ -135,7 +135,7 @@ def goalkeeper_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
                 # difficulty += step_size × int(mean_ep_len / ep_len_divisor)
                 # every update_interval per-env steps. Longer episodes → faster advance.
                 "update_interval": 500,   # per-env steps between updates (same as G1)
-                "ep_len_divisor":  50,    # same divisor as G1
+                "ep_len_divisor":  48,    # same divisor as G1
                 "step_size":       0.01,  # difficulty units per curriculumupdate per check
             },
         )
@@ -149,7 +149,7 @@ def goalkeeper_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
                 "reward_name": "softstop",
                 "base_weight": 100.0,    # G1 stop_init=100  → max 250 at cu=3
                 "update_interval": 500,
-                "ep_len_divisor":  50,
+                "ep_len_divisor":  48,
             },
         )
         # NOTE: torque_limits and dof_pos_limits intentionally NOT in curriculum.
@@ -163,7 +163,7 @@ def goalkeeper_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
                 "reward_name": "footreach",
                 "base_weight": 10.0,     # G1 eereach_init=10 → max 25 at cu=3
                 "update_interval": 500,
-                "ep_len_divisor":  50,
+                "ep_len_divisor":  48,
             },
         )
 
