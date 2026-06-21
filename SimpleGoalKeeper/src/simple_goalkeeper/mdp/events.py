@@ -27,7 +27,7 @@ _EASY_Y_START = (-0.05, 0.05)  # lateral spawn: very centred on easy (hard = ±1
 _EASY_Y_END   = (-0.05, 0.05)  # goal target Y: dead centre on easy
 _EASY_Z_START = (0.1, 0.25)
 _EASY_Z_END   = (0.05, 0.15)
-_EASY_SPEED   = (2.0, 3.0)     # slow on easy → longer t_flight, more reaction time
+_EASY_SPEED   = (1.0, 1.5)     # slow on easy → longer t_flight, more reaction time
 
 
 def _lerp_range(
@@ -256,14 +256,15 @@ def reset_from_motion_data(
     env_ids: torch.Tensor | None,
     asset_cfg: SceneEntityCfg = _DEFAULT_ROBOT_CFG,
 ) -> None:
-    """Reset event: 80% RSI from NPZ motion frame, 20% HOME_KEYFRAME standing pose.
+    """Reset event: 50% RSI from NPZ motion frame, 50% HOME_KEYFRAME standing pose.
 
-    Calls init() lazily on first invocation so this works even if
-    init_motion_loader startup event is not registered.
+    50/50 split (was 80/20): more standing-start episodes make the policy
+    reliably calibrated for play mode (which always starts from standing),
+    reducing the inconsistent save behaviour observed when --no-rsi True.
     """
     mgr = MotionResetManager.get()
     mgr.init(env)
-    mgr.reset(env, env_ids, asset_cfg, rsi_fraction=0.8)
+    mgr.reset(env, env_ids, asset_cfg, rsi_fraction=0.5)
 
 
 def reset_ball_local_frame(
