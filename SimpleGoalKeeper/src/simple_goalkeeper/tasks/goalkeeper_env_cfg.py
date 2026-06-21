@@ -235,9 +235,11 @@ def goalkeeper_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
         enable_corruption=False,
     )
 
-    # Observation history: 10 frames (matches G1 upstream num_actor_history=10).
-    cfg.observations["actor"].history_length = 10
-    cfg.observations["critic"].history_length = 10
+    # No observation history — matches BoosterT1mjlab kick task (history_length=1).
+    # G1 uses 10-step history but BoosterT1mjlab does not; 10-step history would
+    # expand the policy input from 84 to 840 dims with no evidence of benefit here.
+    cfg.observations["actor"].history_length = 1
+    cfg.observations["critic"].history_length = 1
 
     # Observation delay (training only): 0–2 steps = 0–40 ms at 50 Hz.
     if not play:
