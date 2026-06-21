@@ -173,11 +173,10 @@ def goalkeeper_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
     # a clean signal from the start. Visibility gating (warmup + vanish)
     # is left for play/sim2real evaluation.
     # ------------------------------------------------------------------
+    # Actor: only terms available at deployment on real hardware.
+    # base_lin_vel, ball_vel_b, foot_pos_b removed — not measurable at deployment.
+    # ball_pos_b kept as 3D (XY from camera + Z height for ball height awareness).
     actor_terms = {
-        "base_lin_vel": ObservationTermCfg(
-            func=gk_mdp.base_lin_vel,
-            noise=Unoise(n_min=-0.1, n_max=0.1),
-        ),
         "base_ang_vel": ObservationTermCfg(
             func=mjlab_mdp.base_ang_vel,
             noise=Unoise(n_min=-0.2, n_max=0.2),
@@ -200,10 +199,19 @@ def goalkeeper_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
             params={"ball_name": BALL_NAME, "always_visible": not play},
             noise=Unoise(n_min=-0.05, n_max=0.05),
         ),
+    }
+    # Critic: actor terms + privileged info not available at deployment.
+    # base_lin_vel, ball_vel_b, foot_pos_b help the value function during training
+    # but are thrown away at deployment — only the actor network is used.
+    critic_terms = {
+        k: ObservationTermCfg(func=v.func, params=v.params)
+        for k, v in actor_terms.items()
+    }
+    critic_terms.update({
+        "base_lin_vel": ObservationTermCfg(func=gk_mdp.base_lin_vel),
         "ball_vel_b": ObservationTermCfg(
             func=gk_mdp.ball_vel_b,
             params={"ball_name": BALL_NAME, "always_visible": not play},
-            noise=Unoise(n_min=-0.1, n_max=0.1),
         ),
         "left_foot_pos_b": ObservationTermCfg(
             func=gk_mdp.left_foot_pos_b,
@@ -213,12 +221,7 @@ def goalkeeper_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
             func=gk_mdp.right_foot_pos_b,
             params={"asset_cfg": _FEET_CFG},
         ),
-    }
-    # Critic: same terms without noise.
-    critic_terms = {
-        k: ObservationTermCfg(func=v.func, params=v.params)
-        for k, v in actor_terms.items()
-    }
+    })
 
     cfg.observations["actor"] = ObservationGroupCfg(terms=actor_terms, enable_corruption=True)
     cfg.observations["critic"] = ObservationGroupCfg(terms=critic_terms, enable_corruption=False)
