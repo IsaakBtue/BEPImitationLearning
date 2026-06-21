@@ -41,7 +41,7 @@ def _motion_files() -> list[str]:
 
 def goalkeeper_amp_runner_cfg() -> AMPRunnerCfg:
     return AMPRunnerCfg(
-        num_steps_per_env=24,
+        num_steps_per_env=100,
         max_iterations=50_000,
         save_interval=250,
         experiment_name="simple_goalkeeper",
