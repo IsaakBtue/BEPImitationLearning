@@ -5,4 +5,7 @@ __pycache__/
 *.egg-info/
 uv.lock
 /logs/
+# Track only the designated deployment checkpoint + its params
+!/logs/rsl_rl/simple_goalkeeper/2026-06-20_21-33-45_phase1/model_20500.pt
+!/logs/rsl_rl/simple_goalkeeper/2026-06-20_21-33-45_phase1/params/
 SimpleGoalKeeper/beyondAMP/data/
