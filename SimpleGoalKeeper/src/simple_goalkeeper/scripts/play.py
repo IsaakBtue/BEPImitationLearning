@@ -53,8 +53,8 @@ class PlayConfig:
     viewer: Literal["auto", "native", "viser"] = "auto"
     difficulty: float | None = None
     """Override ball difficulty (0.0 = easiest, 1.0 = hardest). Default: use curriculum value."""
-    no_rsi: bool = False
-    """Disable Random State Initialization — every episode starts from the standing keyframe."""
+    rsi: bool = False
+    """Enable Random State Initialization in play (default: off — starts from standing keyframe)."""
     analytics: bool = False
     """Print ball velocity, delta_vx, foot heights, and stopball/softstop state to stdout each step.
     Also toggleable at runtime with the V key."""
@@ -164,9 +164,14 @@ def run_play(task_id: str, cfg: PlayConfig) -> None:
     if cfg.no_terminations:
         env_cfg.terminations = {}
         print("[INFO]: Terminations disabled")
-    if cfg.no_rsi:
-        env_cfg.events.pop("reset_from_motion_data", None)
-        print("[INFO]: RSI disabled — episodes start from standing keyframe")
+    if cfg.rsi:
+        # RSI already popped in play mode by default; re-add it when requested.
+        from simple_goalkeeper.mdp.events import reset_from_motion_data as _rsi_fn
+        from mjlab.managers.event_manager import EventTermCfg as _EvtCfg
+        env_cfg.events["reset_from_motion_data"] = _EvtCfg(
+            func=_rsi_fn, mode="reset",
+        )
+        print("[INFO]: RSI enabled — episodes start from random motion frames")
 
     # Override motion file for WithOverlay task if specified on CLI.
     if cfg.motion_file is not None and "motion_ghost" in env_cfg.commands:

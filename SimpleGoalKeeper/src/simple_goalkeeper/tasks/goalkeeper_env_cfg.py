@@ -540,9 +540,11 @@ def goalkeeper_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
         cfg.terminations.pop("out_of_terrain_bounds", None)
         # No disturbance pushes during play/eval — mirrors kick task play mode.
         cfg.events.pop("push_robot", None)
-        # RSI is kept in play mode so each episode starts from a random motion frame,
-        # matching the training distribution. init_motion_loader is registered
-        # unconditionally above; reset_from_motion_data is NOT popped here.
+        # RSI disabled in play mode by default — mirrors BoosterT1mjlab kicking task
+        # which never registers reset_from_motion_data in play. Always starting from
+        # standing makes play behaviour deterministic and consistent across episodes.
+        # Use --no-rsi False in the play script to re-enable RSI if needed.
+        cfg.events.pop("reset_from_motion_data", None)
         # Play: rolling ball — same function as training so visualisation matches
         # the distribution the policy was trained on. vz=0 keeps ball at foot level.
         cfg.events["reset_ball"] = EventTermCfg(
