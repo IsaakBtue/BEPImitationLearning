@@ -244,11 +244,8 @@ def goalkeeper_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
         enable_corruption=False,
     )
 
-    # Observation history: 1 (no stacking) to match BoosterT1mjlab kick task
-    # for deployment compatibility. Critic keeps 1 as well (consistent).
-    # Restore to 10 if deployment issues are resolved.
-    cfg.observations["actor"].history_length = 1
-    cfg.observations["critic"].history_length = 1
+    cfg.observations["actor"].history_length = 10
+    cfg.observations["critic"].history_length = 10
 
     # Observation delay (training only): 0–2 steps = 0–40 ms at 50 Hz.
     if not play:
