@@ -267,15 +267,10 @@ def reset_from_motion_data(
     env_ids: torch.Tensor | None,
     asset_cfg: SceneEntityCfg = _DEFAULT_ROBOT_CFG,
 ) -> None:
-    """Reset event: 50% RSI from NPZ motion frame, 50% HOME_KEYFRAME standing pose.
-
-    50/50 split (was 80/20): more standing-start episodes make the policy
-    reliably calibrated for play mode (which always starts from standing),
-    reducing the inconsistent save behaviour observed when --no-rsi True.
-    """
+    """Reset event: 70% RSI from NPZ motion frame, 30% HOME_KEYFRAME standing pose."""
     mgr = MotionResetManager.get()
     mgr.init(env)
-    mgr.reset(env, env_ids, asset_cfg, rsi_fraction=0.5)
+    mgr.reset(env, env_ids, asset_cfg, rsi_fraction=0.7)
 
 
 def reset_ball_local_frame(
