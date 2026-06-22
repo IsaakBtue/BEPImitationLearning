@@ -19,6 +19,8 @@ from __future__ import annotations
 
 import os
 import sys
+
+os.environ.setdefault("WANDB_MODE", "disabled")
 from dataclasses import asdict, dataclass, field
 from datetime import datetime
 from pathlib import Path
