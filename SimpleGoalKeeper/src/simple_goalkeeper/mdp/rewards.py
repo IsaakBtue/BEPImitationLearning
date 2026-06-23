@@ -64,31 +64,24 @@ def _ball_is_behind(env: "ManagerBasedRlEnv", ball_name: str) -> torch.Tensor:
 
     Fires when ANY of:
       - ball_x < 0 (crossed goal line)
-      - _softstop_flag is set (delta_vx > 0.2 — partial contact)
-      - delta_vx > 1.0 from _sb_init_vx (full stopball deflection)
+      - _softstop_flag is set (ball reversed to positive X velocity)
+      - _sb_flag is set (delta_vx > 1.0 — hard contact, even without full reversal)
 
-    Checking _softstop_flag (0.2 m/s threshold) means partial contacts also
-    deactivate footreach and activate post-save recovery immediately, preventing
-    the robot from standing still in a T-pose while tracking a ball it already
-    touched.
+    Both flags needed: softstop alone misses hard partial deflections; stopball alone
+    misses soft full reversals. Together they prevent footreach from running on
+    after any meaningful contact, stopping the farm-footreach-post-stopball exploit.
     """
     ball: Entity = env.scene[ball_name]
     ball_x_local = ball.data.root_link_pos_w[:, 0] - env.scene.env_origins[:, 0]
-    ball_x_vel = ball.data.root_link_lin_vel_w[:, 0]
 
-    # Persistent flag: softstop fires once at delta_vx > 0.2 m/s.
     softstop_fired = getattr(env, "_softstop_flag", None)
+    stopball_fired = getattr(env, "_sb_flag", None)
     already_deflected = (
-        softstop_fired
-        if softstop_fired is not None
-        else torch.zeros(env.num_envs, dtype=torch.bool, device=env.device)
+        (softstop_fired if softstop_fired is not None
+         else torch.zeros(env.num_envs, dtype=torch.bool, device=env.device))
+        | (stopball_fired if stopball_fired is not None
+           else torch.zeros(env.num_envs, dtype=torch.bool, device=env.device))
     )
-
-    # Also check real-time delta_vx against stopball threshold (mirrors old behaviour).
-    init_vx = getattr(env, "_sb_init_vx", None)
-    if init_vx is not None:
-        delta_vx = ball_x_vel - init_vx
-        already_deflected = already_deflected | (delta_vx > 1.0)
 
     return (ball_x_local < 0.0) | already_deflected
 
@@ -265,8 +258,7 @@ def softstop(
     This is a genuine save: foot contact deflected the ball away from the goal.
     Uses its own _softstop_flag, independent of stopball.
 
-    Also gates _ball_is_behind: once this flag is set, footreach deactivates and
-    post-save recovery rewards activate immediately.
+    Also gates _ball_is_behind.
     """
     ball: Entity = env.scene[ball_name]
     ball_x_vel = ball.data.root_link_lin_vel_w[:, 0]
@@ -278,9 +270,61 @@ def softstop(
     just_reset = env.episode_length_buf <= 1
     env._softstop_flag[just_reset] = False
 
-    in_front = ball_x_local > -0.3  # match stopball tolerance: deflection may complete just past line
+    in_front = ball_x_local > -0.3
     fired = (ball_x_vel > velocity_threshold) & in_front & ~env._softstop_flag
     env._softstop_flag |= fired
+    return fired.float()
+
+
+def single_foot_save(
+    env: "ManagerBasedRlEnv",
+    ball_name: str,
+    window: int = 3,
+) -> torch.Tensor:
+    """One-time bonus when stopball and softstop both fire within `window` steps.
+
+    Same-step coincidence was too strict: MuJoCo soft contacts accumulate over
+    several steps, so stopball (delta_vx > 1.0) and softstop (ball_x_vel > threshold)
+    can fire 1-3 steps apart on a clean single-foot save. A two-touch exploit still
+    fires them many steps apart (first foot slows, second foot taps back).
+
+    Tracks the episode step when each flag first rose, fires when both are set
+    and |sb_step - ss_step| <= window. Two int32 tensors, negligible GPU cost.
+    """
+    sb_flag = getattr(env, "_sb_flag", None)
+    ss_flag = getattr(env, "_softstop_flag", None)
+
+    if sb_flag is None or ss_flag is None:
+        return torch.zeros(env.num_envs, device=env.device)
+
+    _UNSET = -999
+    if not hasattr(env, "_sfs_flag"):
+        env._sfs_flag    = torch.zeros(env.num_envs, dtype=torch.bool, device=env.device)
+        env._sfs_sb_step = torch.full((env.num_envs,), _UNSET, dtype=torch.int32, device=env.device)
+        env._sfs_ss_step = torch.full((env.num_envs,), _UNSET, dtype=torch.int32, device=env.device)
+        env._sfs_sb_prev = torch.zeros(env.num_envs, dtype=torch.bool, device=env.device)
+        env._sfs_ss_prev = torch.zeros(env.num_envs, dtype=torch.bool, device=env.device)
+
+    just_reset = env.episode_length_buf <= 1
+    env._sfs_flag[just_reset]    = False
+    env._sfs_sb_step[just_reset] = _UNSET
+    env._sfs_ss_step[just_reset] = _UNSET
+    env._sfs_sb_prev[just_reset] = False
+    env._sfs_ss_prev[just_reset] = False
+
+    step = env.episode_length_buf.to(torch.int32)
+
+    sb_just_fired = sb_flag & ~env._sfs_sb_prev
+    ss_just_fired = ss_flag & ~env._sfs_ss_prev
+    env._sfs_sb_step[sb_just_fired] = step[sb_just_fired]
+    env._sfs_ss_step[ss_just_fired] = step[ss_just_fired]
+    env._sfs_sb_prev[:] = sb_flag
+    env._sfs_ss_prev[:] = ss_flag
+
+    both_recorded = (env._sfs_sb_step >= 0) & (env._sfs_ss_step >= 0)
+    within_window = (env._sfs_sb_step - env._sfs_ss_step).abs() <= window
+    fired = both_recorded & within_window & ~env._sfs_flag
+    env._sfs_flag |= fired
     return fired.float()
 
 
@@ -666,25 +710,19 @@ def inner_face_orientation_save(
     env: "ManagerBasedRlEnv",
     ball_name: str,
     asset_cfg: SceneEntityCfg = _DEFAULT_FEET_CFG,
-    alignment_threshold: float = 0.4,
+    alignment_threshold: float = 0.7,
 ) -> torch.Tensor:
-    """One-time bonus when softstop fires and the closest foot's inner face points at the ball.
+    """One-time bonus when softstop fires and the closest foot is turned sideways (block posture).
 
-    Replaces geom-contact detection with foot orientation checking, which is more
-    robust: instead of asking "which geom was hit?", we ask "was the foot rotated
-    correctly so its medial face faced the ball?".
+    Checks that the foot's long axis (toe-heel, local X) is parallel to world Y at the save
+    moment — meaning the foot is rotated 90° so its broad inner face is presented to the ball
+    rather than the toe or heel.
 
-    The inner face of each foot is its local -Y axis (left) or +Y axis (right):
-      Left foot:  inner face normal in local frame = (0, -1, 0)
-      Right foot: inner face normal in local frame = (0, +1, 0)
-    (From XML: left inner geoms at y=-0.03/-0.01, right inner at y=+0.03/+0.01.)
+    |quat_apply(foot_quat, [1,0,0]) · [0,1,0]| > threshold
+    threshold=0.7 ≈ cos(45°): foot long axis within 45° of world Y.
 
-    Fires once per episode when softstop transitions False→True, if at the save
-    frame the foot closest to the ball has its inner-face normal aligned with the
-    foot→ball direction by at least alignment_threshold (dot product, 0.4 ≈ 66°).
-
-    No sensor needed — uses foot quaternions directly.
-    Weight: +15.0.
+    This is orthogonal to feetorientation (which constrains roll/pitch — foot flatness).
+    Together they enforce: flat foot AND turned sideways = correct block posture.
     """
     if not hasattr(env, "_ifos_ss_prev"):
         env._ifos_ss_prev = torch.zeros(env.num_envs, dtype=torch.bool, device=env.device)
@@ -715,31 +753,20 @@ def inner_face_orientation_save(
     dist = torch.norm(foot_pos_w - ball_pos_w[:, None, :], dim=-1)        # (N, 2)
     left_closer = dist[:, 0] <= dist[:, 1]                                 # (N,)
 
-    # Inner face normal in local foot frame:
-    #   left foot  → (0, -1, 0)  (medial = negative local Y)
-    #   right foot → (0, +1, 0)  (medial = positive local Y)
-    left_local_y  = torch.tensor([0.0, -1.0, 0.0], device=env.device).expand(env.num_envs, -1)
-    right_local_y = torch.tensor([0.0,  1.0, 0.0], device=env.device).expand(env.num_envs, -1)
+    # Foot long axis (toe direction) in local frame = (1, 0, 0).
+    # Rotate into world frame for each foot.
+    foot_long_local = torch.tensor([1.0, 0.0, 0.0], device=env.device).expand(env.num_envs, -1)
+    left_long_w  = quat_apply(foot_quat_w[:, 0, :], foot_long_local)      # (N, 3)
+    right_long_w = quat_apply(foot_quat_w[:, 1, :], foot_long_local)      # (N, 3)
 
-    # Rotate local normal into world frame using foot quaternion.
-    left_inner_w  = quat_apply(foot_quat_w[:, 0, :], left_local_y)        # (N, 3)
-    right_inner_w = quat_apply(foot_quat_w[:, 1, :], right_local_y)       # (N, 3)
+    # Pick the closer foot's long axis.
+    foot_long_w = torch.where(left_closer[:, None], left_long_w, right_long_w)  # (N, 3)
 
-    # Pick the closer foot's inner-face world normal.
-    inner_normal_w = torch.where(
-        left_closer[:, None], left_inner_w, right_inner_w
-    )                                                                       # (N, 3)
-
-    # Unit vector from chosen foot to ball.
-    closer_foot_pos = torch.where(
-        left_closer[:, None], foot_pos_w[:, 0, :], foot_pos_w[:, 1, :]
-    )                                                                       # (N, 3)
-    foot_to_ball = ball_pos_w - closer_foot_pos                            # (N, 3)
-    foot_to_ball = foot_to_ball / (foot_to_ball.norm(dim=-1, keepdim=True) + 1e-6)
-
-    # Alignment: dot product of inner face normal and foot→ball direction.
-    alignment = (inner_normal_w * foot_to_ball).sum(dim=-1)                # (N,)
-    oriented_correctly = alignment > alignment_threshold
+    # "Lengthy side parallel to Y" = long axis aligned with world Y.
+    # abs() because either +Y or -Y direction is a valid sideways save.
+    world_y = torch.tensor([0.0, 1.0, 0.0], device=env.device).expand(env.num_envs, -1)
+    y_alignment = (foot_long_w * world_y).sum(dim=-1).abs()                # (N,)
+    oriented_correctly = y_alignment > alignment_threshold
 
     fired = just_fired & oriented_correctly & ~env._ifos_flag
     env._ifos_flag |= fired

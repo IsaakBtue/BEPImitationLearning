@@ -41,7 +41,7 @@ def _motion_files() -> list[str]:
 
 def goalkeeper_amp_runner_cfg() -> AMPRunnerCfg:
     return AMPRunnerCfg(
-        num_steps_per_env=100,
+        num_steps_per_env=24,
         max_iterations=50_000,
         save_interval=250,
         experiment_name="simple_goalkeeper",
@@ -79,7 +79,7 @@ def goalkeeper_amp_runner_cfg() -> AMPRunnerCfg:
         ),
         amp_discr_hidden_dims=[512, 256, 128],
         amp_reward_coef=1.0,
-        amp_task_reward_lerp=0.6,
+        amp_task_reward_lerp=0.5,
         amp_min_normalized_std=0.05,
         video_interval=0,
         video_n_steps=250,

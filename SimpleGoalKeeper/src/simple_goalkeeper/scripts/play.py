@@ -216,6 +216,17 @@ def run_play(task_id: str, cfg: PlayConfig) -> None:
         if cfg.checkpoint_file is None:
             raise ValueError("--checkpoint-file is required for --agent trained")
         resume_path = Path(cfg.checkpoint_file)
+        if not resume_path.is_absolute() and not resume_path.exists():
+            # Walk up directory tree to find the checkpoint relative to a parent dir.
+            # Allows passing paths like "BEPImitationLearning/SimpleGoalKeeper/logs/..."
+            # from inside SimpleGoalKeeper/ — resolves from /home/robocup/IsaakB/.
+            parent = Path.cwd()
+            for _ in range(6):
+                parent = parent.parent
+                candidate = parent / resume_path
+                if candidate.exists():
+                    resume_path = candidate
+                    break
         if not resume_path.exists():
             raise FileNotFoundError(f"Checkpoint not found: {resume_path}")
         print(f"[INFO] Loading checkpoint: {resume_path.name}")

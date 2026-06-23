@@ -269,7 +269,13 @@ def goalkeeper_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
         "softstop": RewardTermCfg(
             func=gk_mdp.softstop,
             weight=100.0,
-            params={"ball_name": BALL_NAME, "velocity_threshold": 0.1},
+            params={"ball_name": BALL_NAME, "velocity_threshold": 0.05},
+        ),
+        # --- single-foot save bonus: same foot first contacted AND caused the reversal ---
+        "single_foot_save": RewardTermCfg(
+            func=gk_mdp.single_foot_save,
+            weight=50.0,
+            params={"ball_name": BALL_NAME},
         ),
         # --- clean-trap bonus: ball nearly dead after deflection ---
         "cleanstop": RewardTermCfg(
@@ -286,7 +292,7 @@ def goalkeeper_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
         "inner_face_orientation_save": RewardTermCfg(
             func=gk_mdp.inner_face_orientation_save,
             weight=25.0,
-            params={"ball_name": BALL_NAME, "alignment_threshold": 0.4, "asset_cfg": _FEET_CFG},
+            params={"ball_name": BALL_NAME, "alignment_threshold": 0.7, "asset_cfg": _FEET_CFG},
         ),
         # --- ball interception (feet-only) ---
         "footreach": RewardTermCfg(
@@ -563,7 +569,7 @@ def goalkeeper_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
                 "dist_range":    (1.5, 2.5),
                 "y_start_range": (-0.3, 0.3),
                 "y_end_range":   (-1.0, 1.0),
-                "speed_range":   (2.0, 3.5),
+                "speed_range":   (0.5, 2.0),
                 "spawn_z":       0.12,
             },
         )

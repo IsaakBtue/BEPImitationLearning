@@ -4,7 +4,7 @@ from .events import init_motion_loader, reset_from_motion_data, reset_ball_local
 from .rewards import (
     ball_vx_reduction, posture, ang_vel_xy_l2, ang_vel_z_l2,
     stayonline, noretreat, feetorientation, deviation_waist_joint,
-    footreach, foot_proximity, stopball, softstop, cleanstop, foot_clearance,
+    footreach, foot_proximity, stopball, softstop, single_foot_save, cleanstop, foot_clearance,
     airborne_at_save, inner_face_orientation_save,
     penalize_kneeheight, dof_vel_limits,
     postorientation, postangvel, postlinvel,

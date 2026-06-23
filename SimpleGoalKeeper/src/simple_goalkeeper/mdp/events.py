@@ -267,10 +267,10 @@ def reset_from_motion_data(
     env_ids: torch.Tensor | None,
     asset_cfg: SceneEntityCfg = _DEFAULT_ROBOT_CFG,
 ) -> None:
-    """Reset event: 70% RSI from NPZ motion frame, 30% HOME_KEYFRAME standing pose."""
+    """Reset event: 60% RSI from NPZ motion frame, 40% HOME_KEYFRAME standing pose."""
     mgr = MotionResetManager.get()
     mgr.init(env)
-    mgr.reset(env, env_ids, asset_cfg, rsi_fraction=0.7)
+    mgr.reset(env, env_ids, asset_cfg, rsi_fraction=0.5)
 
 
 def reset_ball_local_frame(
