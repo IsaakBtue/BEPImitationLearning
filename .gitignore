@@ -38,9 +38,28 @@ Thumbs.db
 logs/
 runs/
 *.log
+*.c3d
+*.pkl
+*.npz
+*.gif
+*.log
+*.tex
+
+
+# SimpleGoalKeeper motion files (small reference data, explicitly tracked)
+!SimpleGoalKeeper/logs/
+!SimpleGoalKeeper/src/simple_goalkeeper/motions/data/*.npz
+!SimpleGoalKeeper/src/simple_goalkeeper/motions/raw/*.pkl
 
 # Model checkpoints (wandb training runs)
-**/wandb/
+my_mjlab_project_booster_t1/wandb/
+Imitationlearningbooster/wandb/
+Imitationlearningbooster/logs/
+goalkeeper_deploy/tasks/goalkeeper/models/*.pt
+zzgifs/
+
+# wandb binary protocol files (large, already synced to wandb.ai cloud)
+SimpleGoalKeeper/logs/rsl_rl/simple_goalkeeper/wandb/**/*.wandb
 
 # Local overrides
 .local/

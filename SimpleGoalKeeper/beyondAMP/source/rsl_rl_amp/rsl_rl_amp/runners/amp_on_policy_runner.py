@@ -1,0 +1,371 @@
+from __future__ import annotations
+
+import time
+import os
+from collections import deque
+import statistics
+from typing import TYPE_CHECKING
+
+import numpy as np
+from torch.utils.tensorboard import SummaryWriter
+import torch
+from rsl_rl_amp.algorithms import AMPPPO, PPO, AMPPPOWeighted
+from rsl_rl_amp.modules import ActorCritic, ActorCriticRecurrent
+from rsl_rl_amp.env import VecEnv
+from rsl_rl_amp.modules.amp_discriminator import AMPDiscriminator
+from rsl_rl_amp.utils.utils import Normalizer
+
+from beyondAMP.motion.motion_dataset import MotionDataset
+
+if TYPE_CHECKING:
+    # Backend-agnostic: the IsaacLab and mjlab wrappers expose the same
+    # contract (num_obs, dof_pos_limits, motion_dataset, AMP step shape).
+    # Importing only for type hints avoids requiring IsaacLab when running
+    # the mjlab backend.
+    from beyondAMP.isaaclab.rsl_rl.amp_wrapper import AMPEnvWrapper
+
+class AMPOnPolicyRunner:
+
+    def __init__(self,
+                 env: VecEnv,
+                 train_cfg,
+                 log_dir=None,
+                 device='cpu'):
+
+        self.cfg=train_cfg
+        self.alg_cfg = train_cfg["algorithm"]
+        self.policy_cfg = train_cfg["policy"]
+        self.amp_data_cfg = train_cfg["amp_data"]
+        self.device = device
+        self.env:AMPEnvWrapper = env
+        if self.env.num_privileged_obs is not None:
+            num_critic_obs = self.env.num_privileged_obs 
+        else:
+            num_critic_obs = self.env.num_obs
+        actor_critic_class = eval(self.policy_cfg["class_name"]) # ActorCritic
+        num_actor_obs = self.env.num_obs
+        actor_critic: ActorCritic = actor_critic_class( num_actor_obs=num_actor_obs,
+                                                        num_critic_obs=num_critic_obs,
+                                                        num_actions=self.env.num_actions,
+                                                        **self.policy_cfg).to(self.device)
+
+        amp_data = env.motion_dataset
+        amp_obs_dim = env.get_amp_observations().shape[-1] # amp_data.observation_dim
+        amp_normalizer = Normalizer(amp_obs_dim)
+        discriminator = AMPDiscriminator(
+            amp_obs_dim * 2,
+            train_cfg['amp_reward_coef'],
+            train_cfg['amp_discr_hidden_dims'], device,
+            train_cfg['amp_task_reward_lerp']).to(self.device)
+
+        # self.discr: AMPDiscriminator = AMPDiscriminator()
+        alg_class = eval(self.alg_cfg["class_name"]) # PPO
+        min_std = (
+            torch.tensor(self.cfg["amp_min_normalized_std"], device=self.device) *
+            (torch.abs(self.env.dof_pos_limits[0, :, 1] - self.env.dof_pos_limits[0, :, 0])))
+        self.alg: AMPPPO = alg_class(actor_critic, discriminator, amp_data, amp_normalizer, device=self.device, min_std=min_std, **self.alg_cfg)
+        self.num_steps_per_env = self.cfg["num_steps_per_env"]
+        self.save_interval = self.cfg["save_interval"]
+
+        # init storage and model
+        self.alg.init_storage(self.env.num_envs, self.num_steps_per_env, [num_actor_obs], [self.env.num_privileged_obs], [self.env.num_actions])
+
+        # Log
+        self.log_dir = log_dir
+        self.writer = None
+        self.tot_timesteps = 0
+        self.tot_time = 0
+        self.current_learning_iteration = 0
+        self._video_renderer = None
+
+        _, _ = self.env.reset()
+    
+    def learn(self, num_learning_iterations, init_at_random_ep_len=False):
+        # initialize writer
+        if self.log_dir is not None and self.writer is None:
+            if self.cfg.get("use_wandb", False):
+                from rsl_rl_amp.utils.wandb_utils import WandbSummaryWriter
+                self.writer = WandbSummaryWriter(log_dir=self.log_dir, flush_secs=10, cfg=self.cfg)
+            else:
+                self.writer = SummaryWriter(log_dir=self.log_dir, flush_secs=10)
+        if init_at_random_ep_len:
+            self.env.episode_length_buf = torch.randint_like(self.env.episode_length_buf, high=int(self.env.max_episode_length))
+        obs = self.env.get_observations()
+        privileged_obs = self.env.get_privileged_observations()
+        amp_obs = self.env.get_amp_observations()
+        critic_obs = privileged_obs if privileged_obs is not None else obs
+        obs, critic_obs, amp_obs = obs.to(self.device), critic_obs.to(self.device), amp_obs.to(self.device)
+        self.alg.actor_critic.train() # switch to train mode (for dropout for example)
+        self.alg.discriminator.train()
+
+        ep_infos = []
+        rewbuffer = deque(maxlen=100)
+        ampbuffer = deque(maxlen=100)
+        discribuffer = deque(maxlen=100)
+        lenbuffer = deque(maxlen=100)
+        cur_reward_sum = torch.zeros(self.env.num_envs, dtype=torch.float, device=self.device)
+        cur_amp_sum = torch.zeros(self.env.num_envs, dtype=torch.float, device=self.device)
+        cur_discri_sum = torch.zeros(self.env.num_envs, dtype=torch.float, device=self.device) 
+        cur_episode_length = torch.zeros(self.env.num_envs, dtype=torch.float, device=self.device)
+
+        tot_iter = self.current_learning_iteration + num_learning_iterations
+        for it in range(self.current_learning_iteration, tot_iter):
+            start = time.time()
+            # Rollout
+            with torch.inference_mode():
+                for i in range(self.num_steps_per_env):
+                    actions = self.alg.act(obs, critic_obs, amp_obs)
+                    obs, privileged_obs, rewards, dones, infos, reset_env_ids, terminal_amp_states = self.env.step(actions, not_amp=False)
+                    next_amp_obs = self.env.get_amp_observations()
+
+                    critic_obs = privileged_obs if privileged_obs is not None else obs
+                    obs, critic_obs, next_amp_obs, rewards, dones = obs.to(self.device), critic_obs.to(self.device), next_amp_obs.to(self.device), rewards.to(self.device), dones.to(self.device)
+
+                    # Account for terminal states.
+                    next_amp_obs_with_term = torch.clone(next_amp_obs)
+                    next_amp_obs_with_term[reset_env_ids] = terminal_amp_states
+
+                    lerp_rewards, d_logits, amp_rewards = self.alg.discriminator.predict_amp_reward(
+                        amp_obs, next_amp_obs_with_term, rewards, normalizer=self.alg.amp_normalizer)
+                    amp_obs = torch.clone(next_amp_obs)
+                    self.alg.process_env_step(lerp_rewards, dones, infos, next_amp_obs_with_term)
+                    
+                    if self.log_dir is not None:
+                        # Book keeping
+                        if 'episode' in infos:
+                            ep_infos.append(infos['episode'])
+                        if 'log' in infos:
+                            ep_infos.append(infos['log'])
+                        cur_reward_sum += rewards
+                        cur_amp_sum += amp_rewards
+                        cur_discri_sum += d_logits
+                        cur_episode_length += 1
+                        self.log_loc(cur_reward_sum, dones, rewbuffer)
+                        self.log_loc(cur_amp_sum, dones, ampbuffer)
+                        self.log_loc(cur_discri_sum, dones, discribuffer)
+                        self.log_loc(cur_episode_length, dones, lenbuffer)
+
+                stop = time.time()
+                collection_time = stop - start
+
+                # Learning step
+                start = stop
+                self.alg.compute_returns(critic_obs)
+            
+            mean_value_loss, mean_surrogate_loss, \
+            mean_amp_loss, mean_grad_pen_loss, \
+            mean_policy_pred, mean_expert_pred = \
+                self.alg.update()
+                
+            stop = time.time()
+            learn_time = stop - start
+            if self.log_dir is not None:
+                self.log(locals())
+            effective_save_interval = 200 if it < 1000 else self.save_interval
+            if it % effective_save_interval == 0:
+                self.save(os.path.join(self.log_dir, 'model_{}.pt'.format(it)))
+
+            video_interval = self.cfg.get("video_interval", 0)
+            if (video_interval > 0 and it % video_interval == 0
+                    and self.cfg.get("use_wandb", False) and self.log_dir is not None):
+                self._record_video(it)
+                # Re-sync obs: env state was modified by the video pass.
+                with torch.inference_mode():
+                    obs = self.env.get_observations().to(self.device)
+                    privileged_obs = self.env.get_privileged_observations()
+                    amp_obs = self.env.get_amp_observations().to(self.device)
+                    critic_obs = (privileged_obs.to(self.device)
+                                  if privileged_obs is not None else obs)
+
+            ep_infos.clear()
+        
+        self.current_learning_iteration += num_learning_iterations
+        self.save(os.path.join(self.log_dir, 'model_{}.pt'.format(self.current_learning_iteration)))
+
+    def log_loc(self, cur_sum, dones, buffer):
+        new_ids = (dones > 0).nonzero(as_tuple=False)
+        buffer.extend(cur_sum[new_ids][:, 0].cpu().numpy().tolist())
+        cur_sum[new_ids] = 0
+
+    def log(self, locs, width=80, pad=35):
+        self.tot_timesteps += self.num_steps_per_env * self.env.num_envs
+        self.tot_time += locs['collection_time'] + locs['learn_time']
+        iteration_time = locs['collection_time'] + locs['learn_time']
+
+        ep_string = f''
+        if locs['ep_infos']:
+            # Collect all keys across all ep_info dicts (they may differ).
+            all_keys: set[str] = set()
+            for ep_info in locs['ep_infos']:
+                all_keys.update(ep_info.keys())
+            for key in sorted(all_keys):
+                infotensor = torch.tensor([], device=self.device)
+                for ep_info in locs['ep_infos']:
+                    if key not in ep_info:
+                        continue
+                    # handle scalar and zero dimensional tensor infos
+                    if not isinstance(ep_info[key], torch.Tensor):
+                        ep_info[key] = torch.Tensor([ep_info[key]])
+                    if len(ep_info[key].shape) == 0:
+                        ep_info[key] = ep_info[key].unsqueeze(0)
+                    infotensor = torch.cat((infotensor, ep_info[key].to(self.device)))
+                if infotensor.numel() > 0:
+                    value = torch.mean(infotensor)
+                    self.writer.add_scalar('Episode_Reward/' + key, value, locs['it'])
+                    ep_string += f"""{f'Mean episode {key}:':>{pad}} {value:.4f}\n"""
+        mean_std = self.alg.actor_critic.std.mean()
+        fps = int(self.num_steps_per_env * self.env.num_envs / (locs['collection_time'] + locs['learn_time']))
+
+        self.writer.add_scalar('Loss/value_function', locs['mean_value_loss'], locs['it'])
+        self.writer.add_scalar('Loss/surrogate', locs['mean_surrogate_loss'], locs['it'])
+        self.writer.add_scalar('Loss/AMP', locs['mean_amp_loss'], locs['it'])
+        self.writer.add_scalar('Loss/AMP_grad', locs['mean_grad_pen_loss'], locs['it'])
+        self.writer.add_scalar('Loss/learning_rate', self.alg.learning_rate, locs['it'])
+        self.writer.add_scalar('Policy/mean_std', mean_std.item(), locs['it'])
+        self.writer.add_scalar('Perf/total_fps', fps, locs['it'])
+        self.writer.add_scalar('Perf/collection_time', locs['collection_time'], locs['it'])
+        self.writer.add_scalar('Perf/learning_time', locs['learn_time'], locs['it'])
+
+        if len(locs['rewbuffer']) > 0:
+            self.writer.add_scalar('Train/mean_reward', statistics.mean(locs['rewbuffer']), locs['it'])
+            self.writer.add_scalar('Train/mean_episode_length', statistics.mean(locs['lenbuffer']), locs['it'])
+            self.writer.add_scalar('Train/mean_amp_reward', statistics.mean(locs['ampbuffer']), locs['it'])
+            self.writer.add_scalar('Train/mean_discri_logits', statistics.mean(locs['discribuffer']), locs['it'])
+
+        str = f" \033[1m Learning iteration {locs['it']}/{self.current_learning_iteration + locs['num_learning_iterations']} \033[0m "
+
+        if len(locs['rewbuffer']) > 0:
+            log_string = (f"""{'#' * width}\n"""
+                          f"""{str.center(width, ' ')}\n\n"""
+                          f"""{'Computation:':>{pad}} {fps:.0f} steps/s (collection: {locs[
+                            'collection_time']:.3f}s, learning {locs['learn_time']:.3f}s)\n"""
+                          f"""{'Value function loss:':>{pad}} {locs['mean_value_loss']:.4f}\n"""
+                          f"""{'Surrogate loss:':>{pad}} {locs['mean_surrogate_loss']:.4f}\n"""
+                          f"""{'AMP loss:':>{pad}} {locs['mean_amp_loss']:.4f}\n"""
+                          f"""{'AMP grad pen loss:':>{pad}} {locs['mean_grad_pen_loss']:.4f}\n"""
+                          f"""{'AMP mean policy pred:':>{pad}} {locs['mean_policy_pred']:.4f}\n"""
+                          f"""{'AMP mean expert pred:':>{pad}} {locs['mean_expert_pred']:.4f}\n"""
+                          f"""{'Mean action noise std:':>{pad}} {mean_std.item():.2f}\n"""
+                          f"""{'Mean reward:':>{pad}} {statistics.mean(locs['rewbuffer']):.2f}\n"""
+                          f"""{'Mean episode length:':>{pad}} {statistics.mean(locs['lenbuffer']):.2f}\n""")
+                        #   f"""{'Mean reward/step:':>{pad}} {locs['mean_reward']:.2f}\n"""
+                        #   f"""{'Mean episode length/episode:':>{pad}} {locs['mean_trajectory_length']:.2f}\n""")
+        else:
+            log_string = (f"""{'#' * width}\n"""
+                          f"""{str.center(width, ' ')}\n\n"""
+                          f"""{'Computation:':>{pad}} {fps:.0f} steps/s (collection: {locs[
+                            'collection_time']:.3f}s, learning {locs['learn_time']:.3f}s)\n"""
+                          f"""{'Value function loss:':>{pad}} {locs['mean_value_loss']:.4f}\n"""
+                          f"""{'Surrogate loss:':>{pad}} {locs['mean_surrogate_loss']:.4f}\n"""
+                          f"""{'Mean action noise std:':>{pad}} {mean_std.item():.2f}\n""")
+                        #   f"""{'Mean reward/step:':>{pad}} {locs['mean_reward']:.2f}\n"""
+                        #   f"""{'Mean episode length/episode:':>{pad}} {locs['mean_trajectory_length']:.2f}\n""")
+
+        log_string += ep_string
+        log_string += (f"""{'-' * width}\n"""
+                       f"""{'Total timesteps:':>{pad}} {self.tot_timesteps}\n"""
+                       f"""{'Iteration time:':>{pad}} {iteration_time:.2f}s\n"""
+                       f"""{'Total time:':>{pad}} {self.tot_time:.2f}s\n"""
+                       f"""{'ETA:':>{pad}} {self.tot_time / (locs['it'] + 1) * (
+                               locs['num_learning_iterations'] - locs['it']):.1f}s\n""")
+        print(log_string)
+
+    def _init_video_renderer(self) -> None:
+        """Create a headless MuJoCo renderer for WandB video logging (mjlab only)."""
+        from mjlab.viewer import OffscreenRenderer, ViewerConfig
+
+        base_env = self.env.unwrapped
+        cfg = ViewerConfig(
+            origin_type=ViewerConfig.OriginType.ASSET_ROOT,
+            entity_name="robot",
+            env_idx=0,
+            max_extra_envs=0,
+            distance=4.0,
+            elevation=-25.0,
+            azimuth=90.0,
+            height=360,
+            width=640,
+            enable_shadows=False,
+            enable_reflections=False,
+        )
+        self._video_renderer = OffscreenRenderer(
+            model=base_env.sim.mj_model,
+            cfg=cfg,
+            scene=base_env.scene,
+            sim_model=base_env.sim.model,
+            expanded_fields=base_env.sim.expanded_fields,
+        )
+        self._video_renderer.initialize()
+
+    def _record_video(self, it: int) -> None:
+        """Run a short inference episode, render env 0, and upload to WandB."""
+        import numpy as np
+        import wandb
+
+        base_env = self.env.unwrapped
+        if not hasattr(base_env, "sim"):
+            return  # not an mjlab env — skip silently
+
+        if self._video_renderer is None:
+            try:
+                self._init_video_renderer()
+            except Exception as exc:
+                print(f"[WARN] Video renderer init failed: {exc}")
+                return
+
+        n_steps = self.cfg.get("video_n_steps", 200)
+        policy = self.alg.actor_critic.act_inference
+        self.alg.actor_critic.eval()
+
+        frames: list[np.ndarray] = []
+        try:
+            with torch.inference_mode():
+                obs = self.env.get_observations().to(self.device)
+                for _ in range(n_steps):
+                    action = policy(obs)
+                    result = self.env.step(action, not_amp=False)
+                    obs = result[0].to(self.device)
+                    self._video_renderer.update(base_env.sim.data)
+                    frames.append(self._video_renderer.render())
+        except Exception as exc:
+            print(f"[WARN] Video recording failed at step: {exc}")
+        finally:
+            self.alg.actor_critic.train()
+            self.alg.discriminator.train()
+
+        if not frames:
+            return
+
+        # (T, H, W, C) → (T, C, H, W) for wandb.Video
+        video_array = np.stack(frames).transpose(0, 3, 1, 2)
+        try:
+            wandb.log({"video/gameplay": wandb.Video(video_array, fps=50, format="mp4")}, step=it)
+            print(f"[INFO] WandB video logged at iteration {it} ({len(frames)} frames)")
+        except Exception as exc:
+            print(f"[WARN] WandB video upload failed: {exc}")
+
+    def save(self, path, infos=None):
+        torch.save({
+            'model_state_dict': self.alg.actor_critic.state_dict(),
+            'optimizer_state_dict': self.alg.optimizer.state_dict(),
+            'discriminator_state_dict': self.alg.discriminator.state_dict(),
+            'amp_normalizer': self.alg.amp_normalizer,
+            'iter': self.current_learning_iteration,
+            'infos': infos,
+            }, path)
+
+    def load(self, path, load_optimizer=True):
+        loaded_dict = torch.load(path, map_location=self.device, weights_only=False)
+        self.alg.actor_critic.load_state_dict(loaded_dict['model_state_dict'])
+        self.alg.discriminator.load_state_dict(loaded_dict['discriminator_state_dict'])
+        self.alg.amp_normalizer = loaded_dict['amp_normalizer']
+        if load_optimizer:
+            self.alg.optimizer.load_state_dict(loaded_dict['optimizer_state_dict'])
+        # self.current_learning_iteration = loaded_dict['iter']
+        return loaded_dict['infos']
+
+    def get_inference_policy(self, device=None):
+        self.alg.actor_critic.eval() # switch to evaluation mode (dropout for example)
+        if device is not None:
+            self.alg.actor_critic.to(device)
+        return self.alg.actor_critic.act_inference

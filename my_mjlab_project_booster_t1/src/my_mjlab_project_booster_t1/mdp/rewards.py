@@ -7,6 +7,7 @@ import torch
 
 from mjlab.entity import Entity
 from mjlab.managers.scene_entity_config import SceneEntityCfg
+from mjlab.sensor import ContactSensor
 from mjlab.utils.lab_api.math import quat_apply, quat_inv
 
 if TYPE_CHECKING:
@@ -88,9 +89,25 @@ def eereach(
     dist = torch.norm(hand_pos_w - target_w[:, None, :], dim=-1)
     min_dist = dist.min(dim=-1).values
     rew = 1.0 - 1.0 / (1.0 + torch.exp(-sigma * (min_dist - reach_th)))
+
+    # Velocity amplification toward the ball (not the end_target) for physical realism.
+    to_ball = ball_pos_w[:, None, :] - hand_pos_w                      # (N, 2, 3)
+    hand_vel_w = robot.data.body_link_lin_vel_w[:, asset_cfg.body_ids, :]  # (N, 2, 3)
+    to_ball_unit = to_ball / to_ball.norm(dim=-1, keepdim=True).clamp(min=1e-6)
+    vel_toward = (hand_vel_w * to_ball_unit).sum(dim=-1)               # (N, 2)
+    closest_vel = vel_toward[torch.arange(env.num_envs, device=env.device), closest_idx]
+    vel_sigma = 1.0 + 3.0 * torch.clamp(closest_vel, 0.0, 3.0)        # 1× – 4×
+
+    # Post-pass: double the multiplier once ball passes goal line.
+    behind = _ball_is_behind(env, ball_name)
+    vel_sigma = torch.where(behind, vel_sigma * 2.0, vel_sigma)
+
+    # Combine: phase1 when ball is far, phase2 when ball is close.
+    taskrew = torch.where(phase1_mask, phase1_rew, rew * vel_sigma)
+
     projected_grav = env.scene["robot"].data.projected_gravity_b
     upright = (1.0 - torch.clamp(torch.sum(projected_grav[:, :2] ** 2, dim=1), 0.0, 1.0))
-    return rew * upright
+    return taskrew * upright
 
 
 def catch_success(
@@ -124,8 +141,8 @@ def stopball(
     current_vy - initial_vy > delta_vel_threshold (2.0 m/s, matching G1).
     """
     ball: Entity = env.scene[ball_name]
-    ball_y_vel = ball.data.root_link_lin_vel_w[:, 1]
-    ball_y_local = ball.data.root_link_pos_w[:, 1] - env.scene.env_origins[:, 1]
+    ball_x_vel = ball.data.root_link_lin_vel_w[:, 0]
+    ball_x_local = ball.data.root_link_pos_w[:, 0] - env.scene.env_origins[:, 0]
 
     if not hasattr(env, "_sb_init_vy"):
         env._sb_init_vy = ball_y_vel.clone()
@@ -138,7 +155,7 @@ def stopball(
 
     delta_vy = ball_y_vel - env._sb_init_vy
     in_front = ball_y_local > 0.0
-    fired = (delta_vy > delta_vel_threshold) & in_front & ~env._sb_flag
+    fired = (delta_vx > delta_vel_threshold) & in_front & ~env._sb_flag
 
     env._sb_flag |= fired
 
@@ -156,8 +173,8 @@ def stayonline(
     The robot slides laterally in X to intercept; this penalises Y deviation.
     """
     robot: Entity = env.scene["robot"]
-    y_local = robot.data.root_link_pos_w[:, 1] - env.scene.env_origins[:, 1]
-    dist = torch.clamp(y_local.abs(), line_offset, max_offset) - line_offset
+    x_local = robot.data.root_link_pos_w[:, 0] - env.scene.env_origins[:, 0]
+    dist = torch.clamp(x_local.abs(), line_offset, max_offset) - line_offset
     return dist
 
 
@@ -231,18 +248,44 @@ def postlinvel(env: ManagerBasedRlEnv, ball_name: str = "ball") -> torch.Tensor:
 
 def penalize_sharpcontact(
     env: ManagerBasedRlEnv,
-    height_threshold: float = 0.35,
+    force_threshold: float = 1000.0,
 ) -> torch.Tensor:
-    """Penalize trunk collapse as proxy for hard body–ground contact.
+    """Penalize large impulsive foot contact forces.
 
-    cfrc_ext is not exposed per-body in mjlab, so we use trunk height drop as
-    a proxy. Trunk Z < 0.35 m (half of normal ~0.7 m) indicates a hard fall.
-    Weight: -100 (same as upstream) — fires as a binary flag.
+    Mirrors upstream _reward_penalize_sharpcontact exactly:
+        return (mean(norm(foot_contact_forces)) > max_contact_force) * 1.0
+    where max_contact_force = 1000 N (g1_29_config.py cfg.rewards.max_contact_force).
+
+    Upstream averages over 2 foot bodies: mean(norm(contact_forces[:, feet, :]), dim=-1).
+    Port geom layout (4 geoms, sorted by name):
+        index 0: left_foot_1  ─┐ left foot
+        index 1: left_foot_2  ─┘
+        index 2: right_foot_1 ─┐ right foot
+        index 3: right_foot_2 ─┘
+    Fix: per-foot max over geoms, then mean over feet — matches upstream 2-body mean.
+    Weight: -100.0 (same as upstream).
     """
-    robot: Entity = env.scene["robot"]
-    trunk_z = robot.data.root_link_pos_w[:, 2]
-    env_z = env.scene.env_origins[:, 2]
-    return (trunk_z - env_z < height_threshold).float()
+    sensor: ContactSensor = env.scene["feet_contact"]
+    force_per_geom = sensor.data.force.norm(dim=-1)          # [B, 4]
+    left_max  = force_per_geom[:, :2].max(dim=-1).values     # max of left_foot_1, left_foot_2
+    right_max = force_per_geom[:, 2:].max(dim=-1).values     # max of right_foot_1, right_foot_2
+    mean_force = (left_max + right_max) / 2.0                # [B]
+    return (mean_force > force_threshold).float()
+
+
+def penalize_self_collision(env: ManagerBasedRlEnv) -> torch.Tensor:
+    """Binary penalty when any self-collision is detected in the Trunk subtree.
+
+    Reads from the self_collision ContactSensor (already declared in the scene).
+    The sensor monitors Trunk-subtree vs Trunk-subtree contacts; found > 0 means
+    at least one matching contact was detected this step.
+
+    data.found shape: [B, 1] (reduce="none", num_slots=1).
+    Returns 1.0 on any self-collision, 0.0 otherwise.
+    Weight: -50.0.
+    """
+    sensor: ContactSensor = env.scene["self_collision"]
+    return (sensor.data.found > 0).any(dim=-1).float()
 
 
 def penalize_kneeheight(
@@ -267,20 +310,67 @@ def successland(
     ball_name: str = "ball",
     asset_cfg: SceneEntityCfg = _FEET_CFG,
     height_threshold: float = 0.05,
+    air_height_threshold: float = 1.0,
 ) -> torch.Tensor:
-    """Reward both feet near ground after the ball passes — encourages safe landing.
+    """Reward safe landing after a jump save.
 
-    Mirrors upstream _reward_successland. Uses foot height < threshold as a
-    proxy for foot–ground contact (mjlab has no per-foot contact sensor here).
-    Only active when ball is behind/passed so it doesn't fire during the dive.
+    Mirrors upstream _reward_successland exactly:
+        jump = root_z > 1.0
+        has_in_air |= jump
+        has_contact = foot_0_contact & foot_1_contact
+        one_feet_contact = exactly one foot down & has_in_air
+        successful_landings = has_contact & has_in_air
+        air_reward = has_in_air.float()
+        landing_reward = successful_landings.float() * 5.0
+        one_feet_punish = one_feet_contact.float() * -1.0
+        jump_ids = end_regions == 2 | 3   ← upstream gates on jump-region envs only
+        return (air_reward + landing_reward + one_feet_punish) * jump_ids
+
+    Port adaptation:
+    - No region partitioning: all envs are treated as jump-region envs, BUT
+      we require _has_in_air so the reward only fires after actual jumps (never
+      fires for ground-level saves). This is functionally equivalent to the
+      upstream jump_ids gate.
+    - Contact detection: foot height < height_threshold (mjlab proxy for contact sensor).
+    - _has_in_air reset on episode_length_buf <= 1.
+
     Weight: 4.0 (same as upstream).
     """
-    behind = _ball_is_behind(env, ball_name)
     robot: Entity = env.scene[asset_cfg.name]
-    foot_z = robot.data.body_link_pos_w[:, asset_cfg.body_ids, 2]
-    env_z = env.scene.env_origins[:, 2:3]
-    feet_down = (foot_z - env_z < height_threshold).all(dim=-1)
-    return feet_down.float() * behind.float()
+    ball: Entity = env.scene[ball_name]
+
+    # Initialise per-env _has_in_air buffer.
+    if not hasattr(env, "_has_in_air"):
+        env._has_in_air = torch.zeros(env.num_envs, dtype=torch.bool, device=env.device)
+
+    # Reset at start of each episode.
+    just_reset = env.episode_length_buf <= 1
+    env._has_in_air[just_reset] = False
+
+    # Track whether the robot has actually left the ground this episode.
+    root_z = robot.data.root_link_pos_w[:, 2]
+    env_z  = env.scene.env_origins[:, 2]
+    env._has_in_air |= (root_z - env_z > air_height_threshold)
+
+    # Foot contact via height proxy.
+    foot_z = robot.data.body_link_pos_w[:, asset_cfg.body_ids, 2]    # [B, 2]
+    env_z_2d = env.scene.env_origins[:, 2:3]                          # [B, 1]
+    foot_down = (foot_z - env_z_2d < height_threshold)                # [B, 2]
+
+    has_contact       = foot_down[:, 0] & foot_down[:, 1]
+    one_feet_contact  = (foot_down[:, 0] ^ foot_down[:, 1]) & env._has_in_air
+
+    successful_landings = has_contact & env._has_in_air
+
+    landing_reward  = successful_landings.float() * 5.0
+    one_feet_punish = one_feet_contact.float() * -1.0
+
+    # air_reward = has_in_air.float() is intentionally omitted.
+    # Upstream gates the entire successland reward on jump_ids (end_regions == 2|3).
+    # T1 only uses lefthand motion (region 0 equivalent) — no jump regions exist,
+    # so upstream would return 0 for all T1 envs. Emitting air_reward here would
+    # fire +1/step every step after any stumble, corrupting the reward signal.
+    return landing_reward + one_feet_punish
 
 
 def postupperdofpos(
@@ -400,7 +490,6 @@ def torque_limits(
 def feet_slippage(
     env: ManagerBasedRlEnv,
     asset_cfg: SceneEntityCfg = _FEET_CFG,
-    contact_height_threshold: float = 0.05,
 ) -> torch.Tensor:
     """Reward feet not slipping while in ground contact.
 
@@ -410,17 +499,29 @@ def feet_slippage(
     Returns 1.0 when no contact or no slip; approaches 0 with high slip.
     Weight: +3.0 (positive reward for not slipping — same as upstream).
 
-    Contact detection: upstream uses contact_forces > 1 N; mjlab has no
-    per-foot contact sensor here so foot height < threshold is used as proxy.
-    3D velocity (not just XY) matches upstream rigid_body_states[:, :, 7:10].
-    """
-    robot: Entity = env.scene[asset_cfg.name]
-    foot_vel_w = robot.data.body_link_lin_vel_w[:, asset_cfg.body_ids, :]  # (N, 2, 3)
-    foot_speed = torch.norm(foot_vel_w, dim=-1)  # (N, 2)
+    Contact detection: physics-based via feet_contact sensor (found > 0).
+    Replaces the previous foot-height proxy which returned exp(0) = 1.0
+    whenever feet were in the air (e.g., during a dive), inflating WandB
+    curves and masking true slippage behaviour.
 
-    foot_z = robot.data.body_link_pos_w[:, asset_cfg.body_ids, 2]
-    env_z = env.scene.env_origins[:, 2:3]
-    in_contact = (foot_z - env_z < contact_height_threshold).float()
+    Geom layout from feet_contact sensor (sorted by name):
+        index 0: left_foot_1  ─┐ left foot
+        index 1: left_foot_2  ─┘
+        index 2: right_foot_1 ─┐ right foot
+        index 3: right_foot_2 ─┘
+
+    Velocity from body_link_lin_vel_w matches upstream rigid_body_states[:, feet, 7:10].
+    """
+    sensor: ContactSensor = env.scene["feet_contact"]
+    found = sensor.data.found  # [B, 4]
+
+    left_in_contact  = (found[:, 0] > 0) | (found[:, 1] > 0)  # [B]
+    right_in_contact = (found[:, 2] > 0) | (found[:, 3] > 0)  # [B]
+    in_contact = torch.stack([left_in_contact, right_in_contact], dim=-1).float()  # [B, 2]
+
+    robot: Entity = env.scene[asset_cfg.name]
+    foot_vel_w = robot.data.body_link_lin_vel_w[:, asset_cfg.body_ids, :]  # [B, 2, 3]
+    foot_speed = torch.norm(foot_vel_w, dim=-1)                             # [B, 2]
 
     contactvel = torch.sum(foot_speed * in_contact, dim=-1)
     return torch.exp(-10.0 * contactvel)

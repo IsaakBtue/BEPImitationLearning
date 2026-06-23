@@ -12,6 +12,10 @@ from mjlab.actuator.builtin_actuator import BuiltinPositionActuatorCfg
 T1_XML = Path(__file__).parent.parent / "assets" / "booster_t1" / "T1_serial_clean.xml"
 
 _NATURAL_FREQ = 2 * math.pi * 10  # 10 Hz
+# Actuator command delay (timesteps at 200 Hz). Matches KaydenKnapik/BoosterT1mjlab
+# which applies delay at the actuator level (not obs level) for hardware realism.
+_DELAY_MIN = 2
+_DELAY_MAX = 8
 
 
 def get_spec() -> mujoco.MjSpec:
@@ -27,6 +31,8 @@ def _make_actuator(target: str, effort: float, stiffness: float) -> BuiltinPosit
         damping=damping,
         effort_limit=effort,
         armature=armature,
+        delay_min_lag=_DELAY_MIN,
+        delay_max_lag=_DELAY_MAX,
     )
 
 
@@ -36,14 +42,14 @@ T1_ARTICULATION = EntityArticulationInfoCfg(
         _make_actuator(
             r"(Left_Shoulder_Pitch|Left_Shoulder_Roll|Left_Elbow_Pitch|Left_Elbow_Yaw"
             r"|Right_Shoulder_Pitch|Right_Shoulder_Roll|Right_Elbow_Pitch|Right_Elbow_Yaw)",
-            18.0, 15.0,
+            36.0, 15.0,
         ),
-        _make_actuator(r"Waist", 30.0, 80.0),
-        _make_actuator(r"(Left_Hip_Pitch|Right_Hip_Pitch)", 45.0, 120.0),
-        _make_actuator(r"(Left_Hip_Roll|Left_Hip_Yaw|Right_Hip_Roll|Right_Hip_Yaw)", 30.0, 80.0),
-        _make_actuator(r"(Left_Knee_Pitch|Right_Knee_Pitch)", 60.0, 200.0),
-        _make_actuator(r"(Left_Ankle_Pitch|Right_Ankle_Pitch)", 20.0, 50.0),
-        _make_actuator(r"(Left_Ankle_Roll|Right_Ankle_Roll)", 15.0, 40.0),
+        _make_actuator(r"Waist", 40.0, 80.0),
+        _make_actuator(r"(Left_Hip_Pitch|Right_Hip_Pitch)", 55.0, 120.0),
+        _make_actuator(r"(Left_Hip_Roll|Left_Hip_Yaw|Right_Hip_Roll|Right_Hip_Yaw)", 40.0, 80.0),
+        _make_actuator(r"(Left_Knee_Pitch|Right_Knee_Pitch)", 65.0, 200.0),
+        _make_actuator(r"(Left_Ankle_Pitch|Right_Ankle_Pitch)", 50.0, 50.0),
+        _make_actuator(r"(Left_Ankle_Roll|Right_Ankle_Roll)", 50.0, 40.0),
     ),
     soft_joint_pos_limit_factor=0.9,
 )
@@ -53,14 +59,15 @@ T1_ACTION_SCALE = {
     # All joints use the 0.25 factor (same as G1) so motors saturate at 4x action_scale,
     # not 1x. Without this, any N(0,1) policy output above ±1 pegs the joint at max
     # torque, producing bang-bang control → jitter and oscillation.
+    # Effort limits updated to KaydenKnapik values (hardware-verified).
     r"(Left_Shoulder_Pitch|Left_Shoulder_Roll|Left_Elbow_Pitch|Left_Elbow_Yaw"
-    r"|Right_Shoulder_Pitch|Right_Shoulder_Roll|Right_Elbow_Pitch|Right_Elbow_Yaw)": 0.25 * 18.0 / 15.0,
-    r"Waist": 0.25 * 30.0 / 80.0,
-    r"(Left_Hip_Pitch|Right_Hip_Pitch)": 0.25 * 45.0 / 120.0,
-    r"(Left_Hip_Roll|Left_Hip_Yaw|Right_Hip_Roll|Right_Hip_Yaw)": 0.25 * 30.0 / 80.0,
-    r"(Left_Knee_Pitch|Right_Knee_Pitch)": 0.25 * 60.0 / 200.0,
-    r"(Left_Ankle_Pitch|Right_Ankle_Pitch)": 0.25 * 20.0 / 50.0,
-    r"(Left_Ankle_Roll|Right_Ankle_Roll)": 0.25 * 15.0 / 40.0,
+    r"|Right_Shoulder_Pitch|Right_Shoulder_Roll|Right_Elbow_Pitch|Right_Elbow_Yaw)": 0.25 * 36.0 / 15.0,
+    r"Waist": 0.25 * 40.0 / 80.0,
+    r"(Left_Hip_Pitch|Right_Hip_Pitch)": 0.25 * 55.0 / 120.0,
+    r"(Left_Hip_Roll|Left_Hip_Yaw|Right_Hip_Roll|Right_Hip_Yaw)": 0.25 * 40.0 / 80.0,
+    r"(Left_Knee_Pitch|Right_Knee_Pitch)": 0.25 * 65.0 / 200.0,
+    r"(Left_Ankle_Pitch|Right_Ankle_Pitch)": 0.25 * 50.0 / 50.0,
+    r"(Left_Ankle_Roll|Right_Ankle_Roll)": 0.25 * 50.0 / 40.0,
 }
 
 T1_STANDING_KEYFRAME = EntityCfg.InitialStateCfg(

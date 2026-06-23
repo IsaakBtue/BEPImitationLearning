@@ -1,5 +1,5 @@
-# Retrain from scratch (reward axis fix + action scale fix — old checkpoints incompatible)
-cd /home/isaak/BEPImitationlearning/my_mjlab_project_booster_t1 && uv run python -m mjlab.scripts.train goalkeeper_booster_t1
+# Train AMP goalkeeper (6 motions)
+cd /home/robocup/IsaakB/BEPImitationLearning/my_mjlab_project_booster_t1 && env -u PYTHONPATH .venv/bin/train goalkeeper_booster_t1_amp
 
-# Play with overlay to verify orientation matches reference motion
-cd /home/isaak/BEPImitationlearning/my_mjlab_project_booster_t1 && uv run python -m mjlab.scripts.play goalkeeper_booster_t1_withoverlay --checkpoint-file logs/rsl_rl/g1_goalkeeper/2026-05-14_12-51-34/model_800.pt --motion-file src/my_mjlab_project_booster_t1/motions/data/lefthand_t1.npz
+# Play/evaluate a checkpoint
+cd /home/robocup/IsaakB/BEPImitationLearning/my_mjlab_project_booster_t1 && env -u PYTHONPATH .venv/bin/play goalkeeper_booster_t1_amp --checkpoint-file logs/rsl_rl/goalkeeper_amp_booster_t1/2026-06-05_16-40-21/model_0.pt --motion-file ../Imitationlearningbooster/src/imitationlearningbooster/motions/data/lefthand_t1.npz

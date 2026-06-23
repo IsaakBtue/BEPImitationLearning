@@ -1,0 +1,21 @@
+__pycache__/
+*.pyc
+*.pyo
+.venv/
+*.egg-info/
+uv.lock
+/logs/
+# Track only the designated deployment checkpoint + its params
+!/logs/rsl_rl/simple_goalkeeper/2026-06-20_21-33-45_phase1/model_20500.pt
+!/logs/rsl_rl/simple_goalkeeper/2026-06-20_21-33-45_phase1/params/
+!/logs/rsl_rl/simple_goalkeeper/2026-06-21_19-26-06_phase1/model_1500.pt
+!/logs/rsl_rl/simple_goalkeeper/2026-06-21_19-26-06_phase1/model_2750.pt
+!/logs/rsl_rl/simple_goalkeeper/2026-06-21_19-26-06_phase1/params/
+!/logs/rsl_rl/simple_goalkeeper/2026-06-21_21-36-16_phase1/model_1000.pt
+!/logs/rsl_rl/simple_goalkeeper/2026-06-21_21-36-16_phase1/params/
+!/logs/rsl_rl/simple_goalkeeper/2026-06-22_12-45-03_phase1/model_4250.pt
+!/logs/rsl_rl/simple_goalkeeper/2026-06-22_12-45-03_phase1/params/
+!/logs/rsl_rl/simple_goalkeeper/2026-06-22_23-17-45_phase1/model_13500.pt
+!/logs/rsl_rl/simple_goalkeeper/2026-06-22_23-17-45_phase1/2026-06-22_23-17-45_phase1.onnx
+!/logs/rsl_rl/simple_goalkeeper/2026-06-22_23-17-45_phase1/params/
+SimpleGoalKeeper/beyondAMP/data/

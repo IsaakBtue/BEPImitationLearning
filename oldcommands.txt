@@ -1,0 +1,32 @@
+# ========== Imitationlearningbooster (6 motions, AMP) ==========
+29.589
+# Smoke test (2 envs, 3 iterations)
+cd /home/robocup/IsaakB/BEPImitationLearning/Imitationlearningbooster && env -u PYTHONPATH .venv/bin/train goalkeeper_booster_t1_amp --env.scene.num-envs 2 --runner.max-iterations 3
+
+# Full GPU training (6144 envs)
+cd /home/robocup/IsaakB/BEPImitationLearning/Imitationlearningbooster && env -u PYTHONPATH .venv/bin/train goalkeeper_booster_t1_amp
+
+# Play (no overlay, random motion each episode)
+cd /home/robocup/IsaakB/BEPImitationLearning/Imitationlearningbooster && env -u PYTHONPATH .venv/bin/play goalkeeper_booster_t1_amp --checkpoint-file logs/rsl_rl/goalkeeper_amp_booster_t1/2026-06-05_17-33-14/model_0.pt
+
+# Play with ghost overlay — cycles all 6 motions sequentially
+cd /home/robocup/IsaakB/BEPImitationLearning/Imitationlearningbooster && env -u PYTHONPATH .venv/bin/play goalkeeper_booster_t1_amp_withoverlay --checkpoint-file logs/rsl_rl/goalkeeper_amp_booster_t1/2026-06-05_17-33-14/model_0.pt
+
+# Visualise all 6 reference motions (no policy, ghost overlay only, cycles sequentially)
+cd /home/robocup/IsaakB/BEPImitationLearning/Imitationlearningbooster && env -u PYTHONPATH .venv/bin/play goalkeeper_booster_t1_amp_withoverlay --agent zero --no-terminations True
+
+# Visualise a single specific motion (replace filename as needed)
+cd /home/robocup/IsaakB/BEPImitationLearning/Imitationlearningbooster && env -u PYTHONPATH .venv/bin/play goalkeeper_booster_t1_amp_withoverlay --agent zero --no-terminations True --motion-file src/imitationlearningbooster/motions/data/lefthand_t1.npz
+
+cd /home/robocup/IsaakB/BEPImitationLearning/Imitationlearningbooster && env -u PYTHONPATH .venv/bin/play goalkeeper_booster_t1_amp_withoverlay --agent zero --no-terminations True --motion-file src/imitationlearningbooster/motions/data/righthand_t1.npz
+
+cd /home/robocup/IsaakB/BEPImitationLearning/Imitationlearningbooster && env -u PYTHONPATH .venv/bin/play goalkeeper_booster_t1_amp_withoverlay --agent zero --no-terminations True --motion-file src/imitationlearningbooster/motions/data/leftjump_t1.npz
+
+cd /home/robocup/IsaakB/BEPImitationLearning/Imitationlearningbooster && env -u PYTHONPATH .venv/bin/play goalkeeper_booster_t1_amp_withoverlay --agent zero --no-terminations True --motion-file src/imitationlearningbooster/motions/data/rightjump_t1.npz
+
+cd /home/robocup/IsaakB/BEPImitationLearning/Imitationlearningbooster && env -u PYTHONPATH .venv/bin/play goalkeeper_booster_t1_amp_withoverlay --agent zero --no-terminations True --motion-file src/imitationlearningbooster/motions/data/leftstep_t1.npz
+
+cd /home/robocup/IsaakB/BEPImitationLearning/Imitationlearningbooster && env -u PYTHONPATH .venv/bin/play goalkeeper_booster_t1_amp_withoverlay --agent zero --no-terminations True --motion-file src/imitationlearningbooster/motions/data/rightstep_t1.npz
+
+# Re-convert pkl → npz
+cd /home/robocup/IsaakB/BEPImitationLearning/Imitationlearningbooster && env -u PYTHONPATH python src/imitationlearningbooster/motions/convert_all.py

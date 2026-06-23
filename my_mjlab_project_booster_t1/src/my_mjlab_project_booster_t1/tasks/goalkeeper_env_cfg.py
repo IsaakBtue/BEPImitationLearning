@@ -24,6 +24,7 @@ from my_mjlab_project_booster_t1.mdp import MultiMotionCommandCfg
 import my_mjlab_project_booster_t1.mdp.observations as gk_obs
 import my_mjlab_project_booster_t1.mdp.rewards as gk_rew
 import my_mjlab_project_booster_t1.mdp.resets as gk_resets
+from my_mjlab_project_booster_t1.mdp.resets import ball_difficulty_curriculum
 from my_mjlab_project_booster_t1.robots.t1_constants import get_t1_robot_cfg, T1_ACTION_SCALE
 
 _HAND_CFG = SceneEntityCfg("robot", body_names=("left_hand_link", "right_hand_link"))
@@ -43,8 +44,8 @@ _ALL_JOINT_CFG = SceneEntityCfg("robot")
 def get_axes_spec() -> mujoco.MjSpec:
     """World-frame axis markers for play-mode orientation reference.
 
-    Red  = +X (robot slides laterally in this direction to intercept)
-    Green = +Y (ball approaches FROM here — robot faces +Y)
+    Red  = +X (ball approaches FROM here — robot faces +X)
+    Green = +Y (robot slides laterally in this direction to intercept)
     Blue  = +Z (up)
 
     Purely visual: contype=0, conaffinity=0, no physics.
@@ -63,8 +64,8 @@ def get_axes_spec() -> mujoco.MjSpec:
         g.conaffinity = 0
         g.group = 1
 
-    _arrow("axis_x", [1.5, 0.0, 0.02], (1.0, 0.2, 0.2, 0.9))   # red  → +X
-    _arrow("axis_y", [0.0, 2.0, 0.02], (0.2, 1.0, 0.2, 0.9))   # green → +Y (ball)
+    _arrow("axis_x", [1.5, 0.0, 0.02], (1.0, 0.2, 0.2, 0.9))   # red  → +X (ball approach)
+    _arrow("axis_y", [0.0, 2.0, 0.02], (0.2, 1.0, 0.2, 0.9))   # green → +Y (lateral)
     _arrow("axis_z", [0.0, 0.0, 0.52], (0.2, 0.4, 1.0, 0.9))   # blue  → +Z
 
     return spec
@@ -98,15 +99,29 @@ def goalkeeper_env_cfg(play: bool = False, num_steps_per_env: int = 24) -> Manag
     }
     cfg.scene.num_envs = 6144
 
-    cfg.scene.sensors = (ContactSensorCfg(
-        name="self_collision",
-        primary=ContactMatch(mode="subtree", pattern="Trunk", entity="robot"),
-        secondary=ContactMatch(mode="subtree", pattern="Trunk", entity="robot"),
-        fields=("found", "force"),
-        reduce="none",
-        num_slots=1,
-        history_length=4,
-    ),)
+    cfg.scene.sensors = (
+        ContactSensorCfg(
+            name="self_collision",
+            primary=ContactMatch(mode="subtree", pattern="Trunk", entity="robot"),
+            secondary=ContactMatch(mode="subtree", pattern="Trunk", entity="robot"),
+            fields=("found", "force"),
+            reduce="none",
+            num_slots=1,
+            history_length=4,
+        ),
+        ContactSensorCfg(
+            name="feet_contact",
+            primary=ContactMatch(
+                mode="geom",
+                pattern=r"^(left|right)_foot_[12]$",
+                entity="robot",
+            ),
+            secondary=None,       # any contact partner (ground, ball, etc.)
+            fields=("found", "force"),
+            reduce="netforce",    # sum all contact points per geom → true net force
+            history_length=0,
+        ),
+    )
 
     cfg.sim.nconmax = 100
     cfg.sim.njmax = 500
@@ -179,7 +194,14 @@ def goalkeeper_env_cfg(play: bool = False, num_steps_per_env: int = 24) -> Manag
     _robot_cfg = SceneEntityCfg("robot")
     for group in cfg.observations.values():
         group.terms["base_ang_vel"] = ObservationTermCfg(
-            func=mjlab_obs.base_ang_vel, params={"asset_cfg": _robot_cfg}
+            func=mjlab_obs.base_ang_vel, params={"asset_cfg": _robot_cfg},
+            noise=Unoise(n_min=-0.2, n_max=0.2),
+        )
+        # Increase joint_vel noise from base ±0.5 to KaydenKnapik ±1.5.
+        # Base tracking_env_cfg uses 0.5; KaydenKnapik's hardware-verified config uses 1.5.
+        group.terms["joint_vel"] = ObservationTermCfg(
+            func=mjlab_mdp.joint_vel_rel,
+            noise=Unoise(n_min=-1.5, n_max=1.5),
         )
     cfg.observations["actor"].terms.pop("base_lin_vel", None)
     cfg.observations["critic"].terms["base_lin_vel"] = ObservationTermCfg(
@@ -281,14 +303,15 @@ def goalkeeper_env_cfg(play: bool = False, num_steps_per_env: int = 24) -> Manag
     # ====================================================================
     # Override motion tracking weights from base config
     # (These come from make_tracking_env_cfg() in mjlab)
-    # Replacing AMP with explicit motion tracking to learn the lefthand save
+    # Reduced from previous values: motion was ~34 total vs task ~15, causing the policy
+    # to prioritise motion mimicry over ball interception. Now ~17 vs task ~25 (with curriculum).
     # ====================================================================
-    cfg.rewards["motion_global_root_pos"].weight = 10.0   # was 0.5 → Force sideways dive
-    cfg.rewards["motion_global_root_ori"].weight = 5.0    # was 0.5 → Force rotation
-    cfg.rewards["motion_body_pos"].weight = 10.0          # was 1.0 → Force body pose
-    cfg.rewards["motion_body_ori"].weight = 3.0           # was 1.0
-    cfg.rewards["motion_body_lin_vel"].weight = 3.0       # was 1.0
-    cfg.rewards["motion_body_ang_vel"].weight = 3.0       # was 1.0
+    cfg.rewards["motion_global_root_pos"].weight = 4.0    # was 10.0
+    cfg.rewards["motion_global_root_ori"].weight = 3.0    # was 5.0
+    cfg.rewards["motion_body_pos"].weight = 4.0           # was 10.0
+    cfg.rewards["motion_body_ori"].weight = 2.0           # was 3.0
+    cfg.rewards["motion_body_lin_vel"].weight = 2.0       # was 3.0
+    cfg.rewards["motion_body_ang_vel"].weight = 2.0       # was 3.0
 
     # Second-order smoothness (jerk) penalty — matches original's _reward_smoothness formula.
     # G1 weight -0.1 was on top of AMP's implicit smoothness; T1 has no AMP so -0.1 is
@@ -340,6 +363,9 @@ def goalkeeper_env_cfg(play: bool = False, num_steps_per_env: int = 24) -> Manag
     cfg.rewards["penalize_kneeheight"] = RewardTermCfg(
         func=gk_rew.penalize_kneeheight, weight=-100.0,
         params={"asset_cfg": _KNEE_BODY_CFG},
+    )
+    cfg.rewards["penalize_self_collision"] = RewardTermCfg(
+        func=gk_rew.penalize_self_collision, weight=-50.0,
     )
 
     # Gap 3 — Successland: reward safe landing after save (4.0)
@@ -494,6 +520,11 @@ def goalkeeper_env_cfg(play: bool = False, num_steps_per_env: int = 24) -> Manag
     cfg.events["foot_friction"].params["asset_cfg"].geom_names = r"^(left|right)_foot_[12]$"
     cfg.events["base_com"].params["asset_cfg"].body_names = ("Trunk",)
 
+    # Observation history: G1 stacks 10 timesteps (num_actor_history=10).
+    # Applied to both actor and critic so the policy always sees the same input format.
+    cfg.observations["actor"].history_length = 10
+    cfg.observations["critic"].history_length = 10
+
     # Remove all motion-tracking-specific terminations from the base config.
     # These check deviation from reference motion pose, not relevant for goalkeeper.
     # Observation history: G1 stacks 10 timesteps (num_actor_history=10).
@@ -520,6 +551,12 @@ def goalkeeper_env_cfg(play: bool = False, num_steps_per_env: int = 24) -> Manag
     cfg.terminations["base_height"] = TerminationTermCfg(
         func=mjlab_mdp.root_height_below_minimum,
         params={"minimum_height": 0.4},
+        time_out=False,
+    )
+    # 3. Force-based: mirrors upstream sharpforce_buf (> 1.5 × 1000 N at feet).
+    cfg.terminations["sharpforce"] = TerminationTermCfg(
+        func=gk_resets.sharpforce_termination,
+        params={"max_contact_force": 1500.0},
         time_out=False,
     )
 
@@ -556,6 +593,24 @@ def goalkeeper_play_env_cfg(num_steps_per_env: int = 24) -> ManagerBasedRlEnvCfg
     for _term in ["anchor_pos", "anchor_ori", "ee_body_pos"]:
         cfg.terminations.pop(_term, None)
 
+    return cfg
+
+
+def goalkeeper_play_withoverlay_legacy_env_cfg(num_steps_per_env: int = 24) -> ManagerBasedRlEnvCfg:
+    """Play config for checkpoints trained WITHOUT ball/hand obs (obs size 750, history=10)."""
+    cfg = goalkeeper_play_withoverlay_env_cfg(num_steps_per_env=num_steps_per_env)
+    _legacy_drop = ["ball_pos_b", "ball_vel_b", "left_hand_pos_b", "right_hand_pos_b"]
+    for _obs in _legacy_drop:
+        cfg.observations["actor"].terms.pop(_obs, None)
+        cfg.observations["critic"].terms.pop(_obs, None)
+    return cfg
+
+
+def goalkeeper_play_withoverlay_corporate_env_cfg(num_steps_per_env: int = 24) -> ManagerBasedRlEnvCfg:
+    """Play config for checkpoints trained with history_length=1 and ball/hand obs (obs size 87)."""
+    cfg = goalkeeper_play_withoverlay_env_cfg(num_steps_per_env=num_steps_per_env)
+    cfg.observations["actor"].history_length = 1
+    cfg.observations["critic"].history_length = 1
     return cfg
 
 

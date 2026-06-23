@@ -1,0 +1,82 @@
+seed: 42
+num_steps_per_env: 24
+max_iterations: 50000
+obs_groups:
+  actor: !!python/tuple
+  - actor
+  critic: !!python/tuple
+  - critic
+save_interval: 500
+experiment_name: simple_goalkeeper
+run_name: phase1
+logger: wandb
+wandb_project: SimpleGoalKeeper
+wandb_tags: !!python/tuple []
+resume: false
+load_run: .*
+load_checkpoint: model_.*.pt
+clip_actions: null
+upload_model: true
+empirical_normalization: true
+policy:
+  class_name: ActorCritic
+  init_noise_std: 1.0
+  noise_std_type: scalar
+  actor_hidden_dims:
+  - 512
+  - 256
+  - 128
+  critic_hidden_dims:
+  - 512
+  - 256
+  - 128
+  activation: elu
+algorithm:
+  class_name: AMPPPO
+  num_learning_epochs: 5
+  num_mini_batches: 4
+  learning_rate: 0.001
+  schedule: adaptive
+  gamma: 0.99
+  lam: 0.95
+  entropy_coef: 0.005
+  desired_kl: 0.01
+  max_grad_norm: 1.0
+  value_loss_coef: 1.0
+  use_clipped_value_loss: true
+  clip_param: 0.2
+  normalize_advantage_per_mini_batch: false
+  amp_replay_buffer_size: 100000
+device: cuda:0
+amp_data:
+  class_type: !!python/name:beyondAMP.motion.motion_dataset.MotionDataset ''
+  asset_name: robot
+  motion_files:
+  - /home/ibouwmeest/data_local_share_scratch/SimpleGoalKeeper/src/simple_goalkeeper/motions/data/LeftDoubleStep_own_booster_t1.npz
+  - /home/ibouwmeest/data_local_share_scratch/SimpleGoalKeeper/src/simple_goalkeeper/motions/data/LeftQuickStep_own_booster_t1.npz
+  - /home/ibouwmeest/data_local_share_scratch/SimpleGoalKeeper/src/simple_goalkeeper/motions/data/LeftStep_own_booster_t1.npz
+  - /home/ibouwmeest/data_local_share_scratch/SimpleGoalKeeper/src/simple_goalkeeper/motions/data/LeftTripleStep_own_booster_t1.npz
+  - /home/ibouwmeest/data_local_share_scratch/SimpleGoalKeeper/src/simple_goalkeeper/motions/data/RightDoubleStep_own_booster_t1.npz
+  - /home/ibouwmeest/data_local_share_scratch/SimpleGoalKeeper/src/simple_goalkeeper/motions/data/RightTripleStep_own_booster_t1.npz
+  - /home/ibouwmeest/data_local_share_scratch/SimpleGoalKeeper/src/simple_goalkeeper/motions/data/Rightstep_own_booster_t1.npz
+  body_names:
+  - left_foot_link
+  - right_foot_link
+  - Shank_Left
+  - Shank_Right
+  - Waist
+  amp_obs_terms:
+  - joint_pos
+  - joint_vel
+  anchor_name: Trunk
+amp_reward_coef: 0.5
+amp_discr_hidden_dims:
+- 512
+- 256
+- 128
+amp_task_reward_lerp: 0.9
+amp_min_normalized_std: 0.05
+use_wandb: true
+wandb_entity: i-p-b-bouwmeester-eindhoven-university-of-technology
+video_interval: 1000
+video_n_steps: 250
