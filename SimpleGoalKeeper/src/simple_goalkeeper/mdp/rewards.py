@@ -97,24 +97,30 @@ def _robot_x_axis_w(env: "ManagerBasedRlEnv") -> torch.Tensor:
 def _get_ball_crossing_y(env: "ManagerBasedRlEnv", ball_name: str) -> torch.Tensor:
     """Frozen Y coordinate where the ball will cross the goal line (x_local = 0).
 
-    Computed once per episode at reset from the ball's initial position and velocity.
-    Both footreach (phase1) and foot_proximity read this so the robot pre-positions
-    toward where the ball WILL arrive, not where it currently is. Mirrors ILB's
-    _ball_end_target frozen intercept pattern.
+    Uses _rsi_cross_y set analytically by reset_ball_rolling at spawn time (no buffer
+    lag). Converts from env-relative to world frame by adding env_origin_y.
+    Falls back to velocity-based estimate only when _rsi_cross_y is unavailable.
     """
-    ball: Entity = env.scene[ball_name]
-    ball_pos_w = ball.data.root_link_pos_w
-    ball_vel_w = ball.data.root_link_lin_vel_w
-    ball_x_local = ball_pos_w[:, 0] - env.scene.env_origins[:, 0]
-
     just_reset = env.episode_length_buf <= 1
     if not hasattr(env, "_ball_crossing_y"):
-        env._ball_crossing_y = ball_pos_w[:, 1].clone()
+        env._ball_crossing_y = env.scene.env_origins[:, 1].clone()
+
     if just_reset.any():
-        bvx = ball_vel_w[just_reset, 0].clamp(max=-0.1)   # approaching → negative
-        bvy = ball_vel_w[just_reset, 1]
-        t_cross = ball_x_local[just_reset] / (-bvx)
-        env._ball_crossing_y[just_reset] = ball_pos_w[just_reset, 1] + bvy * t_cross
+        rsi_cross_y = getattr(env, "_rsi_cross_y", None)
+        if rsi_cross_y is not None:
+            # Analytically computed at spawn: no buffer lag, exact match with RSI pool.
+            env._ball_crossing_y[just_reset] = (
+                env.scene.env_origins[just_reset, 1] + rsi_cross_y[just_reset]
+            )
+        else:
+            ball: Entity = env.scene[ball_name]
+            ball_pos_w = ball.data.root_link_pos_w
+            ball_vel_w = ball.data.root_link_lin_vel_w
+            ball_x_local = ball_pos_w[:, 0] - env.scene.env_origins[:, 0]
+            bvx = ball_vel_w[just_reset, 0].clamp(max=-0.1)
+            bvy = ball_vel_w[just_reset, 1]
+            t_cross = ball_x_local[just_reset] / (-bvx)
+            env._ball_crossing_y[just_reset] = ball_pos_w[just_reset, 1] + bvy * t_cross
     return env._ball_crossing_y
 
 

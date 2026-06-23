@@ -25,10 +25,14 @@ from __future__ import annotations
 
 import os
 import sys
+import types
+from sys import stderr
 from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Literal
 
+import mujoco
+import numpy as np
 import torch
 import tyro
 
@@ -55,7 +59,7 @@ class PlayConfig:
     """Override ball difficulty (0.0 = easiest, 1.0 = hardest). Default: use curriculum value."""
     rsi: bool = False
     """Enable Random State Initialization in play (default: off — starts from standing keyframe)."""
-    analytics: bool = False
+    analytics: bool = True
     """Print ball velocity, delta_vx, foot heights, and stopball/softstop state to stdout each step.
     Also toggleable at runtime with the V key."""
 
@@ -78,7 +82,7 @@ class AnalyticsPolicy:
     def toggle(self) -> None:
         self.enabled = not self.enabled
         status = "ON" if self.enabled else "OFF"
-        print(f"\n[Analytics] {status}")
+        print(f"\n[Analytics] {status}", file=stderr)
 
     def __call__(self, obs: "torch.Tensor") -> "torch.Tensor":
         import torch as _torch
@@ -91,7 +95,7 @@ class AnalyticsPolicy:
         # Detect episode reset (any env reset → print separator for env 0).
         if self._prev_ep_buf is not None and (ep_buf[0] < self._prev_ep_buf[0]).item():
             if self.enabled:
-                print()  # newline after overwriting line
+                print(file=stderr)  # newline after overwriting line
             self._ep += 1
         self._prev_ep_buf = ep_buf.clone()
 
@@ -115,30 +119,60 @@ class AnalyticsPolicy:
         softstop_fired  = ss_flag[0].item()  if ss_flag  is not None else False
         cleanstop_fired = cs_flag[0].item()  if cs_flag  is not None else False
 
-        # Foot heights above floor.
+        # Foot heights + slip velocities.
         from simple_goalkeeper.robots.t1_constants import HOME_KEYFRAME  # noqa: F401 (unused val)
         foot_ids = robot.find_bodies(["left_foot_link", "right_foot_link"])[0]
-        foot_z = robot.data.body_link_pos_w[0, foot_ids, 2]
+        foot_pos_w  = robot.data.body_link_pos_w[0, foot_ids, :]   # [2, 3]
+        foot_vel_w  = robot.data.body_link_lin_vel_w[0, foot_ids, :]  # [2, 3]
         floor_z = env.scene.env_origins[0, 2]
-        lf_h = (foot_z[0] - floor_z).item()
-        rf_h = (foot_z[1] - floor_z).item()
+        lf_h = (foot_pos_w[0, 2] - floor_z).item()
+        rf_h = (foot_pos_w[1, 2] - floor_z).item()
+        _CONTACT_H = 0.06  # foot height threshold to consider "in contact"
+        lf_contact = lf_h < _CONTACT_H
+        rf_contact = rf_h < _CONTACT_H
+        lf_slip = foot_vel_w[0, :2].norm().item() if lf_contact else 0.0
+        rf_slip = foot_vel_w[1, :2].norm().item() if rf_contact else 0.0
 
         ball_speed = bv.norm().item()
+
+        # Interception point in robot's local frame.
+        # crossing_y is world-frame Y; express it as robot-local lateral offset.
+        cross_y_w = getattr(env, "_ball_crossing_y", None)
+        if cross_y_w is not None:
+            from mjlab.utils.lab_api.math import quat_apply_inverse
+            origin = env.scene.env_origins[0]
+            cross_pt_w = torch.tensor(
+                [origin[0].item(), cross_y_w[0].item(), origin[2].item() + 0.1],
+                device=env.device,
+            )
+            robot_pos_w0 = robot.data.root_link_pos_w[0]
+            robot_quat_w0 = robot.data.root_link_quat_w[0]
+            cross_local = quat_apply_inverse(robot_quat_w0.unsqueeze(0),
+                                             (cross_pt_w - robot_pos_w0).unsqueeze(0))[0]
+            int_x = cross_local[0].item()   # forward in robot frame (+= in front)
+            int_y = cross_local[1].item()   # lateral in robot frame (+= right)
+        else:
+            int_x = float("nan")
+            int_y = float("nan")
 
         flags = (
             f"{'SB✓' if stopball_fired else 'SB·'} "
             f"{'SS✓' if softstop_fired else 'SS·'} "
             f"{'CS✓' if cleanstop_fired else 'CS·'}"
         )
+        lf_tag = f"{'G' if lf_contact else 'A'}{lf_slip:.2f}"
+        rf_tag = f"{'G' if rf_contact else 'A'}{rf_slip:.2f}"
         print(
             f"\rEp{self._ep:3d} | "
             f"bvx={bv[0].item():+6.2f} bvy={bv[1].item():+5.2f} spd={ball_speed:.2f} "
             f"bx={bx_local:+5.2f} | "
+            f"int(x={int_x:+5.2f} y={int_y:+5.2f}) | "
             f"dvx={delta_vx:+5.2f} | "
-            f"LF={lf_h:.3f} RF={rf_h:.3f} | "
+            f"LF={lf_h:.3f}({lf_tag}) RF={rf_h:.3f}({rf_tag}) | "
             f"{flags}",
             end="",
             flush=True,
+            file=stderr,
         )
         return actions
 
@@ -147,6 +181,80 @@ class AnalyticsPolicy:
         reset_fn = getattr(self._policy, "reset", None)
         if reset_fn is not None:
             reset_fn()
+
+
+def _patch_viewer_intercept_vis(native_viewer: "NativeMujocoViewer", env) -> None:
+    """Monkey-patch NativeMujocoViewer to draw the predicted interception sphere.
+
+    Adds a green sphere at the frozen goal-line crossing point (env 0) and a
+    vertical line from floor to sphere so it's visible from any camera angle.
+    The sphere updates each render frame — it moves when a new episode starts
+    and the crossing_y changes.
+    """
+    orig_update = native_viewer._update_debug_visualizers
+
+    def _patched_update(viewer_handle: "mujoco.viewer.Handle") -> None:
+        orig_update(viewer_handle)  # run normal debug vis (resets ngeom=0)
+
+        raw_env = env.unwrapped if hasattr(env, "unwrapped") else env
+        cross_y_t = getattr(raw_env, "_ball_crossing_y", None)
+        if cross_y_t is None:
+            return
+
+        scn = viewer_handle.user_scn
+        origins = raw_env.scene.env_origins[0].cpu().numpy()
+        goal_x = float(origins[0])
+        cross_y = float(cross_y_t[0].item())
+        floor_z = float(origins[2])
+        sphere_z = floor_z + 0.12
+
+        def _add_sphere(x: float, y: float, z: float, r: float, rgba) -> None:
+            if scn.ngeom >= scn.maxgeom:
+                return
+            scn.ngeom += 1
+            g = scn.geoms[scn.ngeom - 1]
+            g.category = mujoco.mjtCatBit.mjCAT_DECOR
+            mujoco.mjv_initGeom(
+                geom=g,
+                type=mujoco.mjtGeom.mjGEOM_SPHERE,
+                size=np.array([r, r, r], dtype=np.float64),
+                pos=np.array([x, y, z], dtype=np.float64),
+                mat=np.eye(3, dtype=np.float64).flatten(),
+                rgba=np.array(rgba, dtype=np.float32),
+            )
+
+        def _add_line(from_: np.ndarray, to: np.ndarray, width: float, rgba) -> None:
+            if scn.ngeom >= scn.maxgeom:
+                return
+            scn.ngeom += 1
+            g = scn.geoms[scn.ngeom - 1]
+            g.category = mujoco.mjtCatBit.mjCAT_DECOR
+            mujoco.mjv_initGeom(
+                geom=g,
+                type=mujoco.mjtGeom.mjGEOM_LINE,
+                size=np.zeros(3, dtype=np.float64),
+                pos=np.zeros(3, dtype=np.float64),
+                mat=np.zeros(9, dtype=np.float64),
+                rgba=np.array(rgba, dtype=np.float32),
+            )
+            mujoco.mjv_connector(
+                geom=g,
+                type=mujoco.mjtGeom.mjGEOM_LINE,
+                width=width,
+                from_=from_,
+                to=to,
+            )
+
+        # Sphere at intercept point.
+        _add_sphere(goal_x, cross_y, sphere_z, 0.08, [0.1, 1.0, 0.2, 0.75])
+        # Vertical line from floor to sphere.
+        _add_line(
+            np.array([goal_x, cross_y, floor_z], dtype=np.float64),
+            np.array([goal_x, cross_y, sphere_z], dtype=np.float64),
+            0.008, [0.1, 1.0, 0.2, 0.6],
+        )
+
+    native_viewer._update_debug_visualizers = _patched_update
 
 
 def run_play(task_id: str, cfg: PlayConfig) -> None:
@@ -249,7 +357,9 @@ def run_play(task_id: str, cfg: PlayConfig) -> None:
         def _key_cb(key: int) -> None:
             if key == KEY_V:
                 analytics.toggle()
-        NativeMujocoViewer(env, final_policy, key_callback=_key_cb).run()
+        native_viewer = NativeMujocoViewer(env, final_policy, key_callback=_key_cb)
+        _patch_viewer_intercept_vis(native_viewer, env)
+        native_viewer.run()
     elif resolved_viewer == "viser":
         ViserPlayViewer(env, final_policy).run()
     else:

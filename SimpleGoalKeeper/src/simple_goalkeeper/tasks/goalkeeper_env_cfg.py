@@ -494,8 +494,8 @@ def goalkeeper_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
             "ball_name":      BALL_NAME,
             "dist_range":     (1.5, 2.5),
             "y_start_range":  (-0.3, 0.3),
-            "y_end_range":    (-1.0, 1.0),
-            "speed_range":    (0.5, 2.0),
+            "y_end_range":    (-0.7, 0.7),
+            "speed_range":    (0.5, 1.5),
             "spawn_z":        0.12,
         },
     )

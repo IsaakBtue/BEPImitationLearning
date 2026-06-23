@@ -1,5 +1,1 @@
-cd /home/isaak/BEPImitationlearning/my_mjlab_project_booster_t1 && .venv/bin/python -m mjlab.scripts.train goalkeeper_booster_t1
-python -m mjlab.scripts.play goalkeeper_booster_t1_withoverlay   --checkpoint-file logs/rsl_rl/g1_goalkeeper/2026-05-19_17-06-43/model_0.pt --motion-file src/my_mjlab_project_booster_t1/motions/data/lefthand_t1.npz
-
-
-cd /home/robocup/IsaakB/BEPImitationlLearning/my_mjlab_project_booster_t1 && uv run python -m mjlab.scripts.train goalkeeper_booster_t1 --env.scene.num-envs 6144 --gpu-ids '[0]'  
+cd /home/robocup/IsaakB/BEPImitationLearning/SimpleGoalKeeper && uv run sgk_train Mjlab-BeyondAMP-Goalkeeper-T1 --num-envs 4096

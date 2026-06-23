@@ -8,9 +8,11 @@ cd /home/robocup/IsaakB/BEPImitationLearning/Imitationlearningbooster && env -u 
 
 # Play (no overlay, random motion each episode)
 cd /home/robocup/IsaakB/BEPImitationLearning/Imitationlearningbooster && env -u PYTHONPATH .venv/bin/play goalkeeper_booster_t1_amp --checkpoint-file logs/rsl_rl/goalkeeper_amp_booster_t1/2026-06-05_17-33-14/model_0.pt
+cd /home/robocup/IsaakB/BEPImitationLearning/Imitationlearningbooster && env -u PYTHONPATH .venv/bin/play goalkeeper_booster_t1_amp --checkpoint-file logs/rsl_rl/goalkeeper_amp_booster_t1/2026-06-05_17-33-14/model_0.pt
 
 # Play with ghost overlay — cycles all 6 motions sequentially
 cd /home/robocup/IsaakB/BEPImitationLearning/Imitationlearningbooster && env -u PYTHONPATH .venv/bin/play goalkeeper_booster_t1_amp_withoverlay --checkpoint-file logs/rsl_rl/goalkeeper_amp_booster_t1/2026-06-05_17-33-14/model_0.pt
+(base) robocup@devpc69bj:~/IsaakB/BEPImitationLearning/SimpleGoalKeeper$ cd /home/robocup/IsaakB/BEPImitationLearning/SimpleGoalKeeper && uv run sgk_play Mjlab-BeyondAMP-Goalkeeper-T1-WithOverlay --checkpoint-file logs/rsl_rl/simple_goalkeeper/2026-06-14_16-13-26_phase1/model_400.pt
 
 # Visualise all 6 reference motions (no policy, ghost overlay only, cycles sequentially)
 cd /home/robocup/IsaakB/BEPImitationLearning/Imitationlearningbooster && env -u PYTHONPATH .venv/bin/play goalkeeper_booster_t1_amp_withoverlay --agent zero --no-terminations True

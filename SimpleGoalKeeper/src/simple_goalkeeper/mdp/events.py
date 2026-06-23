@@ -513,6 +513,8 @@ class reward_curriculum_ep_len:
         self._term_cfg        = env.reward_manager.get_term_cfg(self._reward_name)
         if not hasattr(env, "_curriculumupdate"):
             env._curriculumupdate = 0
+        if not hasattr(env, "_cu_latched_max"):
+            env._cu_latched_max = False
 
     def __call__(
         self,
@@ -525,11 +527,16 @@ class reward_curriculum_ep_len:
         # Update shared curriculumupdate once per window (first term to run wins).
         if env.common_step_counter - self._last_update >= self._update_interval:
             self._last_update = env.common_step_counter
-            if len(env_ids) > 0:
-                mean_ep_len = env.episode_length_buf[env_ids].float().mean().item()
-            else:
-                mean_ep_len = 0.0
-            env._curriculumupdate = int(mean_ep_len / self._ep_len_divisor)
+            if not env._cu_latched_max:
+                if len(env_ids) > 0:
+                    mean_ep_len = env.episode_length_buf[env_ids].float().mean().item()
+                else:
+                    mean_ep_len = 0.0
+                cu = int(mean_ep_len / self._ep_len_divisor)
+                # Latch at max once ep_len >= 148 — prevents oscillation near the boundary.
+                if mean_ep_len >= 148.0:
+                    env._cu_latched_max = True
+                env._curriculumupdate = cu
 
         # G1 formula — weight = base * (1 + 0.5 * cu), cu capped at 3 naturally by ep_len.
         new_weight = self._base_weight * (1.0 + 0.5 * env._curriculumupdate)
