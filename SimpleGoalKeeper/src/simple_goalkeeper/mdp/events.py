@@ -267,7 +267,7 @@ def reset_from_motion_data(
     env_ids: torch.Tensor | None,
     asset_cfg: SceneEntityCfg = _DEFAULT_ROBOT_CFG,
 ) -> None:
-    """Reset event: 60% RSI from NPZ motion frame, 40% HOME_KEYFRAME standing pose."""
+    """Reset event: 50% RSI from NPZ motion frame, 50% HOME_KEYFRAME standing pose."""
     mgr = MotionResetManager.get()
     mgr.init(env)
     mgr.reset(env, env_ids, asset_cfg, rsi_fraction=0.5)
@@ -513,8 +513,6 @@ class reward_curriculum_ep_len:
         self._term_cfg        = env.reward_manager.get_term_cfg(self._reward_name)
         if not hasattr(env, "_curriculumupdate"):
             env._curriculumupdate = 0
-        if not hasattr(env, "_cu_latched_max"):
-            env._cu_latched_max = False
 
     def __call__(
         self,
@@ -527,16 +525,14 @@ class reward_curriculum_ep_len:
         # Update shared curriculumupdate once per window (first term to run wins).
         if env.common_step_counter - self._last_update >= self._update_interval:
             self._last_update = env.common_step_counter
-            if not env._cu_latched_max:
-                if len(env_ids) > 0:
-                    mean_ep_len = env.episode_length_buf[env_ids].float().mean().item()
-                else:
-                    mean_ep_len = 0.0
-                cu = int(mean_ep_len / self._ep_len_divisor)
-                # Latch at max once ep_len >= 148 — prevents oscillation near the boundary.
-                if mean_ep_len >= 148.0:
-                    env._cu_latched_max = True
-                env._curriculumupdate = cu
+            if len(env_ids) > 0:
+                mean_ep_len = env.episode_length_buf[env_ids].float().mean().item()
+            else:
+                mean_ep_len = 0.0
+            cu = int(mean_ep_len / self._ep_len_divisor)
+            # Monotonic: once a level is reached it never drops. Prevents oscillation
+            # near the boundary (e.g. ep_len flickering across 144 = 48×3).
+            env._curriculumupdate = max(env._curriculumupdate, cu)
 
         # G1 formula — weight = base * (1 + 0.5 * cu), cu capped at 3 naturally by ep_len.
         new_weight = self._base_weight * (1.0 + 0.5 * env._curriculumupdate)
@@ -648,7 +644,7 @@ def reset_ball_rolling(
 
     _EASY_DIST_R   = (1.5, 2.0)
     _EASY_Y_ROLL   = (-0.05, 0.05)
-    _EASY_SPEED_R  = (1.5, 2.5)
+    _EASY_SPEED_R  = (0.8, 1.5)
 
     dist_r    = _lerp_range(_EASY_DIST_R,  dist_range,   d)
     y_start_r = _lerp_range(_EASY_Y_ROLL,  y_start_range, d)

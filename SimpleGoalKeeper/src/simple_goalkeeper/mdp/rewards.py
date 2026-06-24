@@ -162,13 +162,22 @@ def footreach(
     asidegoal = torch.where(asidegoal.abs() < 0.3, torch.zeros_like(asidegoal), asidegoal)
     phase1_rew = 1.0 - asidegoal.abs()                                  # 1=aligned, 0=1 m off
 
-    # Phase 2: sigmoid reach to frozen crossing point (where ball WILL arrive at goal line).
-    # Mirrors ILB eereach end_target: robot must pre-position foot at intercept, not
-    # chase the live ball. Using live ball caused free reward when ball rolled through center.
+    # Phase 2 crossing point: frozen when far, live ball when close (mirrors G1 end_target update).
+    # G1 post_physics_step lines 203-206: end_target switches to ball_states[:, :3] when
+    # balllocal < 0.5 — robot converges on the actual ball in the final 0.5 m. The X
+    # coordinate stays at goal_x_w (stayonline constraint keeps the foot at the goal line).
     goal_x_w  = env.scene.env_origins[:, 0]       # (N,)
     floor_z_w = env.scene.env_origins[:, 2]       # (N,)
+    live_y = ball_pos_w[:, 1]
+    live_z = ball_pos_w[:, 2]
+    ball_close = ball_x_local < 0.5               # (N,) bool — mirrors G1 balllocal < 0.5
+
+    # Switch from frozen crossing Y/Z to live ball Y/Z when ball is within 0.5 m.
+    target_y = torch.where(ball_close, live_y, crossing_y)
+    target_z = torch.where(ball_close, live_z, floor_z_w + 0.10)
+
     crossing_point = torch.stack(
-        [goal_x_w, crossing_y, floor_z_w + 0.10], dim=-1
+        [goal_x_w, target_y, target_z], dim=-1
     )                                                                     # (N, 3)
     dist_to_crossing = torch.norm(
         foot_pos_w - crossing_point[:, None, :], dim=-1
@@ -178,7 +187,7 @@ def footreach(
     # Lateral velocity toward crossing side amplifies the reach reward.
     lateral_vel_y = robot.data.root_link_lin_vel_w[:, 1]
     vel_toward = torch.where(lateral_error > 0, lateral_vel_y, -lateral_vel_y)
-    vel_sigma = 1.0 + 3.0 * vel_toward.clamp(0.0, 3.0)                # 1–10×
+    vel_sigma = 1.0 + 3.0 * vel_toward.clamp(0.0, 3.0)                # 1–10× (matches G1 eereach)
 
     # Combine: phase1 when ball is far, phase2 sigmoid when close.
     phase1_mask = ball_x_local > 1.5
@@ -197,22 +206,36 @@ def foot_proximity(
     asset_cfg: SceneEntityCfg = _DEFAULT_FEET_CFG,
     sigma: float = 5.0,
 ) -> torch.Tensor:
-    """Dense continuous reward for foot near the frozen ball crossing point.
+    """Dense continuous reward for foot near the ball crossing point.
 
     Uses the frozen goal-line crossing point (env._ball_crossing_y, set by
-    _get_ball_crossing_y) as the target. Rewards exp(-sigma * dist) so there is
-    always a gradient pulling the foot toward the arrival point, unlike the
-    one-shot stopball. Analogous to ILB's hand_proximity_strict (weight 5.0).
-    Deactivates once the ball is behind (same gate as footreach).
+    _get_ball_crossing_y) as the target when the ball is far (>= 0.5 m from goal line).
+    When the ball is within 0.5 m, switches to the live ball Y/Z position (mirrors G1
+    end_target update in post_physics_step lines 203-206). Rewards exp(-sigma * dist)
+    so there is always a gradient pulling the foot toward the arrival point, unlike the
+    one-shot stopball. Deactivates once the ball is behind (same gate as footreach).
     Weight: +5.0.
     """
     robot: Entity = env.scene[asset_cfg.name]
+    ball: Entity = env.scene[ball_name]
+
+    ball_pos_w = ball.data.root_link_pos_w                              # (N, 3)
+    ball_x_local = ball_pos_w[:, 0] - env.scene.env_origins[:, 0]     # (N,)
 
     crossing_y = _get_ball_crossing_y(env, ball_name)                  # (N,)
     goal_x_w = env.scene.env_origins[:, 0]
     env_z    = env.scene.env_origins[:, 2]
+
+    # Live ball switch: when ball is within 0.5 m of goal line, track live position.
+    # Mirrors G1 post_physics_step: end_target = ball_states[:, :3] when balllocal < 0.5.
+    ball_close = ball_x_local < 0.5               # (N,) bool
+    live_y = ball_pos_w[:, 1]
+    live_z = ball_pos_w[:, 2]
+    target_y = torch.where(ball_close, live_y, crossing_y)
+    target_z = torch.where(ball_close, live_z, env_z + 0.10)
+
     crossing_point = torch.stack(
-        [goal_x_w, crossing_y, env_z + 0.10], dim=-1                   # (N, 3) — ball radius
+        [goal_x_w, target_y, target_z], dim=-1                         # (N, 3)
     )
 
     foot_pos_w = robot.data.body_link_pos_w[:, asset_cfg.body_ids, :]  # (N, 2, 3)

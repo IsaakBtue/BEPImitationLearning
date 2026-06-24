@@ -166,6 +166,18 @@ def goalkeeper_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
                 "ep_len_divisor":  48,
             },
         )
+        # G1 lines 363-364: stopball weight also grows with curriculum (same formula as eereach).
+        # Keep base 20 (max 50 at cu=3) well below softstop base 100 (max 250) so softstop
+        # remains the dominant primary signal.
+        cfg.curriculum["stopball_curriculum"] = CurriculumTermCfg(
+            func=gk_mdp.reward_curriculum_ep_len,
+            params={
+                "reward_name": "stopball",
+                "base_weight": 20.0,     # G1 pattern: same formula; max 50 at cu=3
+                "update_interval": 500,
+                "ep_len_divisor":  48,
+            },
+        )
 
     # ------------------------------------------------------------------
     # Observations
@@ -263,7 +275,7 @@ def goalkeeper_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
         "stopball": RewardTermCfg(
             func=gk_mdp.stopball,
             weight=20.0,
-            params={"ball_name": BALL_NAME, "delta_vel_threshold": 1.0},
+            params={"ball_name": BALL_NAME, "delta_vel_threshold": 0.6},
         ),
         # --- partial deflection signal (fires before stopball; gates _ball_is_behind) ---
         "softstop": RewardTermCfg(
@@ -495,7 +507,7 @@ def goalkeeper_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
             "dist_range":     (1.5, 2.5),
             "y_start_range":  (-0.3, 0.3),
             "y_end_range":    (-0.7, 0.7),
-            "speed_range":    (0.5, 1.5),
+            "speed_range":    (0.8, 2.0),
             "spawn_z":        0.12,
         },
     )
@@ -568,7 +580,7 @@ def goalkeeper_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
                 "ball_name":     BALL_NAME,
                 "dist_range":    (1.5, 2.5),
                 "y_start_range": (-0.3, 0.3),
-                "y_end_range":   (-1.0, 1.0),
+                "y_end_range":   (-0.7, 0.7),
                 "speed_range":   (0.5, 2.0),
                 "spawn_z":       0.12,
             },
