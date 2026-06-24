@@ -189,7 +189,7 @@ class MotionResetManager:
         env: "ManagerBasedRlEnv",
         env_ids: torch.Tensor | None,
         asset_cfg: SceneEntityCfg = _DEFAULT_ROBOT_CFG,
-        rsi_fraction: float = 0.8,
+        rsi_fraction: float = 0.6,
     ) -> None:
         """80% distance-conditioned RSI + 20% HOME_KEYFRAME standing.
 
