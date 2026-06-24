@@ -1,0 +1,42 @@
+# ========== SimpleGoalKeeperObsHis (2 motions, HIM-PPO AMP, feet-only) ==========
+# num-envs flag:  --env.scene.num-envs N
+# 8192 envs: use PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True AND 4096 envs works fine without it
+# NOTE: num_mini_batches=4 (matches ILB); 8192 envs may OOM during gradient update — use 4096 for stable training
+
+# Smoke test (2 envs, 3 iterations)
+cd /home/robocup/IsaakB/BEPImitationLearning/SimpleGoalKeeperObsHis && env -u PYTHONPATH .venv/bin/train simple_goalkeeper_him --env.scene.num-envs 2 --agent.max-iterations 3
+
+# Full GPU training (4096 envs — recommended)
+cd /home/robocup/IsaakB/BEPImitationLearning/SimpleGoalKeeperObsHis && env -u PYTHONPATH .venv/bin/train simple_goalkeeper_him --env.scene.num-envs 4096
+
+# Full GPU training (8192 envs — expandable_segments required)
+cd /home/robocup/IsaakB/BEPImitationLearning/SimpleGoalKeeperObsHis && PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True env -u PYTHONPATH .venv/bin/train simple_goalkeeper_him --env.scene.num-envs 8192
+
+# Resume from checkpoint
+cd /home/robocup/IsaakB/BEPImitationLearning/SimpleGoalKeeperObsHis && env -u PYTHONPATH .venv/bin/train simple_goalkeeper_him --agent.resume True --agent.load-run 2026-06-18_12-34-40 --agent.load-checkpoint model_1000.pt
+
+# Play (zero-action sanity check, headless)
+cd /home/robocup/IsaakB/BEPImitationLearning/SimpleGoalKeeperObsHis && env -u PYTHONPATH .venv/bin/play simple_goalkeeper_him --agent zero --env.scene.num-envs 1
+
+# Play (trained checkpoint, overlay)
+cd /home/robocup/IsaakB/BEPImitationLearning/SimpleGoalKeeperObsHis && env -u PYTHONPATH .venv/bin/play simple_goalkeeper_him_withoverlay --checkpoint-file logs/rsl_rl/simple_goalkeeper_him/2026-06-18_12-34-40/model_1000.pt
+# Play with ghost overlay — cycles all 7 reference motions sequentially
+cd /home/robocup/IsaakB/BEPImitationLearning/SimpleGoalKeeperObsHis && env -u PYTHONPATH .venv/bin/play simple_goalkeeper_him_withoverlay --checkpoint-file logs/rsl_rl/simple_goalkeeper_him/2026-06-18_12-34-40/model_1000.pt
+
+# Visualise all reference motions only (no policy, ghost overlay only, cycles sequentially)
+cd /home/robocup/IsaakB/BEPImitationLearning/SimpleGoalKeeperObsHis && env -u PYTHONPATH .venv/bin/play simple_goalkeeper_him_withoverlay --agent zero --no-terminations True
+
+# Visualise a single specific motion (replace filename as needed)
+cd /home/robocup/IsaakB/BEPImitationLearning/SimpleGoalKeeperObsHis && env -u PYTHONPATH .venv/bin/play simple_goalkeeper_him_withoverlay --agent zero --no-terminations True --motion-file src/simple_goalkeeper_him/motions/data/LeftStep_own_booster_t1.npz
+
+cd /home/robocup/IsaakB/BEPImitationLearning/SimpleGoalKeeperObsHis && env -u PYTHONPATH .venv/bin/play simple_goalkeeper_him_withoverlay --agent zero --no-terminations True --motion-file src/simple_goalkeeper_him/motions/data/LeftDoubleStep_own_booster_t1.npz
+
+cd /home/robocup/IsaakB/BEPImitationLearning/SimpleGoalKeeperObsHis && env -u PYTHONPATH .venv/bin/play simple_goalkeeper_him_withoverlay --agent zero --no-terminations True --motion-file src/simple_goalkeeper_him/motions/data/LeftQuickStep_own_booster_t1.npz
+
+cd /home/robocup/IsaakB/BEPImitationLearning/SimpleGoalKeeperObsHis && env -u PYTHONPATH .venv/bin/play simple_goalkeeper_him_withoverlay --agent zero --no-terminations True --motion-file src/simple_goalkeeper_him/motions/data/LeftTripleStep_own_booster_t1.npz
+
+cd /home/robocup/IsaakB/BEPImitationLearning/SimpleGoalKeeperObsHis && env -u PYTHONPATH .venv/bin/play simple_goalkeeper_him_withoverlay --agent zero --no-terminations True --motion-file src/simple_goalkeeper_him/motions/data/RightDoubleStep_own_booster_t1.npz
+
+cd /home/robocup/IsaakB/BEPImitationLearning/SimpleGoalKeeperObsHis && env -u PYTHONPATH .venv/bin/play simple_goalkeeper_him_withoverlay --agent zero --no-terminations True --motion-file src/simple_goalkeeper_him/motions/data/Rightstep_own_booster_t1.npz
+
+cd /home/robocup/IsaakB/BEPImitationLearning/SimpleGoalKeeperObsHis && env -u PYTHONPATH .venv/bin/play simple_goalkeeper_him_withoverlay --agent zero --no-terminations True --motion-file src/simple_goalkeeper_him/motions/data/RightTripleStep_own_booster_t1.npz
