@@ -149,7 +149,7 @@ def goalkeeper_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
                 "reward_name": "softstop",
                 "base_weight": 100.0,    # G1 stop_init=100  → max 250 at cu=3
                 "update_interval": 500,
-                "ep_len_divisor":  48,
+                "ep_len_divisor":  47,
             },
         )
         # NOTE: torque_limits and dof_pos_limits intentionally NOT in curriculum.
@@ -163,7 +163,7 @@ def goalkeeper_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
                 "reward_name": "footreach",
                 "base_weight": 10.0,     # G1 eereach_init=10 → max 25 at cu=3
                 "update_interval": 500,
-                "ep_len_divisor":  48,
+                "ep_len_divisor":  47,
             },
         )
         # G1 lines 363-364: stopball weight also grows with curriculum (same formula as eereach).
@@ -175,7 +175,7 @@ def goalkeeper_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
                 "reward_name": "stopball",
                 "base_weight": 20.0,     # G1 pattern: same formula; max 50 at cu=3
                 "update_interval": 500,
-                "ep_len_divisor":  48,
+                "ep_len_divisor":  47,
             },
         )
 
@@ -257,7 +257,7 @@ def goalkeeper_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
     )
 
     cfg.observations["actor"].history_length = 10
-    cfg.observations["critic"].history_length = 10
+    cfg.observations["critic"].history_length = 1
 
     # Observation delay (training only): 0–2 steps = 0–40 ms at 50 Hz.
     if not play:

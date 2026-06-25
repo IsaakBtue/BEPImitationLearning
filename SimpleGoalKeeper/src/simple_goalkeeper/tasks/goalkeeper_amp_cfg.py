@@ -70,6 +70,7 @@ def goalkeeper_amp_runner_cfg() -> AMPRunnerCfg:
             lam=0.95,
             desired_kl=0.01,
             max_grad_norm=1.0,
+            amp_replay_buffer_size=500_000,
         ),
         amp_data=MotionDatasetCfg(
             motion_files=_motion_files(),

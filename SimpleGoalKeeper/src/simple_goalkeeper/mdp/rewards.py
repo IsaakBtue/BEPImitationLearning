@@ -179,9 +179,13 @@ def footreach(
     crossing_point = torch.stack(
         [goal_x_w, target_y, target_z], dim=-1
     )                                                                     # (N, 3)
-    dist_to_crossing = torch.norm(
-        foot_pos_w - crossing_point[:, None, :], dim=-1
-    ).min(dim=-1).values                                                  # (N,)
+    # Side-specific foot: left foot (idx 0) for +Y crossing, right (idx 1) for -Y.
+    is_left_ball = crossing_y > env.scene.env_origins[:, 1]
+    foot_idx = torch.where(is_left_ball,
+                           torch.zeros(env.num_envs, dtype=torch.long, device=env.device),
+                           torch.ones(env.num_envs, dtype=torch.long, device=env.device))
+    foot_pos_active = foot_pos_w[torch.arange(env.num_envs, device=env.device), foot_idx]
+    dist_to_crossing = torch.norm(foot_pos_active - crossing_point, dim=-1)  # (N,)
     reach_rew = 1.0 - 1.0 / (1.0 + torch.exp(-sigma * (dist_to_crossing - reach_th)))
 
     # Lateral velocity toward crossing side amplifies the reach reward.
@@ -238,9 +242,13 @@ def foot_proximity(
         [goal_x_w, target_y, target_z], dim=-1                         # (N, 3)
     )
 
-    foot_pos_w = robot.data.body_link_pos_w[:, asset_cfg.body_ids, :]  # (N, 2, 3)
-    dist = torch.norm(foot_pos_w - crossing_point[:, None, :], dim=-1)  # (N, 2)
-    min_dist = dist.min(dim=-1).values                                   # (N,)
+    foot_pos_w = robot.data.body_link_pos_w[:, asset_cfg.body_ids, :]   # (N, 2, 3)
+    is_left_ball = crossing_y > env.scene.env_origins[:, 1]
+    foot_idx = torch.where(is_left_ball,
+                           torch.zeros(env.num_envs, dtype=torch.long, device=env.device),
+                           torch.ones(env.num_envs, dtype=torch.long, device=env.device))
+    foot_pos_active = foot_pos_w[torch.arange(env.num_envs, device=env.device), foot_idx]
+    min_dist = torch.norm(foot_pos_active - crossing_point, dim=-1)     # (N,)
 
     behind = _ball_is_behind(env, ball_name)
     return torch.exp(-sigma * min_dist) * (~behind).float()
@@ -850,11 +858,16 @@ def foot_clearance(
     """
     behind = _ball_is_behind(env, ball_name)
     robot: Entity = env.scene[asset_cfg.name]
-    foot_pos_w = robot.data.body_link_pos_w[:, asset_cfg.body_ids, :]        # (N, 2, 3)
-    floor_z = env.scene.env_origins[:, 2]                                     # (N,)
-    foot_z_above_floor = (foot_pos_w[:, :, 2] - floor_z[:, None]).clamp(0.0, target_height)  # (N, 2)
-    max_foot_height = foot_z_above_floor.max(dim=-1).values                   # (N,)
-    return (max_foot_height / target_height) * (~behind).float()
+    foot_pos_w = robot.data.body_link_pos_w[:, asset_cfg.body_ids, :]         # (N, 2, 3)
+    floor_z = env.scene.env_origins[:, 2]                                      # (N,)
+    crossing_y = _get_ball_crossing_y(env, ball_name)
+    is_left_ball = crossing_y > env.scene.env_origins[:, 1]
+    foot_idx = torch.where(is_left_ball,
+                           torch.zeros(env.num_envs, dtype=torch.long, device=env.device),
+                           torch.ones(env.num_envs, dtype=torch.long, device=env.device))
+    foot_z_active = foot_pos_w[torch.arange(env.num_envs, device=env.device), foot_idx, 2]
+    foot_z_above_floor = (foot_z_active - floor_z).clamp(0.0, target_height)  # (N,)
+    return (foot_z_above_floor / target_height) * (~behind).float()
 
 
 def feet_slippage(

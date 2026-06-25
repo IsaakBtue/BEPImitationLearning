@@ -666,7 +666,7 @@ def reset_ball_rolling(
     _Y_INNER = 0.15   # minimum offset from center at d=0
     _Y_OUTER = 0.35   # maximum offset from center at d=0
     max_half = max(abs(y_end_range[0]), abs(y_end_range[1]))
-    inner = _Y_INNER * (1.0 - d)
+    inner = max(_Y_INNER * (1.0 - d), 0.1)
     outer = _Y_OUTER + (max_half - _Y_OUTER) * d
     mag   = sample_uniform(inner, outer, (n,), env.device)
     side  = torch.where(torch.rand(n, device=env.device) > 0.5,
