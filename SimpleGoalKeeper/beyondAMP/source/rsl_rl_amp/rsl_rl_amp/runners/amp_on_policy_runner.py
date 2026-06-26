@@ -115,6 +115,8 @@ class AMPOnPolicyRunner:
             with torch.inference_mode():
                 for i in range(self.num_steps_per_env):
                     actions = self.alg.act(obs, critic_obs, amp_obs)
+                    obs_prev = obs.clone()
+                    critic_obs_prev = critic_obs.clone()
                     obs, privileged_obs, rewards, dones, infos, reset_env_ids, terminal_amp_states = self.env.step(actions, not_amp=False)
                     next_amp_obs = self.env.get_amp_observations()
 
@@ -128,7 +130,7 @@ class AMPOnPolicyRunner:
                     lerp_rewards, d_logits, amp_rewards = self.alg.discriminator.predict_amp_reward(
                         amp_obs, next_amp_obs_with_term, rewards, normalizer=self.alg.amp_normalizer)
                     amp_obs = torch.clone(next_amp_obs)
-                    self.alg.process_env_step(lerp_rewards, dones, infos, next_amp_obs_with_term)
+                    self.alg.process_env_step(lerp_rewards, dones, infos, next_amp_obs_with_term, obs, critic_obs)
                     
                     if self.log_dir is not None:
                         # Book keeping

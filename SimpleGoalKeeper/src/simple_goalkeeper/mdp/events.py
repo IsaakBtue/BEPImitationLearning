@@ -589,8 +589,9 @@ class ball_difficulty_curriculum:
             mean_ep_len = 0.0
         curriculumupdate = int(mean_ep_len / self._ep_len_divisor)
 
-        # Advance difficulty (mirrors G1: range += 0.3 × curriculumupdate, clamped).
-        new_difficulty = min(1.0, env._ball_difficulty + self._step_size * curriculumupdate)
+        # Direct curriculum mapping (matches G1: difficulty = f(cu) only, not accumulated).
+        # At cu=3 (ep_len≈144), difficulty = 1.0. No step accumulation.
+        new_difficulty = min(1.0, curriculumupdate / 3.0)
         env._ball_difficulty = new_difficulty
         return {"ball_difficulty": torch.tensor(new_difficulty)}
 

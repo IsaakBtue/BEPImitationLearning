@@ -504,10 +504,10 @@ def goalkeeper_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
         mode="reset",
         params={
             "ball_name":      BALL_NAME,
-            "dist_range":     (2.0, 2.5),
+            "dist_range":     (2.0, 3.5),
             "y_start_range":  (-0.3, 0.3),
             "y_end_range":    (-0.7, 0.7),
-            "speed_range":    (1.5, 2.5),
+            "speed_range":    (2.0, 4.0),
             "spawn_z":        0.12,
         },
     )

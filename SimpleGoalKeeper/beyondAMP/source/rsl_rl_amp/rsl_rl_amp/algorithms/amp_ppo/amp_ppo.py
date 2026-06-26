@@ -30,6 +30,9 @@ class AMPPPO:
                  device='cpu',
                  amp_replay_buffer_size=100000,
                  min_std=None,
+                 value_smoothness_coef=0.1,
+                 smoothness_upper_bound=1.0,
+                 smoothness_lower_bound=0.1,
                  **kwargs
                  ):
 
@@ -75,6 +78,11 @@ class AMPPPO:
         self.max_grad_norm = max_grad_norm
         self.use_clipped_value_loss = use_clipped_value_loss
 
+        # Policy & Value smoothing parameters (from G1 HIM-PPO)
+        self.value_smoothness_coef = value_smoothness_coef
+        self.smoothness_upper_bound = smoothness_upper_bound
+        self.smoothness_lower_bound = smoothness_lower_bound
+
     def init_storage(self, num_envs, num_transitions_per_env, actor_obs_shape, critic_obs_shape, action_shape):
         self.storage = RolloutStorage(
             num_envs, num_transitions_per_env, actor_obs_shape, critic_obs_shape, action_shape, self.device)
@@ -101,9 +109,11 @@ class AMPPPO:
         self.amp_transition.observations = amp_obs
         return self.transition.actions
     
-    def process_env_step(self, rewards, dones, infos, amp_obs):
+    def process_env_step(self, rewards, dones, infos, amp_obs, next_obs, next_critic_obs):
         self.transition.rewards = rewards.clone()
         self.transition.dones = dones
+        self.transition.next_observations = next_obs
+        self.transition.next_critic_observations = next_critic_obs
         # Bootstrapping on time outs
         if 'time_outs' in infos:
             self.transition.rewards += self.gamma * torch.squeeze(self.transition.values * infos['time_outs'].unsqueeze(1).to(self.device), 1)
@@ -145,8 +155,8 @@ class AMPPPO:
                 self.num_mini_batches)
         for sample, sample_amp_policy, sample_amp_expert in zip(generator, amp_policy_generator, amp_expert_generator):
 
-                obs_batch, critic_obs_batch, actions_batch, target_values_batch, advantages_batch, returns_batch, old_actions_log_prob_batch, \
-                    old_mu_batch, old_sigma_batch, hid_states_batch, masks_batch = sample
+                obs_batch, next_obs_batch, critic_obs_batch, next_critic_obs_batch, actions_batch, target_values_batch, advantages_batch, returns_batch, old_actions_log_prob_batch, \
+                    old_mu_batch, old_sigma_batch, cont_batch, hid_states_batch, masks_batch = sample
                 aug_obs_batch = obs_batch.detach()
                 self.actor_critic.act(aug_obs_batch, masks=masks_batch, hidden_states=hid_states_batch[0])
                 actions_log_prob_batch = self.actor_critic.get_actions_log_prob(actions_batch)
@@ -189,6 +199,18 @@ class AMPPPO:
                 else:
                     value_loss = (returns_batch - value_batch).pow(2).mean()
 
+                # Policy & Value smoothing loss (from G1 HIM-PPO)
+                epsilon = self.smoothness_lower_bound / (self.smoothness_upper_bound - self.smoothness_lower_bound)
+                policy_smooth_coef = self.smoothness_upper_bound * epsilon
+                value_smooth_coef = self.value_smoothness_coef * policy_smooth_coef
+
+                mix_weights = cont_batch * (torch.rand_like(cont_batch) - 0.5) * 2.0
+                mix_obs_batch = obs_batch + mix_weights * (next_obs_batch - obs_batch)
+                mix_critic_obs_batch = critic_obs_batch + mix_weights * (next_critic_obs_batch - critic_obs_batch)
+                policy_smooth_loss = torch.square(torch.norm(self.actor_critic.act(mix_obs_batch, masks=masks_batch, hidden_states=hid_states_batch[0]) - mu_batch, dim=-1)).mean()
+                value_smooth_loss = torch.square(torch.norm(self.actor_critic.evaluate(mix_critic_obs_batch, masks=masks_batch, hidden_states=hid_states_batch[1]) - value_batch, dim=-1)).mean()
+                smooth_loss = policy_smooth_coef * policy_smooth_loss + value_smooth_coef * value_smooth_loss
+
                 # Discriminator loss.
                 policy_state, policy_next_state = sample_amp_policy
                 expert_state, expert_next_state = sample_amp_expert
@@ -213,7 +235,8 @@ class AMPPPO:
                     surrogate_loss +
                     self.value_loss_coef * value_loss -
                     self.entropy_coef * entropy_batch.mean() +
-                    amp_loss + grad_pen_loss)
+                    amp_loss + grad_pen_loss +
+                    smooth_loss)
 
                 # Gradient step
                 self.optimizer.zero_grad()
