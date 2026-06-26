@@ -22,12 +22,12 @@ _DEFAULT_ROBOT_CFG = SceneEntityCfg("robot")
 
 # Easy (difficulty=0.0) spawn ranges: short distance, centred, slow, low.
 # Hard (difficulty=1.0) ranges are passed as params to reset_ball_local_frame.
-_EASY_DIST    = (2.0, 3.0)
+_EASY_DIST    = (2.5, 3.5)
 _EASY_Y_START = (-0.05, 0.05)  # lateral spawn: very centred on easy (hard = ±1.0 m via params)
 _EASY_Y_END   = (-0.05, 0.05)  # goal target Y: dead centre on easy
 _EASY_Z_START = (0.1, 0.25)
 _EASY_Z_END   = (0.05, 0.15)
-_EASY_SPEED   = (0.5, 1.0)     # slow on easy → longer t_flight, more reaction time
+_EASY_SPEED   = (1.0, 1.5)     # slow on easy → longer t_flight, more reaction time
 
 
 def _lerp_range(
@@ -642,9 +642,9 @@ def reset_ball_rolling(
     d = float(getattr(env, "_ball_difficulty", 1.0))
     d = max(0.0, min(1.0, d))
 
-    _EASY_DIST_R   = (1.5, 2.0)
+    _EASY_DIST_R   = (2.0, 2.5)
     _EASY_Y_ROLL   = (-0.05, 0.05)
-    _EASY_SPEED_R  = (0.8, 1.5)
+    _EASY_SPEED_R  = (1.3, 2.0)
 
     dist_r    = _lerp_range(_EASY_DIST_R,  dist_range,   d)
     y_start_r = _lerp_range(_EASY_Y_ROLL,  y_start_range, d)
@@ -715,12 +715,18 @@ def reset_ball_rolling(
     )
 
     # Store predicted goal-line crossing Y (relative to env origin) for RSI pool selection.
-    # cross_y = y_start + (y_end - y_start) * x_start / (x_start + 0.3)
+    # Computes where ball crosses goal line, accounting for diagonal trajectory.
+    # Ball travels from (x_start, y_start) to (-0.3, y_end) along a straight line.
+    # At x = -0.3 (goal line), Y = y_start + (y_end - y_start) * (distance along X) / (total distance).
+    # Total horizontal distance = sqrt((x_start + 0.3)^2 + (y_end - y_start)^2)
+    # Distance along X at goal line = x_start + 0.3
+    # So cross_y = y_start + (y_end - y_start) * (x_start + 0.3) / horiz_dist
     # Computed here while x_start/y_start/y_end are in scope — avoids the entity data
     # buffer lag that would corrupt a post-write read of ball.data.root_link_lin_vel_w.
     if not hasattr(env, "_rsi_cross_y"):
         env._rsi_cross_y = torch.zeros(env.num_envs, device=env.device)
-    env._rsi_cross_y[env_ids] = y_start + (y_end - y_start) * x_start / (x_start + 0.3)
+    horiz_dist = torch.sqrt((x_start + 0.3) ** 2 + (y_end - y_start) ** 2)
+    env._rsi_cross_y[env_ids] = y_start + (y_end - y_start) * (x_start + 0.3) / horiz_dist
 
     _init_visibility_state(env, env_ids)
 

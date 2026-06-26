@@ -28,6 +28,17 @@ Standalone, simplified goalkeeper training environment for the Booster T1 humano
 
 This rule exists because G1 is the only proven working reference. Every undocumented divergence is a potential source of a local optimum or training failure. "It seems reasonable" is not a justification — G1 must be the baseline.
 
+## Change Approval Workflow
+
+**Before making ANY code changes**, you MUST:
+
+1. **List all changes** you plan to make in a clear, bullet-point format
+2. **Show this list to the user** and wait for explicit approval
+3. **DO NOT apply changes until approved**
+4. **Only after approval**: apply changes and document them
+
+This prevents accidental modifications, keeps the user informed of scope, and ensures changes match the actual request.
+
 ## Divergences from G1 Upstream
 
 | Parameter | G1 value | SimpleGoalKeeper value | Justification |

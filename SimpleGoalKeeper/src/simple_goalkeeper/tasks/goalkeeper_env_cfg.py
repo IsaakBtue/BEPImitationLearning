@@ -209,7 +209,7 @@ def goalkeeper_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
         # XY only — matches BoosterT1mjlab kick task for deployment compatibility.
         "ball_pos_b": ObservationTermCfg(
             func=gk_mdp.ball_pos_xy_b,
-            params={"ball_name": BALL_NAME, "always_visible": not play},
+            params={"ball_name": BALL_NAME, "always_visible": True},
             noise=Unoise(n_min=-0.05, n_max=0.05),
         ),
     }
@@ -223,13 +223,13 @@ def goalkeeper_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
     }
     critic_terms["ball_pos_b"] = ObservationTermCfg(
         func=gk_mdp.ball_pos_b,
-        params={"ball_name": BALL_NAME, "always_visible": not play},
+        params={"ball_name": BALL_NAME, "always_visible": True},
     )
     critic_terms.update({
         "base_lin_vel": ObservationTermCfg(func=gk_mdp.base_lin_vel),
         "ball_vel_b": ObservationTermCfg(
             func=gk_mdp.ball_vel_b,
-            params={"ball_name": BALL_NAME, "always_visible": not play},
+            params={"ball_name": BALL_NAME, "always_visible": True},
         ),
         "left_foot_pos_b": ObservationTermCfg(
             func=gk_mdp.left_foot_pos_b,
@@ -504,10 +504,10 @@ def goalkeeper_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
         mode="reset",
         params={
             "ball_name":      BALL_NAME,
-            "dist_range":     (1.5, 2.0),
+            "dist_range":     (2.0, 2.5),
             "y_start_range":  (-0.3, 0.3),
             "y_end_range":    (-0.7, 0.7),
-            "speed_range":    (1.0, 2.0),
+            "speed_range":    (1.5, 2.5),
             "spawn_z":        0.12,
         },
     )
@@ -578,10 +578,10 @@ def goalkeeper_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
             mode="reset",
             params={
                 "ball_name":     BALL_NAME,
-                "dist_range":    (1.5, 2.0),
+                "dist_range":    (2.0, 2.5),
                 "y_start_range": (-0.3, 0.3),
                 "y_end_range":   (-0.7, 0.7),
-                "speed_range":   (1.0, 2.0),
+                "speed_range":   (1.5, 2.5),
                 "spawn_z":       0.12,
             },
         )
