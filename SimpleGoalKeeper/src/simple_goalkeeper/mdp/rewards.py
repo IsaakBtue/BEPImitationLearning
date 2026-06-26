@@ -59,6 +59,22 @@ _T1_EFFORT_MAP: dict[str, float] = {
 }
 
 
+def _get_correct_foot_idx(env: "ManagerBasedRlEnv", ball_name: str) -> torch.Tensor:
+    """Determine which foot (left=0, right=1) should contact the ball.
+
+    Ball crossing Y > env origin Y → left foot (0) should reach.
+    Ball crossing Y <= env origin Y → right foot (1) should reach.
+
+    Returns: (N,) tensor of dtype int64, values 0 or 1.
+    """
+    crossing_y = _get_ball_crossing_y(env, ball_name)
+    is_left_ball = crossing_y > env.scene.env_origins[:, 1]
+    foot_idx = torch.where(is_left_ball,
+                           torch.zeros(env.num_envs, dtype=torch.long, device=env.device),
+                           torch.ones(env.num_envs, dtype=torch.long, device=env.device))
+    return foot_idx
+
+
 def _ball_is_behind(env: "ManagerBasedRlEnv", ball_name: str) -> torch.Tensor:
     """Bool mask (N,): ball has been deflected OR has crossed the goal line.
 
@@ -295,7 +311,8 @@ def softstop(
     This is a genuine save: foot contact deflected the ball away from the goal.
     Uses its own _softstop_flag, independent of stopball.
 
-    Also gates _ball_is_behind.
+    Also gates _ball_is_behind and tracks which foot was in contact when softstop fires
+    (used by single_foot_save, inner_face_orientation_save, cleanstop, airborne_at_save).
     """
     ball: Entity = env.scene[ball_name]
     ball_x_vel = ball.data.root_link_lin_vel_w[:, 0]
@@ -303,12 +320,27 @@ def softstop(
 
     if not hasattr(env, "_softstop_flag"):
         env._softstop_flag = torch.zeros(env.num_envs, dtype=torch.bool, device=env.device)
+        env._softstop_correct_foot = torch.zeros(env.num_envs, dtype=torch.bool, device=env.device)
 
     just_reset = env.episode_length_buf <= 1
     env._softstop_flag[just_reset] = False
+    env._softstop_correct_foot[just_reset] = False
 
     in_front = ball_x_local > -0.3
     fired = (ball_x_vel > velocity_threshold) & in_front & ~env._softstop_flag
+
+    # Track correct foot contact at softstop moment.
+    if fired.any():
+        foot_idx = _get_correct_foot_idx(env, ball_name)
+        sensor: ContactSensor = env.scene["feet_contact"]
+        found = sensor.data.found  # [B, 8]: 0-3=left, 4-7=right
+        left_in_contact = (found[:, :4] > 0).any(dim=-1)   # (B,)
+        right_in_contact = (found[:, 4:] > 0).any(dim=-1)  # (B,)
+        foot_in_contact = torch.stack([left_in_contact, right_in_contact], dim=-1)  # (B, 2)
+
+        correct_foot_contact = foot_in_contact[torch.arange(env.num_envs, device=env.device), foot_idx]
+        env._softstop_correct_foot[fired] = correct_foot_contact[fired]
+
     env._softstop_flag |= fired
     return fired.float()
 
@@ -318,15 +350,16 @@ def single_foot_save(
     ball_name: str,
     window: int = 3,
 ) -> torch.Tensor:
-    """One-time bonus when stopball and softstop both fire within `window` steps.
+    """One-time bonus when stopball and softstop both fire within `window` steps AND correct foot made contact.
 
     Same-step coincidence was too strict: MuJoCo soft contacts accumulate over
-    several steps, so stopball (delta_vx > 1.0) and softstop (ball_x_vel > threshold)
+    several steps, so stopball (delta_vx > threshold) and softstop (ball_x_vel > threshold)
     can fire 1-3 steps apart on a clean single-foot save. A two-touch exploit still
     fires them many steps apart (first foot slows, second foot taps back).
 
-    Tracks the episode step when each flag first rose, fires when both are set
-    and |sb_step - ss_step| <= window. Two int32 tensors, negligible GPU cost.
+    Tracks the episode step when each flag first rose, fires when both are set,
+    within window, and the correct foot was in contact at softstop moment.
+    Two int32 tensors, negligible GPU cost.
     """
     sb_flag = getattr(env, "_sb_flag", None)
     ss_flag = getattr(env, "_softstop_flag", None)
@@ -360,7 +393,8 @@ def single_foot_save(
 
     both_recorded = (env._sfs_sb_step >= 0) & (env._sfs_ss_step >= 0)
     within_window = (env._sfs_sb_step - env._sfs_ss_step).abs() <= window
-    fired = both_recorded & within_window & ~env._sfs_flag
+    correct_foot = getattr(env, "_softstop_correct_foot", torch.zeros(env.num_envs, dtype=torch.bool, device=env.device))
+    fired = both_recorded & within_window & correct_foot & ~env._sfs_flag
     env._sfs_flag |= fired
     return fired.float()
 
@@ -710,10 +744,10 @@ def airborne_at_save(
     env: "ManagerBasedRlEnv",
     ball_name: str,
 ) -> torch.Tensor:
-    """One-time bonus when softstop fires with either foot airborne.
+    """One-time bonus when softstop fires with correct foot airborne.
 
     softstop fires unconditionally on ball velocity; this fires on top of it
-    as a quality bonus when the robot had a foot in the air at the save moment,
+    as a quality bonus when the robot had the correct foot in the air at the save moment,
     rewarding the committed step/dive motion over a flat-footed shuffle.
     Weight: +15.0.
     """
@@ -730,15 +764,19 @@ def airborne_at_save(
         return torch.zeros(env.num_envs, device=env.device)
 
     fc = env.scene["feet_contact"].data.found                      # (B, 8)
-    any_airborne = (
-        ~(fc[:, :4] > 0).any(dim=-1) |                            # left foot up
-        ~(fc[:, 4:] > 0).any(dim=-1)                              # right foot up
-    )
+    left_in_contact = (fc[:, :4] > 0).any(dim=-1)
+    right_in_contact = (fc[:, 4:] > 0).any(dim=-1)
+    foot_in_contact = torch.stack([left_in_contact, right_in_contact], dim=-1)  # (B, 2)
+
+    foot_idx = _get_correct_foot_idx(env, ball_name)
+    correct_foot_in_contact = foot_in_contact[torch.arange(env.num_envs, device=env.device), foot_idx]
+    correct_foot_airborne = ~correct_foot_in_contact
 
     just_fired = softstop_fired & ~env._aas_ss_prev
     env._aas_ss_prev[:] = softstop_fired
 
-    fired = just_fired & any_airborne & ~env._aas_flag
+    correct_foot_contact = getattr(env, "_softstop_correct_foot", torch.zeros(env.num_envs, dtype=torch.bool, device=env.device))
+    fired = just_fired & correct_foot_airborne & correct_foot_contact & ~env._aas_flag
     env._aas_flag |= fired
     return fired.float()
 
@@ -805,7 +843,8 @@ def inner_face_orientation_save(
     y_alignment = (foot_long_w * world_y).sum(dim=-1).abs()                # (N,)
     oriented_correctly = y_alignment > alignment_threshold
 
-    fired = just_fired & oriented_correctly & ~env._ifos_flag
+    correct_foot = getattr(env, "_softstop_correct_foot", torch.zeros(env.num_envs, dtype=torch.bool, device=env.device))
+    fired = just_fired & oriented_correctly & correct_foot & ~env._ifos_flag
     env._ifos_flag |= fired
     return fired.float()
 
@@ -815,11 +854,11 @@ def cleanstop(
     ball_name: str,
     speed_threshold: float = 0.25,
 ) -> torch.Tensor:
-    """One-time reward when ball nearly stops after deflection.
+    """One-time reward when ball nearly stops after deflection AND correct foot made contact.
 
     Fires once per episode when softstop has already triggered AND the ball's total
-    speed drops below speed_threshold (0.25 m/s). Rewards a clean foot-trap style
-    save over a hard uncontrolled deflection.
+    speed drops below speed_threshold (0.25 m/s) AND the correct foot was in contact
+    at softstop moment. Rewards a clean foot-trap style save over a hard uncontrolled deflection.
     Weight: +25.0.
     """
     ball: Entity = env.scene[ball_name]
@@ -835,7 +874,8 @@ def cleanstop(
     if softstop_fired is None:
         return torch.zeros(env.num_envs, device=env.device)
 
-    fired = softstop_fired & (ball_speed < speed_threshold) & ~env._cleanstop_flag
+    correct_foot = getattr(env, "_softstop_correct_foot", torch.zeros(env.num_envs, dtype=torch.bool, device=env.device))
+    fired = softstop_fired & (ball_speed < speed_threshold) & correct_foot & ~env._cleanstop_flag
     env._cleanstop_flag |= fired
     return fired.float()
 
