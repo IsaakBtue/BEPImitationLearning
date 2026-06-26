@@ -747,3 +747,19 @@ def ball_exit_termination(
     ball: Entity = env.scene[ball_name]
     ball_x_local = ball.data.root_link_pos_w[:, 0] - env.scene.env_origins[:, 0]
     return ball_x_local < behind_threshold
+
+
+def correct_foot_save_curriculum(env: "ManagerBasedRlEnv", cfg) -> torch.Tensor:
+    """Weight multiplier for correct-foot-save bonuses (single_foot_save, etc.).
+
+    Activates at curriculum update >= 3 (cu >= 3).
+    Returns: (N,) tensor of weight multipliers, 1.0 before cu=3, 2.0 at cu>=3.
+
+    Mirrors G1 footreach/stopball curriculum pattern but with different activation.
+    """
+    if not hasattr(env, "_curriculumupdate"):
+        env._curriculumupdate = torch.zeros(1, dtype=torch.int32, device=env.device)
+
+    cu = env._curriculumupdate[0].item()
+    multiplier = 2.0 if cu >= 3 else 1.0
+    return torch.full((env.num_envs,), multiplier, device=env.device)
