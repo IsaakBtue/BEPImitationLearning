@@ -178,6 +178,12 @@ def goalkeeper_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
                 "ep_len_divisor":  47,
             },
         )
+        # Correct-foot-save curriculum: multiplier for single_foot_save, inner_face_orientation_save,
+        # cleanstop, airborne_at_save. Activates at cu >= 3, doubling weights from 1x to 2x.
+        cfg.curriculum["correct_foot_save_curriculum"] = CurriculumTermCfg(
+            func=gk_mdp.correct_foot_save_curriculum,
+            params={},
+        )
 
     # ------------------------------------------------------------------
     # Observations
