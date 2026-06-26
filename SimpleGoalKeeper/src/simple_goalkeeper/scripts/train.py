@@ -19,9 +19,15 @@ from __future__ import annotations
 
 import os
 import sys
+from pathlib import Path
+
+# Load W&B API key from config file if it exists
+_wandb_key_file = Path.home() / ".wandb_api_key"
+if _wandb_key_file.exists():
+    os.environ["WANDB_API_KEY"] = _wandb_key_file.read_text().strip()
+
 from dataclasses import asdict, dataclass, field
 from datetime import datetime
-from pathlib import Path
 from typing import Literal
 
 import tyro

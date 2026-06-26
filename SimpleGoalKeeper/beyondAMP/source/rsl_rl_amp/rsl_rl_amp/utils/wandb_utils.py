@@ -34,7 +34,10 @@ class WandbSummaryWriter(SummaryWriter):
 
     def add_scalar(self, tag, scalar_value, global_step=None, walltime=None, new_style=False):
         super().add_scalar(tag, scalar_value, global_step=global_step, walltime=walltime, new_style=new_style)
-        wandb.log({tag: scalar_value}, step=global_step)
+        try:
+            wandb.log({tag: scalar_value}, step=global_step)
+        except Exception as e:
+            print(f"[WARN] W&B logging failed for {tag}: {e}")
 
     def stop(self):
         wandb.finish()
