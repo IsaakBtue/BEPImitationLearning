@@ -110,9 +110,11 @@ class PPO:
         self.transition.critic_observations = critic_obs
         return self.transition.actions
     
-    def process_env_step(self, rewards, dones, infos):
+    def process_env_step(self, rewards, dones, infos, next_obs, next_critic_obs):
         self.transition.rewards = rewards.clone()
         self.transition.dones = dones
+        self.transition.next_observations = next_obs
+        self.transition.next_critic_observations = next_critic_obs
         # Bootstrapping on time outs
         if 'time_outs' in infos:
             self.transition.rewards += self.gamma * torch.squeeze(self.transition.values * infos['time_outs'].unsqueeze(1).to(self.device), 1)
@@ -187,7 +189,7 @@ class PPO:
                 mix_weights = cont_batch * (torch.rand_like(cont_batch) - 0.5) * 2.0
                 mix_obs_batch = obs_batch + mix_weights * (next_obs_batch - obs_batch)
                 mix_critic_obs_batch = critic_obs_batch + mix_weights * (next_critic_obs_batch - critic_obs_batch)
-                policy_smooth_loss = torch.square(torch.norm(mu_batch - self.actor_critic.act(mix_obs_batch), dim=-1)).mean()
+                policy_smooth_loss = torch.square(torch.norm(mu_batch - self.actor_critic.act_inference(mix_obs_batch), dim=-1)).mean()
                 value_smooth_loss = torch.square(torch.norm(value_batch - self.actor_critic.evaluate(mix_critic_obs_batch), dim=-1)).mean()
                 smooth_loss = policy_smooth_coef * policy_smooth_loss + value_smooth_coef * value_smooth_loss
 

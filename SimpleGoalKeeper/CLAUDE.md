@@ -28,6 +28,10 @@ Standalone, simplified goalkeeper training environment for the Booster T1 humano
 
 This rule exists because G1 is the only proven working reference. Every undocumented divergence is a potential source of a local optimum or training failure. "It seems reasonable" is not a justification — G1 must be the baseline.
 
+## Training / Play Parity Rule
+
+**Training and play ball spawn parameters must always match.** Whenever `dist_range`, `speed_range`, `y_start_range`, `y_end_range`, or `spawn_z` are changed in the training `reset_ball` block (`goalkeeper_env_cfg.py` around line 515), the play block (around line 589) must be updated to the same values in the same commit. A policy evaluated on a different distribution than it was trained on gives misleading results.
+
 ## Change Approval Workflow
 
 **Before making ANY code changes**, you MUST:

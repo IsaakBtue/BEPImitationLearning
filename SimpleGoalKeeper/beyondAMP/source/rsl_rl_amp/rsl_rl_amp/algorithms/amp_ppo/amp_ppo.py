@@ -207,7 +207,7 @@ class AMPPPO:
                 mix_weights = cont_batch * (torch.rand_like(cont_batch) - 0.5) * 2.0
                 mix_obs_batch = obs_batch + mix_weights * (next_obs_batch - obs_batch)
                 mix_critic_obs_batch = critic_obs_batch + mix_weights * (next_critic_obs_batch - critic_obs_batch)
-                policy_smooth_loss = torch.square(torch.norm(self.actor_critic.act(mix_obs_batch, masks=masks_batch, hidden_states=hid_states_batch[0]) - mu_batch, dim=-1)).mean()
+                policy_smooth_loss = torch.square(torch.norm(self.actor_critic.act_inference(mix_obs_batch) - mu_batch, dim=-1)).mean()
                 value_smooth_loss = torch.square(torch.norm(self.actor_critic.evaluate(mix_critic_obs_batch, masks=masks_batch, hidden_states=hid_states_batch[1]) - value_batch, dim=-1)).mean()
                 smooth_loss = policy_smooth_coef * policy_smooth_loss + value_smooth_coef * value_smooth_loss
 

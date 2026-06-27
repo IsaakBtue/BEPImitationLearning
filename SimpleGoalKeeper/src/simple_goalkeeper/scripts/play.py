@@ -310,12 +310,11 @@ def run_play(task_id: str, cfg: PlayConfig) -> None:
         env._ball_difficulty = float(cfg.difficulty)
         print(f"[INFO]: Ball difficulty overridden to {cfg.difficulty} (0=easy, 1=hard)")
 
-    # Print expected ball spawn ranges at the current difficulty (matches training).
+    import math as _math
     d = float(getattr(env, "_ball_difficulty", 1.0))
     _EASY_DIST = (2.0, 2.0); _HARD_DIST = (2.0, 3.5)
     _EASY_T    = (0.9, 1.3); _HARD_T    = (0.7, 1.1)
     _Y_INNER = 0.15; _Y_OUTER = 0.35; _Y_MAX = 1.0
-    import math as _math
     dist_lo = _EASY_DIST[0] + d * (_HARD_DIST[0] - _EASY_DIST[0])
     dist_hi = _EASY_DIST[1] + d * (_HARD_DIST[1] - _EASY_DIST[1])
     t_lo    = _EASY_T[0]    + d * (_HARD_T[0]    - _EASY_T[0])
