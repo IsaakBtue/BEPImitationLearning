@@ -309,6 +309,29 @@ def run_play(task_id: str, cfg: PlayConfig) -> None:
     if cfg.difficulty is not None:
         env._ball_difficulty = float(cfg.difficulty)
         print(f"[INFO]: Ball difficulty overridden to {cfg.difficulty} (0=easy, 1=hard)")
+
+    # Print expected ball spawn ranges at the current difficulty (matches training).
+    d = float(getattr(env, "_ball_difficulty", 1.0))
+    _EASY_DIST = (2.0, 2.0); _HARD_DIST = (2.0, 3.5)
+    _EASY_T    = (0.9, 1.3); _HARD_T    = (0.7, 1.1)
+    _Y_INNER = 0.15; _Y_OUTER = 0.35; _Y_MAX = 1.0
+    import math as _math
+    dist_lo = _EASY_DIST[0] + d * (_HARD_DIST[0] - _EASY_DIST[0])
+    dist_hi = _EASY_DIST[1] + d * (_HARD_DIST[1] - _EASY_DIST[1])
+    t_lo    = _EASY_T[0]    + d * (_HARD_T[0]    - _EASY_T[0])
+    t_hi    = _EASY_T[1]    + d * (_HARD_T[1]    - _EASY_T[1])
+    y_inner = max(_Y_INNER * (1.0 - d), 0.1)
+    y_outer = _Y_OUTER + (_Y_MAX - _Y_OUTER) * d
+    spd_min = (dist_lo + 0.3) / t_hi
+    spd_max = _math.sqrt((dist_hi + 0.3)**2 + (y_outer + 0.3)**2) / t_lo
+    print(
+        f"[INFO]: Ball spawn at d={d:.2f} — "
+        f"dist {dist_lo:.1f}–{dist_hi:.1f} m | "
+        f"t_flight {t_lo:.2f}–{t_hi:.2f} s | "
+        f"y_end ±{y_inner:.2f}–{y_outer:.2f} m | "
+        f"speed ~{spd_min:.1f}–{spd_max:.1f} m/s"
+    )
+
     env = AMPEnvWrapper(env, clip_actions=agent_cfg.clip_actions, motion_dataset=agent_cfg.amp_data)
 
     DUMMY_MODE = cfg.agent in {"zero", "random"}

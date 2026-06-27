@@ -619,10 +619,10 @@ def reset_ball_rolling(
     env: "ManagerBasedRlEnv",
     env_ids: torch.Tensor | None,
     ball_name: str,
-    dist_range: tuple[float, float] = (1.5, 2.5),
-    y_start_range: tuple[float, float] = (-0.5, 0.5),
-    y_end_range: tuple[float, float] = (-0.5, 0.5),
-    speed_range: tuple[float, float] = (2.0, 3.5),
+    dist_range: tuple[float, float] = (2.0, 3.5),
+    y_start_range: tuple[float, float] = (-0.3, 0.3),
+    y_end_range: tuple[float, float] = (-1.0, 1.0),
+    t_flight_range: tuple[float, float] = (0.7, 1.1),
     spawn_z: float = 0.10,
 ) -> None:
     """Spawn ball at ground level in world (global) frame — rolling ground pass.
@@ -633,6 +633,8 @@ def reset_ball_rolling(
     world-X position, ball_exit_termination uses world-X) perfectly aligned with
     the ball trajectory.
 
+    Uses t_flight directly (like G1) so reaction time is guaranteed regardless of
+    distance. Speed = horiz_dist / t_flight — longer diagonal shots are faster.
     vz=0: ball drops to ground in <0.05 s then rolls at foot/ankle height.
     Curriculum lerps from easy to hard via env._ball_difficulty.
     """
@@ -643,21 +645,21 @@ def reset_ball_rolling(
     d = float(getattr(env, "_ball_difficulty", 1.0))
     d = max(0.0, min(1.0, d))
 
-    _EASY_DIST_R   = (2.0, 2.5)
-    _EASY_Y_ROLL   = (-0.05, 0.05)
-    _EASY_SPEED_R  = (1.3, 2.0)
+    _EASY_DIST_R = (2.0, 2.0)   # narrow at easy — always close
+    _EASY_Y_ROLL = (-0.05, 0.05)
+    _EASY_T      = (0.9, 1.3)   # slow at easy — lots of reaction time
 
-    dist_r    = _lerp_range(_EASY_DIST_R,  dist_range,   d)
-    y_start_r = _lerp_range(_EASY_Y_ROLL,  y_start_range, d)
-    speed_r   = _lerp_range(_EASY_SPEED_R, speed_range,   d)
+    dist_r    = _lerp_range(_EASY_DIST_R, dist_range,    d)
+    y_start_r = _lerp_range(_EASY_Y_ROLL, y_start_range, d)
+    t_r       = _lerp_range(_EASY_T,      t_flight_range, d)
 
     ball: Entity = env.scene[ball_name]
     origins = env.scene.env_origins[env_ids]   # world goal-line origin per env
     floor_z = origins[:, 2]
 
-    x_start = sample_uniform(*dist_r,    (n,), env.device)
-    y_start = sample_uniform(*y_start_r, (n,), env.device)
-    speed_h = sample_uniform(*speed_r,   (n,), env.device)
+    x_start  = sample_uniform(*dist_r,    (n,), env.device)
+    y_start  = sample_uniform(*y_start_r, (n,), env.device)
+    t_flight = sample_uniform(*t_r,       (n,), env.device)
 
     # Two-sided dead zone for y_end (mirrors G1's ±0.2 m minimum offset).
     # At d=0: ball always arrives 0.15–0.35 m left or right of center — never
@@ -683,10 +685,9 @@ def reset_ball_rolling(
     ], dim=-1)
 
     # World-frame velocity: aimed from (x_start, y_start) → goal-line target (-0.3, y_end).
+    # Speed = horiz_dist / t_flight — t_flight is sampled directly (G1 approach).
     dx = -(x_start + 0.3)          # world -X: from spawn toward 0.3 m behind goal line
     dy = y_end - y_start            # world Y: lateral sweep to target
-    horiz_dist = torch.sqrt(dx ** 2 + dy ** 2)
-    t_flight = horiz_dist / speed_h
 
     ball_vel = torch.stack([
         dx / t_flight,              # world vx (negative = approaching)
