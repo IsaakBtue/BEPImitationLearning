@@ -849,6 +849,43 @@ def inner_face_orientation_save(
     return fired.float()
 
 
+def foot_inner_face_continuous(
+    env: "ManagerBasedRlEnv",
+    ball_name: str,
+    asset_cfg: SceneEntityCfg = _DEFAULT_FEET_CFG,
+) -> torch.Tensor:
+    """Continuous reward for rotating the assigned foot's inner face toward the ball.
+
+    Active every step while the ball is live (same ~behind gate as footreach).
+    Uses the same assigned foot as footreach (_get_correct_foot_idx: left=0 for +Y
+    balls, right=1 for -Y balls).
+
+    Metric: |foot_long_axis_w · robot_y_w| — 0 when foot points forward, 1 when
+    foot is fully turned sideways (inner face presented in the robot's lateral direction).
+    Uses robot local Y (not world Y) so a dive yaw doesn't degrade the signal.
+    """
+    robot: Entity = env.scene[asset_cfg.name]
+
+    foot_quat_w = robot.data.body_link_quat_w[:, asset_cfg.body_ids, :]  # (N, 2, 4)
+
+    foot_idx = _get_correct_foot_idx(env, ball_name)  # (N,) — 0=left, 1=right
+
+    foot_long_local = torch.zeros(env.num_envs, 3, device=env.device)
+    foot_long_local[:, 0] = 1.0                                              # local X = toe dir
+    left_long_w  = quat_apply(foot_quat_w[:, 0, :], foot_long_local)        # (N, 3)
+    right_long_w = quat_apply(foot_quat_w[:, 1, :], foot_long_local)        # (N, 3)
+    foot_long_w  = torch.where((foot_idx == 0)[:, None], left_long_w, right_long_w)  # (N, 3)
+
+    robot_y_local = torch.zeros(env.num_envs, 3, device=env.device)
+    robot_y_local[:, 1] = 1.0
+    robot_y_w = quat_apply(robot.data.root_link_quat_w, robot_y_local)      # (N, 3)
+
+    alignment = (foot_long_w * robot_y_w).sum(dim=-1).abs()                 # (N,) in [0, 1]
+
+    behind = _ball_is_behind(env, ball_name)
+    return alignment * (~behind).float()
+
+
 def cleanstop(
     env: "ManagerBasedRlEnv",
     ball_name: str,

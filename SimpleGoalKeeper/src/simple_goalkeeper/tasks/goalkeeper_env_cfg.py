@@ -182,10 +182,11 @@ def goalkeeper_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
         # Only makes sense once the robot already saves reliably (cu=3 = footreach fully ramped).
         # One entry per reward, same pattern as reward_curriculum_ep_len.
         for _name, _base in (
-            ("single_foot_save",            50.0),
-            ("cleanstop",                   25.0),
-            ("airborne_at_save",            15.0),
-            ("inner_face_orientation_save", 25.0),
+            ("single_foot_save",             50.0),
+            ("cleanstop",                    25.0),
+            ("airborne_at_save",             15.0),
+            ("inner_face_orientation_save",  25.0),
+            ("foot_inner_face_continuous",    5.0),
         ):
             cfg.curriculum[f"{_name}_curriculum"] = CurriculumTermCfg(
                 func=gk_mdp.correct_foot_save_curriculum,
@@ -318,6 +319,11 @@ def goalkeeper_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
             func=gk_mdp.inner_face_orientation_save,
             weight=25.0,
             params={"ball_name": BALL_NAME, "alignment_threshold": 0.7, "asset_cfg": _FEET_CFG},
+        ),
+        "foot_inner_face_continuous": RewardTermCfg(
+            func=gk_mdp.foot_inner_face_continuous,
+            weight=5.0,
+            params={"ball_name": BALL_NAME, "asset_cfg": _FEET_CFG},
         ),
         # --- ball interception (feet-only) ---
         "footreach": RewardTermCfg(
