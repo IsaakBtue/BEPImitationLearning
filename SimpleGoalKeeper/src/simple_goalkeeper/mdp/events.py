@@ -749,7 +749,7 @@ def ball_exit_termination(
     return ball_x_local < behind_threshold
 
 
-def reward_curriculum_ep_len(env: "ManagerBasedRlEnv", cfg) -> torch.Tensor:
+def reward_curriculum_ep_len(env: "ManagerBasedRlEnv", env_ids: torch.Tensor, **kwargs) -> torch.Tensor:
     """Episode-length-driven weight curriculum for rewards.
 
     Mirrors G1 compute_reward() lines 359-364:
@@ -767,7 +767,7 @@ def reward_curriculum_ep_len(env: "ManagerBasedRlEnv", cfg) -> torch.Tensor:
     return torch.full((env.num_envs,), multiplier, device=env.device)
 
 
-def ball_difficulty_curriculum(env: "ManagerBasedRlEnv", cfg) -> torch.Tensor:
+def ball_difficulty_curriculum(env: "ManagerBasedRlEnv", env_ids: torch.Tensor, **kwargs) -> torch.Tensor:
     """Ball difficulty curriculum: monotonically increases, never goes backward.
 
     Mirrors softstop/stopball curriculum pattern — increases with curriculum update.
@@ -790,7 +790,7 @@ def ball_difficulty_curriculum(env: "ManagerBasedRlEnv", cfg) -> torch.Tensor:
     return env._max_difficulty_reached.clone()
 
 
-def correct_foot_save_curriculum(env: "ManagerBasedRlEnv", cfg) -> torch.Tensor:
+def correct_foot_save_curriculum(env: "ManagerBasedRlEnv", env_ids: torch.Tensor, **kwargs) -> torch.Tensor:
     """Weight multiplier for correct-foot-save bonuses (single_foot_save, etc.).
 
     Activates at curriculum update >= 3 (cu >= 3).
