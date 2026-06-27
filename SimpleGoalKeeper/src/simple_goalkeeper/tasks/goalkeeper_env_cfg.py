@@ -178,6 +178,19 @@ def goalkeeper_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
                 "ep_len_divisor":  47,
             },
         )
+        # Correct-foot-save quality bonuses: weights double at cu >= 3 (ep_len ≈ 144 steps).
+        # Only makes sense once the robot already saves reliably (cu=3 = footreach fully ramped).
+        # One entry per reward, same pattern as reward_curriculum_ep_len.
+        for _name, _base in (
+            ("single_foot_save",            50.0),
+            ("cleanstop",                   25.0),
+            ("airborne_at_save",            15.0),
+            ("inner_face_orientation_save", 25.0),
+        ):
+            cfg.curriculum[f"{_name}_curriculum"] = CurriculumTermCfg(
+                func=gk_mdp.correct_foot_save_curriculum,
+                params={"reward_name": _name, "base_weight": _base, "activate_at_cu": 3},
+            )
 
     # ------------------------------------------------------------------
     # Observations

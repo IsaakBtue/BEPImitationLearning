@@ -540,6 +540,47 @@ class reward_curriculum_ep_len:
         return {"weight": torch.tensor(float(new_weight))}
 
 
+class correct_foot_save_curriculum:
+    """Step-up curriculum for correct-foot-save quality bonuses.
+
+    Reads the shared env._curriculumupdate (written by reward_curriculum_ep_len
+    instances) and doubles the reward weight the moment cu reaches a threshold.
+
+    Formula: weight = base_weight * multiplier
+        where multiplier = 1.0 when cu < activate_at_cu
+                         = 2.0 when cu >= activate_at_cu
+
+    Intended for one-time quality bonuses that only make sense once the policy
+    has already learned to save reliably (cu >= 3 = ep_len ≈ 144 steps):
+        single_foot_save, inner_face_orientation_save, cleanstop, airborne_at_save.
+
+    One curriculum entry per reward (same pattern as reward_curriculum_ep_len).
+    Shares env._curriculumupdate — no extra episode-length sampling.
+    """
+
+    def __init__(self, cfg: "CurriculumTermCfg", env: "ManagerBasedRlEnv") -> None:
+        p = cfg.params
+        self._reward_name    = p["reward_name"]
+        self._base_weight    = p["base_weight"]
+        self._activate_at_cu = p.get("activate_at_cu", 3)
+        self._term_cfg       = env.reward_manager.get_term_cfg(self._reward_name)
+        if not hasattr(env, "_curriculumupdate"):
+            env._curriculumupdate = 0
+
+    def __call__(
+        self,
+        env: "ManagerBasedRlEnv",
+        env_ids: torch.Tensor,
+        reward_name: str,
+        base_weight: float,
+        **kwargs,
+    ) -> dict:
+        multiplier = 2.0 if env._curriculumupdate >= self._activate_at_cu else 1.0
+        new_weight = self._base_weight * multiplier
+        self._term_cfg.weight = new_weight
+        return {"weight": torch.tensor(float(new_weight))}
+
+
 class ball_difficulty_curriculum:
     """Adaptive difficulty curriculum — direct port of Humanoid-Goalkeeper (G1) approach.
 
