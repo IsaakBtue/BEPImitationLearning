@@ -52,9 +52,6 @@ class PPO:
                  schedule="fixed",
                  desired_kl=0.01,
                  device='cpu',
-                 value_smoothness_coef=0.1,
-                 smoothness_upper_bound=1.0,
-                 smoothness_lower_bound=0.1,
                  **kwargs
                  ):
 
@@ -82,11 +79,6 @@ class PPO:
         self.max_grad_norm = max_grad_norm
         self.use_clipped_value_loss = use_clipped_value_loss
 
-        # Policy & Value smoothing parameters (from G1 HIM-PPO)
-        self.value_smoothness_coef = value_smoothness_coef
-        self.smoothness_upper_bound = smoothness_upper_bound
-        self.smoothness_lower_bound = smoothness_lower_bound
-
     def init_storage(self, num_envs, num_transitions_per_env, actor_obs_shape, critic_obs_shape, action_shape):
         self.storage = RolloutStorage(num_envs, num_transitions_per_env, actor_obs_shape, critic_obs_shape, action_shape, self.device)
 
@@ -110,11 +102,9 @@ class PPO:
         self.transition.critic_observations = critic_obs
         return self.transition.actions
     
-    def process_env_step(self, rewards, dones, infos, next_obs, next_critic_obs):
+    def process_env_step(self, rewards, dones, infos):
         self.transition.rewards = rewards.clone()
         self.transition.dones = dones
-        self.transition.next_observations = next_obs
-        self.transition.next_critic_observations = next_critic_obs
         # Bootstrapping on time outs
         if 'time_outs' in infos:
             self.transition.rewards += self.gamma * torch.squeeze(self.transition.values * infos['time_outs'].unsqueeze(1).to(self.device), 1)
@@ -135,8 +125,8 @@ class PPO:
             generator = self.storage.reccurent_mini_batch_generator(self.num_mini_batches, self.num_learning_epochs)
         else:
             generator = self.storage.mini_batch_generator(self.num_mini_batches, self.num_learning_epochs)
-        for obs_batch, next_obs_batch, critic_obs_batch, next_critic_obs_batch, actions_batch, target_values_batch, advantages_batch, returns_batch, old_actions_log_prob_batch, \
-            old_mu_batch, old_sigma_batch, cont_batch, hid_states_batch, masks_batch in generator:
+        for obs_batch, critic_obs_batch, actions_batch, target_values_batch, advantages_batch, returns_batch, old_actions_log_prob_batch, \
+            old_mu_batch, old_sigma_batch, hid_states_batch, masks_batch in generator:
 
 
                 self.actor_critic.act(obs_batch, masks=masks_batch, hidden_states=hid_states_batch[0])
@@ -180,20 +170,6 @@ class PPO:
                     value_loss = (returns_batch - value_batch).pow(2).mean()
 
                 loss = surrogate_loss + self.value_loss_coef * value_loss - self.entropy_coef * entropy_batch.mean()
-
-                # Policy & Value smoothing loss (from G1 HIM-PPO, lines 231-242)
-                epsilon = self.smoothness_lower_bound / (self.smoothness_upper_bound - self.smoothness_lower_bound)
-                policy_smooth_coef = self.smoothness_upper_bound * epsilon
-                value_smooth_coef = self.value_smoothness_coef * policy_smooth_coef
-
-                mix_weights = cont_batch * (torch.rand_like(cont_batch) - 0.5) * 2.0
-                mix_obs_batch = obs_batch + mix_weights * (next_obs_batch - obs_batch)
-                mix_critic_obs_batch = critic_obs_batch + mix_weights * (next_critic_obs_batch - critic_obs_batch)
-                policy_smooth_loss = torch.square(torch.norm(mu_batch - self.actor_critic.act_inference(mix_obs_batch), dim=-1)).mean()
-                value_smooth_loss = torch.square(torch.norm(value_batch - self.actor_critic.evaluate(mix_critic_obs_batch), dim=-1)).mean()
-                smooth_loss = policy_smooth_coef * policy_smooth_loss + value_smooth_coef * value_smooth_loss
-
-                loss += smooth_loss
 
                 # Gradient step
                 self.optimizer.zero_grad()
