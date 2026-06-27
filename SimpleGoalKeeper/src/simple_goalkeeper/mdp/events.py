@@ -757,14 +757,14 @@ def reward_curriculum_ep_len(env: "ManagerBasedRlEnv", env_ids: torch.Tensor, **
       where cu = int(mean_ep_len / ep_len_divisor)
 
     Monotonically increases with curriculum update — never goes backward.
-    Returns: (N,) tensor of weight multipliers.
+    Returns: scalar tensor of weight multiplier.
     """
     if not hasattr(env, "_curriculumupdate"):
         env._curriculumupdate = torch.zeros(1, dtype=torch.int32, device=env.device)
 
     cu = env._curriculumupdate[0].item()
     multiplier = 1.0 + 0.5 * cu  # 1.0 at cu=0, 1.5 at cu=1, 2.0 at cu=2, 2.5 at cu=3, etc.
-    return torch.full((env.num_envs,), multiplier, device=env.device)
+    return torch.tensor(multiplier, device=env.device)
 
 
 def ball_difficulty_curriculum(env: "ManagerBasedRlEnv", env_ids: torch.Tensor, **kwargs) -> torch.Tensor:
@@ -774,18 +774,18 @@ def ball_difficulty_curriculum(env: "ManagerBasedRlEnv", env_ids: torch.Tensor, 
     difficulty = 0.01 * curriculumupdate, clamped to [0, 1].
 
     Stores the maximum difficulty reached so it never decreases.
-    Returns: (N,) tensor of difficulty values [0, 1].
+    Returns: scalar tensor of difficulty value [0, 1].
     """
     if not hasattr(env, "_curriculumupdate"):
         env._curriculumupdate = torch.zeros(1, dtype=torch.int32, device=env.device)
     if not hasattr(env, "_max_difficulty_reached"):
-        env._max_difficulty_reached = torch.zeros(env.num_envs, device=env.device)
+        env._max_difficulty_reached = torch.tensor(0.0, device=env.device)
 
     cu = env._curriculumupdate[0].item()
     new_difficulty = min(0.01 * cu, 1.0)  # 0 at cu=0, 1.0 at cu=100+
-    env._max_difficulty_reached[:] = torch.max(
+    env._max_difficulty_reached = torch.max(
         env._max_difficulty_reached,
-        torch.full((env.num_envs,), new_difficulty, device=env.device)
+        torch.tensor(new_difficulty, device=env.device)
     )
     return env._max_difficulty_reached.clone()
 
@@ -794,7 +794,7 @@ def correct_foot_save_curriculum(env: "ManagerBasedRlEnv", env_ids: torch.Tensor
     """Weight multiplier for correct-foot-save bonuses (single_foot_save, etc.).
 
     Activates at curriculum update >= 3 (cu >= 3).
-    Returns: (N,) tensor of weight multipliers, 1.0 before cu=3, 2.0 at cu>=3.
+    Returns: scalar tensor of weight multiplier, 1.0 before cu=3, 2.0 at cu>=3.
 
     Mirrors G1 footreach/stopball curriculum pattern but with different activation.
     """
@@ -803,4 +803,4 @@ def correct_foot_save_curriculum(env: "ManagerBasedRlEnv", env_ids: torch.Tensor
 
     cu = env._curriculumupdate[0].item()
     multiplier = 2.0 if cu >= 3 else 1.0
-    return torch.full((env.num_envs,), multiplier, device=env.device)
+    return torch.tensor(multiplier, device=env.device)
