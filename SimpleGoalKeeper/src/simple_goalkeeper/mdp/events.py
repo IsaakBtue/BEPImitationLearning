@@ -213,6 +213,9 @@ class MotionResetManager:
         rsi_local  = use_rsi.nonzero(as_tuple=True)[0]
         stand_local = (~use_rsi).nonzero(as_tuple=True)[0]
 
+        # Collect extra env_ids that are redirected from RSI → standing.
+        extra_stand_ids: list[torch.Tensor] = []
+
         # ── 80 %: distance-conditioned RSI ────────────────────────────────
         if len(rsi_local) > 0:
             ids_rsi = env_ids[rsi_local]
@@ -233,11 +236,17 @@ class MotionResetManager:
                 is_triple = abs_cy >= _TRIPLE_THRESH
                 is_double = ~is_single & ~is_triple
 
+                # Single-range RSI overshoots: the robot commits to a lateral step
+                # but the ball arrives near centre and passes through the legs.
+                # Redirect all single-range envs (regardless of rsi_fraction) to
+                # HOME_KEYFRAME so the policy starts standing and reacts freely.
+                single_local = is_single.nonzero(as_tuple=True)[0]
+                if len(single_local) > 0:
+                    extra_stand_ids.append(ids_rsi[single_local])
+
                 for (side, steps), mask in [
-                    (("left",  "single"), is_left  & is_single),
                     (("left",  "double"), is_left  & is_double),
                     (("left",  "triple"), is_left  & is_triple),
-                    (("right", "single"), ~is_left & is_single),
                     (("right", "double"), ~is_left & is_double),
                     (("right", "triple"), ~is_left & is_triple),
                 ]:
@@ -247,9 +256,13 @@ class MotionResetManager:
                     pool = self.pools.get((side, steps), self.frames)
                     self._write_rsi_state(env, ids_rsi[local_ids], pool, robot)
 
-        # ── 20 %: HOME_KEYFRAME standing pose ─────────────────────────────
+        # ── HOME_KEYFRAME standing pose (20% random + all single-range) ───
+        ids_stand_parts: list[torch.Tensor] = []
         if len(stand_local) > 0:
-            ids_stand = env_ids[stand_local]
+            ids_stand_parts.append(env_ids[stand_local])
+        ids_stand_parts.extend(extra_stand_ids)
+        if ids_stand_parts:
+            ids_stand = torch.cat(ids_stand_parts)
             ns = len(ids_stand)
             home_pos = robot.data.default_joint_pos[ids_stand]
             home_vel = torch.zeros(ns, home_pos.shape[-1], device=env.device)

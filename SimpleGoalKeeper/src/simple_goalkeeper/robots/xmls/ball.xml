@@ -3,10 +3,10 @@
     <!-- Soccer ball: size 5, radius=0.10m (diameter 20cm), mass=0.42kg -->
     <!-- group=1: keeps ball out of terrain raycasts (which only scan group 0) -->
     <body name="ball" pos="0 0 0.10">
-      <!-- No joint damping — friction controls rolling deceleration.
-           Imitationlearningbooster uses no damping; the low rolling friction
-           (0.0001) makes the ball roll realistically without stopping too fast. -->
-      <joint type="free" name="ball_freejoint"/>
+      <!-- damping=0.003: viscous rolling deceleration (~1.8 m/s² at 2 m/s).
+           condim=3 makes torsional/rolling friction values inactive, so joint
+           damping is the only way to decelerate a pure-rolling ball. -->
+      <joint type="free" name="ball_freejoint" damping="0.0005"/>
       <inertial mass="0.42" pos="0 0 0" diaginertia="0.00168 0.00168 0.00168"/>
       <!-- friction = [slide, torsional, rolling] — matches Imitationlearningbooster exactly.
            condim=3 (default, NOT 6): only normal + 2 tangential constraints are active.
