@@ -1,0 +1,45 @@
+{
+  "os": "Linux-5.15.0-181-generic-x86_64-with-glibc2.35",
+  "python": "CPython 3.11.15",
+  "startedAt": "2026-06-26T16:53:56.341472Z",
+  "args": [
+    "Mjlab-BeyondAMP-Goalkeeper-T1",
+    "--num-envs",
+    "6144"
+  ],
+  "program": "/home/ibouwmeest/BEPImitationLearning/SimpleGoalKeeper/.venv/bin/sgk_train",
+  "codePath": "SimpleGoalKeeper/.venv/bin/sgk_train",
+  "codePathLocal": ".venv/bin/sgk_train",
+  "git": {
+    "remote": "https://github.com/IsaakBtue/BEPImitationLearning.git",
+    "commit": "1b02b66292cb58a6cd97beee225b547e0bc5bbb7"
+  },
+  "email": "i.p.b.bouwmeester@student.tue.nl",
+  "root": "/home/ibouwmeest/BEPImitationLearning/SimpleGoalKeeper",
+  "host": "ubuntudesktop4.isaacsim-aiteam.src.surf-hosted.nl",
+  "executable": "/home/ibouwmeest/BEPImitationLearning/SimpleGoalKeeper/.venv/bin/python",
+  "cpu_count": 11,
+  "cpu_count_logical": 11,
+  "gpu": "NVIDIA A10",
+  "gpu_count": 1,
+  "disk": {
+    "/": {
+      "total": "103865303040",
+      "used": "53908217856"
+    }
+  },
+  "memory": {
+    "total": "92789039104"
+  },
+  "gpu_nvidia": [
+    {
+      "name": "NVIDIA A10",
+      "memoryTotal": "24146608128",
+      "cudaCores": 9216,
+      "architecture": "Ampere",
+      "uuid": "GPU-00d8e7d4-ad4b-602f-e2bd-602b818c84f1"
+    }
+  ],
+  "cudaVersion": "13.3",
+  "writerId": "hnhzx0ia1mh8bzwd5hzwk1qcjb0aiivm"
+}
