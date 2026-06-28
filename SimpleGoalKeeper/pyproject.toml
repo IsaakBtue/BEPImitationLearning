@@ -38,6 +38,7 @@ sgk_train    = "simple_goalkeeper.scripts.train:main"
 sgk_play     = "simple_goalkeeper.scripts.play:main"
 sgk_convert  = "simple_goalkeeper.scripts.pkl_to_npz:cli"
 sgk_export   = "simple_goalkeeper.scripts.export_onnx:main"
+sgk_view     = "simple_goalkeeper.scripts.view_motion:main"
 
 [build-system]
 requires = ["setuptools>=61"]
