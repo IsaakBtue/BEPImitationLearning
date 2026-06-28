@@ -28,4 +28,8 @@ uv.lock
 !/logs/rsl_rl/simple_goalkeeper/2026-06-27_20-43-05_phase1/2026-06-27_20-43-05_phase1.onnx
 !/logs/rsl_rl/simple_goalkeeper/2026-06-27_20-43-05_phase1/ONNX_REPORT.md
 !/logs/rsl_rl/simple_goalkeeper/2026-06-27_20-43-05_phase1/params/
+!/logs/rsl_rl/simple_goalkeeper/2026-06-28_01-38-44_phase1/model_9000.pt
+!/logs/rsl_rl/simple_goalkeeper/2026-06-28_01-38-44_phase1/2026-06-28_01-38-44_phase1.onnx
+!/logs/rsl_rl/simple_goalkeeper/2026-06-28_01-38-44_phase1/ONNX_REPORT.md
+!/logs/rsl_rl/simple_goalkeeper/2026-06-28_01-38-44_phase1/params/
 SimpleGoalKeeper/beyondAMP/data/
