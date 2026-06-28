@@ -59,11 +59,39 @@ def _yaw_only_quat(q_wxyz: torch.Tensor) -> torch.Tensor:
 
 _FOOT_CONTACT_BELOW_BODY = 0.030  # foot capsule center -0.01 + radius 0.02 below foot body
 
-# Lateral crossing-Y thresholds for selecting single / double / triple step RSI.
-# A ball predicted to cross the goal line within ±0.35 m of center needs at most
-# one step; 0.35–0.65 m needs a double step; beyond 0.65 m needs a triple step.
-_SINGLE_THRESH = 0.35   # |cross_y| < this  → single step pool
-_TRIPLE_THRESH = 0.65   # |cross_y| >= this → triple step pool
+# Lateral crossing-Y thresholds for 4-tier distance-conditioned RSI.
+_SINGLE_THRESH = 0.35   # |cross_y| < 0.35          → single  (standing reset)
+_DOUBLE_THRESH = 0.65   # 0.35 ≤ |cross_y| < 0.65   → double  (MediumStep, SafeMedium)
+_TRIPLE_THRESH = 0.85   # 0.65 ≤ |cross_y| < 0.85   → triple  (FarStep, SafeFar)
+                        # |cross_y| ≥ 0.85           → wide    (DoubleStep, TripleStep)
+
+# Exact filename stem (lowercased) → (side, pool) mapping.
+# Name-specific so adding new files never silently mis-classifies.
+_STEM_TO_POOL: dict[str, tuple[str, str]] = {
+    # double  (0.35–0.65 m)
+    "leftmediumstep_own_booster_t1":  ("left",  "double"),
+    "leftsafemedium1_booster_t1":     ("left",  "double"),
+    "rightmediumstep_own_booster_t1": ("right", "double"),
+    "rightsafemedium1_booster_t1":    ("right", "double"),
+    # triple  (0.65–0.85 m)
+    "leftfarstep_own_booster_t1":     ("left",  "triple"),
+    "leftsafefar1_booster_t1":        ("left",  "triple"),
+    "rightfarstep_own_booster_t1":    ("right", "triple"),
+    "rightsafefar1_booster_t1":       ("right", "triple"),
+    # wide    (≥ 0.85 m)
+    "leftdoublestep_own_booster_t1":  ("left",  "wide"),
+    "lefttriplestep_own_booster_t1":  ("left",  "wide"),
+    "rightdoublestep_own_booster_t1": ("right", "wide"),
+    "righttriplestep_own_booster_t1": ("right", "wide"),
+    # single-range files (< 0.35 m) → standing pose, not RSI pools; listed so
+    # the init loop doesn't warn about unknown files.
+    "leftstep_own_booster_t1":        None,
+    "leftsafe1_booster_t1":           None,
+    "leftsafefront1_booster_t1":      None,
+    "rightstep_own_booster_t1":       None,
+    "rightsafe1_booster_t1":          None,
+    "rightsafefront1_booster_t1":     None,
+}
 
 
 def _load_pool(files: list, dev: str) -> dict[str, torch.Tensor]:
@@ -83,13 +111,11 @@ def _load_pool(files: list, dev: str) -> dict[str, torch.Tensor]:
 
 
 class MotionResetManager:
-    """Distance-conditioned RSI: selects single/double/triple step frames
-    based on the ball's predicted goal-line crossing position.
+    """Distance-conditioned RSI: selects motion frames based on ball's predicted
+    goal-line crossing position.  4 distance tiers × 2 sides = 8 pools.
 
     reset_ball fires BEFORE reset_from_motion_data (see goalkeeper_env_cfg.py),
-    so the new ball velocity is already set when reset() is called.  We compute
-    the lateral crossing Y from (ball_pos, ball_vel) and route each resetting
-    environment to the matching motion pool (side × step-count = 6 pools).
+    so the new ball velocity is already set when reset() is called.
     """
 
     _instance: "MotionResetManager | None" = None
@@ -97,7 +123,7 @@ class MotionResetManager:
     def __init__(self) -> None:
         # Combined pool (fallback / AMP reference compatibility)
         self.frames: dict[str, torch.Tensor] = {}
-        # Per-type pools keyed by (side, steps): side ∈ {left, right}, steps ∈ {single, double, triple}
+        # Per-type pools keyed by (side, steps): side ∈ {left, right}, steps ∈ {single, double, triple, wide}
         self.pools: dict[tuple[str, str], dict[str, torch.Tensor]] = {}
 
     @classmethod
@@ -107,7 +133,7 @@ class MotionResetManager:
         return cls._instance
 
     def init(self, env: "ManagerBasedRlEnv") -> None:
-        """Load NPZ files into 6 per-type pools + one combined fallback pool."""
+        """Load NPZ files into 8 per-type pools + one combined fallback pool."""
         if "joint_pos" in self.frames:
             return
 
@@ -117,29 +143,21 @@ class MotionResetManager:
 
         dev = env.device
 
-        # Classify each file by (side, step-count) from its stem name.
-        # New motion naming convention:
-        #   *Far*    → triple (wide, far lateral save)
-        #   *Medium* → double (medium lateral save)
-        #   *Step*   → single (old step motions, close range)
-        #   *Safe*   → single (close/front single-step saves)
-        #   *Front*  → single (frontal save)
         bucket: dict[tuple[str, str], list] = {
-            ("left",  "single"): [], ("left",  "double"): [], ("left",  "triple"): [],
-            ("right", "single"): [], ("right", "double"): [], ("right", "triple"): [],
+            ("left",  "double"): [], ("left",  "triple"): [], ("left",  "wide"): [],
+            ("right", "double"): [], ("right", "triple"): [], ("right", "wide"): [],
         }
         all_files = []
         for f in motion_files:
             stem = f.stem.lower()
-            side  = "left"  if "left"  in stem else "right"
-            if "far" in stem:
-                steps = "triple"
-            elif "medium" in stem:
-                steps = "double"
-            else:
-                steps = "single"
-            bucket[(side, steps)].append(f)
+            if stem not in _STEM_TO_POOL:
+                print(f"[MotionResetManager] WARNING: {f.name} not in _STEM_TO_POOL — added to combined pool only")
+                all_files.append(f)
+                continue
+            key = _STEM_TO_POOL[stem]
             all_files.append(f)
+            if key is not None:   # None = single-range, goes to combined pool only
+                bucket[key].append(f)
 
         for key, files in bucket.items():
             if files:
@@ -195,8 +213,12 @@ class MotionResetManager:
 
         reset_ball fires first, so ball pos/vel reflect the NEW episode trajectory.
         We predict the ball's goal-line crossing Y and pick:
-          left/right  — from sign of crossing_y
-          single/double/triple — from |crossing_y| vs thresholds
+          left/right — from sign of crossing_y
+          tier       — from |crossing_y| vs thresholds:
+            < 0.35 m  → standing pose (no RSI)
+            0.35–0.65 → double  (MediumStep, SafeMedium)
+            0.65–0.85 → triple  (FarStep, SafeFar)
+            ≥ 0.85    → wide    (DoubleStep, TripleStep)
 
         20% standing resets prevent the AMP dive→RSI transition artefact and
         ensure the policy learns to save from a standing start (deployment scenario).
@@ -209,8 +231,8 @@ class MotionResetManager:
         robot: Entity = env.scene[asset_cfg.name]
         n = len(env_ids)
 
-        use_rsi    = torch.rand(n, device=env.device) < rsi_fraction
-        rsi_local  = use_rsi.nonzero(as_tuple=True)[0]
+        use_rsi     = torch.rand(n, device=env.device) < rsi_fraction
+        rsi_local   = use_rsi.nonzero(as_tuple=True)[0]
         stand_local = (~use_rsi).nonzero(as_tuple=True)[0]
 
         # Collect extra env_ids that are redirected from RSI → standing.
@@ -229,17 +251,17 @@ class MotionResetManager:
                 # Fallback for the very first reset before reset_ball has ever fired.
                 self._write_rsi_state(env, ids_rsi, self.frames, robot)
             else:
-                cy = cross_y[ids_rsi]
-                is_left   = cy > 0
-                abs_cy    = cy.abs()
-                is_single = abs_cy < _SINGLE_THRESH
-                is_triple = abs_cy >= _TRIPLE_THRESH
-                is_double = ~is_single & ~is_triple
+                cy     = cross_y[ids_rsi]
+                is_left = cy > 0
+                abs_cy  = cy.abs()
 
-                # Single-range RSI overshoots: the robot commits to a lateral step
-                # but the ball arrives near centre and passes through the legs.
-                # Redirect all single-range envs (regardless of rsi_fraction) to
-                # HOME_KEYFRAME so the policy starts standing and reacts freely.
+                is_single = abs_cy < _SINGLE_THRESH
+                is_double = (abs_cy >= _SINGLE_THRESH) & (abs_cy < _DOUBLE_THRESH)
+                is_triple = (abs_cy >= _DOUBLE_THRESH) & (abs_cy < _TRIPLE_THRESH)
+                is_wide   = abs_cy >= _TRIPLE_THRESH
+
+                # Single-range: ball arrives near centre — start standing so the
+                # policy reacts freely rather than committing to a lateral step.
                 single_local = is_single.nonzero(as_tuple=True)[0]
                 if len(single_local) > 0:
                     extra_stand_ids.append(ids_rsi[single_local])
@@ -247,8 +269,10 @@ class MotionResetManager:
                 for (side, steps), mask in [
                     (("left",  "double"), is_left  & is_double),
                     (("left",  "triple"), is_left  & is_triple),
+                    (("left",  "wide"),   is_left  & is_wide),
                     (("right", "double"), ~is_left & is_double),
                     (("right", "triple"), ~is_left & is_triple),
+                    (("right", "wide"),   ~is_left & is_wide),
                 ]:
                     local_ids = mask.nonzero(as_tuple=True)[0]
                     if len(local_ids) == 0:
