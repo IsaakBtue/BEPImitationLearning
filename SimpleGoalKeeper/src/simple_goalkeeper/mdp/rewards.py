@@ -913,16 +913,11 @@ def foot_clearance(
     """
     behind = _ball_is_behind(env, ball_name)
     robot: Entity = env.scene[asset_cfg.name]
-    foot_pos_w = robot.data.body_link_pos_w[:, asset_cfg.body_ids, :]         # (N, 2, 3)
-    floor_z = env.scene.env_origins[:, 2]                                      # (N,)
-    crossing_y = _get_ball_crossing_y(env, ball_name)
-    is_left_ball = crossing_y > env.scene.env_origins[:, 1]
-    foot_idx = torch.where(is_left_ball,
-                           torch.zeros(env.num_envs, dtype=torch.long, device=env.device),
-                           torch.ones(env.num_envs, dtype=torch.long, device=env.device))
-    foot_z_active = foot_pos_w[torch.arange(env.num_envs, device=env.device), foot_idx, 2]
-    foot_z_above_floor = (foot_z_active - floor_z).clamp(0.0, target_height)  # (N,)
-    return (foot_z_above_floor / target_height) * (~behind).float()
+    foot_pos_w = robot.data.body_link_pos_w[:, asset_cfg.body_ids, :]        # (N, 2, 3)
+    floor_z = env.scene.env_origins[:, 2]                                     # (N,)
+    foot_z_above_floor = (foot_pos_w[:, :, 2] - floor_z[:, None]).clamp(0.0, target_height)  # (N, 2)
+    max_foot_height = foot_z_above_floor.max(dim=-1).values                   # (N,)
+    return (max_foot_height / target_height) * (~behind).float()
 
 
 def feet_slippage(
@@ -938,10 +933,11 @@ def feet_slippage(
         0: left_foot_1, 1: left_foot_2 → left foot
         2: right_foot_1, 3: right_foot_2 → right foot
 
-    Suppressed (returns 1.0) when ball is within 0.5 m of either foot: the
+    Suppressed only for the correct foot when the ball is within 0.5 m of it: the
     contact sensor cannot distinguish ground from ball, so without this gate
     the policy learns to plant feet passively rather than sweep into the ball,
     preventing the force needed for stopball (delta_vx > 1 m/s).
+    The trailing foot is NOT gated — it must remain non-sliding throughout.
     Weight: +3.0.
     """
     sensor: ContactSensor = env.scene["feet_contact"]
@@ -953,12 +949,21 @@ def feet_slippage(
     robot: Entity = env.scene[asset_cfg.name]
     foot_vel_w = robot.data.body_link_lin_vel_w[:, asset_cfg.body_ids, :]  # [B, 2, 3]
     foot_speed = torch.norm(foot_vel_w, dim=-1)                             # [B, 2]
-    contactvel = torch.sum(foot_speed * in_contact, dim=-1)
-    slippage_rew = torch.exp(-10.0 * contactvel)
 
     ball: Entity = env.scene[ball_name]
     foot_pos_w = robot.data.body_link_pos_w[:, asset_cfg.body_ids, :]      # [B, 2, 3]
     ball_pos_w = ball.data.root_link_pos_w                                   # [B, 3]
-    min_dist = torch.norm(foot_pos_w - ball_pos_w[:, None, :], dim=-1).min(dim=-1).values
-    ball_near_foot = min_dist < 0.5
-    return torch.where(ball_near_foot, torch.ones_like(slippage_rew), slippage_rew)
+
+    # Suppress slippage penalty for the correct foot only when ball is near it.
+    # The trailing foot keeps its full penalty so it cannot drag freely.
+    foot_dist = torch.norm(foot_pos_w - ball_pos_w[:, None, :], dim=-1)    # [B, 2]
+    foot_idx = _get_correct_foot_idx(env, ball_name)                        # (N,)
+    arange = torch.arange(env.num_envs, device=env.device)
+    correct_foot_near_ball = foot_dist[arange, foot_idx] < 0.5             # (N,)
+    suppress = torch.zeros(env.num_envs, 2, dtype=torch.bool, device=env.device)
+    suppress[arange, foot_idx] = correct_foot_near_ball
+
+    contactvel_per_foot = foot_speed * in_contact                           # [B, 2]
+    contactvel_per_foot = contactvel_per_foot.masked_fill(suppress, 0.0)
+    contactvel = contactvel_per_foot.sum(dim=-1)
+    return torch.exp(-10.0 * contactvel)
