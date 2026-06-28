@@ -69,14 +69,10 @@ _TRIPLE_THRESH = 0.85   # 0.65 ≤ |cross_y| < 0.85   → triple  (FarStep, Safe
 # Name-specific so adding new files never silently mis-classifies.
 _STEM_TO_POOL: dict[str, tuple[str, str]] = {
     # double  (0.35–0.65 m)
-    "leftmediumstep_own_booster_t1":  ("left",  "double"),
     "leftsafemedium1_booster_t1":     ("left",  "double"),
-    "rightmediumstep_own_booster_t1": ("right", "double"),
     "rightsafemedium1_booster_t1":    ("right", "double"),
     # triple  (0.65–0.85 m)
-    "leftfarstep_own_booster_t1":     ("left",  "triple"),
     "leftsafefar1_booster_t1":        ("left",  "triple"),
-    "rightfarstep_own_booster_t1":    ("right", "triple"),
     "rightsafefar1_booster_t1":       ("right", "triple"),
     # wide    (≥ 0.85 m)
     "leftdoublestep_own_booster_t1":  ("left",  "wide"),
