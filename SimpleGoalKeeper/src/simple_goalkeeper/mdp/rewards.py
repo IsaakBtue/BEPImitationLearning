@@ -938,8 +938,18 @@ def feet_slippage(
     the policy learns to plant feet passively rather than sweep into the ball,
     preventing the force needed for stopball (delta_vx > 1 m/s).
     The trailing foot is NOT gated — it must remain non-sliding throughout.
+
+    Sliding is measured as the horizontal (XY) speed of the actual ground contact
+    point, not the foot body center.  Rigid-body kinematics:
+        v_contact = v_body + ω × r_contact
+    where r_contact points from the foot body origin to the contact patch.
+    The foot capsules sit at z=-0.01 (local) with radius 0.02, so the contact
+    point is 0.03 m below the foot body origin in foot-local frame.  This
+    correctly captures the edge-dragging that occurs when the foot is tilted.
     Weight: +3.0.
     """
+    _CONTACT_Z_LOCAL = 0.03  # capsule endpoint z (-0.01) + radius (0.02), in metres
+
     sensor: ContactSensor = env.scene["feet_contact"]
     found = sensor.data.found  # [B, 8]
     left_in_contact  = (found[:, :4] > 0).any(dim=-1)
@@ -947,8 +957,23 @@ def feet_slippage(
     in_contact = torch.stack([left_in_contact, right_in_contact], dim=-1).float()  # [B, 2]
 
     robot: Entity = env.scene[asset_cfg.name]
-    foot_vel_w = robot.data.body_link_lin_vel_w[:, asset_cfg.body_ids, :]  # [B, 2, 3]
-    foot_speed = torch.norm(foot_vel_w, dim=-1)                             # [B, 2]
+    foot_vel_w   = robot.data.body_link_lin_vel_w[:, asset_cfg.body_ids, :]   # [B, 2, 3]
+    foot_omega_w = robot.data.body_link_ang_vel_w[:, asset_cfg.body_ids, :]   # [B, 2, 3]
+    foot_quat_w  = robot.data.body_link_quat_w[:, asset_cfg.body_ids, :]      # [B, 2, 4]
+
+    # Contact point offset in foot-local frame: straight down to the capsule bottom
+    r_local = torch.zeros_like(foot_vel_w)   # [B, 2, 3]
+    r_local[:, :, 2] = -_CONTACT_Z_LOCAL
+
+    # Rotate offset to world frame and compute contact-point velocity
+    r_world = quat_apply(
+        foot_quat_w.reshape(-1, 4),
+        r_local.reshape(-1, 3),
+    ).reshape(env.num_envs, 2, 3)
+    v_contact = foot_vel_w + torch.cross(foot_omega_w, r_world, dim=-1)  # [B, 2, 3]
+
+    # Penalise only horizontal sliding — vertical motion (lifting/landing) is fine
+    foot_speed = torch.norm(v_contact[:, :, :2], dim=-1)                  # [B, 2]
 
     ball: Entity = env.scene[ball_name]
     foot_pos_w = robot.data.body_link_pos_w[:, asset_cfg.body_ids, :]      # [B, 2, 3]
