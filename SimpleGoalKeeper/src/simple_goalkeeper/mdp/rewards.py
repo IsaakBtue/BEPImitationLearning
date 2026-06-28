@@ -686,28 +686,6 @@ def postwaistdofpos(
     return torch.exp(-3.0 * err) * behind.float()
 
 
-def post_default_pose(
-    env: "ManagerBasedRlEnv",
-    ball_name: str,
-    asset_cfg: SceneEntityCfg = _DEFAULT_ROBOT_CFG,
-    std: float = 0.5,
-) -> torch.Tensor:
-    """Reward ALL joints returning to home-keyframe default after ball is deflected.
-
-    Covers legs, arms, and waist together — encourages the robot to stand in its
-    standard goalkeeper stance (T-like pose) once the save is complete.
-    exp(-sum_sq_err / std^2) × behind — bounded [0, 1].
-    std=0.5 rad means reward = 0.37 when RMS joint error is 0.5 rad (≈ 28°).
-    """
-    behind = _ball_is_behind(env, ball_name)
-    robot: Entity = env.scene[asset_cfg.name]
-    delta = (
-        robot.data.joint_pos[:, asset_cfg.joint_ids]
-        - robot.data.default_joint_pos[:, asset_cfg.joint_ids]
-    )
-    err = torch.sum(torch.square(delta), dim=-1)
-    return torch.exp(-err / (std ** 2)) * behind.float()
-
 
 def penalize_sharpcontact(
     env: "ManagerBasedRlEnv",

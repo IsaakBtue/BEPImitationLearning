@@ -9,7 +9,7 @@ from .rewards import (
     penalize_kneeheight, dof_vel_limits,
     postorientation, postangvel, postlinvel,
     torques_normalized_l2, torque_limits,
-    postupperdofpos, postwaistdofpos, post_default_pose,
+    postupperdofpos, postwaistdofpos,
     penalize_sharpcontact, penalize_self_collision, feet_slippage,
 )
 from .commands import GhostMotionCommand, GhostMotionCommandCfg

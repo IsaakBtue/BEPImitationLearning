@@ -382,12 +382,6 @@ def goalkeeper_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
             weight=1.0,
             params={"ball_name": BALL_NAME, "asset_cfg": _RECOVERY_WAIST_CFG},
         ),
-        # --- full-body T-pose recovery (all 21 joints → home keyframe default) ---
-        "post_default_pose": RewardTermCfg(
-            func=gk_mdp.post_default_pose,
-            weight=5.0,
-            params={"ball_name": BALL_NAME, "asset_cfg": _ALL_JOINTS_CFG, "std": 0.5},
-        ),
         # --- hardware safety ---
         "penalize_kneeheight": RewardTermCfg(
             func=gk_mdp.penalize_kneeheight,
