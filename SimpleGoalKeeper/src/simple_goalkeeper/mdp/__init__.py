@@ -3,7 +3,7 @@ from .observations import ball_pos_b, ball_pos_xy_b, ball_vel_b, left_foot_pos_b
 from .events import init_motion_loader, reset_from_motion_data, reset_ball_local_frame, reset_ball_global_frame, reset_ball_rolling, tick_catchstep, ball_difficulty_curriculum, reward_curriculum_ep_len, correct_foot_save_curriculum, ball_exit_termination, sharpforce_termination
 from .rewards import (
     ball_vx_reduction, posture, ang_vel_xy_l2, ang_vel_z_l2,
-    stayonline, noretreat, feetorientation, deviation_waist_joint,
+    stayonline, noretreat, feetorientation, foot_ang_vel_xy, deviation_waist_joint,
     footreach, foot_proximity, stopball, softstop, single_foot_save, cleanstop, foot_clearance,
     airborne_at_save, inner_face_orientation_save, foot_inner_face_continuous,
     penalize_kneeheight, dof_vel_limits,
