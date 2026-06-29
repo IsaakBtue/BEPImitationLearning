@@ -135,19 +135,21 @@ def goalkeeper_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
                 # difficulty += step_size × int(mean_ep_len / ep_len_divisor)
                 # every update_interval per-env steps. Longer episodes → faster advance.
                 "update_interval": 500,   # per-env steps between updates (same as G1)
-                "ep_len_divisor":  48,    # same divisor as G1
+                "ep_len_divisor":  47,    # matches reward curricula divisor exactly so ball
+                                          # difficulty and reward weights advance at the same
+                                          # episode-length boundary (was 48, off by 1 step)
                 "step_size":       0.01,  # difficulty units per curriculumupdate per check
             },
         )
         # Episode-length-driven weight curriculum — mirrors G1 compute_reward() lines 359-364:
         #   weight = base * (1 + 0.5 * curriculumupdate)  where cu = int(mean_ep_len / 50)
         # All three terms share env._curriculumupdate (set by whichever runs first each window).
-        # G1 max (cu=3, ep_len=150): softstop 100→250, footreach 10→25.
+        # G1 max (cu=3, ep_len=150): softstop 105→262.5, footreach 10→25.
         cfg.curriculum["softstop_curriculum"] = CurriculumTermCfg(
             func=gk_mdp.reward_curriculum_ep_len,
             params={
                 "reward_name": "softstop",
-                "base_weight": 100.0,    # G1 stop_init=100  → max 250 at cu=3
+                "base_weight": 105.0,    # G1 stop_init=100 + 5 shifted from stopball → max 262.5 at cu=3
                 "update_interval": 500,
                 "ep_len_divisor":  47,
             },
@@ -167,13 +169,13 @@ def goalkeeper_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
             },
         )
         # G1 lines 363-364: stopball weight also grows with curriculum (same formula as eereach).
-        # Keep base 20 (max 50 at cu=3) well below softstop base 100 (max 250) so softstop
-        # remains the dominant primary signal.
+        # Keep base 15 (max 37.5 at cu=3) well below softstop base 105 (max 262.5) so softstop
+        # remains the dominant primary signal. 5 shifted to softstop to make it the clear end goal.
         cfg.curriculum["stopball_curriculum"] = CurriculumTermCfg(
             func=gk_mdp.reward_curriculum_ep_len,
             params={
                 "reward_name": "stopball",
-                "base_weight": 20.0,     # G1 pattern: same formula; max 50 at cu=3
+                "base_weight": 15.0,     # was 20; 5 shifted to softstop; max 37.5 at cu=3
                 "update_interval": 500,
                 "ep_len_divisor":  47,
             },
@@ -184,7 +186,6 @@ def goalkeeper_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
         for _name, _base in (
             ("single_foot_save",             50.0),
             ("cleanstop",                    25.0),
-            ("airborne_at_save",             15.0),
             ("inner_face_orientation_save",  25.0),
             ("foot_inner_face_continuous",    5.0),
         ):
@@ -288,13 +289,13 @@ def goalkeeper_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
         # --- primary task signal ---
         "stopball": RewardTermCfg(
             func=gk_mdp.stopball,
-            weight=20.0,
+            weight=15.0,
             params={"ball_name": BALL_NAME, "delta_vel_threshold": 0.6},
         ),
         # --- partial deflection signal (fires before stopball; gates _ball_is_behind) ---
         "softstop": RewardTermCfg(
             func=gk_mdp.softstop,
-            weight=100.0,
+            weight=105.0,
             params={"ball_name": BALL_NAME, "velocity_threshold": 0.05},
         ),
         # --- single-foot save bonus: same foot first contacted AND caused the reversal ---
@@ -310,11 +311,6 @@ def goalkeeper_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
             params={"ball_name": BALL_NAME, "speed_threshold": 0.25},
         ),
         # --- save quality bonuses (fire on top of softstop, not as a gate) ---
-        "airborne_at_save": RewardTermCfg(
-            func=gk_mdp.airborne_at_save,
-            weight=15.0,
-            params={"ball_name": BALL_NAME},
-        ),
         "inner_face_orientation_save": RewardTermCfg(
             func=gk_mdp.inner_face_orientation_save,
             weight=25.0,
@@ -426,7 +422,7 @@ def goalkeeper_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
         ),
         "ang_vel_z": RewardTermCfg(
             func=gk_mdp.ang_vel_z_l2,
-            weight=-2.0,
+            weight=-0.5,
             params={"asset_cfg": _ROBOT_CFG},
         ),
         "deviation_waist_joint": RewardTermCfg(
