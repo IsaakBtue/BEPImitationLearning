@@ -349,7 +349,12 @@ def goalkeeper_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
         ),
         "feetorientation": RewardTermCfg(
             func=gk_mdp.feetorientation,
-            weight=3.0,
+            weight=0.5,
+            params={"asset_cfg": _FEET_CFG},
+        ),
+        "foot_ang_vel_xy": RewardTermCfg(
+            func=gk_mdp.foot_ang_vel_xy,
+            weight=-0.5,
             params={"asset_cfg": _FEET_CFG},
         ),
         # --- post-save recovery (active only when ball is behind) ---
@@ -417,7 +422,7 @@ def goalkeeper_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
         # --- stability ---
         "ang_vel_xy": RewardTermCfg(
             func=gk_mdp.ang_vel_xy_l2,
-            weight=-0.1,
+            weight=-0.5,
             params={"asset_cfg": _ROBOT_CFG},
         ),
         "ang_vel_z": RewardTermCfg(

@@ -516,6 +516,21 @@ def feetorientation(
     return torch.exp(-sigma * err)
 
 
+def foot_ang_vel_xy(
+    env: "ManagerBasedRlEnv",
+    asset_cfg: SceneEntityCfg = _DEFAULT_FEET_CFG,
+) -> torch.Tensor:
+    """Sum of squared foot roll+pitch angular velocity across both feet.
+
+    Penalises active foot rotation in XY (heel-first landings, ankle twist during
+    dives). Orthogonal to feetorientation: that measures static tilt; this measures
+    how fast the foot is rotating into or out of a tilt.
+    """
+    robot: Entity = env.scene[asset_cfg.name]
+    foot_ang_vel_w = robot.data.body_link_ang_vel_w[:, asset_cfg.body_ids, :]  # [B, 2, 3]
+    return torch.sum(foot_ang_vel_w[:, :, :2] ** 2, dim=-1).sum(dim=-1)
+
+
 def postorientation(
     env: "ManagerBasedRlEnv",
     ball_name: str,
@@ -939,16 +954,19 @@ def feet_slippage(
     preventing the force needed for stopball (delta_vx > 1 m/s).
     The trailing foot is NOT gated — it must remain non-sliding throughout.
 
-    Sliding is measured as the horizontal (XY) speed of the actual ground contact
-    point, not the foot body center.  Rigid-body kinematics:
+    Sliding is measured as the worst-case horizontal speed across two contact
+    points per foot: the center-bottom and the toe tip.  Rigid-body kinematics:
         v_contact = v_body + ω × r_contact
-    where r_contact points from the foot body origin to the contact patch.
-    The foot capsules sit at z=-0.01 (local) with radius 0.02, so the contact
-    point is 0.03 m below the foot body origin in foot-local frame.  This
-    correctly captures the edge-dragging that occurs when the foot is tilted.
+    Center-bottom: r = (0, 0, -0.03) in foot-local (capsule z=-0.01 + radius 0.02).
+    Toe-tip: r = (0.105, 0.01, -0.03) in foot-local (foot4 forward tip + radius).
+    When the trailing foot tilts toe-down, the center-bottom sample underestimates
+    the actual toe sliding velocity; the toe-tip sample catches it.
     Weight: +3.0.
     """
-    _CONTACT_Z_LOCAL = 0.03  # capsule endpoint z (-0.01) + radius (0.02), in metres
+    _CONTACT_Z_LOCAL = 0.03  # capsule z (-0.01) + radius (0.02)
+    # foot4 extends to x=+0.105, y=+0.01 in foot-local frame
+    _TOE_X_LOCAL = 0.105
+    _TOE_Y_LOCAL = 0.01
 
     sensor: ContactSensor = env.scene["feet_contact"]
     found = sensor.data.found  # [B, 8]
@@ -961,19 +979,31 @@ def feet_slippage(
     foot_omega_w = robot.data.body_link_ang_vel_w[:, asset_cfg.body_ids, :]   # [B, 2, 3]
     foot_quat_w  = robot.data.body_link_quat_w[:, asset_cfg.body_ids, :]      # [B, 2, 4]
 
-    # Contact point offset in foot-local frame: straight down to the capsule bottom
-    r_local = torch.zeros_like(foot_vel_w)   # [B, 2, 3]
-    r_local[:, :, 2] = -_CONTACT_Z_LOCAL
+    def _contact_speed(r_local_offset: torch.Tensor) -> torch.Tensor:
+        """Horizontal speed at a contact point given foot-local offset [B,2,3]."""
+        r_world = quat_apply(
+            foot_quat_w.reshape(-1, 4),
+            r_local_offset.reshape(-1, 3),
+        ).reshape(env.num_envs, 2, 3)
+        v = foot_vel_w + torch.cross(foot_omega_w, r_world, dim=-1)
+        return torch.norm(v[:, :, :2], dim=-1)  # [B, 2]
 
-    # Rotate offset to world frame and compute contact-point velocity
-    r_world = quat_apply(
-        foot_quat_w.reshape(-1, 4),
-        r_local.reshape(-1, 3),
-    ).reshape(env.num_envs, 2, 3)
-    v_contact = foot_vel_w + torch.cross(foot_omega_w, r_world, dim=-1)  # [B, 2, 3]
+    # Center-bottom contact point
+    r_center = torch.zeros_like(foot_vel_w)
+    r_center[:, :, 2] = -_CONTACT_Z_LOCAL
+    speed_center = _contact_speed(r_center)
 
-    # Penalise only horizontal sliding — vertical motion (lifting/landing) is fine
-    foot_speed = torch.norm(v_contact[:, :, :2], dim=-1)                  # [B, 2]
+    # Toe-tip contact point (left foot4 / right foot3 end, worst case for tilted foot).
+    # Left foot (idx 0): foot4 tip at y=+0.01; right foot (idx 1): foot3 tip at y=-0.01.
+    r_toe = torch.zeros_like(foot_vel_w)
+    r_toe[:, :, 0] = _TOE_X_LOCAL
+    r_toe[:, 0, 1] = _TOE_Y_LOCAL    # left foot
+    r_toe[:, 1, 1] = -_TOE_Y_LOCAL   # right foot (mirrored)
+    r_toe[:, :, 2] = -_CONTACT_Z_LOCAL
+    speed_toe = _contact_speed(r_toe)
+
+    # Take the worst-case (highest) sliding speed across the two sample points
+    foot_speed = torch.maximum(speed_center, speed_toe)                      # [B, 2]
 
     ball: Entity = env.scene[ball_name]
     foot_pos_w = robot.data.body_link_pos_w[:, asset_cfg.body_ids, :]      # [B, 2, 3]
