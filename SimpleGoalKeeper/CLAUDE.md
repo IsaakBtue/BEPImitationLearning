@@ -196,6 +196,39 @@ uv run sgk_play Mjlab-BeyondAMP-Goalkeeper-T1 --agent zero --num-envs 1
 uv run sgk_play Mjlab-BeyondAMP-Goalkeeper-T1 --checkpoint-file logs/rsl_rl/simple_goalkeeper/<run>/model_500.pt
 ```
 
+## Reading TensorBoard / WandB Episode Reward Metrics
+
+mjlab's `reward_manager` logs `Episode_Reward/X` with **two scaling factors** baked in:
+
+```
+Episode_Reward/X = (Σ over episode of [reward_fn(obs) × weight × dt]) / max_episode_length_s
+```
+
+Where `dt = 0.02 s` and `max_episode_length_s = 3.0 s` (150 steps).
+
+**The logged value is NOT a raw per-episode sum.** It is divided by `max_episode_length_s`, so it represents "reward per second" rather than "reward per episode". This is done in `reward_manager.py`:
+```python
+value = value * term_cfg.weight * scale          # scale = dt = 0.02
+self._episode_sums[name] += value
+# on episode end:
+extras["Episode_Reward/" + key] = episodic_sum_avg / self._env.max_episode_length_s
+```
+
+### Converting logged values to meaningful metrics
+
+**One-shot rewards** (fire once per episode: `softstop`, `stopball`, `single_foot_save`):
+```
+event_rate = logged_value × max_episode_length_s / (weight × dt)
+           = logged_value × 3.0 / (weight × 0.02)
+```
+Example: softstop logged = 1.09, weight = 210 → rate = 1.09 × 3.0 / (210 × 0.02) = **77.9%** of episodes
+
+**Per-step rewards** (e.g., `ang_vel_xy`, `feetorientation`): logged value ≈ average per-step value × weight (already divided by max_episode_length_s cancels the dt accumulation for continuous rewards).
+
+**Binary termination-linked rewards** (e.g., `penalize_sharpcontact` at 1700 N): same formula as one-shot, since they also fire on at most one step per episode.
+
+This scaling is the source of the "softstop ≈ 1.09 looks tiny" confusion — 1.09 is actually a 78% save rate. Always apply the formula before interpreting one-shot metrics.
+
 ## Standalone Constraint
 
 **No runtime imports from `Imitationlearningbooster`, `BoosterT1mjlab`, or `HandWavingMotion`.**
