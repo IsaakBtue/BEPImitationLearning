@@ -349,7 +349,7 @@ def goalkeeper_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
         ),
         "feetorientation": RewardTermCfg(
             func=gk_mdp.feetorientation,
-            weight=0.5,
+            weight=3.0,
             params={"asset_cfg": _FEET_CFG},
         ),
         "foot_ang_vel_xy": RewardTermCfg(
