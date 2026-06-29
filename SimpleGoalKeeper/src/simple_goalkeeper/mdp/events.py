@@ -639,7 +639,7 @@ class ball_difficulty_curriculum:
         self._step_size      = p.get("step_size",      0.01)
         self._update_interval = p.get("update_interval", 500)
         self._ep_len_divisor  = p.get("ep_len_divisor",   50)
-        self._last_update     = 0
+        self._last_update     = -(self._update_interval)
         if not hasattr(env, "_ball_difficulty"):
             env._ball_difficulty = 0.0
 
