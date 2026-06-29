@@ -1,1 +1,2 @@
-cd /home/robocup/IsaakB/BEPImitationLearning/SimpleGoalKeeper && uv run sgk_train Mjlab-BeyondAMP-Goalkeeper-T1 --num-envs 4096
+cd /home/ibouwmeest/BEPImitationLearning/SimpleGoalKeeper
+uv run sgk_train Mjlab-BeyondAMP-Goalkeeper-T1 --num-envs 4096

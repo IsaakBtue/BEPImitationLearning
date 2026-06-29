@@ -31,13 +31,29 @@ class WandbSummaryWriter(SummaryWriter):
             },
             dir=os.path.dirname(log_dir),
         )
+        # Buffer all add_scalar calls for the same step and flush them in a
+        # single wandb.log() call.  Separate wandb.log() calls for the same
+        # iteration would auto-increment WandB's internal step counter, making
+        # metrics for the same training iteration appear at different x positions
+        # in the WandB UI when the default "Step" axis is used.
+        self._wandb_buffer: dict = {}
+        self._wandb_step: int | None = None
+
+    def _flush_wandb(self) -> None:
+        if self._wandb_buffer:
+            try:
+                wandb.log(self._wandb_buffer, step=self._wandb_step)
+            except Exception as e:
+                print(f"[WARN] W&B logging failed: {e}")
+            self._wandb_buffer = {}
 
     def add_scalar(self, tag, scalar_value, global_step=None, walltime=None, new_style=False):
         super().add_scalar(tag, scalar_value, global_step=global_step, walltime=walltime, new_style=new_style)
-        try:
-            wandb.log({tag: scalar_value}, step=global_step)
-        except Exception as e:
-            print(f"[WARN] W&B logging failed for {tag}: {e}")
+        if global_step != self._wandb_step:
+            self._flush_wandb()
+            self._wandb_step = global_step
+        self._wandb_buffer[tag] = scalar_value
 
     def stop(self):
+        self._flush_wandb()
         wandb.finish()

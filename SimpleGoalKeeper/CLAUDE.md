@@ -32,6 +32,10 @@ This rule exists because G1 is the only proven working reference. Every undocume
 
 **Training and play ball spawn parameters must always match.** Whenever `dist_range`, `speed_range`, `y_start_range`, `y_end_range`, or `spawn_z` are changed in the training `reset_ball` block (`goalkeeper_env_cfg.py` around line 515), the play block (around line 589) must be updated to the same values in the same commit. A policy evaluated on a different distribution than it was trained on gives misleading results.
 
+## Git Commit & Push Rule
+
+**Every push must include ALL modified files** (`git add -A`) unless the user explicitly says otherwise. Never leave uncommitted working-tree changes behind when pushing.
+
 ## Change Approval Workflow
 
 **Before making ANY code changes**, you MUST:
@@ -70,6 +74,9 @@ This prevents accidental modifications, keeps the user informed of scope, and en
 | Episode length (training) | ILB: 3 s | **SGK: 3 s** (was 6 s) | **FIX 2026-06-20:** 6 s was wasted compute. The `~behind` gate zeros `footreach` once the ball is deflected (~75 steps in), so the remaining 225 steps of a 6 s episode contributed zero footreach and diluted `stopball`'s per-step signal. At 6 s (300 steps), max stopball/step = weight(100)/300 = 0.33. At 3 s (150 steps), max = 100/150 = 0.67 — matching the observed 0.7 from near-100% save rate. Matches ILB episode_length_s=3.0. `goalkeeper_env_cfg.py:episode_length_s`. |
 | **RSI split** | 100% RSI (previous SGK) | **80% RSI + 20% HOME_KEYFRAME standing** | **FIX 2026-06-20:** Mirrors ILB `reset_robot_rsi` 80/20 split. Pure 100% RSI caused AMP artefact: after a diving save, the next episode's RSI mid-motion start looks like a discontinuous jump from a dive pose — the discriminator penalises this as an impossible transition. 20% standing resets give AMP a natural standing→step transition that IS in the reference data. Also ensures the policy learns starting from standing (deployment scenario). `events.py:MotionResetManager.reset`. |
 | `penalize_sharpcontact` threshold | 1000 N | **1200 N** | **FIX 2026-06-20:** 1000 N was too sensitive — normal rapid lateral stepping during ball interception triggered the penalty, preventing the robot from moving aggressively. At 1000 N, the training run (iter 7143 and 18944) showed catastrophic crashes where the penalty fired continuously (every step of a 150-step episode). 1200 N still penalises ground-slamming but tolerates normal stepping dynamics. `rewards.py:penalize_sharpcontact`, `goalkeeper_env_cfg.py`. |
+| `ball_difficulty` curriculum `ep_len_divisor` | 48 | **47** | **FIX 2026-06-29:** `ball_difficulty_curriculum` used divisor 48 while all reward curricula (softstop, footreach, stopball) used 47. This caused ball difficulty to advance at a slightly different episode-length threshold (ep_len=48 vs 47 for cu=1), making the curves appear desynchronised in WandB. Changed to 47 to match reward curricula exactly. `goalkeeper_env_cfg.py`. |
+| WandB logging | N/A | **Batch per iteration (single `wandb.log` call)** | **FIX 2026-06-29:** `WandbSummaryWriter` called `wandb.log({tag: val}, step=it)` separately for EACH metric. WandB's internal step counter auto-increments on every `wandb.log()` call, so metrics for the same training iteration appeared at different WandB x-axis positions. Fixed by buffering all `add_scalar` calls for the same step and flushing in a single `wandb.log(all_metrics, step=it)` call. `beyondAMP/source/rsl_rl_amp/rsl_rl_amp/utils/wandb_utils.py`. |
+| `airborne_at_save` reward | N/A | **Removed 2026-06-29** | **FIX 2026-06-29:** User request. The reward optimised for the correct foot being airborne at the save moment, but this is a secondary quality metric that adds training noise without clear benefit at early stages. Removed the `RewardTermCfg` and `airborne_at_save_curriculum` from config. `goalkeeper_env_cfg.py`. |
 | Effector type | Hands | Feet only | Phase 1 scope. |
 
 ## Frame Convention
