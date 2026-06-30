@@ -719,7 +719,7 @@ def reset_ball_rolling(
     d = float(getattr(env, "_ball_difficulty", 1.0))
     d = max(0.0, min(1.0, d))
 
-    _EASY_DIST_R      = (2.0, 2.0)
+    _EASY_DIST_R      = (1.5, 2.0)
     _EASY_Y_ROLL      = (-0.05, 0.05)
     _EASY_T_FLIGHT_R  = (0.9, 1.3)   # easy: long flight → slow balls; hard: 0.7–1.1 s
 
