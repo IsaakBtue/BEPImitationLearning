@@ -8,7 +8,6 @@ import torch
 
 from mjlab.tasks.tracking.mdp.commands import MotionCommand, MotionCommandCfg, MotionLoader
 
-
 class GhostMotionCommand(MotionCommand):
     """Shows the reference motion ghost in world space without RSI teleportation.
 

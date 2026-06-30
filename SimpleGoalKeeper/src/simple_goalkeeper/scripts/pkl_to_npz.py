@@ -209,10 +209,9 @@ def convert_one(
     # Pass 1: find minimum capsule contact point height for z-correction.
     # Uses geom contact surface (capsule center Z − radius) rather than foot body center.
     # When the foot is tilted during a step, the body center stays near Z=0 while the
-    # actual contact surface can be 35–47 mm underground. Targeting contact surface at
-    # _CONTACT_Z_TARGET matches the _FOOT_CONTACT_BELOW_BODY runtime offset in events.py
-    # so the floor sits at Z=0 after RSI resets.
-    _CONTACT_Z_TARGET = -0.030  # must match _FOOT_CONTACT_BELOW_BODY in events.py
+    # actual contact surface can be 35–47 mm underground. Target = 0.0 so the lowest
+    # contact point sits exactly at floor level in the output NPZ.
+    _CONTACT_Z_TARGET = 0.0
     min_contact_z = float("inf")
     for i in range(T_out):
         mdata.qpos[:3] = root_pos_r[i]

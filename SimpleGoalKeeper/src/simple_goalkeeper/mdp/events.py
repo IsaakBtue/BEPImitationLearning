@@ -57,7 +57,9 @@ def _yaw_only_quat(q_wxyz: torch.Tensor) -> torch.Tensor:
     return out
 
 
-_FOOT_CONTACT_BELOW_BODY = 0.030  # foot capsule center -0.01 + radius 0.02 below foot body
+# Z offset baked into NPZ files (2026-06-30): body_pos_w Z was shifted +0.030 m
+# in all NPZ files so the foot capsule contact surface sits at floor level.
+# No runtime correction needed here anymore.
 
 # Lateral crossing-Y thresholds for 4-tier distance-conditioned RSI.
 _SINGLE_THRESH = 0.30   # |cross_y| < 0.30          → single  (standing reset)
@@ -180,8 +182,7 @@ class MotionResetManager:
         root_pos  = pool["root_pos"][frame_ids]
         root_quat = pool["root_quat"][frame_ids]
         positions = env.scene.env_origins[ids].clone()
-        # pkl_to_npz aligns foot_link BODY to Z=0; capsule contact is 0.03 m lower.
-        positions[:, 2] = root_pos[:, 2] + _FOOT_CONTACT_BELOW_BODY
+        positions[:, 2] = root_pos[:, 2]  # Z offset baked into NPZ (2026-06-30)
         robot.write_root_link_pose_to_sim(
             torch.cat([positions, root_quat], dim=-1), env_ids=ids
         )
