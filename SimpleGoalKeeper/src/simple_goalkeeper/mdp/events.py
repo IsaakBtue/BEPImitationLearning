@@ -691,6 +691,23 @@ def sharpforce_termination(
     return mean_force > max_contact_force
 
 
+def shank_height_termination(
+    env: "ManagerBasedRlEnv",
+    min_height: float = 0.24,
+    asset_cfg: "SceneEntityCfg" = SceneEntityCfg("robot", body_names=("Shank_Left", "Shank_Right")),
+) -> torch.Tensor:
+    """Terminate when either knee (shank body origin) drops below min_height above floor.
+
+    Catches deep single-step lunges that the kneeheight penalty alone cannot prevent.
+    Fires when the worst-case shank across left/right is below threshold.
+    """
+    robot: Entity = env.scene[asset_cfg.name]
+    shank_pos_w = robot.data.body_link_pos_w[:, asset_cfg.body_ids, :]  # (N, 2, 3)
+    floor_z = env.scene.env_origins[:, 2]
+    shank_z = shank_pos_w[:, :, 2] - floor_z[:, None]                  # (N, 2)
+    return shank_z.min(dim=-1).values < min_height
+
+
 def reset_ball_rolling(
     env: "ManagerBasedRlEnv",
     env_ids: torch.Tensor | None,

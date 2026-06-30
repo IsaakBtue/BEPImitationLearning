@@ -387,7 +387,7 @@ def goalkeeper_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
         "penalize_kneeheight": RewardTermCfg(
             func=gk_mdp.penalize_kneeheight,
             weight=-100.0,
-            params={"min_height": 0.15, "asset_cfg": _KNEE_BODY_CFG},
+            params={"min_height": 0.255, "asset_cfg": _KNEE_BODY_CFG},
         ),
         "penalize_sharpcontact": RewardTermCfg(
             func=gk_mdp.penalize_sharpcontact,
@@ -520,7 +520,7 @@ def goalkeeper_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
             "ball_name":      BALL_NAME,
             "dist_range":     (1.5, 3.5),
             "y_start_range":  (-0.3, 0.3),
-            "y_end_range":    (-1.0, 1.0),
+            "y_end_range":    (-0.9, 0.9),
             "t_flight_range": (0.7, 1.1),
             "spawn_z":        0.12,
         },
@@ -562,6 +562,11 @@ def goalkeeper_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
             params={"max_contact_force": 2500.0},
             time_out=False,
         ),
+        "shank_height": TerminationTermCfg(
+            func=gk_mdp.shank_height_termination,
+            params={"min_height": 0.24, "asset_cfg": _KNEE_BODY_CFG},
+            time_out=False,
+        ),
     }
 
     # ------------------------------------------------------------------
@@ -594,7 +599,7 @@ def goalkeeper_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
                 "ball_name":     BALL_NAME,
                 "dist_range":    (1.5, 3.5),
                 "y_start_range": (-0.3, 0.3),
-                "y_end_range":   (-1.0, 1.0),
+                "y_end_range":   (-0.9, 0.9),
                 "t_flight_range": (0.7, 1.1),
                 "spawn_z":       0.12,
             },
