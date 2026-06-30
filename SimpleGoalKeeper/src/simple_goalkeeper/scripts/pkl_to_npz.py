@@ -195,22 +195,37 @@ def convert_one(
 
     foot_names = ["left_foot_link", "right_foot_link"]
     foot_ids = [mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_BODY, n) for n in foot_names]
+    foot_body_id_set = set(foot_ids)
+
+    # Capsule collision geoms on foot bodies (type 3 = mjGEOM_CAPSULE).
+    foot_capsule_geom_ids = [
+        i for i in range(model.ngeom)
+        if model.geom_bodyid[i] in foot_body_id_set and model.geom_type[i] == 3
+    ]
 
     # headless XML has 21 joints (no head) → skip first 2 DOFs (AAHead_yaw, Head_pitch)
     dof_headless = dof_pos_r[:, _HEAD_JOINT_COUNT:]  # (T, 21)
 
-    # Pass 1: find minimum foot height for z-correction
-    min_foot_z = float("inf")
+    # Pass 1: find minimum capsule contact point height for z-correction.
+    # Uses geom contact surface (capsule center Z − radius) rather than foot body center.
+    # When the foot is tilted during a step, the body center stays near Z=0 while the
+    # actual contact surface can be 35–47 mm underground. Targeting contact surface at
+    # _CONTACT_Z_TARGET matches the _FOOT_CONTACT_BELOW_BODY runtime offset in events.py
+    # so the floor sits at Z=0 after RSI resets.
+    _CONTACT_Z_TARGET = -0.030  # must match _FOOT_CONTACT_BELOW_BODY in events.py
+    min_contact_z = float("inf")
     for i in range(T_out):
         mdata.qpos[:3] = root_pos_r[i]
         mdata.qpos[3:7] = root_rot_wxyz[i]
         mdata.qpos[7:] = dof_headless[i]
         mujoco.mj_kinematics(model, mdata)
-        for bid in foot_ids:
-            min_foot_z = min(min_foot_z, float(mdata.xpos[bid, 2]))
+        for gid in foot_capsule_geom_ids:
+            contact_z = float(mdata.geom_xpos[gid, 2]) - float(model.geom_size[gid, 0])
+            min_contact_z = min(min_contact_z, contact_z)
 
-    root_pos_r[:, 2] -= min_foot_z
-    print(f"  z-correction: {-min_foot_z:+.4f} m")
+    z_shift = min_contact_z - _CONTACT_Z_TARGET
+    root_pos_r[:, 2] -= z_shift
+    print(f"  z-correction: {-z_shift:+.4f} m  (min contact was {min_contact_z:+.4f} m)")
 
     # Pass 2: FK to extract body kinematics.
     # Exclude world body (index 0) so local indices 0..nbody-2 map to Trunk..right_foot_link.
@@ -259,19 +274,24 @@ def main(
     output_dir: str = str(_HERE.parent / "motions" / "data"),
     output_fps: int = 50,
     speed_factor: float = 2.0,
+    names: list[str] | None = None,
 ) -> None:
-    """Convert all *.pkl in input_dir to NPZ files in output_dir.
+    """Convert *.pkl files in input_dir to NPZ files in output_dir.
 
     speed_factor: time-compression applied to every clip (default 2.0).
-    Source PKL files from this project are 30 fps slow-walking recordings.
-    2× compression doubles joint velocities, matching the faster movements
-    needed for goalkeeper saves.  Pass --speed-factor 1.0 to disable.
+    names: optional list of PKL stems to convert (e.g. LeftDoubleStep_own_booster_t1).
+           If omitted, all *.pkl files in input_dir are converted.
     """
     in_dir = Path(input_dir)
     out_dir = Path(output_dir)
     pkl_files = sorted(in_dir.glob("*.pkl"))
     if not pkl_files:
         raise FileNotFoundError(f"No .pkl files in {in_dir}")
+    if names is not None:
+        name_set = set(names)
+        pkl_files = [p for p in pkl_files if p.stem in name_set]
+        if not pkl_files:
+            raise FileNotFoundError(f"None of {name_set} found in {in_dir}")
     print(f"Converting {len(pkl_files)} files @ {output_fps} fps  speed_factor={speed_factor}× → {out_dir}")
     for pkl in pkl_files:
         convert_one(pkl, out_dir / (pkl.stem + ".npz"), output_fps, speed_factor)

@@ -60,10 +60,10 @@ def _yaw_only_quat(q_wxyz: torch.Tensor) -> torch.Tensor:
 _FOOT_CONTACT_BELOW_BODY = 0.030  # foot capsule center -0.01 + radius 0.02 below foot body
 
 # Lateral crossing-Y thresholds for 4-tier distance-conditioned RSI.
-_SINGLE_THRESH = 0.35   # |cross_y| < 0.35          → single  (standing reset)
-_DOUBLE_THRESH = 0.65   # 0.35 ≤ |cross_y| < 0.65   → double  (MediumStep, SafeMedium)
-_TRIPLE_THRESH = 0.85   # 0.65 ≤ |cross_y| < 0.85   → triple  (FarStep, SafeFar)
-                        # |cross_y| ≥ 0.85           → wide    (DoubleStep, TripleStep)
+_SINGLE_THRESH = 0.30   # |cross_y| < 0.30          → single  (standing reset)
+_DOUBLE_THRESH = 0.50   # 0.30 ≤ |cross_y| < 0.50   → double  (MediumStep, SafeMedium)
+_TRIPLE_THRESH = 0.70   # 0.50 ≤ |cross_y| < 0.70   → triple  (FarStep, SafeFar)
+                        # |cross_y| ≥ 0.70           → wide    (DoubleStep, TripleStep)
 
 # Exact filename stem (lowercased) → (side, pool) mapping.
 # Name-specific so adding new files never silently mis-classifies.
