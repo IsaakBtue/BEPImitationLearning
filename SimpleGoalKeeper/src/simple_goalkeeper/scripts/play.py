@@ -133,6 +133,13 @@ class AnalyticsPolicy:
         lf_slip = foot_vel_w[0, :2].norm().item() if lf_contact else 0.0
         rf_slip = foot_vel_w[1, :2].norm().item() if rf_contact else 0.0
 
+        # Base (Trunk root) and shank heights above floor.
+        base_h = (robot.data.root_link_pos_w[0, 2] - floor_z).item()
+        shank_ids = robot.find_bodies(["Shank_Left", "Shank_Right"])[0]
+        shank_pos_w = robot.data.body_link_pos_w[0, shank_ids, :]  # [2, 3]
+        lsh_h = (shank_pos_w[0, 2] - floor_z).item()
+        rsh_h = (shank_pos_w[1, 2] - floor_z).item()
+
         ball_speed = bv.norm().item()
 
         # Interception point in robot's local frame.
@@ -169,6 +176,7 @@ class AnalyticsPolicy:
             f"int(x={int_x:+5.2f} y={int_y:+5.2f}) | "
             f"dvx={delta_vx:+5.2f} | "
             f"LF={lf_h:.3f}({lf_tag}) RF={rf_h:.3f}({rf_tag}) | "
+            f"base={base_h:.3f} Lsh={lsh_h:.3f} Rsh={rsh_h:.3f} | "
             f"{flags}",
             end="",
             flush=True,
