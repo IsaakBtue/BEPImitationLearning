@@ -62,10 +62,10 @@ def _yaw_only_quat(q_wxyz: torch.Tensor) -> torch.Tensor:
 # No runtime correction needed here anymore.
 
 # Lateral crossing-Y thresholds for 4-tier distance-conditioned RSI.
-_SINGLE_THRESH = 0.30   # |cross_y| < 0.30          → single  (standing reset)
-_DOUBLE_THRESH = 0.50   # 0.30 ≤ |cross_y| < 0.50   → double  (MediumStep, SafeMedium)
-_TRIPLE_THRESH = 0.70   # 0.50 ≤ |cross_y| < 0.70   → triple  (FarStep, SafeFar)
-                        # |cross_y| ≥ 0.70           → wide    (DoubleStep, TripleStep)
+_SINGLE_THRESH = 0.20   # |cross_y| < 0.20          → single  (standing reset)
+_DOUBLE_THRESH = 0.40   # 0.20 ≤ |cross_y| < 0.40   → double  (MediumStep, SafeMedium)
+_TRIPLE_THRESH = 0.60   # 0.40 ≤ |cross_y| < 0.60   → triple  (FarStep, SafeFar)
+                        # |cross_y| ≥ 0.60           → wide    (DoubleStep, TripleStep)
 
 # Exact filename stem (lowercased) → (side, pool) mapping.
 # Name-specific so adding new files never silently mis-classifies.
