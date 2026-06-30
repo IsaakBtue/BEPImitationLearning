@@ -400,7 +400,7 @@ def goalkeeper_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
         ),
         "feet_slippage": RewardTermCfg(
             func=gk_mdp.feet_slippage,
-            weight=3.0,
+            weight=5.0,
             params={"ball_name": BALL_NAME, "asset_cfg": _FEET_CFG},
         ),
         # --- joint limits ---

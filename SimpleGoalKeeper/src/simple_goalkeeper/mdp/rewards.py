@@ -1021,4 +1021,4 @@ def feet_slippage(
     contactvel_per_foot = foot_speed * in_contact                           # [B, 2]
     contactvel_per_foot = contactvel_per_foot.masked_fill(suppress, 0.0)
     contactvel = contactvel_per_foot.sum(dim=-1)
-    return torch.exp(-10.0 * contactvel)
+    return torch.exp(-50.0 * contactvel)
