@@ -213,30 +213,42 @@ class MotionResetManager:
         """Literal port of Humanoid-Goalkeeper G1's continue_keep mechanism.
 
         Source: Humanoid-Goalkeeper/legged_gym/legged_gym/envs/base/legged_robot.py
-        _reset_dofs, lines 657-682 (read-only upstream reference, not modified):
+        _reset_dofs, lines 657-682, with G1's ACTIVE config values from
+        legged_gym/legged_gym/envs/g1/g1_29_config.py:279-282
+        (continue_keep=True, randomize_initial_joint_pos=True,
+        initial_joint_pos_scale=[0.5, 1.5], initial_joint_pos_offset=[-0.1, 0.1]);
+        both files are read-only upstream references, not modified:
 
+            dof_upper = self.dof_pos_limits[:, 1].view(1, -1)
+            dof_lower = self.dof_pos_limits[:, 0].view(1, -1)
             if self.cfg.domain_rand.continue_keep and torch.rand(1).item() > 0.2:
                 self.dof_pos[env_ids] = self.dof_pos[torch.randint(0, self.num_envs, (len(env_ids),), device=...)]
             else:
-                self.dof_pos[env_ids] = self.standpos * torch.ones(...)
+                init_dos_pos = self.standpos * torch_rand_float(0.5, 1.5, (len(env_ids), self.num_dof), device=...)
+                init_dos_pos += torch_rand_float(-0.1, 0.1, (len(env_ids), self.num_dof), device=...)
+                self.dof_pos[env_ids] = torch.clip(init_dos_pos, dof_lower, dof_upper)
             self.dof_vel[env_ids] = 0.
 
         One coin flip per reset() call decides ALL of env_ids together — this
         is G1's own behavior (`torch.rand(1)`, not one flip per env). On the
         rsi_fraction branch, dof_pos is copied from `torch.randint(0, num_envs, ...)`:
         ANY currently-running env, with no side/tier matching, no exclusion of
-        the current reset batch, and no minimum-age check — G1 has none of
-        these either; its donor pool is the full population, so any
-        cross-contamination from same-batch resets is diluted away for free.
-        This deliberately replaces the side/tier-conditioned pool system
-        this project used previously — see docs/superpowers/plans/
-        2026-07-01-live-env-rsi.md for the full comparison and the explicit
-        decision to drop tier-matching in favor of G1 fidelity.
+        the current reset batch, no minimum-age check, and — matching G1
+        exactly — NO clamping: G1's `torch.clip` only appears in the OTHER
+        branch, never on the continue_keep copy. This deliberately replaces
+        the side/tier-conditioned pool system this project used previously —
+        see docs/superpowers/plans/2026-07-01-live-env-rsi.md for the full
+        comparison, including a fidelity audit that caught the clamp being
+        on the wrong branch and this else-branch's randomization being
+        missing entirely in an earlier version of this port.
 
         dof_vel is always zeroed, matching G1's unconditional
         `self.dof_vel[env_ids] = 0.` (not just on the continue_keep branch).
         Root pose/velocity are untouched here in both branches — reset_base
-        handles them, matching G1's separate _reset_root_states.
+        handles them, matching G1's separate _reset_root_states (note: G1's
+        _reset_root_states also randomizes root velocity ±0.3 unconditionally
+        on every reset, which this project's reset_base does not — a known,
+        separate divergence outside reset_from_motion_data's scope).
         """
         if env_ids is None:
             env_ids = torch.arange(env.num_envs, device=env.device, dtype=torch.int32)
@@ -249,10 +261,14 @@ class MotionResetManager:
         if torch.rand(1, device=env.device).item() > (1.0 - rsi_fraction):
             donor_idx = torch.randint(0, env.num_envs, (n,), device=env.device)
             joint_pos = robot.data.joint_pos[donor_idx].clone()
-            limits = robot.data.soft_joint_pos_limits[env_ids.long()]
-            joint_pos.clamp_(limits[..., 0], limits[..., 1])
         else:
-            joint_pos = robot.data.default_joint_pos[env_ids].clone()
+            default_pos = robot.data.default_joint_pos[env_ids]
+            num_dof = default_pos.shape[-1]
+            scale = sample_uniform(0.5, 1.5, (n, num_dof), env.device)
+            offset = sample_uniform(-0.1, 0.1, (n, num_dof), env.device)
+            joint_pos = default_pos * scale + offset
+            limits = robot.data.joint_pos_limits[env_ids.long()]
+            joint_pos = joint_pos.clamp(limits[..., 0], limits[..., 1])
 
         joint_vel = torch.zeros_like(joint_pos)
         robot.write_joint_state_to_sim(joint_pos, joint_vel, env_ids=env_ids)
@@ -269,10 +285,17 @@ def reset_from_motion_data(
     env_ids: torch.Tensor | None,
     asset_cfg: SceneEntityCfg = _DEFAULT_ROBOT_CFG,
 ) -> None:
-    """Reset event: 50% RSI from NPZ motion frame, 50% HOME_KEYFRAME standing pose."""
+    """Reset event: continue_keep-style donor copy vs default pose.
+
+    FIX 2026-07-01: this wrapper hardcoded rsi_fraction=0.5 (a silent 50/50
+    split), diverging from both G1's actual 80/20 (`torch.rand(1).item() > 0.2`,
+    legged_robot.py:669) and this project's own reset()/CLAUDE.md-documented
+    80/20 intent. Caught by an independent fidelity audit — see
+    docs/superpowers/plans/2026-07-01-live-env-rsi.md.
+    """
     mgr = MotionResetManager.get()
     mgr.init(env)
-    mgr.reset(env, env_ids, asset_cfg, rsi_fraction=0.5)
+    mgr.reset(env, env_ids, asset_cfg, rsi_fraction=0.8)
 
 
 def reset_ball_local_frame(

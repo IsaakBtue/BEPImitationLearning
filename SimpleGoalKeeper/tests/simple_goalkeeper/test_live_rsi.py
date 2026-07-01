@@ -2,15 +2,16 @@ import torch
 
 
 class _FakeRobotData:
-    def __init__(self, joint_pos, default_joint_pos, soft_limits):
+    def __init__(self, joint_pos, default_joint_pos, soft_limits, hard_limits):
         self.joint_pos = joint_pos
         self.default_joint_pos = default_joint_pos
         self.soft_joint_pos_limits = soft_limits
+        self.joint_pos_limits = hard_limits
 
 
 class _FakeRobot:
-    def __init__(self, joint_pos, default_joint_pos, soft_limits):
-        self.data = _FakeRobotData(joint_pos, default_joint_pos, soft_limits)
+    def __init__(self, joint_pos, default_joint_pos, soft_limits, hard_limits):
+        self.data = _FakeRobotData(joint_pos, default_joint_pos, soft_limits, hard_limits)
         self.written_pos = None
         self.written_vel = None
         self.written_ids = None
@@ -44,11 +45,12 @@ class _FakeEnv:
         self.scene = _Scene(robot)
 
 
-def _make_env(num_envs, num_dof, joint_values):
+def _make_env(num_envs, num_dof, joint_values, hard_bound=10.0):
     """joint_values: (num_envs, num_dof) tensor of each env's CURRENT live dof_pos."""
     default_joint_pos = torch.zeros(num_envs, num_dof)
     soft_limits = torch.tensor([[-3.0, 3.0]] * num_dof).unsqueeze(0).repeat(num_envs, 1, 1)
-    robot = _FakeRobot(joint_values, default_joint_pos, soft_limits)
+    hard_limits = torch.tensor([[-hard_bound, hard_bound]] * num_dof).unsqueeze(0).repeat(num_envs, 1, 1)
+    robot = _FakeRobot(joint_values, default_joint_pos, soft_limits, hard_limits)
     env = _FakeEnv(num_envs=num_envs, robot=robot)
     return env, robot
 
@@ -86,18 +88,23 @@ def test_reset_dof_vel_always_zero_on_both_branches():
     assert torch.allclose(robot.written_vel, torch.zeros(1, num_dof))
 
 
-def test_reset_rsi_fraction_1_copies_dof_pos_from_another_live_env_and_clamps(monkeypatch):
+def test_reset_rsi_fraction_1_copies_dof_pos_from_another_live_env_without_clamping(monkeypatch):
+    """G1's torch.clip only appears in the OTHER (else) branch — the
+    continue_keep donor-copy branch never clips, since a live env's dof_pos
+    is already physically valid. Use a donor value outside even the FAKE
+    hard limit to prove no clamping of any kind happens here."""
     from simple_goalkeeper.mdp.events import MotionResetManager
 
     num_envs, num_dof = 4, 3
-    # Env 1 (the donor torch.randint is forced to pick) is out of joint range.
+    # Env 1 (the donor torch.randint is forced to pick) is outside both the
+    # soft [-3, 3] AND the fake hard [-3, 3] bound used by _make_env's default.
     joint_values = torch.tensor([
         [0.0, 0.0, 0.0],
         [5.0, 5.0, 5.0],
         [0.0, 0.0, 0.0],
         [0.0, 0.0, 0.0],
     ])
-    env, robot = _make_env(num_envs, num_dof, joint_values)
+    env, robot = _make_env(num_envs, num_dof, joint_values, hard_bound=3.0)
     mgr = MotionResetManager()
     env_ids = torch.tensor([0], dtype=torch.int32)
 
@@ -105,23 +112,33 @@ def test_reset_rsi_fraction_1_copies_dof_pos_from_another_live_env_and_clamps(mo
     mgr.reset(env, env_ids, rsi_fraction=1.0)  # rsi_fraction=1.0 -> always the donor branch
 
     assert robot.written_ids.tolist() == [0]
-    # Donor (env 1) had joint_pos == 5.0, clamped to the soft limit [-3, 3].
-    assert torch.allclose(robot.written_pos, torch.tensor([[3.0, 3.0, 3.0]]))
+    # Donor (env 1) had joint_pos == 5.0 — copied verbatim, no clamp applied.
+    assert torch.allclose(robot.written_pos, torch.tensor([[5.0, 5.0, 5.0]]))
 
 
-def test_reset_rsi_fraction_0_uses_default_pose_not_a_donor():
+def test_reset_rsi_fraction_0_randomizes_around_default_pose_and_clips_to_hard_limits(monkeypatch):
+    """G1's active config (g1_29_config.py: randomize_initial_joint_pos=True,
+    initial_joint_pos_scale=[0.5, 1.5], initial_joint_pos_offset=[-0.1, 0.1])
+    scales+offsets the default pose per-joint, then clips to the HARD dof
+    limits — not a flat copy of default_joint_pos, and not the soft limits."""
     from simple_goalkeeper.mdp.events import MotionResetManager
 
     num_envs, num_dof = 4, 2
-    joint_values = torch.ones(num_envs, num_dof) * 9.0  # would be obviously wrong if ever copied
-    env, robot = _make_env(num_envs, num_dof, joint_values)
+    joint_values = torch.ones(num_envs, num_dof) * 99.0  # would be obviously wrong if ever copied
+    env, robot = _make_env(num_envs, num_dof, joint_values, hard_bound=1.0)
+    robot.data.default_joint_pos = torch.ones(num_envs, num_dof) * 2.0
     mgr = MotionResetManager()
     env_ids = torch.tensor([0], dtype=torch.int32)
 
+    # scale=1.5, offset=0.1 -> 2.0*1.5+0.1 = 3.1, clipped to hard bound [-1, 1] -> 1.0
+    monkeypatch.setattr(
+        "simple_goalkeeper.mdp.events.sample_uniform",
+        lambda lo, hi, shape, device: torch.full(shape, hi),
+    )
     mgr.reset(env, env_ids, rsi_fraction=0.0)  # rsi_fraction=0.0 -> always the default-pose branch
 
     assert robot.written_ids.tolist() == [0]
-    assert torch.allclose(robot.written_pos, torch.zeros(1, num_dof))
+    assert torch.allclose(robot.written_pos, torch.ones(1, num_dof))
 
 
 def test_reset_donor_pool_is_not_tier_restricted_and_not_batch_excluded(monkeypatch):
@@ -150,21 +167,159 @@ def test_reset_donor_pool_is_not_tier_restricted_and_not_batch_excluded(monkeypa
 
 def test_reset_single_coin_flip_covers_the_whole_batch_at_once(monkeypatch):
     """G1 draws ONE torch.rand(1) per reset() call, not one per env — so
-    every env in this call must land on the SAME branch."""
+    every env in this call must land on the SAME branch. Only the coin-flip
+    call (shape (1,)) is forced; other torch.rand uses (e.g. inside
+    sample_uniform's scale/offset randomization) fall through to the real
+    implementation so they aren't broken by this patch."""
+    from simple_goalkeeper.mdp.events import MotionResetManager
+
+    num_envs, num_dof = 5, 1
+    joint_values = torch.arange(num_envs, dtype=torch.float32).reshape(num_envs, 1) + 100.0
+    env, robot = _make_env(num_envs, num_dof, joint_values, hard_bound=1000.0)
+    mgr = MotionResetManager()
+    env_ids = torch.tensor([0, 1, 2, 3], dtype=torch.int32)
+
+    real_rand = torch.rand
+
+    def _forced_coin_flip(value):
+        def _fake(*a, **k):
+            if a and a[0] == 1:
+                return torch.tensor([value])
+            return real_rand(*a, **k)
+        return _fake
+
+    monkeypatch.setattr(torch, "rand", _forced_coin_flip(0.99))  # forces donor branch
+    mgr.reset(env, env_ids, rsi_fraction=0.8)
+    assert robot.written_ids.tolist() == [0, 1, 2, 3]
+    # Donor branch copies live values (~100), unmistakably not the ~2.0 default-pose range.
+    assert (robot.written_pos > 50).all()
+
+    monkeypatch.setattr(torch, "rand", _forced_coin_flip(0.01))  # forces default branch
+    mgr.reset(env, env_ids, rsi_fraction=0.8)
+    assert robot.written_ids.tolist() == [0, 1, 2, 3]
+    # Default-pose branch: default_joint_pos is 0 here, scale*0==0, only the
+    # small +-0.1 offset survives, so it must be nowhere near the donor range.
+    assert (robot.written_pos.abs() < 0.2).all()
+
+
+def test_reset_threshold_matches_g1s_literal_condition_at_default_rsi_fraction():
+    """G1's literal condition is `torch.rand(1).item() > 0.2` (legged_robot.py:669),
+    i.e. an 80% chance of the continue_keep branch. SimpleGoalKeeper's rsi_fraction
+    defaults to 0.8 and reset() uses `> (1.0 - rsi_fraction)`.
+
+    NOT bit-for-bit identical: `1.0 - 0.8 == 0.19999999999999996` in float64,
+    not exactly `0.2` (a standard float rounding artifact). This makes the
+    two comparisons disagree for the single exact value draw == 0.2 (0.2 >
+    0.19999999999999996 is True; 0.2 > 0.2 is False) — verified below. This
+    is a real, precise difference, not a rounding error in this test; it's
+    just astronomically unlikely to matter (torch.rand draws float32 values
+    from a continuous [0,1) distribution — landing on the literal decimal
+    0.2 has negligible probability), so it's noted here rather than "fixed,"
+    since the fix (hardcoding 0.2 rather than deriving it from rsi_fraction)
+    would remove the ability to pass rsi_fraction values other than 0.8."""
+    rsi_fraction = 0.8
+    assert abs((1.0 - rsi_fraction) - 0.2) < 1e-9  # negligible, not bit-exact
+    assert (0.2 > (1.0 - rsi_fraction)) != (0.2 > 0.2)  # the one value that disagrees
+    for draw in (0.0, 0.1, 0.19999999999999996, 0.2000001, 0.5, 0.99):
+        assert (draw > (1.0 - rsi_fraction)) == (draw > 0.2), (
+            f"draw={draw} disagrees between the two thresholds"
+        )
+
+
+def test_reset_coin_flip_probability_matches_rsi_fraction_statistically():
+    """Over many independent reset() calls, the donor-branch rate should
+    converge to rsi_fraction (G1: an 80% chance per call, not per env)."""
+    from simple_goalkeeper.mdp.events import MotionResetManager
+
+    num_envs, num_dof = 4, 1
+    joint_values = torch.ones(num_envs, num_dof) * 7.0  # distinguishable from default (0.0)
+    env, robot = _make_env(num_envs, num_dof, joint_values)
+    mgr = MotionResetManager()
+    env_ids = torch.tensor([0], dtype=torch.int32)
+
+    torch.manual_seed(42)
+    n_trials = 2000
+    donor_hits = 0
+    for _ in range(n_trials):
+        mgr.reset(env, env_ids, rsi_fraction=0.8)
+        # Donor value is 7.0; the default-pose branch is 0.0 * scale +- 0.1
+        # offset, always within [-0.1, 0.1] — well clear of 7.0.
+        if abs(robot.written_pos.item()) > 1.0:
+            donor_hits += 1
+
+    rate = donor_hits / n_trials
+    # Binomial std dev at n=2000, p=0.8 is ~0.009; 5 sigma is generous slack
+    # for a statistical test while still catching a badly wrong probability.
+    assert abs(rate - 0.8) < 0.05, f"donor-branch rate {rate} far from expected 0.8"
+
+
+def test_reset_donor_sampling_is_roughly_uniform_over_full_population():
+    """G1 samples torch.randint(0, num_envs, ...) uniformly — no env should be
+    systematically favored or excluded as a donor over many draws."""
     from simple_goalkeeper.mdp.events import MotionResetManager
 
     num_envs, num_dof = 5, 1
     joint_values = torch.arange(num_envs, dtype=torch.float32).reshape(num_envs, 1)
     env, robot = _make_env(num_envs, num_dof, joint_values)
     mgr = MotionResetManager()
-    env_ids = torch.tensor([0, 1, 2, 3], dtype=torch.int32)
+    env_ids = torch.tensor([2], dtype=torch.int32)  # always reset the same single env
 
-    monkeypatch.setattr(torch, "rand", lambda *a, **k: torch.tensor([0.99]))  # forces donor branch
-    mgr.reset(env, env_ids, rsi_fraction=0.8)
-    assert robot.written_ids.tolist() == [0, 1, 2, 3]
-    assert not torch.allclose(robot.written_pos, torch.zeros(4, 1))  # not the default pose
+    torch.manual_seed(7)
+    n_trials = 2000
+    counts = torch.zeros(num_envs)
+    for _ in range(n_trials):
+        mgr.reset(env, env_ids, rsi_fraction=1.0)  # always the donor branch
+        donor_value = int(robot.written_pos.item())
+        counts[donor_value] += 1
 
-    monkeypatch.setattr(torch, "rand", lambda *a, **k: torch.tensor([0.01]))  # forces default branch
-    mgr.reset(env, env_ids, rsi_fraction=0.8)
-    assert robot.written_ids.tolist() == [0, 1, 2, 3]
-    assert torch.allclose(robot.written_pos, torch.zeros(4, 1))
+    expected = n_trials / num_envs
+    for i in range(num_envs):
+        assert abs(counts[i].item() - expected) < expected * 0.35, (
+            f"env {i} sampled {counts[i].item()} times, expected ~{expected}"
+        )
+
+
+def test_reset_env_ids_none_resets_the_full_population():
+    from simple_goalkeeper.mdp.events import MotionResetManager
+
+    num_envs, num_dof = 3, 2
+    joint_values = torch.ones(num_envs, num_dof) * 4.0
+    env, robot = _make_env(num_envs, num_dof, joint_values)
+    mgr = MotionResetManager()
+
+    mgr.reset(env, None, rsi_fraction=0.0)  # default-pose branch, full population
+
+    assert robot.written_ids.tolist() == [0, 1, 2]
+    # default_joint_pos is 0 here, so only the +-0.1 offset survives —
+    # unmistakably not the donor value of 4.0.
+    assert (robot.written_pos.abs() < 0.2).all()
+
+
+def test_reset_empty_env_ids_is_a_no_op():
+    from simple_goalkeeper.mdp.events import MotionResetManager
+
+    num_envs, num_dof = 3, 2
+    joint_values = torch.ones(num_envs, num_dof) * 4.0
+    env, robot = _make_env(num_envs, num_dof, joint_values)
+    mgr = MotionResetManager()
+
+    mgr.reset(env, torch.tensor([], dtype=torch.int32), rsi_fraction=1.0)
+
+    assert robot.written_ids is None
+
+
+def test_reset_single_env_population_donor_pool_is_itself():
+    """num_envs=1 is the degenerate case of G1's torch.randint(0, num_envs, ...):
+    the only possible donor is the env itself. Must not crash or raise."""
+    from simple_goalkeeper.mdp.events import MotionResetManager
+
+    num_envs, num_dof = 1, 2
+    joint_values = torch.tensor([[1.5, -1.5]])
+    env, robot = _make_env(num_envs, num_dof, joint_values)
+    mgr = MotionResetManager()
+    env_ids = torch.tensor([0], dtype=torch.int32)
+
+    mgr.reset(env, env_ids, rsi_fraction=1.0)
+
+    assert robot.written_ids.tolist() == [0]
+    assert torch.allclose(robot.written_pos, torch.tensor([[1.5, -1.5]]))
