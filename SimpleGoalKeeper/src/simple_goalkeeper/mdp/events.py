@@ -67,6 +67,52 @@ _DOUBLE_THRESH = 0.40   # 0.20 ≤ |cross_y| < 0.40   → double  (MediumStep, S
 _TRIPLE_THRESH = 0.60   # 0.40 ≤ |cross_y| < 0.60   → triple  (FarStep, SafeFar)
                         # |cross_y| ≥ 0.60           → wide    (DoubleStep, TripleStep)
 
+# Live-donor RSI: fixed ordering of the 6 (side, tier) pools, used to tag
+# each env with an integer "which tier is my current episode" id so other
+# envs can be checked for eligibility as live-state donors. -1 = no tier
+# (standing / single-range / not yet classified).
+_POOL_KEYS: list[tuple[str, str]] = [
+    ("left", "double"), ("left", "triple"), ("left", "wide"),
+    ("right", "double"), ("right", "triple"), ("right", "wide"),
+]
+_POOL_ID: dict[tuple[str, str], int] = {key: i for i, key in enumerate(_POOL_KEYS)}
+_POOL_ID_NONE = -1
+
+# Live-donor RSI tuning. See docs/superpowers/plans/2026-07-01-live-env-rsi.md
+# for why these exist — they close the exact gap a prior attempt lost:
+# a donor must not be in the current reset batch (never simultaneously
+# resetting) and must be at least this many steps past its OWN last reset
+# (never "freshly reset noise" masquerading as a matured live state).
+_MIN_MATURITY_STEPS = 10
+_MIN_DONOR_POOL_SIZE = 16
+_LIVE_RSI_WARMUP_STEPS = 500  # env.common_step_counter threshold; matches the
+                              # 500-step cadence already used by reward curricula.
+
+
+def _select_live_donors(
+    pool_id: torch.Tensor,
+    episode_steps: torch.Tensor,
+    exclude_ids: torch.Tensor,
+    target_pool: int,
+    min_maturity_steps: int,
+) -> torch.Tensor:
+    """Indices of envs eligible to donate live dof_pos state for `target_pool`.
+
+    Eligible = currently tagged with target_pool, not in the batch being
+    reset right now, and has been running at least min_maturity_steps since
+    its own last reset.
+    """
+    num_envs = pool_id.shape[0]
+    exclude_mask = torch.zeros(num_envs, dtype=torch.bool, device=pool_id.device)
+    if exclude_ids.numel() > 0:
+        exclude_mask[exclude_ids] = True
+    eligible = (
+        (pool_id == target_pool)
+        & (episode_steps >= min_maturity_steps)
+        & (~exclude_mask)
+    )
+    return eligible.nonzero(as_tuple=True)[0]
+
 # Exact filename stem (lowercased) → (side, pool) mapping.
 # Name-specific so adding new files never silently mis-classifies.
 _STEM_TO_POOL: dict[str, tuple[str, str]] = {
