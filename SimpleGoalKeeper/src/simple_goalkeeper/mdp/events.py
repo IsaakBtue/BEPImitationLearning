@@ -169,6 +169,10 @@ class MotionResetManager:
         self.frames: dict[str, torch.Tensor] = {}
         # Per-type pools keyed by (side, steps): side ∈ {left, right}, steps ∈ {single, double, triple, wide}
         self.pools: dict[tuple[str, str], dict[str, torch.Tensor]] = {}
+        # Live-donor usage bookkeeping, read by live_rsi_usage_curriculum
+        # and reset to 0 there each time it reports — purely for observability.
+        self.live_rsi_hits = 0
+        self.live_rsi_total = 0
 
     @classmethod
     def get(cls) -> "MotionResetManager":
@@ -241,6 +245,32 @@ class MotionResetManager:
 
         joint_pos = pool["joint_pos"][frame_ids].clone()
         joint_vel = pool["joint_vel"][frame_ids].clone()
+        limits = robot.data.soft_joint_pos_limits[ids]
+        joint_pos.clamp_(limits[..., 0], limits[..., 1])
+        robot.write_joint_state_to_sim(joint_pos, joint_vel, env_ids=ids)
+
+    def _write_live_donor_state(
+        self,
+        env: "ManagerBasedRlEnv",
+        ids: torch.Tensor,
+        donor_idx: torch.Tensor,
+        robot: "Entity",
+    ) -> None:
+        """Copy joint positions only from randomly sampled live donor envs.
+
+        Root pose/velocity are intentionally left untouched (already set by
+        the reset_base event this same reset cycle) — copying root state
+        from another live env caused yaw-drift propagation in a prior
+        attempt (SimpleGoalKeeperObsHis, 2026-06-18 session notes). Joint
+        velocities are zeroed rather than copied for the same reason: a
+        donor's current velocity reflects whatever it's mid-doing right now,
+        which may not be physically consistent with the NEW episode's ball
+        trajectory.
+        """
+        n = len(ids)
+        picks = donor_idx[torch.randint(0, donor_idx.numel(), (n,), device=env.device)]
+        joint_pos = robot.data.joint_pos[picks].clone()
+        joint_vel = torch.zeros_like(joint_pos)
         limits = robot.data.soft_joint_pos_limits[ids]
         joint_pos.clamp_(limits[..., 0], limits[..., 1])
         robot.write_joint_state_to_sim(joint_pos, joint_vel, env_ids=ids)
