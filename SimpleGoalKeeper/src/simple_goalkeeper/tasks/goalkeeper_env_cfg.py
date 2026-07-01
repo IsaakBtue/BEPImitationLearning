@@ -387,7 +387,7 @@ def goalkeeper_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
         "penalize_kneeheight": RewardTermCfg(
             func=gk_mdp.penalize_kneeheight,
             weight=-100.0,
-            params={"min_height": 0.28, "asset_cfg": _KNEE_BODY_CFG},
+            params={"min_height": 0.29, "asset_cfg": _KNEE_BODY_CFG},
         ),
         "penalize_sharpcontact": RewardTermCfg(
             func=gk_mdp.penalize_sharpcontact,
@@ -564,7 +564,7 @@ def goalkeeper_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
         ),
         "shank_height": TerminationTermCfg(
             func=gk_mdp.shank_height_termination,
-            params={"min_height": 0.26, "asset_cfg": _KNEE_BODY_CFG},
+            params={"min_height": 0.275, "asset_cfg": _KNEE_BODY_CFG},
             time_out=False,
         ),
     }
