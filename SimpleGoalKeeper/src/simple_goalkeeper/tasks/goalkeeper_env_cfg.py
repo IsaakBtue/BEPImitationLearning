@@ -193,6 +193,13 @@ def goalkeeper_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
                 func=gk_mdp.correct_foot_save_curriculum,
                 params={"reward_name": _name, "base_weight": _base, "activate_at_cu": 3},
             )
+        # Logging-only: reports what fraction of double/triple/wide-tier RSI
+        # resets used a live-donor env vs the static NPZ fallback. Doesn't
+        # change any weight — see live_rsi_usage_curriculum docstring.
+        cfg.curriculum["live_rsi_usage"] = CurriculumTermCfg(
+            func=gk_mdp.live_rsi_usage_curriculum,
+            params={},
+        )
 
     # ------------------------------------------------------------------
     # Observations

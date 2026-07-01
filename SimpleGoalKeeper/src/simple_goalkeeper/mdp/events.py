@@ -722,6 +722,23 @@ class correct_foot_save_curriculum:
         return {"weight": torch.tensor(float(new_weight))}
 
 
+def live_rsi_usage_curriculum(env: "ManagerBasedRlEnv", env_ids: torch.Tensor, **kwargs) -> dict:
+    """Logging-only curriculum term: reports the live-donor RSI hit rate.
+
+    Not a real curriculum — doesn't change any reward weight. Piggybacks on
+    the curriculum manager's reset-time logging so the live-vs-NPZ-fallback
+    split for double/triple/wide-tier resets shows up in TensorBoard/wandb
+    under Episode/Curriculum/live_rsi_usage/live_rsi_fraction, instead of
+    being invisible the way per-pool RSI branching was before this change.
+    """
+    mgr = MotionResetManager.get()
+    total = max(mgr.live_rsi_total, 1)
+    fraction = mgr.live_rsi_hits / total
+    mgr.live_rsi_hits = 0
+    mgr.live_rsi_total = 0
+    return {"live_rsi_fraction": torch.tensor(float(fraction))}
+
+
 class ball_difficulty_curriculum:
     """Adaptive difficulty curriculum — direct port of Humanoid-Goalkeeper (G1) approach.
 

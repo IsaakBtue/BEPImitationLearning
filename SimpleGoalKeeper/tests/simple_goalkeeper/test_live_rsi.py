@@ -158,3 +158,29 @@ def test_reset_prefers_live_donor_when_pool_is_large_and_warm(monkeypatch):
     assert mgr.live_rsi_total == 1
     # env 0 gets tagged into the pool it was just assigned (left, wide) = 2.
     assert env._rsi_pool_id[0].item() == 2
+
+
+def test_live_rsi_usage_curriculum_reports_and_resets_counters():
+    from simple_goalkeeper.mdp.events import MotionResetManager, live_rsi_usage_curriculum
+
+    mgr = MotionResetManager.get()
+    mgr.live_rsi_hits = 3
+    mgr.live_rsi_total = 4
+
+    result = live_rsi_usage_curriculum(env=None, env_ids=None)
+
+    assert torch.isclose(result["live_rsi_fraction"], torch.tensor(0.75))
+    assert mgr.live_rsi_hits == 0
+    assert mgr.live_rsi_total == 0
+
+
+def test_live_rsi_usage_curriculum_handles_zero_total():
+    from simple_goalkeeper.mdp.events import MotionResetManager, live_rsi_usage_curriculum
+
+    mgr = MotionResetManager.get()
+    mgr.live_rsi_hits = 0
+    mgr.live_rsi_total = 0
+
+    result = live_rsi_usage_curriculum(env=None, env_ids=None)
+
+    assert torch.isclose(result["live_rsi_fraction"], torch.tensor(0.0))
