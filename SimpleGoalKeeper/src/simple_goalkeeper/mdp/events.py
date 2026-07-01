@@ -67,52 +67,6 @@ _DOUBLE_THRESH = 0.40   # 0.20 ≤ |cross_y| < 0.40   → double  (MediumStep, S
 _TRIPLE_THRESH = 0.60   # 0.40 ≤ |cross_y| < 0.60   → triple  (FarStep, SafeFar)
                         # |cross_y| ≥ 0.60           → wide    (DoubleStep, TripleStep)
 
-# Live-donor RSI: fixed ordering of the 6 (side, tier) pools, used to tag
-# each env with an integer "which tier is my current episode" id so other
-# envs can be checked for eligibility as live-state donors. -1 = no tier
-# (standing / single-range / not yet classified).
-_POOL_KEYS: list[tuple[str, str]] = [
-    ("left", "double"), ("left", "triple"), ("left", "wide"),
-    ("right", "double"), ("right", "triple"), ("right", "wide"),
-]
-_POOL_ID: dict[tuple[str, str], int] = {key: i for i, key in enumerate(_POOL_KEYS)}
-_POOL_ID_NONE = -1
-
-# Live-donor RSI tuning. See docs/superpowers/plans/2026-07-01-live-env-rsi.md
-# for why these exist — they close the exact gap a prior attempt lost:
-# a donor must not be in the current reset batch (never simultaneously
-# resetting) and must be at least this many steps past its OWN last reset
-# (never "freshly reset noise" masquerading as a matured live state).
-_MIN_MATURITY_STEPS = 10
-_MIN_DONOR_POOL_SIZE = 16
-_LIVE_RSI_WARMUP_STEPS = 500  # env.common_step_counter threshold; matches the
-                              # 500-step cadence already used by reward curricula.
-
-
-def _select_live_donors(
-    pool_id: torch.Tensor,
-    episode_steps: torch.Tensor,
-    exclude_ids: torch.Tensor,
-    target_pool: int,
-    min_maturity_steps: int,
-) -> torch.Tensor:
-    """Indices of envs eligible to donate live dof_pos state for `target_pool`.
-
-    Eligible = currently tagged with target_pool, not in the batch being
-    reset right now, and has been running at least min_maturity_steps since
-    its own last reset.
-    """
-    num_envs = pool_id.shape[0]
-    exclude_mask = torch.zeros(num_envs, dtype=torch.bool, device=pool_id.device)
-    if exclude_ids.numel() > 0:
-        exclude_mask[exclude_ids] = True
-    eligible = (
-        (pool_id == target_pool)
-        & (episode_steps >= min_maturity_steps)
-        & (~exclude_mask)
-    )
-    return eligible.nonzero(as_tuple=True)[0]
-
 # Exact filename stem (lowercased) → (side, pool) mapping.
 # Name-specific so adding new files never silently mis-classifies.
 _STEM_TO_POOL: dict[str, tuple[str, str]] = {
@@ -155,11 +109,15 @@ def _load_pool(files: list, dev: str) -> dict[str, torch.Tensor]:
 
 
 class MotionResetManager:
-    """Distance-conditioned RSI: selects motion frames based on ball's predicted
-    goal-line crossing position.  4 distance tiers × 2 sides = 8 pools.
+    """Loads NPZ motion frames into per-tier pools and the combined pool.
 
-    reset_ball fires BEFORE reset_from_motion_data (see goalkeeper_env_cfg.py),
-    so the new ball velocity is already set when reset() is called.
+    `reset()` (registered as reset_from_motion_data) is a literal port of
+    Humanoid-Goalkeeper G1's continue_keep mechanism (legged_gym/legged_gym/
+    envs/base/legged_robot.py:657-682, _reset_dofs) — see docs/superpowers/
+    plans/2026-07-01-live-env-rsi.md for the full comparison. It does not use
+    the tier pools built here at all; those exist only for the sgk_play_rsi
+    diagnostic script (scripts/play_rsi_doublestep.py), which locks playback
+    to a specific motion pool for visual inspection.
     """
 
     _instance: "MotionResetManager | None" = None
@@ -169,10 +127,6 @@ class MotionResetManager:
         self.frames: dict[str, torch.Tensor] = {}
         # Per-type pools keyed by (side, steps): side ∈ {left, right}, steps ∈ {single, double, triple, wide}
         self.pools: dict[tuple[str, str], dict[str, torch.Tensor]] = {}
-        # Live-donor usage bookkeeping, read by live_rsi_usage_curriculum
-        # and reset to 0 there each time it reports — purely for observability.
-        self.live_rsi_hits = 0
-        self.live_rsi_total = 0
 
     @classmethod
     def get(cls) -> "MotionResetManager":
@@ -249,32 +203,6 @@ class MotionResetManager:
         joint_pos.clamp_(limits[..., 0], limits[..., 1])
         robot.write_joint_state_to_sim(joint_pos, joint_vel, env_ids=ids)
 
-    def _write_live_donor_state(
-        self,
-        env: "ManagerBasedRlEnv",
-        ids: torch.Tensor,
-        donor_idx: torch.Tensor,
-        robot: "Entity",
-    ) -> None:
-        """Copy joint positions only from randomly sampled live donor envs.
-
-        Root pose/velocity are intentionally left untouched (already set by
-        the reset_base event this same reset cycle) — copying root state
-        from another live env caused yaw-drift propagation in a prior
-        attempt (SimpleGoalKeeperObsHis, 2026-06-18 session notes). Joint
-        velocities are zeroed rather than copied for the same reason: a
-        donor's current velocity reflects whatever it's mid-doing right now,
-        which may not be physically consistent with the NEW episode's ball
-        trajectory.
-        """
-        n = len(ids)
-        picks = donor_idx[torch.randint(0, donor_idx.numel(), (n,), device=env.device)]
-        joint_pos = robot.data.joint_pos[picks].clone()
-        joint_vel = torch.zeros_like(joint_pos)
-        limits = robot.data.soft_joint_pos_limits[ids]
-        joint_pos.clamp_(limits[..., 0], limits[..., 1])
-        robot.write_joint_state_to_sim(joint_pos, joint_vel, env_ids=ids)
-
     def reset(
         self,
         env: "ManagerBasedRlEnv",
@@ -282,120 +210,53 @@ class MotionResetManager:
         asset_cfg: SceneEntityCfg = _DEFAULT_ROBOT_CFG,
         rsi_fraction: float = 0.8,
     ) -> None:
-        """80% distance-conditioned RSI + 20% HOME_KEYFRAME standing.
+        """Literal port of Humanoid-Goalkeeper G1's continue_keep mechanism.
 
-        reset_ball fires first, so ball pos/vel reflect the NEW episode trajectory.
-        We predict the ball's goal-line crossing Y and pick:
-          left/right — from sign of crossing_y
-          tier       — from |crossing_y| vs thresholds:
-            < 0.20 m  → standing pose (no RSI)
-            0.20–0.40 → double  (MediumStep, SafeMedium)
-            0.40–0.60 → triple  (FarStep, SafeFar)
-            ≥ 0.60    → wide    (DoubleStep, TripleStep)
+        Source: Humanoid-Goalkeeper/legged_gym/legged_gym/envs/base/legged_robot.py
+        _reset_dofs, lines 657-682 (read-only upstream reference, not modified):
 
-        For double/triple/wide tiers, each reset first tries to copy joint
-        positions from another env currently mid-episode in the SAME tier
-        (live-donor RSI — see docs/superpowers/plans/2026-07-01-live-env-rsi.md).
-        Falls back to the static NPZ pool when too few live donors exist yet
-        (early training / small eval runs / the startup warmup window).
+            if self.cfg.domain_rand.continue_keep and torch.rand(1).item() > 0.2:
+                self.dof_pos[env_ids] = self.dof_pos[torch.randint(0, self.num_envs, (len(env_ids),), device=...)]
+            else:
+                self.dof_pos[env_ids] = self.standpos * torch.ones(...)
+            self.dof_vel[env_ids] = 0.
 
-        20% standing resets prevent the AMP dive→RSI transition artefact and
-        ensure the policy learns to save from a standing start (deployment scenario).
+        One coin flip per reset() call decides ALL of env_ids together — this
+        is G1's own behavior (`torch.rand(1)`, not one flip per env). On the
+        rsi_fraction branch, dof_pos is copied from `torch.randint(0, num_envs, ...)`:
+        ANY currently-running env, with no side/tier matching, no exclusion of
+        the current reset batch, and no minimum-age check — G1 has none of
+        these either; its donor pool is the full population, so any
+        cross-contamination from same-batch resets is diluted away for free.
+        This deliberately replaces the side/tier-conditioned pool system
+        this project used previously — see docs/superpowers/plans/
+        2026-07-01-live-env-rsi.md for the full comparison and the explicit
+        decision to drop tier-matching in favor of G1 fidelity.
+
+        dof_vel is always zeroed, matching G1's unconditional
+        `self.dof_vel[env_ids] = 0.` (not just on the continue_keep branch).
+        Root pose/velocity are untouched here in both branches — reset_base
+        handles them, matching G1's separate _reset_root_states.
         """
         if env_ids is None:
             env_ids = torch.arange(env.num_envs, device=env.device, dtype=torch.int32)
         if len(env_ids) == 0:
             return
 
-        if not hasattr(env, "_rsi_pool_id"):
-            env._rsi_pool_id = torch.full((env.num_envs,), _POOL_ID_NONE, dtype=torch.long, device=env.device)
-
         robot: Entity = env.scene[asset_cfg.name]
         n = len(env_ids)
 
-        use_rsi     = torch.rand(n, device=env.device) < rsi_fraction
-        rsi_local   = use_rsi.nonzero(as_tuple=True)[0]
-        stand_local = (~use_rsi).nonzero(as_tuple=True)[0]
+        if torch.rand(1, device=env.device).item() > (1.0 - rsi_fraction):
+            donor_idx = torch.randint(0, env.num_envs, (n,), device=env.device)
+            joint_pos = robot.data.joint_pos[donor_idx].clone()
+            limits = robot.data.soft_joint_pos_limits[env_ids.long()]
+            joint_pos.clamp_(limits[..., 0], limits[..., 1])
+        else:
+            joint_pos = robot.data.default_joint_pos[env_ids].clone()
 
-        # Collect extra env_ids that are redirected from RSI → standing.
-        extra_stand_ids: list[torch.Tensor] = []
-
-        # ── 80 %: distance-conditioned RSI ────────────────────────────────
-        if len(rsi_local) > 0:
-            ids_rsi = env_ids[rsi_local]
-
-            # Read the crossing Y stored by reset_ball_rolling (fires before this event).
-            # Using the stored value avoids the entity data-buffer lag: ball.data.*
-            # is only refreshed after the next physics step, so reading it here would
-            # give the PREVIOUS episode's ball state.
-            cross_y = getattr(env, "_rsi_cross_y", None)
-            if cross_y is None:
-                # Fallback for the very first reset before reset_ball has ever fired.
-                self._write_rsi_state(env, ids_rsi, self.frames, robot)
-                env._rsi_pool_id[ids_rsi.long()] = _POOL_ID_NONE
-            else:
-                cy     = cross_y[ids_rsi]
-                is_left = cy > 0
-                abs_cy  = cy.abs()
-
-                is_single = abs_cy < _SINGLE_THRESH
-                is_double = (abs_cy >= _SINGLE_THRESH) & (abs_cy < _DOUBLE_THRESH)
-                is_triple = (abs_cy >= _DOUBLE_THRESH) & (abs_cy < _TRIPLE_THRESH)
-                is_wide   = abs_cy >= _TRIPLE_THRESH
-
-                # Single-range: ball arrives near centre — start standing so the
-                # policy reacts freely rather than committing to a lateral step.
-                single_local = is_single.nonzero(as_tuple=True)[0]
-                if len(single_local) > 0:
-                    extra_stand_ids.append(ids_rsi[single_local])
-                    env._rsi_pool_id[ids_rsi[single_local].long()] = _POOL_ID_NONE
-
-                for (side, steps), mask in [
-                    (("left",  "double"), is_left  & is_double),
-                    (("left",  "triple"), is_left  & is_triple),
-                    (("left",  "wide"),   is_left  & is_wide),
-                    (("right", "double"), ~is_left & is_double),
-                    (("right", "triple"), ~is_left & is_triple),
-                    (("right", "wide"),   ~is_left & is_wide),
-                ]:
-                    local_ids = mask.nonzero(as_tuple=True)[0]
-                    if len(local_ids) == 0:
-                        continue
-                    target_ids = ids_rsi[local_ids]
-                    target_pool = _POOL_ID[(side, steps)]
-
-                    used_live = False
-                    if env.common_step_counter >= _LIVE_RSI_WARMUP_STEPS:
-                        donor_idx = _select_live_donors(
-                            env._rsi_pool_id, env.episode_length_buf, ids_rsi.long(),
-                            target_pool=target_pool, min_maturity_steps=_MIN_MATURITY_STEPS,
-                        )
-                        if donor_idx.numel() >= _MIN_DONOR_POOL_SIZE:
-                            self._write_live_donor_state(env, target_ids.long(), donor_idx, robot)
-                            used_live = True
-
-                    if not used_live:
-                        pool = self.pools.get((side, steps), self.frames)
-                        self._write_rsi_state(env, target_ids, pool, robot)
-
-                    env._rsi_pool_id[target_ids.long()] = target_pool
-                    self.live_rsi_total += len(target_ids)
-                    if used_live:
-                        self.live_rsi_hits += len(target_ids)
-
-        # ── HOME_KEYFRAME standing pose (20% random + all single-range) ───
-        ids_stand_parts: list[torch.Tensor] = []
-        if len(stand_local) > 0:
-            ids_stand_parts.append(env_ids[stand_local])
-            env._rsi_pool_id[env_ids[stand_local].long()] = _POOL_ID_NONE
-        ids_stand_parts.extend(extra_stand_ids)
-        if ids_stand_parts:
-            ids_stand = torch.cat(ids_stand_parts)
-            ns = len(ids_stand)
-            home_pos = robot.data.default_joint_pos[ids_stand]
-            home_vel = torch.zeros(ns, home_pos.shape[-1], device=env.device)
-            robot.write_joint_state_to_sim(home_pos, home_vel, env_ids=ids_stand)
-            # Root state already correct from reset_base.
+        joint_vel = torch.zeros_like(joint_pos)
+        robot.write_joint_state_to_sim(joint_pos, joint_vel, env_ids=env_ids)
+        # Root state already correct from reset_base.
 
 
 def init_motion_loader(env: "ManagerBasedRlEnv", env_ids: torch.Tensor | None) -> None:
@@ -720,23 +581,6 @@ class correct_foot_save_curriculum:
         new_weight = self._base_weight * multiplier
         self._term_cfg.weight = new_weight
         return {"weight": torch.tensor(float(new_weight))}
-
-
-def live_rsi_usage_curriculum(env: "ManagerBasedRlEnv", env_ids: torch.Tensor, **kwargs) -> dict:
-    """Logging-only curriculum term: reports the live-donor RSI hit rate.
-
-    Not a real curriculum — doesn't change any reward weight. Piggybacks on
-    the curriculum manager's reset-time logging so the live-vs-NPZ-fallback
-    split for double/triple/wide-tier resets shows up in TensorBoard/wandb
-    under Episode/Curriculum/live_rsi_usage/live_rsi_fraction, instead of
-    being invisible the way per-pool RSI branching was before this change.
-    """
-    mgr = MotionResetManager.get()
-    total = max(mgr.live_rsi_total, 1)
-    fraction = mgr.live_rsi_hits / total
-    mgr.live_rsi_hits = 0
-    mgr.live_rsi_total = 0
-    return {"live_rsi_fraction": torch.tensor(float(fraction))}
 
 
 class ball_difficulty_curriculum:
