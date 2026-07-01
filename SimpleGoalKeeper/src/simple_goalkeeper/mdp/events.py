@@ -70,19 +70,19 @@ _TRIPLE_THRESH = 0.60   # 0.40 ≤ |cross_y| < 0.60   → triple  (FarStep, Safe
 # Exact filename stem (lowercased) → (side, pool) mapping.
 # Name-specific so adding new files never silently mis-classifies.
 _STEM_TO_POOL: dict[str, tuple[str, str]] = {
-    # double  (0.35–0.65 m)
+    # double  (0.20–0.40 m, see _DOUBLE_THRESH above)
     "leftsafemedium1_booster_t1":     ("left",  "double"),
     "rightsafemedium1_booster_t1":    ("right", "double"),
-    # triple  (0.65–0.85 m)
+    # triple  (0.40–0.60 m, see _TRIPLE_THRESH above)
     "leftsafefar1_booster_t1":        ("left",  "triple"),
     "rightsafefar1_booster_t1":       ("right", "triple"),
-    # wide    (≥ 0.85 m)
+    # wide    (≥ 0.60 m, see _TRIPLE_THRESH above)
     "leftdoublestep_own_booster_t1":  ("left",  "wide"),
     "lefttriplestep_own_booster_t1":  ("left",  "wide"),
     "rightdoublestep_own_booster_t1": ("right", "wide"),
     "righttriplestep_own_booster_t1": ("right", "wide"),
-    # single-range files (< 0.35 m) → standing pose, not RSI pools; listed so
-    # the init loop doesn't warn about unknown files.
+    # single-range files (< 0.20 m, see _SINGLE_THRESH above) → standing pose,
+    # not RSI pools; listed so the init loop doesn't warn about unknown files.
     "leftstep_own_booster_t1":        None,
     "leftsafe1_booster_t1":           None,
     "leftsafefront1_booster_t1":      None,
