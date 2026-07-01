@@ -288,10 +288,16 @@ class MotionResetManager:
         We predict the ball's goal-line crossing Y and pick:
           left/right — from sign of crossing_y
           tier       — from |crossing_y| vs thresholds:
-            < 0.35 m  → standing pose (no RSI)
-            0.35–0.65 → double  (MediumStep, SafeMedium)
-            0.65–0.85 → triple  (FarStep, SafeFar)
-            ≥ 0.85    → wide    (DoubleStep, TripleStep)
+            < 0.20 m  → standing pose (no RSI)
+            0.20–0.40 → double  (MediumStep, SafeMedium)
+            0.40–0.60 → triple  (FarStep, SafeFar)
+            ≥ 0.60    → wide    (DoubleStep, TripleStep)
+
+        For double/triple/wide tiers, each reset first tries to copy joint
+        positions from another env currently mid-episode in the SAME tier
+        (live-donor RSI — see docs/superpowers/plans/2026-07-01-live-env-rsi.md).
+        Falls back to the static NPZ pool when too few live donors exist yet
+        (early training / small eval runs / the startup warmup window).
 
         20% standing resets prevent the AMP dive→RSI transition artefact and
         ensure the policy learns to save from a standing start (deployment scenario).
@@ -300,6 +306,9 @@ class MotionResetManager:
             env_ids = torch.arange(env.num_envs, device=env.device, dtype=torch.int32)
         if len(env_ids) == 0:
             return
+
+        if not hasattr(env, "_rsi_pool_id"):
+            env._rsi_pool_id = torch.full((env.num_envs,), _POOL_ID_NONE, dtype=torch.long, device=env.device)
 
         robot: Entity = env.scene[asset_cfg.name]
         n = len(env_ids)
@@ -323,6 +332,7 @@ class MotionResetManager:
             if cross_y is None:
                 # Fallback for the very first reset before reset_ball has ever fired.
                 self._write_rsi_state(env, ids_rsi, self.frames, robot)
+                env._rsi_pool_id[ids_rsi.long()] = _POOL_ID_NONE
             else:
                 cy     = cross_y[ids_rsi]
                 is_left = cy > 0
@@ -338,6 +348,7 @@ class MotionResetManager:
                 single_local = is_single.nonzero(as_tuple=True)[0]
                 if len(single_local) > 0:
                     extra_stand_ids.append(ids_rsi[single_local])
+                    env._rsi_pool_id[ids_rsi[single_local].long()] = _POOL_ID_NONE
 
                 for (side, steps), mask in [
                     (("left",  "double"), is_left  & is_double),
@@ -350,13 +361,33 @@ class MotionResetManager:
                     local_ids = mask.nonzero(as_tuple=True)[0]
                     if len(local_ids) == 0:
                         continue
-                    pool = self.pools.get((side, steps), self.frames)
-                    self._write_rsi_state(env, ids_rsi[local_ids], pool, robot)
+                    target_ids = ids_rsi[local_ids]
+                    target_pool = _POOL_ID[(side, steps)]
+
+                    used_live = False
+                    if env.common_step_counter >= _LIVE_RSI_WARMUP_STEPS:
+                        donor_idx = _select_live_donors(
+                            env._rsi_pool_id, env.episode_length_buf, ids_rsi.long(),
+                            target_pool=target_pool, min_maturity_steps=_MIN_MATURITY_STEPS,
+                        )
+                        if donor_idx.numel() >= _MIN_DONOR_POOL_SIZE:
+                            self._write_live_donor_state(env, target_ids.long(), donor_idx, robot)
+                            used_live = True
+
+                    if not used_live:
+                        pool = self.pools.get((side, steps), self.frames)
+                        self._write_rsi_state(env, target_ids, pool, robot)
+
+                    env._rsi_pool_id[target_ids.long()] = target_pool
+                    self.live_rsi_total += len(target_ids)
+                    if used_live:
+                        self.live_rsi_hits += len(target_ids)
 
         # ── HOME_KEYFRAME standing pose (20% random + all single-range) ───
         ids_stand_parts: list[torch.Tensor] = []
         if len(stand_local) > 0:
             ids_stand_parts.append(env_ids[stand_local])
+            env._rsi_pool_id[env_ids[stand_local].long()] = _POOL_ID_NONE
         ids_stand_parts.extend(extra_stand_ids)
         if ids_stand_parts:
             ids_stand = torch.cat(ids_stand_parts)

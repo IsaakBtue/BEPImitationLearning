@@ -109,3 +109,52 @@ def test_write_live_donor_state_copies_joint_pos_only_and_clamps():
     # donor) — this is the exact fix for the yaw/velocity-drift bug from the
     # prior attempt (SimpleGoalKeeperObsHis, 2026-06-18).
     assert torch.allclose(robot.written_vel, torch.zeros(1, num_dof))
+
+
+def test_reset_prefers_live_donor_when_pool_is_large_and_warm(monkeypatch):
+    from simple_goalkeeper.mdp import events as events_mod
+    from simple_goalkeeper.mdp.events import MotionResetManager
+
+    monkeypatch.setattr(events_mod, "_MIN_DONOR_POOL_SIZE", 2)
+    monkeypatch.setattr(events_mod, "_LIVE_RSI_WARMUP_STEPS", 0)
+    monkeypatch.setattr(events_mod, "_MIN_MATURITY_STEPS", 0)
+
+    num_envs = 4
+    num_dof = 2
+    joint_pos = torch.zeros(num_envs, num_dof)
+    soft_limits = torch.tensor([[-3.0, 3.0]] * num_dof).unsqueeze(0).repeat(num_envs, 1, 1)
+    robot = _FakeRobot(joint_pos, soft_limits)
+    robot.data.default_joint_pos = torch.zeros(num_envs, num_dof)
+    robot.write_root_link_pose_to_sim = lambda *a, **k: None
+    robot.write_root_link_velocity_to_sim = lambda *a, **k: None
+
+    class _Scene:
+        def __init__(self, robot):
+            self._robot = robot
+            self.env_origins = torch.zeros(num_envs, 3)
+
+        def __getitem__(self, name):
+            return self._robot
+
+    env = _FakeEnv(num_envs=num_envs)
+    env.scene = _Scene(robot)
+    env.common_step_counter = 999
+    env.episode_length_buf = torch.tensor([0, 100, 100, 100])  # env 0 is resetting now
+    env._rsi_cross_y = torch.tensor([0.9, 0.0, 0.0, 0.0])  # env 0 wants a "wide" target
+    env._rsi_pool_id = torch.tensor([-1, 2, 2, -1])  # envs 1,2 already tagged "left wide" (pool 2)
+
+    mgr = MotionResetManager()
+    mgr.frames = {"joint_pos": torch.zeros(1, num_dof), "joint_vel": torch.zeros(1, num_dof),
+                  "root_pos": torch.zeros(1, 3), "root_quat": torch.zeros(1, 4),
+                  "root_lin_vel": torch.zeros(1, 3), "root_ang_vel": torch.zeros(1, 3)}
+
+    env_ids = torch.tensor([0], dtype=torch.int32)
+    torch.manual_seed(0)
+    mgr.reset(env, env_ids, rsi_fraction=1.0)
+
+    assert robot.written_ids is not None
+    assert robot.written_ids.tolist() == [0]
+    assert mgr.live_rsi_hits == 1
+    assert mgr.live_rsi_total == 1
+    # env 0 gets tagged into the pool it was just assigned (left, wide) = 2.
+    assert env._rsi_pool_id[0].item() == 2

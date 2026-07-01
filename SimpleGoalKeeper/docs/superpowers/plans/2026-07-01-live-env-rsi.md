@@ -388,7 +388,7 @@ def test_reset_prefers_live_donor_when_pool_is_large_and_warm(monkeypatch):
     env.common_step_counter = 999
     env.episode_length_buf = torch.tensor([0, 100, 100, 100])  # env 0 is resetting now
     env._rsi_cross_y = torch.tensor([0.9, 0.0, 0.0, 0.0])  # env 0 wants a "wide" target
-    env._rsi_pool_id = torch.tensor([-1, 5, 5, -1])  # envs 1,2 already tagged "left wide" (pool 5)
+    env._rsi_pool_id = torch.tensor([-1, 2, 2, -1])  # envs 1,2 already tagged "left wide" (pool 2)
 
     mgr = MotionResetManager()
     mgr.frames = {"joint_pos": torch.zeros(1, num_dof), "joint_vel": torch.zeros(1, num_dof),
@@ -403,8 +403,8 @@ def test_reset_prefers_live_donor_when_pool_is_large_and_warm(monkeypatch):
     assert robot.written_ids.tolist() == [0]
     assert mgr.live_rsi_hits == 1
     assert mgr.live_rsi_total == 1
-    # env 0 gets tagged into the pool it was just assigned (left, wide) = 5.
-    assert env._rsi_pool_id[0].item() == 5
+    # env 0 gets tagged into the pool it was just assigned (left, wide) = 2.
+    assert env._rsi_pool_id[0].item() == 2
 ```
 
 - [ ] **Step 2: Run test to verify it fails**
