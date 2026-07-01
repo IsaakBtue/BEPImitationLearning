@@ -1,3 +1,4 @@
+import pytest
 import torch
 
 
@@ -9,12 +10,36 @@ class _FakeRobotData:
         self.joint_pos_limits = hard_limits
 
 
+class _PoisonedSoftLimitsData(_FakeRobotData):
+    """soft_joint_pos_limits raises if ever read — G1's continue_keep has no
+    soft-limit concept at all; reset() must never touch it (only the hard
+    joint_pos_limits, and only in the else/default-pose branch)."""
+
+    def __init__(self, joint_pos, default_joint_pos, hard_limits):
+        self.joint_pos = joint_pos
+        self.default_joint_pos = default_joint_pos
+        self.joint_pos_limits = hard_limits
+        self._soft = None
+
+    @property
+    def soft_joint_pos_limits(self):
+        raise AssertionError(
+            "reset() read soft_joint_pos_limits — G1's continue_keep has no "
+            "soft-limit concept; this attribute must never be touched."
+        )
+
+    @soft_joint_pos_limits.setter
+    def soft_joint_pos_limits(self, value):
+        self._soft = value
+
+
 class _FakeRobot:
-    def __init__(self, joint_pos, default_joint_pos, soft_limits, hard_limits):
-        self.data = _FakeRobotData(joint_pos, default_joint_pos, soft_limits, hard_limits)
+    def __init__(self, data):
+        self.data = data
         self.written_pos = None
         self.written_vel = None
         self.written_ids = None
+        self.write_joint_state_calls = 0
         self.root_pose_calls = 0
         self.root_velocity_calls = 0
 
@@ -22,6 +47,7 @@ class _FakeRobot:
         self.written_pos = joint_pos
         self.written_vel = joint_vel
         self.written_ids = env_ids
+        self.write_joint_state_calls += 1
 
     def write_root_link_pose_to_sim(self, *a, **k):
         self.root_pose_calls += 1
@@ -50,7 +76,18 @@ def _make_env(num_envs, num_dof, joint_values, hard_bound=10.0):
     default_joint_pos = torch.zeros(num_envs, num_dof)
     soft_limits = torch.tensor([[-3.0, 3.0]] * num_dof).unsqueeze(0).repeat(num_envs, 1, 1)
     hard_limits = torch.tensor([[-hard_bound, hard_bound]] * num_dof).unsqueeze(0).repeat(num_envs, 1, 1)
-    robot = _FakeRobot(joint_values, default_joint_pos, soft_limits, hard_limits)
+    data = _FakeRobotData(joint_values, default_joint_pos, soft_limits, hard_limits)
+    robot = _FakeRobot(data)
+    env = _FakeEnv(num_envs=num_envs, robot=robot)
+    return env, robot
+
+
+def _make_env_poisoned_soft_limits(num_envs, num_dof, joint_values, hard_bound=10.0):
+    """Same as _make_env, but reading soft_joint_pos_limits raises immediately."""
+    default_joint_pos = torch.zeros(num_envs, num_dof)
+    hard_limits = torch.tensor([[-hard_bound, hard_bound]] * num_dof).unsqueeze(0).repeat(num_envs, 1, 1)
+    data = _PoisonedSoftLimitsData(joint_values, default_joint_pos, hard_limits)
+    robot = _FakeRobot(data)
     env = _FakeEnv(num_envs=num_envs, robot=robot)
     return env, robot
 
@@ -323,3 +360,103 @@ def test_reset_single_env_population_donor_pool_is_itself():
 
     assert robot.written_ids.tolist() == [0]
     assert torch.allclose(robot.written_pos, torch.tensor([[1.5, -1.5]]))
+
+
+def test_reset_from_motion_data_passes_rsi_fraction_0_8_to_reset(monkeypatch):
+    """Regression test for the exact bug the audit found: reset_from_motion_data
+    (the function actually registered as the training event) once hardcoded
+    rsi_fraction=0.5, silently overriding reset()'s 0.8 default. Pin the
+    argument it actually passes, not just reset()'s own default."""
+    import simple_goalkeeper.mdp.events as events_mod
+
+    captured = {}
+
+    class _StubMgr:
+        def init(self, env):
+            pass
+
+        def reset(self, env, env_ids, asset_cfg, rsi_fraction):
+            captured["rsi_fraction"] = rsi_fraction
+
+    monkeypatch.setattr(events_mod.MotionResetManager, "get", staticmethod(lambda: _StubMgr()))
+
+    events_mod.reset_from_motion_data(env=object(), env_ids=None)
+
+    assert captured["rsi_fraction"] == 0.8
+
+
+@pytest.mark.parametrize("rsi_fraction", [0.2, 0.5, 0.8, 0.95])
+def test_reset_matches_rsi_fraction_statistically_at_multiple_values(rsi_fraction):
+    """The coin-flip rate must track rsi_fraction generally, not just at the
+    default 0.8 — pins down the `> (1.0 - rsi_fraction)` formula itself."""
+    from simple_goalkeeper.mdp.events import MotionResetManager
+
+    num_envs, num_dof = 4, 1
+    joint_values = torch.ones(num_envs, num_dof) * 50.0
+    env, robot = _make_env(num_envs, num_dof, joint_values)
+    mgr = MotionResetManager()
+    env_ids = torch.tensor([0], dtype=torch.int32)
+
+    torch.manual_seed(123)
+    n_trials = 2000
+    donor_hits = 0
+    for _ in range(n_trials):
+        mgr.reset(env, env_ids, rsi_fraction=rsi_fraction)
+        if abs(robot.written_pos.item()) > 1.0:
+            donor_hits += 1
+
+    rate = donor_hits / n_trials
+    assert abs(rate - rsi_fraction) < 0.05, (
+        f"donor-branch rate {rate} far from expected {rsi_fraction}"
+    )
+
+
+def test_reset_write_joint_state_called_exactly_once_per_reset_call():
+    """Whichever branch fires, write_joint_state_to_sim must be called
+    exactly once — no double-write, no branch calling it twice."""
+    from simple_goalkeeper.mdp.events import MotionResetManager
+
+    num_envs, num_dof = 3, 1
+    joint_values = torch.ones(num_envs, num_dof) * 5.0
+    env, robot = _make_env(num_envs, num_dof, joint_values)
+    mgr = MotionResetManager()
+    env_ids = torch.tensor([0], dtype=torch.int32)
+
+    mgr.reset(env, env_ids, rsi_fraction=1.0)
+    assert robot.write_joint_state_calls == 1
+
+    mgr.reset(env, env_ids, rsi_fraction=0.0)
+    assert robot.write_joint_state_calls == 2
+
+
+def test_reset_donor_branch_never_reads_soft_joint_pos_limits():
+    """G1's continue_keep branch has no soft-limit concept at all — confirm
+    reset() genuinely never touches robot.data.soft_joint_pos_limits here,
+    not just that the end result happens to look unclamped."""
+    from simple_goalkeeper.mdp.events import MotionResetManager
+
+    num_envs, num_dof = 3, 1
+    joint_values = torch.ones(num_envs, num_dof) * 5.0
+    env, robot = _make_env_poisoned_soft_limits(num_envs, num_dof, joint_values)
+    mgr = MotionResetManager()
+    env_ids = torch.tensor([0], dtype=torch.int32)
+
+    mgr.reset(env, env_ids, rsi_fraction=1.0)  # donor branch — must not raise
+
+    assert robot.written_ids.tolist() == [0]
+
+
+def test_reset_default_pose_branch_never_reads_soft_joint_pos_limits():
+    """G1's randomize_initial_joint_pos branch clips to the HARD dof limits,
+    never the soft ones — confirm the else branch doesn't read them either."""
+    from simple_goalkeeper.mdp.events import MotionResetManager
+
+    num_envs, num_dof = 3, 1
+    joint_values = torch.ones(num_envs, num_dof) * 5.0
+    env, robot = _make_env_poisoned_soft_limits(num_envs, num_dof, joint_values)
+    mgr = MotionResetManager()
+    env_ids = torch.tensor([0], dtype=torch.int32)
+
+    mgr.reset(env, env_ids, rsi_fraction=0.0)  # default-pose branch — must not raise
+
+    assert robot.written_ids.tolist() == [0]
