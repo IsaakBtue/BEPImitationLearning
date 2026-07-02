@@ -112,3 +112,34 @@ def test_amp_loss_uses_policy_replay_buffer_not_proprioceptive_obs():
     result = alg.update()
     mean_amp_loss = result[2]
     assert mean_amp_loss > 0.0  # both expert and policy terms now contribute
+
+
+def test_update_refreshes_amp_normalizer_running_stats():
+    """The normalizer must not stay frozen at init (zero mean, unit var,
+    epsilon count) — update() should feed it every region's policy/expert
+    samples, mirroring amp_ppo.py:227-229's per-minibatch normalizer.update()."""
+    alg, actor_critic, discriminators = _make_alg(num_envs=4, num_transitions=2)
+    region_ids = torch.tensor([0.0, 0.0, 2.0, 2.0])
+
+    initial_count = alg.amp_normalizer.count
+    assert initial_count == 1e-4  # RunningMeanStd epsilon default, untouched
+
+    for _ in range(2):
+        obs_current = torch.randn(4, NUM_ONE_STEP_OBS)
+        obs_history = torch.randn(4, NUM_ONE_STEP_OBS * HISTORY_LEN)
+        critic_obs = torch.randn(4, NUM_CRITIC_OBS)
+        critic_obs[:, -1] = region_ids
+        amp_obs = torch.randn(4, AMP_OBS_DIM)
+        alg.act(obs_current, obs_history, critic_obs, amp_obs)
+        alg.process_env_step(
+            rewards=torch.zeros(4), dones=torch.zeros(4, dtype=torch.bool),
+            infos={}, amp_obs=torch.randn(4, AMP_OBS_DIM),
+        )
+    alg.compute_returns(torch.randn(4, NUM_CRITIC_OBS))
+    alg.update()
+
+    # Two regions were present in the batch (left_near, right_near), so the
+    # normalizer should have been fed at least 2 x 2 (policy + expert) batches.
+    assert alg.amp_normalizer.count > initial_count
+    assert not (alg.amp_normalizer.mean == 0.0).all()
+    assert not (alg.amp_normalizer.var == 1.0).all()

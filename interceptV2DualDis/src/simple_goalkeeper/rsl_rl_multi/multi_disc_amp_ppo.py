@@ -241,6 +241,7 @@ class MultiDiscAMPPPO:
             amp_loss = torch.tensor(0.0, device=self.device)
             grad_pen_loss = torch.tensor(0.0, device=self.device)
             policy_preds, expert_preds = [], []
+            normalizer_states = []
             for r, name in enumerate(REGION_NAMES):
                 mask = gt_region == r
                 if not mask.any():
@@ -266,6 +267,7 @@ class MultiDiscAMPPPO:
                 grad_pen_loss = grad_pen_loss + grad_pen
                 expert_preds.append(expert_d.mean().item())
                 policy_preds.append(policy_d.mean().item())
+                normalizer_states.append((policy_state, expert_state))
 
             loss = loss + amp_loss + grad_pen_loss
 
@@ -276,6 +278,17 @@ class MultiDiscAMPPPO:
 
             if not self.actor_critic.fixed_std and self.min_std is not None:
                 self.actor_critic.std.data = self.actor_critic.std.data.clamp(min=self.min_std)
+
+            # Refresh the (shared) normalizer's running mean/std from every
+            # region processed this minibatch — ported from amp_ppo.py:227-229,
+            # which does this once per minibatch for its single region's worth
+            # of data. Here each region draws its own policy/expert pair, so
+            # each pair feeds the update, keeping the normalizer's statistics
+            # from staying frozen at init.
+            if self.amp_normalizer is not None:
+                for policy_state, expert_state in normalizer_states:
+                    self.amp_normalizer.update(policy_state.cpu().numpy())
+                    self.amp_normalizer.update(expert_state.cpu().numpy())
 
             mean_value_loss += value_loss.item()
             mean_surrogate_loss += surrogate_loss.item()
