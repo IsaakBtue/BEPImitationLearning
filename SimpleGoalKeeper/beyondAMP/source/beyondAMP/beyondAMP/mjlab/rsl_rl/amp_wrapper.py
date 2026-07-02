@@ -15,6 +15,11 @@ from .vecenv_wrapper import RslRlVecEnvWrapper
 _AMP_GROUP = "amp"
 
 
+def _motion_weights_from_cfg(motion_dataset_cfg) -> list[float] | None:
+  """Per-motion sampling weights declared on a MotionDatasetCfg, if any."""
+  return getattr(motion_dataset_cfg, "motion_weights", None)
+
+
 class AMPEnvWrapper(RslRlVecEnvWrapper):
   """mjlab AMP wrapper.
 
@@ -39,7 +44,10 @@ class AMPEnvWrapper(RslRlVecEnvWrapper):
       self.motion_dataset = motion_dataset
     else:
       self.motion_dataset = WeightedMotionDataset(
-        motion_dataset, self.unwrapped, self.unwrapped.device
+        motion_dataset,
+        self.unwrapped,
+        self.unwrapped.device,
+        traj_weights=_motion_weights_from_cfg(motion_dataset),
       )
     # Stash on env so MDP terms (rewards / events) can reach it.
     self.unwrapped.motion_dataset = self.motion_dataset

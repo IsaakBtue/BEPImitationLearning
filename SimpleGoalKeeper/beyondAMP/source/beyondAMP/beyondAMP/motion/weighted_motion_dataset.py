@@ -20,13 +20,15 @@ class WeightedMotionDataset(MotionDataset):
     ):
         super().__init__(cfg, env, device)
         num_transitions = len(self.index_t)
+        self._traj_weights = traj_weights
         if transition_weights is not None:
             assert transition_weights.shape[0] == num_transitions
             self.weights = transition_weights.to(device).clone()
+        elif traj_weights is not None:
+            self.weights = self._build_transition_weights_from_traj(traj_weights).to(device)
         else:
-            self.weights = torch.ones(len(self.index_t)).to(device)
+            self.weights = torch.ones(num_transitions).to(device)
 
-        self._traj_weights = traj_weights
         self.norm_weights()
 
     # ---------------------------------------------------------

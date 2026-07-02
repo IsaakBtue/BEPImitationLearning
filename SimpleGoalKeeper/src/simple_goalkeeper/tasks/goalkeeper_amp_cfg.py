@@ -39,6 +39,21 @@ def _motion_files() -> list[str]:
     return sorted(str(p) for p in _MOTIONS_DIR.glob("*.npz"))
 
 
+# Relative sampling weight given to double/triple-step motions in the AMP
+# discriminator dataset. These are otherwise represented only in proportion to
+# their frame count alongside every other motion (~36% of all frames as of
+# 2026-07), so this boosts their share of AMP transitions independent of length.
+_DOUBLE_TRIPLE_STEP_WEIGHT = 4.0
+
+
+def _motion_weights(files: list[str], boost: float = _DOUBLE_TRIPLE_STEP_WEIGHT) -> list[float]:
+    """Per-motion AMP discriminator sampling weight: boost double/triple-step files."""
+    return [
+        boost if ("DoubleStep" in f or "TripleStep" in f) else 1.0
+        for f in files
+    ]
+
+
 def goalkeeper_amp_runner_cfg() -> AMPRunnerCfg:
     return AMPRunnerCfg(
         num_steps_per_env=24,
@@ -74,6 +89,7 @@ def goalkeeper_amp_runner_cfg() -> AMPRunnerCfg:
         ),
         amp_data=MotionDatasetCfg(
             motion_files=_motion_files(),
+            motion_weights=_motion_weights(_motion_files()),
             body_names=GOALKEEPER_KEY_BODY_NAMES,
             amp_obs_terms=AMPObsBaiscTerms,
             anchor_name=GOALKEEPER_ANCHOR_NAME,

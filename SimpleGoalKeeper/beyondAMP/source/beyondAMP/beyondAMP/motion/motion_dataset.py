@@ -100,6 +100,7 @@ class MotionDataset:
 
         # Keep per-trajectory FPS if needed
         self.fps_list = fps_list
+        self._traj_lengths = traj_lengths
 
         # Build transition index list: (global_index_t, global_index_t+1)
         self.index_t, self.index_tp1 = self._build_transition_indices(traj_lengths, self.device)
@@ -314,3 +315,4 @@ class MotionDatasetCfg:
     body_names          : List[str] = MISSING
     amp_obs_terms       : List[str] = MISSING
     anchor_name         : str = MISSING
+    motion_weights      : Union[List[float], None] = None
