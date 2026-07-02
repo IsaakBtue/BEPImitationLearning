@@ -196,14 +196,12 @@ def goalkeeper_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
 
     # ------------------------------------------------------------------
     # Observations
-    # FIX 2026-07-02: matches G1 (legged_robot.py:401-428) — the actor's ball
-    # observation is gated by visibility (warmup + flying + random-vanish) in
-    # training too, not just eval. G1 trains its actor under this same vanish
-    # gate from iteration 1 so the policy learns to stop reacting once the ball
-    # leaves the flying cone (e.g. post-save). Previously `always_visible=True`
-    # was hardcoded here with no train/play distinction, so the policy never
-    # experienced a vanished ball and kept tracking it after saves. The critic
-    # stays always-visible, matching G1's ungated privileged obs.
+    # REVERT 2026-07-02: 8803b6e gated the actor's ball_pos_b with
+    # always_visible=False (matching G1's flying/vanish mask). That change
+    # was wrong for this project and is reverted here — ball is always
+    # visible during training so the policy has a clean signal from the
+    # start. Visibility gating (warmup + vanish) is left for play/sim2real
+    # evaluation, not baked into the training observation itself.
     # ------------------------------------------------------------------
     # Actor: only terms available at deployment on real hardware.
     # base_lin_vel, ball_vel_b, foot_pos_b removed — not measurable at deployment.
@@ -229,7 +227,7 @@ def goalkeeper_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
         # XY only — matches BoosterT1mjlab kick task for deployment compatibility.
         "ball_pos_b": ObservationTermCfg(
             func=gk_mdp.ball_pos_xy_b,
-            params={"ball_name": BALL_NAME, "always_visible": False},
+            params={"ball_name": BALL_NAME, "always_visible": True},
             noise=Unoise(n_min=-0.05, n_max=0.05),
         ),
     }
