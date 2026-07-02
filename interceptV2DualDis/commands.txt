@@ -1,0 +1,2 @@
+# Restart with adaptive G1-style curriculum + stopball threshold 1.5 + dead zone fix:
+cd /home/robocup/IsaakB/BEPImitationLearning/SimpleGoalKeeper && uv run sgk_train Mjlab-BeyondAMP-Goalkeeper-T1 --num-envs 16384

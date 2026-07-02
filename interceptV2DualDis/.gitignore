@@ -1,0 +1,13 @@
+__pycache__/
+*.pyc
+*.pyo
+.venv/
+*.egg-info/
+uv.lock
+/logs/
+# Track only the designated deployment checkpoint + its params, via
+# per-run whitelist entries, e.g.:
+# !/logs/rsl_rl/simple_goalkeeper/<run>/model_XXXX.pt
+# !/logs/rsl_rl/simple_goalkeeper/<run>/<run>.onnx
+# !/logs/rsl_rl/simple_goalkeeper/<run>/ONNX_REPORT.md
+# !/logs/rsl_rl/simple_goalkeeper/<run>/params/
