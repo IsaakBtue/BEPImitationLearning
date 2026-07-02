@@ -67,4 +67,5 @@ uv.lock
 !/logs/rsl_rl/simple_goalkeeper/2026-07-02_01-14-33_phase1/2026-07-02_01-14-33_phase1.onnx
 !/logs/rsl_rl/simple_goalkeeper/2026-07-02_01-14-33_phase1/ONNX_REPORT.md
 !/logs/rsl_rl/simple_goalkeeper/2026-07-02_01-14-33_phase1/params/
+!/logs/rsl_rl/simple_goalkeeper/2026-07-02_20-18-38_phase1/model_2250.pt
 SimpleGoalKeeper/beyondAMP/data/
