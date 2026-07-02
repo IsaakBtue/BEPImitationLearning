@@ -1,11 +1,13 @@
 """Env config for the 4-region, multi-discriminator AMP variant of the
-goalkeeper task. Starts from goalkeeper_env_cfg() and layers on: the
-actor_history observation group (history_length=10), ball/region
+goalkeeper task. Starts from goalkeeper_env_cfg() and layers on: a genuine
+single-step actor_current observation group (history_length=0), ball/region
 ground-truth critic obs terms, and region-conditioned ball spawn + static
 region assignment events. See docs/superpowers/plans/2026-07-02-multi-
 discriminator-amp-implementation-plan.md.
 """
 from __future__ import annotations
+
+import dataclasses
 
 from mjlab.envs import ManagerBasedRlEnvCfg
 from mjlab.managers.event_manager import EventTermCfg
@@ -21,17 +23,23 @@ def goalkeeper_multidisc_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
     """
     cfg = goalkeeper_env_cfg(play=play)
 
-    # (a) History-stacked actor observation group — same terms dict as
-    # "actor" (ObservationManager deep-copies its whole cfg + every term_cfg
-    # on construction, so two groups sharing one terms dict is safe — see
-    # mjlab.managers.observation_manager.ObservationManager.__init__/
-    # _prepare_terms), 10-step history, term-major-flattened.
-    cfg.observations["actor_history"] = ObservationGroupCfg(
-        terms=cfg.observations["actor"].terms,
+    # (a) Single-step actor observation group. The base goalkeeper_env_cfg()
+    # already sets cfg.observations["actor"].history_length = 10, so "actor"
+    # is the 10-step history source; there is otherwise no group anywhere in
+    # this config providing a genuine single-step observation, which
+    # HimActorCritic.act(obs_current, obs_history) needs. Build fresh
+    # ObservationTermCfg clones (not references to "actor"'s term objects,
+    # which are already bound to the group's history_length override) via
+    # dataclasses.replace(..., history_length=0) so this group's terms are
+    # decoupled from the history-stacked ones.
+    current_terms = {
+        name: dataclasses.replace(term_cfg, history_length=0)
+        for name, term_cfg in cfg.observations["actor"].terms.items()
+    }
+    cfg.observations["actor_current"] = ObservationGroupCfg(
+        terms=current_terms,
         concatenate_terms=True,
         enable_corruption=cfg.observations["actor"].enable_corruption,
-        history_length=10,
-        flatten_history_dim=True,
     )
 
     # (b) Ball/region ground-truth terms, critic-only (privileged).
