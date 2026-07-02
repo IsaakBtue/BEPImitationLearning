@@ -58,3 +58,14 @@ def test_reset_ball_rolling_by_region_calls_reset_ball_rolling_per_region(monkey
     assert len(calls) == 4
     called_env_ids = {c[0] for c in calls}
     assert called_env_ids == {(0, 1), (2, 3), (4, 5), (6, 7)}
+
+
+def test_region_id_gt_returns_float_column_vector():
+    from simple_goalkeeper.mdp.regions import region_id_gt
+
+    env = _FakeEnv(num_envs=8)
+    assign_static_regions(env, env_ids=None)
+    out = region_id_gt(env)
+    assert out.shape == (8, 1)
+    assert out.dtype == torch.float32
+    assert torch.equal(out.squeeze(-1), env._region_id.float())

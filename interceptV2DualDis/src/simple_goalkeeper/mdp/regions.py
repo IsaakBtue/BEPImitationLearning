@@ -12,6 +12,9 @@ from typing import TYPE_CHECKING
 
 import torch
 
+from mjlab.entity import Entity
+from mjlab.utils.lab_api.math import quat_apply, quat_inv
+
 from .events import reset_ball_rolling
 
 if TYPE_CHECKING:
@@ -84,3 +87,25 @@ def reset_ball_rolling_by_region(
             t_flight_range=t_flight_range,
             spawn_z=spawn_z,
         )
+
+
+def region_id_gt(env: "ManagerBasedRlEnv") -> torch.Tensor:
+    """Ground-truth region id for the region_estimator's cross-entropy target.
+    Shape (N, 1), float32 (cross-entropy target is cast to long by the caller).
+    """
+    return env._region_id.float().unsqueeze(-1)
+
+
+def ball_state_gt(env: "ManagerBasedRlEnv", ball_name: str = "ball") -> torch.Tensor:
+    """Ground-truth ball state for the ball_estimator's MSE target.
+
+    Shape (N, 4): (pos_x, pos_y, vel_x, vel_y) in robot body frame. Same
+    frame convention as observations.py:ball_pos_b/ball_vel_b (always
+    visible here — this is privileged critic-only info, not gated).
+    """
+    robot: Entity = env.scene["robot"]
+    ball: Entity = env.scene[ball_name]
+    quat_i = quat_inv(robot.data.root_link_quat_w)
+    pos_b = quat_apply(quat_i, ball.data.root_link_pos_w - robot.data.root_link_pos_w)
+    vel_b = quat_apply(quat_i, ball.data.root_link_lin_vel_w)
+    return torch.cat([pos_b[:, :2], vel_b[:, :2]], dim=-1)
