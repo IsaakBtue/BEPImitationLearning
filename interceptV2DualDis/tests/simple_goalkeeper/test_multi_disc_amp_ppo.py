@@ -54,6 +54,8 @@ def _make_alg(num_envs=8, num_transitions=4):
         device="cpu",
         region_id_critic_obs_index=-1,
         ball_gt_critic_obs_slice=slice(-5, -1),
+        amp_obs_dim=AMP_OBS_DIM,
+        amp_replay_buffer_size=64,
     )
     alg.init_storage(num_envs, num_transitions, [NUM_ONE_STEP_OBS], [NUM_ONE_STEP_OBS * HISTORY_LEN],
                       [NUM_CRITIC_OBS], [NUM_ACTIONS])
@@ -89,3 +91,24 @@ def test_region_routing_only_updates_the_matching_discriminator():
             assert changed, f"{name} discriminator should have been updated (region present in batch)"
         else:
             assert not changed, f"{name} discriminator should NOT have been touched (region absent)"
+
+
+def test_amp_loss_uses_policy_replay_buffer_not_proprioceptive_obs():
+    alg, actor_critic, discriminators = _make_alg(num_envs=4, num_transitions=2)
+    region_ids = torch.tensor([0.0, 0.0, 2.0, 2.0])
+    for _ in range(2):
+        obs_current = torch.randn(4, NUM_ONE_STEP_OBS)
+        obs_history = torch.randn(4, NUM_ONE_STEP_OBS * HISTORY_LEN)
+        critic_obs = torch.randn(4, NUM_CRITIC_OBS)
+        critic_obs[:, -1] = region_ids
+        amp_obs = torch.randn(4, AMP_OBS_DIM)
+        alg.act(obs_current, obs_history, critic_obs, amp_obs)
+        alg.process_env_step(
+            rewards=torch.zeros(4), dones=torch.zeros(4, dtype=torch.bool),
+            infos={}, amp_obs=torch.randn(4, AMP_OBS_DIM),
+        )
+    assert alg.amp_storages["left_near"].step > 0 or alg.amp_storages["left_near"].num_samples > 0
+    alg.compute_returns(torch.randn(4, NUM_CRITIC_OBS))
+    result = alg.update()
+    mean_amp_loss = result[2]
+    assert mean_amp_loss > 0.0  # both expert and policy terms now contribute

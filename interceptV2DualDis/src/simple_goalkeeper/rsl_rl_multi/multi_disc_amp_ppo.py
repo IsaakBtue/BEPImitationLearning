@@ -12,6 +12,7 @@ import torch.nn as nn
 import torch.optim as optim
 
 from rsl_rl_amp.storage.rollout_storage import RolloutStorage
+from rsl_rl_amp.storage.replay_buffer import ReplayBuffer
 from rsl_rl_amp.modules.amp_discriminator import AMPDiscriminator
 
 from .him_actor_critic import HimActorCritic
@@ -30,6 +31,7 @@ class MultiDiscAMPPPO:
         amp_normalizer,
         region_id_critic_obs_index: int,
         ball_gt_critic_obs_slice: slice,
+        amp_obs_dim: int,
         num_learning_epochs: int = 1,
         num_mini_batches: int = 1,
         clip_param: float = 0.2,
@@ -43,6 +45,7 @@ class MultiDiscAMPPPO:
         schedule: str = "fixed",
         desired_kl: float = 0.01,
         device: str = "cpu",
+        amp_replay_buffer_size: int = 100_000,
         min_std=None,
         **kwargs,
     ):
@@ -61,6 +64,10 @@ class MultiDiscAMPPPO:
         for d in self.discriminators.values():
             d.to(device)
         self.amp_normalizer = amp_normalizer
+        self.amp_storages: dict[str, ReplayBuffer] = {
+            name: ReplayBuffer(amp_obs_dim, amp_replay_buffer_size, device)
+            for name in REGION_NAMES
+        }
 
         self.actor_critic = actor_critic
         self.actor_critic.to(device)
@@ -113,6 +120,7 @@ class MultiDiscAMPPPO:
         self._pending_obs = combined_obs
         self._pending_critic_obs = critic_obs
         self._pending_amp_obs = amp_obs
+        self._pending_region = critic_obs[:, self.region_id_critic_obs_index].long()
         return self.transition_actions
 
     def process_env_step(self, rewards, dones, infos, amp_obs):
@@ -130,6 +138,13 @@ class MultiDiscAMPPPO:
             transition.rewards += self.gamma * torch.squeeze(
                 transition.values * infos["time_outs"].unsqueeze(1).to(self.device), 1)
         self.storage.add_transitions(transition)
+
+        region = self._pending_region
+        for r, name in enumerate(REGION_NAMES):
+            mask = region == r
+            if mask.any():
+                self.amp_storages[name].insert(self._pending_amp_obs[mask], amp_obs[mask])
+
         self.actor_critic.reset(dones)
 
     def compute_returns(self, last_critic_obs):
@@ -155,12 +170,18 @@ class MultiDiscAMPPPO:
         mean_est_loss = mean_region_loss = mean_policy_pred = mean_expert_pred = 0.0
 
         generator = self.storage.mini_batch_generator(self.num_mini_batches, self.num_learning_epochs)
+        minibatch_size = self.storage.num_envs * self.storage.num_transitions_per_env // self.num_mini_batches
         amp_expert_generators = {
             name: ds.feed_forward_generator(
-                self.num_learning_epochs * self.num_mini_batches,
-                self.storage.num_envs * self.storage.num_transitions_per_env // self.num_mini_batches,
+                self.num_learning_epochs * self.num_mini_batches, minibatch_size,
             )
             for name, ds in self.amp_datasets.items()
+        }
+        amp_policy_generators = {
+            name: rb.feed_forward_generator(
+                self.num_learning_epochs * self.num_mini_batches, minibatch_size,
+            )
+            for name, rb in self.amp_storages.items()
         }
 
         for sample in generator:
@@ -225,25 +246,26 @@ class MultiDiscAMPPPO:
                 if not mask.any():
                     continue
                 expert_state, expert_next_state = next(amp_expert_generators[name])
-                policy_amp = obs_current_batch[mask]  # placeholder policy-side amp obs slice; see Task 5 note
-                # NOTE: the actual policy-side AMP observation comes from the
-                # amp_storage replay buffer (populated in process_env_step),
-                # sampled the same way single-disc AMPPPO.update() does via
-                # self.amp_storage.feed_forward_generator — wired in Task 5
-                # once HimAMPOnPolicyRunner supplies amp_storage per region.
+                policy_state, policy_next_state = next(amp_policy_generators[name])
                 discr = self.discriminators[name]
                 if self.amp_normalizer is not None:
                     with torch.no_grad():
                         expert_state_n = self.amp_normalizer.normalize_torch(expert_state, self.device)
                         expert_next_state_n = self.amp_normalizer.normalize_torch(expert_next_state, self.device)
+                        policy_state_n = self.amp_normalizer.normalize_torch(policy_state, self.device)
+                        policy_next_state_n = self.amp_normalizer.normalize_torch(policy_next_state, self.device)
                 else:
                     expert_state_n, expert_next_state_n = expert_state, expert_next_state
+                    policy_state_n, policy_next_state_n = policy_state, policy_next_state
                 expert_d = discr(torch.cat([expert_state_n, expert_next_state_n], dim=-1))
+                policy_d = discr(torch.cat([policy_state_n, policy_next_state_n], dim=-1))
                 expert_loss = torch.nn.MSELoss()(expert_d, torch.ones(expert_d.size(), device=self.device))
+                policy_loss = torch.nn.MSELoss()(policy_d, -1 * torch.ones(policy_d.size(), device=self.device))
                 grad_pen = discr.compute_grad_pen(expert_state_n, expert_next_state_n, lambda_=10)
-                amp_loss = amp_loss + 0.5 * expert_loss
+                amp_loss = amp_loss + 0.5 * expert_loss + 0.5 * policy_loss
                 grad_pen_loss = grad_pen_loss + grad_pen
                 expert_preds.append(expert_d.mean().item())
+                policy_preds.append(policy_d.mean().item())
 
             loss = loss + amp_loss + grad_pen_loss
 
@@ -263,6 +285,8 @@ class MultiDiscAMPPPO:
             mean_region_loss += region_loss.item()
             if expert_preds:
                 mean_expert_pred += sum(expert_preds) / len(expert_preds)
+            if policy_preds:
+                mean_policy_pred += sum(policy_preds) / len(policy_preds)
 
         num_updates = self.num_learning_epochs * self.num_mini_batches
         self.storage.clear()
