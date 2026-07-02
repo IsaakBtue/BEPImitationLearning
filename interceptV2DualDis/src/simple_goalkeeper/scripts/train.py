@@ -26,6 +26,7 @@ _wandb_key_file = Path.home() / ".wandb_api_key"
 if _wandb_key_file.exists():
     os.environ["WANDB_API_KEY"] = _wandb_key_file.read_text().strip()
 
+import dataclasses
 from dataclasses import asdict, dataclass, field
 from datetime import datetime
 from typing import Literal
@@ -34,13 +35,59 @@ import tyro
 
 from mjlab.envs import ManagerBasedRlEnv, ManagerBasedRlEnvCfg
 from mjlab.scripts._cli import maybe_print_top_level_help
-from mjlab.tasks.registry import list_tasks, load_env_cfg, load_rl_cfg
+from mjlab.tasks.registry import (
+    list_tasks,
+    load_env_cfg,
+    load_rl_cfg,
+    load_runner_cls,
+)
 from mjlab.utils.gpu import select_gpus
 from mjlab.utils.os import dump_yaml, get_checkpoint_path
 from mjlab.utils.torch import configure_torch_backends
 
 from beyondAMP.mjlab.rsl_rl import AMPEnvWrapper, AMPRunnerCfg
 from rsl_rl_amp.runners.amp_on_policy_runner import AMPOnPolicyRunner
+
+
+# Scalar/config keys shared between the multi-disc runner's plain-dict config
+# (goalkeeper_multidisc_amp_runner_cfg -> dict) and AMPRunnerCfg's dataclass
+# fields. The multi-disc task's rl_cfg is intentionally a dict (its runner reads
+# it via subscripting), but tyro needs a dataclass to build the `--agent.*` CLI.
+# So we surface these overridable keys through an AMPRunnerCfg placeholder for
+# the CLI, then fold any overrides back into the real dict at run_train time.
+_MULTIDISC_AGENT_KEYS: tuple[str, ...] = (
+    "num_steps_per_env",
+    "max_iterations",
+    "save_interval",
+    "experiment_name",
+    "run_name",
+    "empirical_normalization",
+    "use_wandb",
+    "wandb_project",
+    "amp_discr_hidden_dims",
+    "amp_reward_coef",
+    "amp_task_reward_lerp",
+    "amp_min_normalized_std",
+)
+
+
+def _amp_runner_cfg_from_multidisc(agent_dict: dict) -> AMPRunnerCfg:
+    """Build an AMPRunnerCfg carrying the multi-disc dict's overridable scalar
+    fields so tyro can expose them as `--agent.*` flags. The nested policy/
+    algorithm/amp_data structures live only in the dict (rebuilt in run_train)."""
+    kwargs = {k: agent_dict[k] for k in _MULTIDISC_AGENT_KEYS if k in agent_dict}
+    return AMPRunnerCfg(**kwargs)
+
+
+def _multidisc_train_cfg(task_id: str, agent: AMPRunnerCfg) -> dict:
+    """Fresh multi-disc dict config with CLI overrides (carried on `agent`)
+    folded back in over the registered defaults."""
+    train_cfg = load_rl_cfg(task_id)
+    assert isinstance(train_cfg, dict)
+    for key in _MULTIDISC_AGENT_KEYS:
+        if key in train_cfg and hasattr(agent, key):
+            train_cfg[key] = getattr(agent, key)
+    return train_cfg
 
 
 @dataclass(frozen=True)
@@ -55,6 +102,11 @@ class TrainConfig:
     def from_task(task_id: str) -> "TrainConfig":
         env_cfg = load_env_cfg(task_id)
         agent_cfg = load_rl_cfg(task_id)
+        # Multi-disc tasks register a plain dict rl_cfg (see Task 7); wrap its
+        # overridable scalars in an AMPRunnerCfg so the shared CLI/log plumbing
+        # below keeps working. The real dict is rebuilt in run_train.
+        if isinstance(agent_cfg, dict):
+            agent_cfg = _amp_runner_cfg_from_multidisc(agent_cfg)
         assert isinstance(agent_cfg, AMPRunnerCfg), (
             f"Task '{task_id}' is not an AMP task — got {type(agent_cfg).__name__}."
         )
@@ -80,12 +132,33 @@ def run_train(task_id: str, cfg: TrainConfig, log_dir: Path) -> None:
     print(f"[INFO] Logging to: {log_dir}")
 
     env = ManagerBasedRlEnv(cfg=cfg.env, device=device)
-    env = AMPEnvWrapper(env, clip_actions=cfg.agent.clip_actions, motion_dataset=cfg.agent.amp_data)
+
+    # A registered custom runner_cls (currently only the multi-disc goalkeeper
+    # task) selects the HIM/multi-discriminator path; everything else keeps the
+    # single-disc AMPOnPolicyRunner behavior byte-for-byte.
+    runner_cls = load_runner_cls(task_id)
 
     dump_yaml(log_dir / "params" / "env.yaml", asdict(cfg.env))
-    dump_yaml(log_dir / "params" / "agent.yaml", asdict(cfg.agent))
 
-    runner = AMPOnPolicyRunner(env, asdict(cfg.agent), log_dir=str(log_dir), device=device)
+    if runner_cls is not None:
+        # Multi-disc: rl_cfg is a plain dict; its RSI/motion loading does not use
+        # AMPEnvWrapper.motion_dataset (verified: no `.motion_dataset` reads in
+        # this project's mdp code), and its amp_data is a dict of 4 cfgs that the
+        # single-dataset wrapper path cannot consume — so pass motion_dataset=None.
+        env = AMPEnvWrapper(env, clip_actions=cfg.agent.clip_actions, motion_dataset=None)
+        train_cfg = _multidisc_train_cfg(task_id, cfg.agent)
+        dumpable = dict(train_cfg)
+        dumpable["amp_data"] = {
+            name: dataclasses.asdict(c) for name, c in train_cfg["amp_data"].items()
+        }
+        dump_yaml(log_dir / "params" / "agent.yaml", dumpable)
+        runner = runner_cls(env, train_cfg, log_dir=str(log_dir), device=device)
+    else:
+        env = AMPEnvWrapper(
+            env, clip_actions=cfg.agent.clip_actions, motion_dataset=cfg.agent.amp_data
+        )
+        dump_yaml(log_dir / "params" / "agent.yaml", asdict(cfg.agent))
+        runner = AMPOnPolicyRunner(env, asdict(cfg.agent), log_dir=str(log_dir), device=device)
 
     if cfg.agent.resume:
         log_root_path = log_dir.parent
@@ -105,7 +178,11 @@ def main() -> None:
 
     import mjlab
 
-    amp_tasks = [t for t in list_tasks() if isinstance(load_rl_cfg(t), AMPRunnerCfg)]
+    # AMPRunnerCfg → single-disc AMP tasks; plain dict → the multi-disc task
+    # (its rl_cfg is intentionally a dict, see Task 7 / from_task).
+    amp_tasks = [
+        t for t in list_tasks() if isinstance(load_rl_cfg(t), (AMPRunnerCfg, dict))
+    ]
     if not amp_tasks:
         raise RuntimeError("No AMP tasks registered.")
 

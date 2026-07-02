@@ -92,8 +92,18 @@ def reset_ball_rolling_by_region(
 def region_id_gt(env: "ManagerBasedRlEnv") -> torch.Tensor:
     """Ground-truth region id for the region_estimator's cross-entropy target.
     Shape (N, 1), float32 (cross-entropy target is cast to long by the caller).
+
+    The observation manager probes each term's output shape during env
+    construction (ObservationManager.__init__ -> _prepare_terms), which runs
+    *before* the ``assign_static_regions`` startup event populates
+    ``env._region_id``. Return a correctly-shaped zeros tensor in that window;
+    every real ``observation_manager.compute()`` happens after startup events,
+    so training/eval always sees the true region ids.
     """
-    return env._region_id.float().unsqueeze(-1)
+    region_id = getattr(env, "_region_id", None)
+    if region_id is None:
+        return torch.zeros((env.num_envs, 1), dtype=torch.float32, device=env.device)
+    return region_id.float().unsqueeze(-1)
 
 
 def ball_state_gt(env: "ManagerBasedRlEnv", ball_name: str = "ball") -> torch.Tensor:
