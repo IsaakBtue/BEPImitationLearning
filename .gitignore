@@ -51,6 +51,12 @@ runs/
 !SimpleGoalKeeper/src/simple_goalkeeper/motions/data/*.npz
 !SimpleGoalKeeper/src/simple_goalkeeper/motions/raw/*.pkl
 
+# interceptV2DualDis motion files (same convention as SimpleGoalKeeper above —
+# this was missing from the original copy commit, leaving motion data
+# untracked; fixed 2026-07-02 before multi-discriminator AMP work began)
+!interceptV2DualDis/src/simple_goalkeeper/motions/data/*.npz
+!interceptV2DualDis/src/simple_goalkeeper/motions/raw/*.pkl
+
 # Model checkpoints (wandb training runs)
 my_mjlab_project_booster_t1/wandb/
 Imitationlearningbooster/wandb/
