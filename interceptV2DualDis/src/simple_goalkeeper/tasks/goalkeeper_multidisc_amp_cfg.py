@@ -3,7 +3,8 @@ goalkeeper task. Starts from goalkeeper_env_cfg() and layers on: a genuine
 single-step actor_current observation group (history_length=0), ball/region
 ground-truth critic obs terms, and region-conditioned ball spawn + static
 region assignment events. See docs/superpowers/plans/2026-07-02-multi-
-discriminator-amp-implementation-plan.md.
+discriminator-amp.md and docs/superpowers/specs/2026-07-02-multi-
+discriminator-amp-design.md.
 """
 from __future__ import annotations
 

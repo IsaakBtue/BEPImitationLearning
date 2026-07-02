@@ -36,7 +36,19 @@ from .multi_disc_amp_ppo import REGION_NAMES, MultiDiscAMPPPO
 
 
 def _get_actor_current_obs(env: AMPEnvWrapper) -> torch.Tensor:
-    """Single-step actor observation (Task 6's ``actor_current`` group)."""
+    """Single-step actor observation (Task 6's ``actor_current`` group).
+
+    Divergence from G1: G1's HimOnPolicyRunner slices obs_current directly out
+    of the history tensor's newest frame, so obs_current and obs_history's
+    current slot share one noise/delay realization. Here obs_current comes
+    from a separate observation group with its own independent
+    enable_corruption sampling -- mjlab flattens history per-term rather than
+    as a single trailing block, so recovering G1's exact slice-based approach
+    would require a per-term gather/reassemble. Documented and accepted as a
+    justified divergence in CLAUDE.md's "Multi-disc obs_current sourcing" row
+    (2026-07-02) rather than fixed -- assessed as functionally safe for a
+    learned MLP by two independent reviews.
+    """
     return env.unwrapped.observation_manager.compute()["actor_current"]
 
 

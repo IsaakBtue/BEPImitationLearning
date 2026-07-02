@@ -81,7 +81,12 @@ def _amp_runner_cfg_from_multidisc(agent_dict: dict) -> AMPRunnerCfg:
 
 def _multidisc_train_cfg(task_id: str, agent: AMPRunnerCfg) -> dict:
     """Fresh multi-disc dict config with CLI overrides (carried on `agent`)
-    folded back in over the registered defaults."""
+    folded back in over the registered defaults.
+
+    load_rl_cfg() already deepcopies the registry's stored config (see
+    mjlab.tasks.registry.load_rl_cfg), so mutating the returned dict below is
+    safe and does not touch the registered defaults.
+    """
     train_cfg = load_rl_cfg(task_id)
     assert isinstance(train_cfg, dict)
     for key in _MULTIDISC_AGENT_KEYS:
