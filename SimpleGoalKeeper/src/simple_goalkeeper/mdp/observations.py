@@ -92,10 +92,20 @@ def ball_pos_xy_b(
     env: "ManagerBasedRlEnv",
     ball_name: str = "ball",
     always_visible: bool = False,
+    hide_when_behind: bool = False,
 ) -> torch.Tensor:
     """Ball XY position in robot body frame (no Z). Shape (N, 2).
 
     Matches BoosterT1mjlab kick task observation space for deployment compatibility.
+
+    hide_when_behind: post-save release gate. Zeroes the observation once
+    _ball_is_behind fires (ball crossed the goal line OR a save was registered
+    via _softstop_flag/_sb_flag — the same latched flag that activates the
+    post* recovery rewards). This is the release half of G1's post-save
+    mechanism (G1 hides the ball via its flying mask, legged_robot.py:401)
+    without G1's warmup blackout / random vanish, which destabilized training
+    when ported wholesale (run 2026-07-02_17-53-27, reverted 3512989).
+    One-way within an episode: the flags are latched until reset.
     """
     robot: Entity = env.scene["robot"]
     ball: Entity = env.scene[ball_name]
@@ -103,10 +113,14 @@ def ball_pos_xy_b(
         quat_inv(robot.data.root_link_quat_w),
         ball.data.root_link_pos_w - robot.data.root_link_pos_w,
     )
-    if always_visible:
-        return ball_pos_b_val[:, :2]
-    visible = _compute_ball_visibility(env, ball_name)
-    return ball_pos_b_val[:, :2] * visible.float().unsqueeze(-1)
+    out = ball_pos_b_val[:, :2]
+    if not always_visible:
+        visible = _compute_ball_visibility(env, ball_name)
+        out = out * visible.float().unsqueeze(-1)
+    if hide_when_behind:
+        from .rewards import _ball_is_behind
+        out = out * (~_ball_is_behind(env, ball_name)).float().unsqueeze(-1)
+    return out
 
 
 def ball_pos_b(
