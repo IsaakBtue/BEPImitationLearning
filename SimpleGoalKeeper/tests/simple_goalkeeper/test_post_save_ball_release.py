@@ -95,3 +95,24 @@ def test_default_hide_when_behind_false_is_backward_compatible():
     out = ball_pos_xy_b(env, "ball", always_visible=True)
     expected = torch.tensor([[1.5, 0.3]] * 4)
     assert torch.allclose(out, expected, atol=1e-5)
+
+
+def test_actor_ball_term_has_release_gate_in_train_and_play():
+    from simple_goalkeeper.tasks.goalkeeper_env_cfg import goalkeeper_env_cfg
+
+    for play in (False, True):
+        cfg = goalkeeper_env_cfg(play=play)
+        actor_term = cfg.observations["actor"].terms["ball_pos_b"]
+        assert actor_term.params["always_visible"] is True
+        assert actor_term.params["hide_when_behind"] is True
+
+
+def test_critic_ball_terms_stay_ungated():
+    from simple_goalkeeper.tasks.goalkeeper_env_cfg import goalkeeper_env_cfg
+
+    cfg = goalkeeper_env_cfg(play=False)
+    critic = cfg.observations["critic"].terms
+    assert critic["ball_pos_b"].params["always_visible"] is True
+    assert "hide_when_behind" not in critic["ball_pos_b"].params
+    assert critic["ball_vel_b"].params["always_visible"] is True
+    assert "hide_when_behind" not in critic["ball_vel_b"].params

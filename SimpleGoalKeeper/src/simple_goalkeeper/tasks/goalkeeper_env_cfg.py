@@ -196,9 +196,10 @@ def goalkeeper_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
 
     # ------------------------------------------------------------------
     # Observations
-    # Ball is always visible during Phase 1 training so the policy has
-    # a clean signal from the start. Visibility gating (warmup + vanish)
-    # is left for play/sim2real evaluation.
+    # Ball is fully visible during the approach (always_visible=True — the full
+    # G1 visibility port was reverted, see CLAUDE.md). hide_when_behind adds the
+    # post-save release: the obs zeroes once _ball_is_behind fires, so the policy
+    # learns to disengage and recover to the default pose after a save.
     # ------------------------------------------------------------------
     # Actor: only terms available at deployment on real hardware.
     # base_lin_vel, ball_vel_b, foot_pos_b removed — not measurable at deployment.
@@ -224,7 +225,7 @@ def goalkeeper_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
         # XY only — matches BoosterT1mjlab kick task for deployment compatibility.
         "ball_pos_b": ObservationTermCfg(
             func=gk_mdp.ball_pos_xy_b,
-            params={"ball_name": BALL_NAME, "always_visible": True},
+            params={"ball_name": BALL_NAME, "always_visible": True, "hide_when_behind": True},
             noise=Unoise(n_min=-0.05, n_max=0.05),
         ),
     }
