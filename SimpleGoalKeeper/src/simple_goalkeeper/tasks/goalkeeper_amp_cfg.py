@@ -33,18 +33,21 @@ GOALKEEPER_KEY_BODY_NAMES: list[str] = [
 ]
 
 
-# EXPERIMENT 2026-07-02: AMP dataset restricted to the four double/triple-step
-# motions only (LeftDoubleStep, RightDoubleStep, LeftTripleStep, RightTripleStep).
-# All Safe*/Step single-step files are excluded from the discriminator. With a
-# homogeneous dataset the previous 4x double/triple weighting is meaningless,
-# so motion_weights is not set (uniform sampling by frame count).
+# EXPERIMENT 2026-07-03: AMP dataset = the four double/triple-step motions plus
+# the two near-standing Step motions (LeftStep_own, Rightstep_own — note the
+# lowercase 's'). The Step motions were re-added because the 4-motion dataset
+# (2026-07-02) contained no standing/idle reference, so the discriminator paid
+# the policy to keep stepping post-save (observed walking-off in play, run
+# 2026-07-02_22-56-40). Mirrors G1, whose dataset contains leftstep.pt/
+# rightstep.pt alongside the save motions. Safe* files stay excluded.
+# motion_weights is not set (uniform sampling by frame count).
 def _motion_files() -> list[str]:
     if not _MOTIONS_DIR.is_dir():
         return []
     return sorted(
         str(p)
         for p in _MOTIONS_DIR.glob("*.npz")
-        if "DoubleStep" in p.name or "TripleStep" in p.name
+        if "Safe" not in p.name
     )
 
 

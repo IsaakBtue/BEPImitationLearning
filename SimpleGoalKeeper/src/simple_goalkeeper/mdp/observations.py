@@ -88,24 +88,42 @@ def _compute_ball_visibility(env: "ManagerBasedRlEnv", ball_name: str) -> torch.
     return visible
 
 
+# G1 flying-mask front edge: ball visible only while x_body > 0.05 m
+# (Humanoid-Goalkeeper legged_robot.py:401, end_target_local[:,0] > 0.05).
+_BEHIND_TORSO_X = 0.05
+
+
 def ball_pos_xy_b(
     env: "ManagerBasedRlEnv",
     ball_name: str = "ball",
     always_visible: bool = False,
-    hide_when_behind: bool = False,
+    hide_behind_torso: bool = False,
+    hide_after_steps: int | None = None,
+    noise_scale: float = 0.0,
 ) -> torch.Tensor:
     """Ball XY position in robot body frame (no Z). Shape (N, 2).
 
     Matches BoosterT1mjlab kick task observation space for deployment compatibility.
 
-    hide_when_behind: post-save release gate. Zeroes the observation once
-    _ball_is_behind fires (ball crossed the goal line OR a save was registered
-    via _softstop_flag/_sb_flag — the same latched flag that activates the
-    post* recovery rewards). This is the release half of G1's post-save
-    mechanism (G1 hides the ball via its flying mask, legged_robot.py:401)
-    without G1's warmup blackout / random vanish, which destabilized training
-    when ported wholesale (run 2026-07-02_17-53-27, reverted 3512989).
-    One-way within an episode: the flags are latched until reset.
+    Post-save release gate v2 — a G1-faithful subset of the flying mask
+    (legged_robot.py:401), replacing the v1 latched-flag gate (fead241) that
+    destabilized run 2026-07-02_22-56-40:
+
+    - hide_behind_torso: zero once the ball is behind the torso front edge
+      (x_body < 0.05, G1's end_target_local[:,0] > 0.05 visibility bound).
+    - hide_after_steps: zero once the episode step exceeds the window
+      (G1's catchstep > 0, 50 steps for 0.4-1.0 s flights; SGK uses 75 for
+      0.7-1.3 s flights so the window closes only after the latest arrival).
+    - noise_scale: uniform noise applied BEFORE the mask, matching G1's
+      noise-then-mask ordering (legged_robot.py:425-426) — a hidden ball is
+      exact zeros, never noise around zero. Replaces manager noise on this
+      term (mjlab applies manager noise after the term returns, which turned
+      the hidden ball into a phantom +/-5 cm ball at the robot's feet).
+
+    Neither hide condition can fire while the ball is still approaching, so
+    visibility during the approach and save is preserved by construction.
+    G1's warmup blackout, random vanish, and approach/cone checks are
+    intentionally NOT ported (user constraint: no pre-save blindness).
     """
     robot: Entity = env.scene["robot"]
     ball: Entity = env.scene[ball_name]
@@ -113,14 +131,17 @@ def ball_pos_xy_b(
         quat_inv(robot.data.root_link_quat_w),
         ball.data.root_link_pos_w - robot.data.root_link_pos_w,
     )
-    out = ball_pos_b_val[:, :2]
+    visible = torch.ones(env.num_envs, dtype=torch.bool, device=ball_pos_b_val.device)
     if not always_visible:
-        visible = _compute_ball_visibility(env, ball_name)
-        out = out * visible.float().unsqueeze(-1)
-    if hide_when_behind:
-        from .rewards import _ball_is_behind
-        out = out * (~_ball_is_behind(env, ball_name)).float().unsqueeze(-1)
-    return out
+        visible &= _compute_ball_visibility(env, ball_name)
+    if hide_behind_torso:
+        visible &= ball_pos_b_val[:, 0] >= _BEHIND_TORSO_X
+    if hide_after_steps is not None:
+        visible &= env.episode_length_buf <= hide_after_steps
+    out = ball_pos_b_val[:, :2]
+    if noise_scale > 0.0:
+        out = out + (2.0 * torch.rand_like(out) - 1.0) * noise_scale
+    return out * visible.float().unsqueeze(-1)
 
 
 def ball_pos_b(
