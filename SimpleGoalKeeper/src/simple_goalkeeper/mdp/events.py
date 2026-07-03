@@ -203,15 +203,88 @@ class MotionResetManager:
         joint_pos.clamp_(limits[..., 0], limits[..., 1])
         robot.write_joint_state_to_sim(joint_pos, joint_vel, env_ids=ids)
 
+    def _tier_npz_reset(
+        self,
+        env: "ManagerBasedRlEnv",
+        env_ids: torch.Tensor,
+        robot: "Entity",
+    ) -> None:
+        """Ball-conditioned NPZ RSI branch (reinstated 2026-07-03, user request).
+
+        Routes each resetting env by the predicted goal-line crossing Y stored
+        by reset_ball_rolling (which fires BEFORE reset_from_motion_data in the
+        same reset cycle — see goalkeeper_env_cfg.py event order):
+
+          |cy| <  0.20         → standing HOME pose (react freely near centre)
+          0.20 ≤ |cy| < 0.40   → (side, double) pool  (SafeMedium)
+          0.40 ≤ |cy| < 0.60   → (side, triple) pool  (SafeFar)
+          |cy| ≥  0.60         → (side, wide)   pool  (DoubleStep + TripleStep)
+
+        side = left if cy > 0 else right. Writes the FULL RSI state (root Z +
+        quat + velocities + joints) from a random pool frame via
+        _write_rsi_state. Falls back to the combined pool if cross_y has never
+        been stored (very first reset, before reset_ball has fired).
+        """
+        cross_y = getattr(env, "_rsi_cross_y", None)
+        if cross_y is None:
+            self._write_rsi_state(env, env_ids, self.frames, robot)
+            return
+
+        cy = cross_y[env_ids.long()]
+        is_left = cy > 0
+        abs_cy = cy.abs()
+
+        is_single = abs_cy < _SINGLE_THRESH
+        is_double = (abs_cy >= _SINGLE_THRESH) & (abs_cy < _DOUBLE_THRESH)
+        is_triple = (abs_cy >= _DOUBLE_THRESH) & (abs_cy < _TRIPLE_THRESH)
+        is_wide = abs_cy >= _TRIPLE_THRESH
+
+        single_local = is_single.nonzero(as_tuple=True)[0]
+        if len(single_local) > 0:
+            ids = env_ids[single_local]
+            home_pos = robot.data.default_joint_pos[ids].clone()
+            robot.write_joint_state_to_sim(
+                home_pos, torch.zeros_like(home_pos), env_ids=ids
+            )
+
+        for (side, steps), mask in [
+            (("left",  "double"), is_left  & is_double),
+            (("left",  "triple"), is_left  & is_triple),
+            (("left",  "wide"),   is_left  & is_wide),
+            (("right", "double"), ~is_left & is_double),
+            (("right", "triple"), ~is_left & is_triple),
+            (("right", "wide"),   ~is_left & is_wide),
+        ]:
+            local_ids = mask.nonzero(as_tuple=True)[0]
+            if len(local_ids) == 0:
+                continue
+            pool = self.pools.get((side, steps), self.frames)
+            self._write_rsi_state(env, env_ids[local_ids], pool, robot)
+
     def reset(
         self,
         env: "ManagerBasedRlEnv",
         env_ids: torch.Tensor | None,
         asset_cfg: SceneEntityCfg = _DEFAULT_ROBOT_CFG,
-        rsi_fraction: float = 0.8,
+        tier_rsi_fraction: float = 0.3,
+        live_rsi_fraction: float = 0.5,
     ) -> None:
-        """Literal port of Humanoid-Goalkeeper G1's continue_keep mechanism.
+        """Three-way reset split (2026-07-03, user request):
 
+          tier_rsi_fraction (default 30%): ball-conditioned NPZ RSI — see
+            _tier_npz_reset. DELIBERATE divergence from the literal G1 port:
+            the policy was not converging to double-stepping, so wide-crossing
+            episodes are seeded with double/triple-step poses again (the
+            pre-2026-07-01 tier mechanism, minus its live-donor/maturity layers).
+          live_rsi_fraction (default 50%): G1 continue_keep — unchanged
+            literal port (see below).
+          remainder (default 20%): G1 randomized default standing pose —
+            unchanged literal port.
+
+        One draw per reset() call decides the WHOLE batch (G1's own
+        `torch.rand(1)` style, kept for all three branches).
+
+        The two G1 branches remain a literal port of _reset_dofs:
         Source: Humanoid-Goalkeeper/legged_gym/legged_gym/envs/base/legged_robot.py
         _reset_dofs, lines 657-682, with G1's ACTIVE config values from
         legged_gym/legged_gym/envs/g1/g1_29_config.py:279-282
@@ -258,7 +331,11 @@ class MotionResetManager:
         robot: Entity = env.scene[asset_cfg.name]
         n = len(env_ids)
 
-        if torch.rand(1, device=env.device).item() > (1.0 - rsi_fraction):
+        draw = torch.rand(1, device=env.device).item()
+        if draw < tier_rsi_fraction:
+            self._tier_npz_reset(env, env_ids, robot)
+            return
+        if draw < tier_rsi_fraction + live_rsi_fraction:
             donor_idx = torch.randint(0, env.num_envs, (n,), device=env.device)
             joint_pos = robot.data.joint_pos[donor_idx].clone()
         else:
@@ -284,8 +361,13 @@ def reset_from_motion_data(
     env: "ManagerBasedRlEnv",
     env_ids: torch.Tensor | None,
     asset_cfg: SceneEntityCfg = _DEFAULT_ROBOT_CFG,
+    tier_rsi_fraction: float = 0.3,
+    live_rsi_fraction: float = 0.5,
 ) -> None:
-    """Reset event: continue_keep-style donor copy vs default pose.
+    """Reset event: tier NPZ RSI vs continue_keep donor copy vs default pose.
+
+    2026-07-03: three-way split (30% ball-conditioned NPZ / 50% G1 live donor /
+    20% G1 randomized standing) — see MotionResetManager.reset.
 
     FIX 2026-07-01: this wrapper hardcoded rsi_fraction=0.5 (a silent 50/50
     split), diverging from both G1's actual 80/20 (`torch.rand(1).item() > 0.2`,
@@ -295,7 +377,11 @@ def reset_from_motion_data(
     """
     mgr = MotionResetManager.get()
     mgr.init(env)
-    mgr.reset(env, env_ids, asset_cfg, rsi_fraction=0.8)
+    mgr.reset(
+        env, env_ids, asset_cfg,
+        tier_rsi_fraction=tier_rsi_fraction,
+        live_rsi_fraction=live_rsi_fraction,
+    )
 
 
 def reset_ball_local_frame(
@@ -770,6 +856,14 @@ def reset_ball_rolling(
     # Speed is derived from geometry and flight time (mirrors G1's assign_ball_states).
     dx = -(x_start + 0.3)          # world -X: from spawn toward 0.3 m behind goal line
     dy = y_end - y_start            # world Y: lateral sweep to target
+
+    # Predicted crossing Y at the goal line (x=0), stored for the tier-routed
+    # RSI branch (reset_from_motion_data fires AFTER this event in the same
+    # reset cycle). Reading ball.data here would lag one physics step, so the
+    # trajectory geometry is stored directly instead.
+    if not hasattr(env, "_rsi_cross_y"):
+        env._rsi_cross_y = torch.zeros(env.num_envs, device=env.device)
+    env._rsi_cross_y[env_ids.long()] = y_start + dy * (x_start / (x_start + 0.3))
 
     ball_vel = torch.stack([
         dx / t_flight,              # world vx (negative = approaching)

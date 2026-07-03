@@ -543,10 +543,14 @@ def goalkeeper_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
         },
     )
 
+    # Three-way reset split (2026-07-03): 30% ball-conditioned NPZ tier RSI
+    # (wide crossings seeded with double/triple-step poses — deliberate
+    # divergence from the literal G1 port to force double-stepping), 50% G1
+    # continue_keep live donor, 20% G1 randomized standing.
     cfg.events["reset_from_motion_data"] = EventTermCfg(
         func=gk_mdp.reset_from_motion_data,
         mode="reset",
-        params={},
+        params={"tier_rsi_fraction": 0.3, "live_rsi_fraction": 0.5},
     )
 
     # Per-step catchstep decrement for ball visibility warmup.

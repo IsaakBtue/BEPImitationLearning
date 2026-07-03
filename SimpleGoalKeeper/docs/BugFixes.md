@@ -59,3 +59,13 @@
 **Why it was wrong:** The policy was not converging to double-step saves at ±0.9 — the widest balls remained reachable with a single lunge, so stepping never became necessary. G1 trains its low/feet target region out to ±1.8 m at max curriculum (`g1_29_config` `ranges_4.maxw`, expansion in `legged_robot.py:333-336`); ±1.1 stays conservative vs upstream. Deliberately NOT added: a stepping-specific reward (G1 has none; footwork emerges from target width + step motions in the prior, and a crafted step reward invites shuffle hacking) and the 4× double/triple AMP boost (double/triple already hold 77% of the 6-file dataset's frames; 4× would shrink the near-standing share to 7% and re-create the post-save AMP conflict fixed earlier today).
 
 **Evidence:** play-mode observation (no double-steps at ±0.9) + G1 `assign_ball_states`/`command_ranges` read + NPZ frame-count audit (73/36/73/73/73/53 frames).
+
+---
+
+## 2026-07-03 — RSI: reinstated ball-conditioned NPZ tier branch (30/50/20 split)
+
+**What changed:** `MotionResetManager.reset()` is now a three-way split decided by one draw per call: 30% ball-conditioned NPZ tier RSI (new `_tier_npz_reset`), 50% G1 `continue_keep` live-donor copy (unchanged literal port), 20% G1 randomized default standing (unchanged). `reset_ball_rolling` now stores the predicted goal-line crossing Y in `env._rsi_cross_y` (trajectory geometry, not laggy `ball.data`). The tier branch routes: |cy| < 0.20 → standing HOME; 0.20–0.40 → (side, double) = SafeMedium; 0.40–0.60 → (side, triple) = SafeFar; ≥ 0.60 → (side, wide) = DoubleStep+TripleStep, writing full RSI state (root + velocities + joints) via the still-intact `_write_rsi_state` pool system. Wrapper + `EventTermCfg` expose `tier_rsi_fraction=0.3`, `live_rsi_fraction=0.5`.
+
+**Why it was wrong:** After the literal G1 port (d496aa3, 2026-07-01) nothing conditioned reset poses on ball trajectory, and the policy stopped converging toward double-stepping — wide balls were mostly met from generic donor poses. User-requested, deliberate divergence from the literal port; the combined RSI share (0.8) still matches G1's `torch.rand(1).item() > 0.2`.
+
+**Evidence:** play-mode observation (no double-steps) + `tests/simple_goalkeeper/test_live_rsi.py` (24 tests: routing, partition boundaries, three-way statistics, crossing-Y storage) + live CUDA env exercise of the tier branch.

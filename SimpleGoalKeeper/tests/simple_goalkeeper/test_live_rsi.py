@@ -101,7 +101,7 @@ def test_reset_root_state_is_never_touched():
 
     mgr = MotionResetManager()
     env_ids = torch.tensor([0], dtype=torch.int32)
-    mgr.reset(env, env_ids, rsi_fraction=1.0)
+    mgr.reset(env, env_ids, tier_rsi_fraction=0.0, live_rsi_fraction=1.0)
 
     # Root pose/velocity are handled by the separate reset_base event, matching
     # G1's continue_keep, which only ever touches dof_pos/dof_vel.
@@ -118,10 +118,10 @@ def test_reset_dof_vel_always_zero_on_both_branches():
     mgr = MotionResetManager()
     env_ids = torch.tensor([0], dtype=torch.int32)
 
-    mgr.reset(env, env_ids, rsi_fraction=1.0)   # forces the donor-copy branch
+    mgr.reset(env, env_ids, tier_rsi_fraction=0.0, live_rsi_fraction=1.0)   # forces the donor-copy branch
     assert torch.allclose(robot.written_vel, torch.zeros(1, num_dof))
 
-    mgr.reset(env, env_ids, rsi_fraction=0.0)   # forces the default-pose branch
+    mgr.reset(env, env_ids, tier_rsi_fraction=0.0, live_rsi_fraction=0.0)   # forces the default-pose branch
     assert torch.allclose(robot.written_vel, torch.zeros(1, num_dof))
 
 
@@ -146,7 +146,7 @@ def test_reset_rsi_fraction_1_copies_dof_pos_from_another_live_env_without_clamp
     env_ids = torch.tensor([0], dtype=torch.int32)
 
     monkeypatch.setattr(torch, "randint", lambda *a, **k: torch.ones(1, dtype=torch.long))
-    mgr.reset(env, env_ids, rsi_fraction=1.0)  # rsi_fraction=1.0 -> always the donor branch
+    mgr.reset(env, env_ids, tier_rsi_fraction=0.0, live_rsi_fraction=1.0)  # tier_rsi_fraction=0.0, live_rsi_fraction=1.0 -> always the donor branch
 
     assert robot.written_ids.tolist() == [0]
     # Donor (env 1) had joint_pos == 5.0 — copied verbatim, no clamp applied.
@@ -172,7 +172,7 @@ def test_reset_rsi_fraction_0_randomizes_around_default_pose_and_clips_to_hard_l
         "simple_goalkeeper.mdp.events.sample_uniform",
         lambda lo, hi, shape, device: torch.full(shape, hi),
     )
-    mgr.reset(env, env_ids, rsi_fraction=0.0)  # rsi_fraction=0.0 -> always the default-pose branch
+    mgr.reset(env, env_ids, tier_rsi_fraction=0.0, live_rsi_fraction=0.0)  # rsi_fraction=0.0 -> always the default-pose branch
 
     assert robot.written_ids.tolist() == [0]
     assert torch.allclose(robot.written_pos, torch.ones(1, num_dof))
@@ -194,7 +194,7 @@ def test_reset_donor_pool_is_not_tier_restricted_and_not_batch_excluded(monkeypa
 
     torch.manual_seed(0)
     monkeypatch.setattr(torch, "randint", lambda *a, **k: torch.zeros(len(env_ids), dtype=torch.long))
-    mgr.reset(env, env_ids, rsi_fraction=1.0)
+    mgr.reset(env, env_ids, tier_rsi_fraction=0.0, live_rsi_fraction=1.0)
 
     # torch.randint patched to always return index 0 -> every env, including
     # env 0 reading from itself, copies joint_values[0] == 1.0. No exclusion,
@@ -225,69 +225,79 @@ def test_reset_single_coin_flip_covers_the_whole_batch_at_once(monkeypatch):
             return real_rand(*a, **k)
         return _fake
 
-    monkeypatch.setattr(torch, "rand", _forced_coin_flip(0.99))  # forces donor branch
-    mgr.reset(env, env_ids, rsi_fraction=0.8)
+    # Partition at defaults (tier=0.3, live=0.5): [0,0.3) tier, [0.3,0.8) live donor, [0.8,1) standing.
+    monkeypatch.setattr(torch, "rand", _forced_coin_flip(0.5))  # forces donor branch
+    mgr.reset(env, env_ids)
     assert robot.written_ids.tolist() == [0, 1, 2, 3]
     # Donor branch copies live values (~100), unmistakably not the ~2.0 default-pose range.
     assert (robot.written_pos > 50).all()
 
-    monkeypatch.setattr(torch, "rand", _forced_coin_flip(0.01))  # forces default branch
-    mgr.reset(env, env_ids, rsi_fraction=0.8)
+    monkeypatch.setattr(torch, "rand", _forced_coin_flip(0.85))  # forces default branch
+    mgr.reset(env, env_ids)
     assert robot.written_ids.tolist() == [0, 1, 2, 3]
     # Default-pose branch: default_joint_pos is 0 here, scale*0==0, only the
     # small +-0.1 offset survives, so it must be nowhere near the donor range.
     assert (robot.written_pos.abs() < 0.2).all()
 
-
-def test_reset_threshold_matches_g1s_literal_condition_at_default_rsi_fraction():
-    """G1's literal condition is `torch.rand(1).item() > 0.2` (legged_robot.py:669),
-    i.e. an 80% chance of the continue_keep branch. SimpleGoalKeeper's rsi_fraction
-    defaults to 0.8 and reset() uses `> (1.0 - rsi_fraction)`.
-
-    NOT bit-for-bit identical: `1.0 - 0.8 == 0.19999999999999996` in float64,
-    not exactly `0.2` (a standard float rounding artifact). This makes the
-    two comparisons disagree for the single exact value draw == 0.2 (0.2 >
-    0.19999999999999996 is True; 0.2 > 0.2 is False) — verified below. This
-    is a real, precise difference, not a rounding error in this test; it's
-    just astronomically unlikely to matter (torch.rand draws float32 values
-    from a continuous [0,1) distribution — landing on the literal decimal
-    0.2 has negligible probability), so it's noted here rather than "fixed,"
-    since the fix (hardcoding 0.2 rather than deriving it from rsi_fraction)
-    would remove the ability to pass rsi_fraction values other than 0.8."""
-    rsi_fraction = 0.8
-    assert abs((1.0 - rsi_fraction) - 0.2) < 1e-9  # negligible, not bit-exact
-    assert (0.2 > (1.0 - rsi_fraction)) != (0.2 > 0.2)  # the one value that disagrees
-    for draw in (0.0, 0.1, 0.19999999999999996, 0.2000001, 0.5, 0.99):
-        assert (draw > (1.0 - rsi_fraction)) == (draw > 0.2), (
-            f"draw={draw} disagrees between the two thresholds"
-        )
+    tier_calls = []
+    monkeypatch.setattr(mgr, "_tier_npz_reset", lambda env, ids, robot: tier_calls.append(ids.tolist()))
+    monkeypatch.setattr(torch, "rand", _forced_coin_flip(0.1))  # forces tier NPZ branch
+    mgr.reset(env, env_ids)
+    assert tier_calls == [[0, 1, 2, 3]]
 
 
-def test_reset_coin_flip_probability_matches_rsi_fraction_statistically():
-    """Over many independent reset() calls, the donor-branch rate should
-    converge to rsi_fraction (G1: an 80% chance per call, not per env)."""
+def test_reset_partition_boundaries_at_default_fractions():
+    """Draw partition (2026-07-03 three-way split): [0, 0.3) tier NPZ RSI,
+    [0.3, 0.8) G1 continue_keep live donor, [0.8, 1.0) G1 randomized standing.
+    The live-donor probability (0.5) plus tier (0.3) preserves an 80% chance
+    of SOME RSI-style reset vs 20% standing — same standing share as G1's
+    literal `torch.rand(1).item() > 0.2` (legged_robot.py:669)."""
+    tier, live = 0.3, 0.5
+    for draw, branch in [
+        (0.0, "tier"), (0.29, "tier"),
+        (0.3, "live"), (0.5, "live"), (0.79, "live"),
+        (0.8, "stand"), (0.99, "stand"),
+    ]:
+        got = "tier" if draw < tier else ("live" if draw < tier + live else "stand")
+        assert got == branch, f"draw={draw}: got {got}, expected {branch}"
+    assert abs((1.0 - (tier + live)) - 0.2) < 1e-9  # standing share matches G1
+
+
+def test_reset_three_way_split_statistics(monkeypatch):
+    """Over many independent reset() calls the branch rates must converge to
+    tier=0.3 / live=0.5 / standing=0.2 (one draw per call, not per env)."""
     from simple_goalkeeper.mdp.events import MotionResetManager
 
     num_envs, num_dof = 4, 1
-    joint_values = torch.ones(num_envs, num_dof) * 7.0  # distinguishable from default (0.0)
+    joint_values = torch.ones(num_envs, num_dof) * 7.0  # donor value, distinguishable
     env, robot = _make_env(num_envs, num_dof, joint_values)
     mgr = MotionResetManager()
     env_ids = torch.tensor([0], dtype=torch.int32)
 
-    torch.manual_seed(42)
-    n_trials = 2000
-    donor_hits = 0
-    for _ in range(n_trials):
-        mgr.reset(env, env_ids, rsi_fraction=0.8)
-        # Donor value is 7.0; the default-pose branch is 0.0 * scale +- 0.1
-        # offset, always within [-0.1, 0.1] — well clear of 7.0.
-        if abs(robot.written_pos.item()) > 1.0:
-            donor_hits += 1
+    counts = {"tier": 0, "live": 0, "stand": 0}
+    monkeypatch.setattr(
+        mgr, "_tier_npz_reset",
+        lambda env, ids, robot: counts.__setitem__("tier", counts["tier"] + 1),
+    )
 
-    rate = donor_hits / n_trials
-    # Binomial std dev at n=2000, p=0.8 is ~0.009; 5 sigma is generous slack
-    # for a statistical test while still catching a badly wrong probability.
-    assert abs(rate - 0.8) < 0.05, f"donor-branch rate {rate} far from expected 0.8"
+    torch.manual_seed(42)
+    n_trials = 3000
+    for _ in range(n_trials):
+        tier_before = counts["tier"]
+        mgr.reset(env, env_ids)
+        if counts["tier"] > tier_before:
+            continue
+        # Donor value is 7.0; the default-pose branch is 0.0 * scale +- 0.1.
+        if abs(robot.written_pos.item()) > 1.0:
+            counts["live"] += 1
+        else:
+            counts["stand"] += 1
+
+    for branch, expected in [("tier", 0.3), ("live", 0.5), ("stand", 0.2)]:
+        rate = counts[branch] / n_trials
+        assert abs(rate - expected) < 0.05, (
+            f"{branch} rate {rate} far from expected {expected}"
+        )
 
 
 def test_reset_donor_sampling_is_roughly_uniform_over_full_population():
@@ -305,7 +315,7 @@ def test_reset_donor_sampling_is_roughly_uniform_over_full_population():
     n_trials = 2000
     counts = torch.zeros(num_envs)
     for _ in range(n_trials):
-        mgr.reset(env, env_ids, rsi_fraction=1.0)  # always the donor branch
+        mgr.reset(env, env_ids, tier_rsi_fraction=0.0, live_rsi_fraction=1.0)  # always the donor branch
         donor_value = int(robot.written_pos.item())
         counts[donor_value] += 1
 
@@ -324,7 +334,7 @@ def test_reset_env_ids_none_resets_the_full_population():
     env, robot = _make_env(num_envs, num_dof, joint_values)
     mgr = MotionResetManager()
 
-    mgr.reset(env, None, rsi_fraction=0.0)  # default-pose branch, full population
+    mgr.reset(env, None, tier_rsi_fraction=0.0, live_rsi_fraction=0.0)  # default-pose branch, full population
 
     assert robot.written_ids.tolist() == [0, 1, 2]
     # default_joint_pos is 0 here, so only the +-0.1 offset survives —
@@ -340,7 +350,7 @@ def test_reset_empty_env_ids_is_a_no_op():
     env, robot = _make_env(num_envs, num_dof, joint_values)
     mgr = MotionResetManager()
 
-    mgr.reset(env, torch.tensor([], dtype=torch.int32), rsi_fraction=1.0)
+    mgr.reset(env, torch.tensor([], dtype=torch.int32), tier_rsi_fraction=0.0, live_rsi_fraction=1.0)
 
     assert robot.written_ids is None
 
@@ -356,17 +366,16 @@ def test_reset_single_env_population_donor_pool_is_itself():
     mgr = MotionResetManager()
     env_ids = torch.tensor([0], dtype=torch.int32)
 
-    mgr.reset(env, env_ids, rsi_fraction=1.0)
+    mgr.reset(env, env_ids, tier_rsi_fraction=0.0, live_rsi_fraction=1.0)
 
     assert robot.written_ids.tolist() == [0]
     assert torch.allclose(robot.written_pos, torch.tensor([[1.5, -1.5]]))
 
 
-def test_reset_from_motion_data_passes_rsi_fraction_0_8_to_reset(monkeypatch):
-    """Regression test for the exact bug the audit found: reset_from_motion_data
-    (the function actually registered as the training event) once hardcoded
-    rsi_fraction=0.5, silently overriding reset()'s 0.8 default. Pin the
-    argument it actually passes, not just reset()'s own default."""
+def test_reset_from_motion_data_passes_the_three_way_split_to_reset(monkeypatch):
+    """Regression guard (the 2026-07-01 audit found this wrapper silently
+    overriding reset()'s fractions once before): pin the arguments the
+    registered training event actually forwards — 0.3 tier / 0.5 live."""
     import simple_goalkeeper.mdp.events as events_mod
 
     captured = {}
@@ -375,20 +384,22 @@ def test_reset_from_motion_data_passes_rsi_fraction_0_8_to_reset(monkeypatch):
         def init(self, env):
             pass
 
-        def reset(self, env, env_ids, asset_cfg, rsi_fraction):
-            captured["rsi_fraction"] = rsi_fraction
+        def reset(self, env, env_ids, asset_cfg, tier_rsi_fraction, live_rsi_fraction):
+            captured["tier"] = tier_rsi_fraction
+            captured["live"] = live_rsi_fraction
 
     monkeypatch.setattr(events_mod.MotionResetManager, "get", staticmethod(lambda: _StubMgr()))
 
     events_mod.reset_from_motion_data(env=object(), env_ids=None)
 
-    assert captured["rsi_fraction"] == 0.8
+    assert captured["tier"] == 0.3
+    assert captured["live"] == 0.5
 
 
-@pytest.mark.parametrize("rsi_fraction", [0.2, 0.5, 0.8, 0.95])
-def test_reset_matches_rsi_fraction_statistically_at_multiple_values(rsi_fraction):
-    """The coin-flip rate must track rsi_fraction generally, not just at the
-    default 0.8 — pins down the `> (1.0 - rsi_fraction)` formula itself."""
+@pytest.mark.parametrize("live_fraction", [0.2, 0.5, 0.8, 0.95])
+def test_reset_matches_live_fraction_statistically_at_multiple_values(live_fraction):
+    """With tier_rsi_fraction=0.0 the donor rate must track live_rsi_fraction
+    generally, not just at the default — pins the partition formula itself."""
     from simple_goalkeeper.mdp.events import MotionResetManager
 
     num_envs, num_dof = 4, 1
@@ -401,13 +412,13 @@ def test_reset_matches_rsi_fraction_statistically_at_multiple_values(rsi_fractio
     n_trials = 2000
     donor_hits = 0
     for _ in range(n_trials):
-        mgr.reset(env, env_ids, rsi_fraction=rsi_fraction)
+        mgr.reset(env, env_ids, tier_rsi_fraction=0.0, live_rsi_fraction=live_fraction)
         if abs(robot.written_pos.item()) > 1.0:
             donor_hits += 1
 
     rate = donor_hits / n_trials
-    assert abs(rate - rsi_fraction) < 0.05, (
-        f"donor-branch rate {rate} far from expected {rsi_fraction}"
+    assert abs(rate - live_fraction) < 0.05, (
+        f"donor-branch rate {rate} far from expected {live_fraction}"
     )
 
 
@@ -422,10 +433,10 @@ def test_reset_write_joint_state_called_exactly_once_per_reset_call():
     mgr = MotionResetManager()
     env_ids = torch.tensor([0], dtype=torch.int32)
 
-    mgr.reset(env, env_ids, rsi_fraction=1.0)
+    mgr.reset(env, env_ids, tier_rsi_fraction=0.0, live_rsi_fraction=1.0)
     assert robot.write_joint_state_calls == 1
 
-    mgr.reset(env, env_ids, rsi_fraction=0.0)
+    mgr.reset(env, env_ids, tier_rsi_fraction=0.0, live_rsi_fraction=0.0)
     assert robot.write_joint_state_calls == 2
 
 
@@ -441,7 +452,7 @@ def test_reset_donor_branch_never_reads_soft_joint_pos_limits():
     mgr = MotionResetManager()
     env_ids = torch.tensor([0], dtype=torch.int32)
 
-    mgr.reset(env, env_ids, rsi_fraction=1.0)  # donor branch — must not raise
+    mgr.reset(env, env_ids, tier_rsi_fraction=0.0, live_rsi_fraction=1.0)  # donor branch — must not raise
 
     assert robot.written_ids.tolist() == [0]
 
@@ -457,6 +468,130 @@ def test_reset_default_pose_branch_never_reads_soft_joint_pos_limits():
     mgr = MotionResetManager()
     env_ids = torch.tensor([0], dtype=torch.int32)
 
-    mgr.reset(env, env_ids, rsi_fraction=0.0)  # default-pose branch — must not raise
+    mgr.reset(env, env_ids, tier_rsi_fraction=0.0, live_rsi_fraction=0.0)  # default-pose branch — must not raise
 
     assert robot.written_ids.tolist() == [0]
+
+
+# ── Tier-routed NPZ RSI branch (reinstated 2026-07-03) ──────────────────────
+
+
+def _make_tier_env(cross_y_values):
+    """Fake env with a stored crossing-Y buffer and sentinel pools."""
+    num_envs = len(cross_y_values)
+    num_dof = 2
+    joint_values = torch.zeros(num_envs, num_dof)
+    env, robot = _make_env(num_envs, num_dof, joint_values)
+    env._rsi_cross_y = torch.tensor(cross_y_values, dtype=torch.float32)
+    return env, robot
+
+
+def _mgr_with_recording_pools():
+    from simple_goalkeeper.mdp.events import MotionResetManager
+
+    mgr = MotionResetManager()
+    for side in ("left", "right"):
+        for steps in ("double", "triple", "wide"):
+            mgr.pools[(side, steps)] = {"name": f"{side}_{steps}"}
+    mgr.frames = {"name": "combined"}
+
+    calls = []
+    mgr._write_rsi_state = lambda env, ids, pool, robot: calls.append(
+        (pool["name"], ids.tolist())
+    )
+    return mgr, calls
+
+
+def test_tier_branch_routes_by_crossing_y_side_and_magnitude():
+    """left = cy > 0; |cy| tiers: <0.20 standing, 0.20-0.40 double,
+    0.40-0.60 triple, >=0.60 wide (the DoubleStep/TripleStep pool)."""
+    env, robot = _make_tier_env([0.7, -0.7, 0.3, -0.5, 0.1, 1.05])
+    mgr, calls = _mgr_with_recording_pools()
+    env_ids = torch.arange(6, dtype=torch.int32)
+
+    mgr.reset(env, env_ids, tier_rsi_fraction=1.0, live_rsi_fraction=0.0)
+
+    routed = {pool: ids for pool, ids in calls}
+    assert routed["left_wide"] == [0, 5]    # 0.7 and 1.05 -> wide, left
+    assert routed["right_wide"] == [1]      # -0.7 -> wide, right
+    assert routed["left_double"] == [2]     # 0.3 -> double, left
+    assert routed["right_triple"] == [3]    # -0.5 -> triple, right
+    # env 4 (|cy| = 0.1 < 0.20): standing HOME pose, written directly.
+    assert robot.written_ids.tolist() == [4]
+    assert torch.allclose(robot.written_pos, torch.zeros(1, 2))
+    assert torch.allclose(robot.written_vel, torch.zeros(1, 2))
+
+
+def test_tier_branch_wide_pool_serves_all_far_crossings_up_to_y_end_max():
+    """Every crossing the widened +-1.1 y_end can produce beyond 0.60 lands in
+    the wide pool — the DoubleStep/TripleStep frames the tier split exists for."""
+    env, robot = _make_tier_env([0.61, 0.9, 1.1, -0.61, -0.9, -1.1])
+    mgr, calls = _mgr_with_recording_pools()
+    env_ids = torch.arange(6, dtype=torch.int32)
+
+    mgr.reset(env, env_ids, tier_rsi_fraction=1.0, live_rsi_fraction=0.0)
+
+    routed = {pool: ids for pool, ids in calls}
+    assert routed["left_wide"] == [0, 1, 2]
+    assert routed["right_wide"] == [3, 4, 5]
+
+
+def test_tier_branch_falls_back_to_combined_pool_without_cross_y():
+    """Before reset_ball has ever fired there is no crossing buffer — the
+    whole batch resets from the combined pool instead of crashing."""
+    num_envs, num_dof = 3, 2
+    env, robot = _make_env(num_envs, num_dof, torch.zeros(num_envs, num_dof))
+    assert not hasattr(env, "_rsi_cross_y")
+    mgr, calls = _mgr_with_recording_pools()
+    env_ids = torch.arange(3, dtype=torch.int32)
+
+    mgr.reset(env, env_ids, tier_rsi_fraction=1.0, live_rsi_fraction=0.0)
+
+    assert calls == [("combined", [0, 1, 2])]
+
+
+def test_reset_ball_rolling_stores_predicted_crossing_y():
+    """reset_ball_rolling must store the goal-line crossing Y (x=0 lerp of the
+    spawn->target segment) into env._rsi_cross_y for the tier branch. Verified
+    geometrically: cross_y = y_start + (y_end - y_start) * x_start / (x_start + 0.3).
+    Uses the real event on a fake ball entity."""
+    from simple_goalkeeper.mdp import events as events_mod
+
+    class _BallData:
+        pass
+
+    class _Ball:
+        def __init__(self):
+            self.data = _BallData()
+
+        def write_root_link_pose_to_sim(self, *a, **k):
+            pass
+
+        def write_root_link_velocity_to_sim(self, *a, **k):
+            pass
+
+    class _TierScene(dict):
+        env_origins = torch.zeros(4, 3)
+
+    class _Env:
+        num_envs = 4
+        device = "cpu"
+        scene = _TierScene({"ball": _Ball()})
+        _ball_difficulty = 1.0
+
+    env = _Env()
+    torch.manual_seed(0)
+    events_mod.reset_ball_rolling(
+        env, torch.arange(4, dtype=torch.int32), "ball",
+        dist_range=(2.0, 2.0),          # x_start fixed at 2.0
+        y_start_range=(0.0, 0.0),       # y_start fixed at 0.0
+        y_end_range=(-1.1, 1.1),
+        t_flight_range=(1.0, 1.0),
+    )
+
+    assert hasattr(env, "_rsi_cross_y")
+    cy = env._rsi_cross_y
+    # With y_start=0: cross_y = y_end * 2.0/2.3 — strictly inside the target,
+    # same sign, and bounded by the widened range.
+    assert (cy.abs() <= 1.1 * 2.0 / 2.3 + 1e-5).all()
+    assert (cy.abs() > 0.0).all()  # dead-zone sampling never returns exactly 0
