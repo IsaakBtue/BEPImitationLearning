@@ -49,3 +49,13 @@
 **Why it was wrong:** The 4-motion dataset contained no standing/idle reference at all, so the discriminator rewarded stepping motion unconditionally — directly fighting the five `post*` recovery rewards after a save (`mean_amp_reward` dropped ~20 → ~11 and play showed the robot walking off post-save). G1's own dataset contains `leftstep.pt`/`rightstep.pt` alongside the save motions.
 
 **Evidence:** run 2026-07-02_22-56-40 play behavior + `Humanoid-Goalkeeper/legged_gym/resources/datasets/goalkeeper/` file listing.
+
+---
+
+## 2026-07-03 — Widened `y_end_range` ±0.9 → ±1.1 to force double-stepping
+
+**What changed:** `y_end_range` (-0.9, 0.9) → (-1.1, 1.1) in BOTH the training and play `reset_ball` blocks (`goalkeeper_env_cfg.py`, parity rule).
+
+**Why it was wrong:** The policy was not converging to double-step saves at ±0.9 — the widest balls remained reachable with a single lunge, so stepping never became necessary. G1 trains its low/feet target region out to ±1.8 m at max curriculum (`g1_29_config` `ranges_4.maxw`, expansion in `legged_robot.py:333-336`); ±1.1 stays conservative vs upstream. Deliberately NOT added: a stepping-specific reward (G1 has none; footwork emerges from target width + step motions in the prior, and a crafted step reward invites shuffle hacking) and the 4× double/triple AMP boost (double/triple already hold 77% of the 6-file dataset's frames; 4× would shrink the near-standing share to 7% and re-create the post-save AMP conflict fixed earlier today).
+
+**Evidence:** play-mode observation (no double-steps at ±0.9) + G1 `assign_ball_states`/`command_ranges` read + NPZ frame-count audit (73/36/73/73/73/53 frames).

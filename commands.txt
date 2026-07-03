@@ -1,14 +1,2 @@
-uv run sgk_play Mjlab-BeyondAMP-Goalkeeper-T1-WithOverlay --agent zero --no-terminations True --motion-file src/simple_goalkeeper/motions/data/LeftStep_own_booster_t1.npz
-uv run sgk_play Mjlab-BeyondAMP-Goalkeeper-T1-WithOverlay --agent zero --no-terminations True --motion-file src/simple_goalkeeper/motions/data/LeftSafe1_booster_t1.npz
-uv run sgk_play Mjlab-BeyondAMP-Goalkeeper-T1-WithOverlay --agent zero --no-terminations True --motion-file src/simple_goalkeeper/motions/data/LeftSafeFront1_booster_t1.npz
-uv run sgk_play Mjlab-BeyondAMP-Goalkeeper-T1-WithOverlay --agent zero --no-terminations True --motion-file src/simple_goalkeeper/motions/data/Rightstep_own_booster_t1.npz
-uv run sgk_play Mjlab-BeyondAMP-Goalkeeper-T1-WithOverlay --agent zero --no-terminations True --motion-file src/simple_goalkeeper/motions/data/RightSafe1_booster_t1.npz
-uv run sgk_play Mjlab-BeyondAMP-Goalkeeper-T1-WithOverlay --agent zero --no-terminations True --motion-file src/simple_goalkeeper/motions/data/RightSafeFront1_booster_t1.npz
-uv run sgk_play Mjlab-BeyondAMP-Goalkeeper-T1-WithOverlay --agent zero --no-terminations True --motion-file src/simple_goalkeeper/motions/data/LeftSafeMedium1_booster_t1.npz
-uv run sgk_play Mjlab-BeyondAMP-Goalkeeper-T1-WithOverlay --agent zero --no-terminations True --motion-file src/simple_goalkeeper/motions/data/RightSafeMedium1_booster_t1.npz
-uv run sgk_play Mjlab-BeyondAMP-Goalkeeper-T1-WithOverlay --agent zero --no-terminations True --motion-file src/simple_goalkeeper/motions/data/LeftSafeFar1_booster_t1.npz
-uv run sgk_play Mjlab-BeyondAMP-Goalkeeper-T1-WithOverlay --agent zero --no-terminations True --motion-file src/simple_goalkeeper/motions/data/RightSafeFar1_booster_t1.npz
-uv run sgk_play Mjlab-BeyondAMP-Goalkeeper-T1-WithOverlay --agent zero --no-terminations True --motion-file src/simple_goalkeeper/motions/data/LeftDoubleStep_own_booster_t1.npz
-uv run sgk_play Mjlab-BeyondAMP-Goalkeeper-T1-WithOverlay --agent zero --no-terminations True --motion-file src/simple_goalkeeper/motions/data/LeftTripleStep_own_booster_t1.npz
-uv run sgk_play Mjlab-BeyondAMP-Goalkeeper-T1-WithOverlay --agent zero --no-terminations True --motion-file src/simple_goalkeeper/motions/data/RightDoubleStep_own_booster_t1.npz
-uv run sgk_play Mjlab-BeyondAMP-Goalkeeper-T1-WithOverlay --agent zero --no-terminations True --motion-file src/simple_goalkeeper/motions/data/RightTripleStep_own_booster_t1.npz
+cd /home/ibouwmeest/BEPImitationLearning/SimpleGoalKeeper
+uv run sgk_train Mjlab-BeyondAMP-Goalkeeper-T1 --num-envs 6144

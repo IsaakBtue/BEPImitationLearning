@@ -533,7 +533,11 @@ def goalkeeper_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
             "ball_name":      BALL_NAME,
             "dist_range":     (1.5, 3.5),
             "y_start_range":  (-0.3, 0.3),
-            "y_end_range":    (-0.9, 0.9),
+            # ±1.1 (was ±0.9, 2026-07-03): wide balls demand double-stepping —
+            # single-lunge reach tops out well short of 1.1 m. G1 trains its
+            # low/feet region out to ±1.8 at max curriculum (g1_29_config
+            # ranges_4.maxw), so this stays conservative vs upstream.
+            "y_end_range":    (-1.1, 1.1),
             "t_flight_range": (0.7, 1.1),
             "spawn_z":        0.12,
         },
@@ -616,7 +620,7 @@ def goalkeeper_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
                 "ball_name":     BALL_NAME,
                 "dist_range":    (1.5, 3.5),
                 "y_start_range": (-0.3, 0.3),
-                "y_end_range":   (-0.9, 0.9),
+                "y_end_range":   (-1.1, 1.1),  # parity with training (see rule)
                 "t_flight_range": (0.7, 1.1),
                 "spawn_z":       0.12,
             },
