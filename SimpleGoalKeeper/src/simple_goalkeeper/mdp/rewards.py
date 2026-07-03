@@ -140,6 +140,59 @@ def _get_ball_crossing_y(env: "ManagerBasedRlEnv", ball_name: str) -> torch.Tens
     return env._ball_crossing_y
 
 
+def _get_reach_target_y(
+    env: "ManagerBasedRlEnv",
+    ball_name: str,
+    wide_threshold: float = 0.6,
+) -> torch.Tensor:
+    """Two-stage reach target for wide crossings (2026-07-03, user-directed design).
+
+    For crossings where |crossing_y - start_y| > wide_threshold (same threshold
+    _tier_npz_reset uses to seed a double/triple-step RSI pose, events.py), the
+    target is the MIDPOINT between the robot's stance and the true crossing point
+    for the first half of the ball's flight time, then switches to the full
+    crossing point for the second half. Narrow crossings always target the full
+    point, unchanged from before this feature.
+
+    Motivation: footreach/foot_proximity previously chased the final crossing
+    point directly from episode start, and the AMP discriminator (2-frame
+    transitions only, no global trajectory signal) could not distinguish a
+    genuine multi-step approach from one continuous maximal-speed leap straight
+    to the target — the policy converged on the leap. Scheduling an intermediate
+    waypoint by flight time gives the existing reach reward a reason to commit to
+    the near point first, without adding a new reward term: once the schedule
+    flips to the full point, the sigmoid reach term and the up-to-10x vel_sigma
+    multiplier in footreach both collapse for a foot still sitting at the (now
+    stale) midpoint, so nothing about this needs a separate "did you actually
+    step" check — lingering is simply not rewarded once the second stage begins.
+
+    Root XY is pinned to env.scene.env_origins at every reset (reset_base,
+    goalkeeper_env_cfg.py; _write_rsi_state, events.py, only ever overwrites Z),
+    so "robot start Y" can always be read live with no new per-episode cache.
+
+    Does not affect the separate live-ball switch already in footreach/
+    foot_proximity (ball_x_local < 0.5 m), which still takes priority once the
+    ball is genuinely close — this only changes the FROZEN target fed into that
+    existing logic.
+    """
+    full_y = _get_ball_crossing_y(env, ball_name)                 # (N,) world Y
+    start_y = env.scene.env_origins[:, 1]                         # (N,) world Y
+
+    rel = getattr(env, "_rsi_cross_y", None)
+    lateral = rel if rel is not None else (full_y - start_y)
+    wide = lateral.abs() > wide_threshold
+
+    t_flight = getattr(env, "_ball_t_flight", None)
+    if t_flight is None:
+        return full_y
+
+    elapsed = env.episode_length_buf.to(full_y.dtype) * env.step_dt
+    first_half = elapsed < (t_flight / 2.0)
+
+    half_y = start_y + (full_y - start_y) / 2.0
+    return torch.where(wide & first_half, half_y, full_y)
+
+
 def footreach(
     env: "ManagerBasedRlEnv",
     ball_name: str,
@@ -149,9 +202,10 @@ def footreach(
 ) -> torch.Tensor:
     """Reach reward adapted from Imitationlearningbooster eereach, for feet instead of hands.
 
-    Phase 1 (ball x_local > 1.5 m): reward lateral alignment with the FROZEN crossing Y
-    (where the ball will cross the goal line), not the live ball Y. This gives a stable
-    pre-positioning target even for angled shots where live ball Y != arrival Y.
+    Phase 1 (ball x_local > 1.5 m): reward lateral alignment with the FROZEN reach target
+    (where the ball will cross the goal line, or the two-stage midpoint on wide crossings
+    — see _get_reach_target_y), not the live ball Y. This gives a stable pre-positioning
+    target even for angled shots where live ball Y != arrival Y.
 
     Phase 2 (ball x_local <= 1.5 m): sigmoid reach reward × lateral vel_sigma so actively
     diving/stepping toward the ball gives up to 10× the static reach reward.
@@ -169,33 +223,40 @@ def footreach(
     ball_x_local = ball_pos_w[:, 0] - env.scene.env_origins[:, 0]     # (N,)
     robot_y_w = robot.data.root_link_pos_w[:, 1]                       # (N,)
 
-    # Frozen crossing Y: where the ball will arrive at the goal line.
+    # True frozen crossing Y (final arrival point) — used only for foot-side selection
+    # below, which must not flip mid-episode based on the two-stage reach target.
     crossing_y = _get_ball_crossing_y(env, ball_name)                  # (N,)
+    # Reach target: full crossing point, or the two-stage midpoint-then-full schedule
+    # on wide crossings (2026-07-03). See _get_reach_target_y.
+    reach_target_y = _get_reach_target_y(env, ball_name)               # (N,)
 
     # Phase 1: pre-position laterally when ball is far (> 1.5 m in front).
-    lateral_error = crossing_y - robot_y_w                             # positive → target right
+    lateral_error = reach_target_y - robot_y_w                         # positive → target right
     asidegoal = lateral_error.clamp(-1.0, 1.0)
     asidegoal = torch.where(asidegoal.abs() < 0.3, torch.zeros_like(asidegoal), asidegoal)
     phase1_rew = 1.0 - asidegoal.abs()                                  # 1=aligned, 0=1 m off
 
-    # Phase 2 crossing point: frozen when far, live ball when close (mirrors G1 end_target update).
-    # G1 post_physics_step lines 203-206: end_target switches to ball_states[:, :3] when
-    # balllocal < 0.5 — robot converges on the actual ball in the final 0.5 m. The X
-    # coordinate stays at goal_x_w (stayonline constraint keeps the foot at the goal line).
+    # Phase 2 crossing point: frozen (two-stage) when far, live ball when close (mirrors
+    # G1 end_target update). G1 post_physics_step lines 203-206: end_target switches to
+    # ball_states[:, :3] when balllocal < 0.5 — robot converges on the actual ball in the
+    # final 0.5 m. The X coordinate stays at goal_x_w (stayonline constraint keeps the
+    # foot at the goal line).
     goal_x_w  = env.scene.env_origins[:, 0]       # (N,)
     floor_z_w = env.scene.env_origins[:, 2]       # (N,)
     live_y = ball_pos_w[:, 1]
     live_z = ball_pos_w[:, 2]
     ball_close = ball_x_local < 0.5               # (N,) bool — mirrors G1 balllocal < 0.5
 
-    # Switch from frozen crossing Y/Z to live ball Y/Z when ball is within 0.5 m.
-    target_y = torch.where(ball_close, live_y, crossing_y)
+    # Switch from frozen (two-stage) target to live ball Y/Z when ball is within 0.5 m.
+    target_y = torch.where(ball_close, live_y, reach_target_y)
     target_z = torch.where(ball_close, live_z, floor_z_w + 0.10)
 
     crossing_point = torch.stack(
         [goal_x_w, target_y, target_z], dim=-1
     )                                                                     # (N, 3)
     # Side-specific foot: left foot (idx 0) for +Y crossing, right (idx 1) for -Y.
+    # Uses the TRUE crossing_y, not reach_target_y — the assigned foot must not
+    # flip mid-episode when the two-stage target switches.
     is_left_ball = crossing_y > env.scene.env_origins[:, 1]
     foot_idx = torch.where(is_left_ball,
                            torch.zeros(env.num_envs, dtype=torch.long, device=env.device),
@@ -228,11 +289,12 @@ def foot_proximity(
 ) -> torch.Tensor:
     """Dense continuous reward for foot near the ball crossing point.
 
-    Uses the frozen goal-line crossing point (env._ball_crossing_y, set by
-    _get_ball_crossing_y) as the target when the ball is far (>= 0.5 m from goal line).
-    When the ball is within 0.5 m, switches to the live ball Y/Z position (mirrors G1
-    end_target update in post_physics_step lines 203-206). Rewards exp(-sigma * dist)
-    so there is always a gradient pulling the foot toward the arrival point, unlike the
+    Uses the frozen reach target (full crossing point, or the two-stage midpoint-
+    then-full schedule on wide crossings — see _get_reach_target_y, mirrors footreach)
+    as the target when the ball is far (>= 0.5 m from goal line). When the ball is
+    within 0.5 m, switches to the live ball Y/Z position (mirrors G1 end_target
+    update in post_physics_step lines 203-206). Rewards exp(-sigma * dist) so there
+    is always a gradient pulling the foot toward the arrival point, unlike the
     one-shot stopball. Deactivates once the ball is behind (same gate as footreach).
     Weight: +5.0.
     """
@@ -242,7 +304,12 @@ def foot_proximity(
     ball_pos_w = ball.data.root_link_pos_w                              # (N, 3)
     ball_x_local = ball_pos_w[:, 0] - env.scene.env_origins[:, 0]     # (N,)
 
+    # True frozen crossing Y (final arrival point) — used only for foot-side
+    # selection below, which must not flip mid-episode with the two-stage target.
     crossing_y = _get_ball_crossing_y(env, ball_name)                  # (N,)
+    # Reach target: full crossing point, or the two-stage midpoint-then-full
+    # schedule on wide crossings (2026-07-03). See _get_reach_target_y.
+    reach_target_y = _get_reach_target_y(env, ball_name)               # (N,)
     goal_x_w = env.scene.env_origins[:, 0]
     env_z    = env.scene.env_origins[:, 2]
 
@@ -251,7 +318,7 @@ def foot_proximity(
     ball_close = ball_x_local < 0.5               # (N,) bool
     live_y = ball_pos_w[:, 1]
     live_z = ball_pos_w[:, 2]
-    target_y = torch.where(ball_close, live_y, crossing_y)
+    target_y = torch.where(ball_close, live_y, reach_target_y)
     target_z = torch.where(ball_close, live_z, env_z + 0.10)
 
     crossing_point = torch.stack(

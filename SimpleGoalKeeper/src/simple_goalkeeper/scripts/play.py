@@ -194,10 +194,19 @@ class AnalyticsPolicy:
 def _patch_viewer_intercept_vis(native_viewer: "NativeMujocoViewer", env) -> None:
     """Monkey-patch NativeMujocoViewer to draw the predicted interception sphere.
 
-    Adds a green sphere at the frozen goal-line crossing point (env 0) and a
-    vertical line from floor to sphere so it's visible from any camera angle.
-    The sphere updates each render frame — it moves when a new episode starts
-    and the crossing_y changes.
+    Adds a sphere at the current reach target (env 0) and a vertical line from
+    floor to sphere so it's visible from any camera angle. The sphere updates
+    each render frame — it moves when a new episode starts and the crossing_y
+    changes.
+
+    Two-stage wide-crossing visualization (2026-07-03, mirrors
+    mdp.rewards._get_reach_target_y exactly): when |crossing_y - start_y| > 0.6
+    and the ball's flight is still in its first half, draws a BLUE sphere at the
+    midpoint between the robot's stance and the true crossing point instead of
+    the usual green one. Once flight time / 2 has elapsed (or the crossing is
+    narrow), draws the usual GREEN sphere at the full crossing point — i.e. blue
+    disappears and green appears (at the full, farther point) once the schedule
+    flips. Lets a human watching sgk_play confirm the timing visually.
     """
     orig_update = native_viewer._update_debug_visualizers
 
@@ -253,14 +262,36 @@ def _patch_viewer_intercept_vis(native_viewer: "NativeMujocoViewer", env) -> Non
                 to=to,
             )
 
-        # Sphere at intercept point.
-        _add_sphere(goal_x, cross_y, sphere_z, 0.08, [0.1, 1.0, 0.2, 0.75])
-        # Vertical line from floor to sphere.
-        _add_line(
-            np.array([goal_x, cross_y, floor_z], dtype=np.float64),
-            np.array([goal_x, cross_y, sphere_z], dtype=np.float64),
-            0.008, [0.1, 1.0, 0.2, 0.6],
-        )
+        # Two-stage wide-crossing schedule (mirrors mdp.rewards._get_reach_target_y).
+        start_y = float(origins[1])
+        rel_t = getattr(raw_env, "_rsi_cross_y", None)
+        rel = float(rel_t[0].item()) if rel_t is not None else (cross_y - start_y)
+        wide = abs(rel) > 0.6
+
+        t_flight_t = getattr(raw_env, "_ball_t_flight", None)
+        first_half = False
+        if wide and t_flight_t is not None:
+            step_dt = float(getattr(raw_env, "step_dt", 0.02))
+            elapsed = float(raw_env.episode_length_buf[0].item()) * step_dt
+            first_half = elapsed < (float(t_flight_t[0].item()) / 2.0)
+
+        if wide and first_half:
+            # Phase 1: BLUE sphere at the midpoint — half the distance, half as far.
+            mid_y = start_y + (cross_y - start_y) / 2.0
+            _add_sphere(goal_x, mid_y, sphere_z, 0.08, [0.15, 0.4, 1.0, 0.75])
+            _add_line(
+                np.array([goal_x, mid_y, floor_z], dtype=np.float64),
+                np.array([goal_x, mid_y, sphere_z], dtype=np.float64),
+                0.008, [0.15, 0.4, 1.0, 0.6],
+            )
+        else:
+            # Phase 2 (or narrow crossing): GREEN sphere at the full crossing point.
+            _add_sphere(goal_x, cross_y, sphere_z, 0.08, [0.1, 1.0, 0.2, 0.75])
+            _add_line(
+                np.array([goal_x, cross_y, floor_z], dtype=np.float64),
+                np.array([goal_x, cross_y, sphere_z], dtype=np.float64),
+                0.008, [0.1, 1.0, 0.2, 0.6],
+            )
 
     native_viewer._update_debug_visualizers = _patched_update
 

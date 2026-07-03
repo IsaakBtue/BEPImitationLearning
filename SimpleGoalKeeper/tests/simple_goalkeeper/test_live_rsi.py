@@ -225,8 +225,8 @@ def test_reset_single_coin_flip_covers_the_whole_batch_at_once(monkeypatch):
             return real_rand(*a, **k)
         return _fake
 
-    # Partition at defaults (tier=0.3, live=0.5): [0,0.3) tier, [0.3,0.8) live donor, [0.8,1) standing.
-    monkeypatch.setattr(torch, "rand", _forced_coin_flip(0.5))  # forces donor branch
+    # Partition at defaults (tier=0.5, live=0.3): [0,0.5) tier, [0.5,0.8) live donor, [0.8,1) standing.
+    monkeypatch.setattr(torch, "rand", _forced_coin_flip(0.6))  # forces donor branch
     mgr.reset(env, env_ids)
     assert robot.written_ids.tolist() == [0, 1, 2, 3]
     # Donor branch copies live values (~100), unmistakably not the ~2.0 default-pose range.
@@ -247,15 +247,16 @@ def test_reset_single_coin_flip_covers_the_whole_batch_at_once(monkeypatch):
 
 
 def test_reset_partition_boundaries_at_default_fractions():
-    """Draw partition (2026-07-03 three-way split): [0, 0.3) tier NPZ RSI,
-    [0.3, 0.8) G1 continue_keep live donor, [0.8, 1.0) G1 randomized standing.
-    The live-donor probability (0.5) plus tier (0.3) preserves an 80% chance
-    of SOME RSI-style reset vs 20% standing — same standing share as G1's
-    literal `torch.rand(1).item() > 0.2` (legged_robot.py:669)."""
-    tier, live = 0.3, 0.5
+    """Draw partition (2026-07-03 three-way split, fractions raised same day
+    30/50/20 -> 50/30/20): [0, 0.5) tier NPZ RSI, [0.5, 0.8) G1 continue_keep
+    live donor, [0.8, 1.0) G1 randomized standing. The live-donor probability
+    (0.3) plus tier (0.5) preserves an 80% chance of SOME RSI-style reset vs
+    20% standing — same standing share as G1's literal
+    `torch.rand(1).item() > 0.2` (legged_robot.py:669)."""
+    tier, live = 0.5, 0.3
     for draw, branch in [
-        (0.0, "tier"), (0.29, "tier"),
-        (0.3, "live"), (0.5, "live"), (0.79, "live"),
+        (0.0, "tier"), (0.49, "tier"),
+        (0.5, "live"), (0.6, "live"), (0.79, "live"),
         (0.8, "stand"), (0.99, "stand"),
     ]:
         got = "tier" if draw < tier else ("live" if draw < tier + live else "stand")
@@ -265,7 +266,7 @@ def test_reset_partition_boundaries_at_default_fractions():
 
 def test_reset_three_way_split_statistics(monkeypatch):
     """Over many independent reset() calls the branch rates must converge to
-    tier=0.3 / live=0.5 / standing=0.2 (one draw per call, not per env)."""
+    tier=0.5 / live=0.3 / standing=0.2 (one draw per call, not per env)."""
     from simple_goalkeeper.mdp.events import MotionResetManager
 
     num_envs, num_dof = 4, 1
@@ -293,7 +294,7 @@ def test_reset_three_way_split_statistics(monkeypatch):
         else:
             counts["stand"] += 1
 
-    for branch, expected in [("tier", 0.3), ("live", 0.5), ("stand", 0.2)]:
+    for branch, expected in [("tier", 0.5), ("live", 0.3), ("stand", 0.2)]:
         rate = counts[branch] / n_trials
         assert abs(rate - expected) < 0.05, (
             f"{branch} rate {rate} far from expected {expected}"
@@ -375,7 +376,8 @@ def test_reset_single_env_population_donor_pool_is_itself():
 def test_reset_from_motion_data_passes_the_three_way_split_to_reset(monkeypatch):
     """Regression guard (the 2026-07-01 audit found this wrapper silently
     overriding reset()'s fractions once before): pin the arguments the
-    registered training event actually forwards — 0.3 tier / 0.5 live."""
+    registered training event actually forwards — 0.5 tier / 0.3 live
+    (raised same-day 2026-07-03 from 0.3/0.5)."""
     import simple_goalkeeper.mdp.events as events_mod
 
     captured = {}
@@ -392,8 +394,8 @@ def test_reset_from_motion_data_passes_the_three_way_split_to_reset(monkeypatch)
 
     events_mod.reset_from_motion_data(env=object(), env_ids=None)
 
-    assert captured["tier"] == 0.3
-    assert captured["live"] == 0.5
+    assert captured["tier"] == 0.5
+    assert captured["live"] == 0.3
 
 
 @pytest.mark.parametrize("live_fraction", [0.2, 0.5, 0.8, 0.95])

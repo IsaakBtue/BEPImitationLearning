@@ -266,17 +266,20 @@ class MotionResetManager:
         env: "ManagerBasedRlEnv",
         env_ids: torch.Tensor | None,
         asset_cfg: SceneEntityCfg = _DEFAULT_ROBOT_CFG,
-        tier_rsi_fraction: float = 0.3,
-        live_rsi_fraction: float = 0.5,
+        tier_rsi_fraction: float = 0.5,
+        live_rsi_fraction: float = 0.3,
     ) -> None:
-        """Three-way reset split (2026-07-03, user request):
+        """Three-way reset split (2026-07-03, user request; fractions raised same day
+        from 30/50/20 to 50/30/20 — the tier-agnostic 50% live-donor branch was
+        diluting exposure to deliberately-seeded double/triple-step poses on wide
+        crossings):
 
-          tier_rsi_fraction (default 30%): ball-conditioned NPZ RSI — see
+          tier_rsi_fraction (default 50%): ball-conditioned NPZ RSI — see
             _tier_npz_reset. DELIBERATE divergence from the literal G1 port:
             the policy was not converging to double-stepping, so wide-crossing
             episodes are seeded with double/triple-step poses again (the
             pre-2026-07-01 tier mechanism, minus its live-donor/maturity layers).
-          live_rsi_fraction (default 50%): G1 continue_keep — unchanged
+          live_rsi_fraction (default 30%): G1 continue_keep — unchanged
             literal port (see below).
           remainder (default 20%): G1 randomized default standing pose —
             unchanged literal port.
@@ -361,13 +364,14 @@ def reset_from_motion_data(
     env: "ManagerBasedRlEnv",
     env_ids: torch.Tensor | None,
     asset_cfg: SceneEntityCfg = _DEFAULT_ROBOT_CFG,
-    tier_rsi_fraction: float = 0.3,
-    live_rsi_fraction: float = 0.5,
+    tier_rsi_fraction: float = 0.5,
+    live_rsi_fraction: float = 0.3,
 ) -> None:
     """Reset event: tier NPZ RSI vs continue_keep donor copy vs default pose.
 
-    2026-07-03: three-way split (30% ball-conditioned NPZ / 50% G1 live donor /
-    20% G1 randomized standing) — see MotionResetManager.reset.
+    2026-07-03: three-way split, raised same day from 30/50/20 to 50/30/20
+    (50% ball-conditioned NPZ / 30% G1 live donor / 20% G1 randomized standing)
+    — see MotionResetManager.reset for the dilution rationale.
 
     FIX 2026-07-01: this wrapper hardcoded rsi_fraction=0.5 (a silent 50/50
     split), diverging from both G1's actual 80/20 (`torch.rand(1).item() > 0.2`,
@@ -905,6 +909,14 @@ def reset_ball_rolling(
         env._rsi_cross_y = torch.zeros(env.num_envs, device=env.device)
     horiz_dist = torch.sqrt((x_start + 0.3) ** 2 + (y_end - y_start) ** 2)
     env._rsi_cross_y[env_ids] = y_start + (y_end - y_start) * (x_start + 0.3) / horiz_dist
+
+    # Store sampled flight time per env (2026-07-03): footreach/foot_proximity's
+    # two-stage wide-crossing target needs the ball's own flight time to know
+    # when "halfway there" has elapsed. t_flight is otherwise only a local
+    # variable used to derive velocity above and would be lost after this event.
+    if not hasattr(env, "_ball_t_flight"):
+        env._ball_t_flight = torch.zeros(env.num_envs, device=env.device)
+    env._ball_t_flight[env_ids] = t_flight
 
     _init_visibility_state(env, env_ids)
 
