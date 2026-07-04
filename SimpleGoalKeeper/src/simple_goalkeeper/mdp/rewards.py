@@ -385,6 +385,34 @@ def foot_proximity(
     return torch.exp(-sigma * min_dist) * (~behind).float()
 
 
+def blue_ball_landed(
+    env: "ManagerBasedRlEnv",
+    ball_name: str,
+    asset_cfg: SceneEntityCfg = _DEFAULT_FEET_CFG,
+) -> torch.Tensor:
+    """One-shot bonus when the assigned foot lands at the blue (midpoint) target.
+
+    Fires once per episode the first time _get_reach_target_y's landing latch
+    (env._blue_landed) becomes true -- the assigned foot was airborne at some
+    point, then came down in contact with the ground within landing_radius of
+    the phase-1 midpoint target on a wide crossing. See _get_reach_target_y for
+    the detection mechanism (2026-07-04, user-directed design: the robot must
+    physically land at the intermediate waypoint before advancing to the
+    green/full target, rather than the schedule advancing on elapsed time alone).
+    Weight: +10.0.
+    """
+    _get_reach_target_y(env, ball_name, asset_cfg=asset_cfg)  # ensure _blue_landed is fresh this step
+
+    if not hasattr(env, "_blue_landed_bonus_flag"):
+        env._blue_landed_bonus_flag = torch.zeros(env.num_envs, dtype=torch.bool, device=env.device)
+    just_reset = env.episode_length_buf <= 1
+    env._blue_landed_bonus_flag[just_reset] = False
+
+    fired = env._blue_landed & ~env._blue_landed_bonus_flag
+    env._blue_landed_bonus_flag |= fired
+    return fired.float()
+
+
 def stopball(
     env: "ManagerBasedRlEnv",
     ball_name: str,

@@ -164,3 +164,36 @@ def test_reach_target_y_without_robot_or_sensor_in_scene_is_unaffected():
     target = _get_reach_target_y(env, "ball")
     expected_mid = 10.0 + (full_y[0].item() - 10.0) / 2.0
     assert torch.allclose(target, torch.tensor([expected_mid]), atol=1e-5)
+
+
+def test_blue_ball_landed_fires_once_per_episode():
+    from simple_goalkeeper.mdp.rewards import blue_ball_landed
+
+    env = _make_env(foot_y=0.0, rel_cross_y=0.9, episode_step=5, found_left=False, found_right=False)
+    r0 = blue_ball_landed(env, "ball", asset_cfg=_feet_cfg())
+    assert r0.item() == 0.0
+
+    env.episode_length_buf[:] = 6
+    env.scene["robot"].data.body_link_pos_w = torch.tensor([[[0.0, 0.45, 0.0], [0.0, 0.45, 0.0]]])
+    env.scene["feet_contact"].data.found[:, :4] = 1.0
+    r1 = blue_ball_landed(env, "ball", asset_cfg=_feet_cfg())
+    assert r1.item() == 1.0  # fires exactly on the landing step
+
+    env.episode_length_buf[:] = 7
+    r2 = blue_ball_landed(env, "ball", asset_cfg=_feet_cfg())
+    assert r2.item() == 0.0  # already paid, does not fire again
+
+
+def test_blue_ball_landed_resets_on_new_episode():
+    from simple_goalkeeper.mdp.rewards import blue_ball_landed
+
+    env = _make_env(foot_y=0.45, rel_cross_y=0.9, episode_step=6, found_left=True, found_right=False)
+    env._blue_landed = torch.ones(1, dtype=torch.bool)
+    env._blue_was_airborne = torch.ones(1, dtype=torch.bool)
+    env._blue_landed_bonus_flag = torch.ones(1, dtype=torch.bool)  # already paid last episode
+
+    env.episode_length_buf[:] = 1  # new episode (reset step)
+    r = blue_ball_landed(env, "ball", asset_cfg=_feet_cfg())
+    assert not env._blue_landed_bonus_flag[0].item()
+    assert not env._blue_landed[0].item()  # never airborne THIS episode -- must not land for free
+    assert r.item() == 0.0
