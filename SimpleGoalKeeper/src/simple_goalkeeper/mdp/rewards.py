@@ -144,8 +144,10 @@ def _get_reach_target_y(
     env: "ManagerBasedRlEnv",
     ball_name: str,
     wide_threshold: float = 0.6,
+    asset_cfg: SceneEntityCfg = _DEFAULT_FEET_CFG,
+    landing_radius: float = 0.3,
 ) -> torch.Tensor:
-    """Two-stage reach target for wide crossings (2026-07-03, user-directed design).
+    """Two-stage reach target for wide crossings (2026-07-03, extended 2026-07-04).
 
     For crossings where |crossing_y - start_y| > wide_threshold (same threshold
     _tier_npz_reset uses to seed a double/triple-step RSI pose, events.py), the
@@ -154,17 +156,24 @@ def _get_reach_target_y(
     crossing point for the second half. Narrow crossings always target the full
     point, unchanged from before this feature.
 
-    Motivation: footreach/foot_proximity previously chased the final crossing
-    point directly from episode start, and the AMP discriminator (2-frame
-    transitions only, no global trajectory signal) could not distinguish a
-    genuine multi-step approach from one continuous maximal-speed leap straight
-    to the target — the policy converged on the leap. Scheduling an intermediate
-    waypoint by flight time gives the existing reach reward a reason to commit to
-    the near point first, without adding a new reward term: once the schedule
-    flips to the full point, the sigmoid reach term and the up-to-10x vel_sigma
-    multiplier in footreach both collapse for a foot still sitting at the (now
-    stale) midpoint, so nothing about this needs a separate "did you actually
-    step" check — lingering is simply not rewarded once the second stage begins.
+    2026-07-04 landing gate (user-directed design): the switch to the full point
+    now ALSO fires early, as soon as the assigned foot (_get_correct_foot_idx)
+    physically lands near the midpoint -- it must be airborne at some point after
+    reset, then come into ground contact (feet_contact sensor) within
+    landing_radius of the midpoint target. This replaces the pure-time switch
+    with a hard gate + timeout fallback: landing before t_flight/2 advances the
+    target early; never landing still falls back to the exact original
+    elapsed >= t_flight/2 behavior, so episodes can never stall. Motivation: the
+    original pure-time schedule let the policy glide/leap through the midpoint
+    without ever placing a foot near it, since nothing checked it actually
+    arrived -- see docs/superpowers/specs/2026-07-04-blue-ball-landing-gate-design.md.
+
+    Landing state (env._blue_was_airborne, env._blue_landed) is only tracked when
+    both a "robot" entity and a "feet_contact" sensor are present in env.scene --
+    absent in the lightweight fake envs used by test_reach_target_two_stage.py,
+    which exercise the time-based schedule in isolation and are unaffected by
+    this extension (KeyError on either lookup silently skips the landing check,
+    matching the exact original behavior).
 
     Root XY is pinned to env.scene.env_origins at every reset (reset_base,
     goalkeeper_env_cfg.py; _write_rsi_state, events.py, only ever overwrites Z),
@@ -190,7 +199,46 @@ def _get_reach_target_y(
     first_half = elapsed < (t_flight / 2.0)
 
     half_y = start_y + (full_y - start_y) / 2.0
-    return torch.where(wide & first_half, half_y, full_y)
+
+    # --- landing gate (2026-07-04) ---
+    n = env.num_envs
+    if not hasattr(env, "_blue_was_airborne"):
+        env._blue_was_airborne = torch.zeros(n, dtype=torch.bool, device=env.device)
+        env._blue_landed = torch.zeros(n, dtype=torch.bool, device=env.device)
+    just_reset = env.episode_length_buf <= 1
+    env._blue_was_airborne[just_reset] = False
+    env._blue_landed[just_reset] = False
+
+    try:
+        robot: Entity = env.scene[asset_cfg.name]
+        feet_contact: ContactSensor = env.scene["feet_contact"]
+    except KeyError:
+        robot = None
+        feet_contact = None
+
+    if robot is not None and feet_contact is not None:
+        foot_pos_w = robot.data.body_link_pos_w[:, asset_cfg.body_ids, :]   # (N, 2, 3)
+        foot_idx = _get_correct_foot_idx(env, ball_name)                    # (N,)
+        arange_n = torch.arange(n, device=env.device)
+        assigned_foot_pos = foot_pos_w[arange_n, foot_idx]                  # (N, 3)
+
+        found = feet_contact.data.found                                    # (N, 8)
+        left_in_contact = (found[:, :4] > 0).any(dim=-1)
+        right_in_contact = (found[:, 4:] > 0).any(dim=-1)
+        foot_in_contact = torch.where(foot_idx == 0, left_in_contact, right_in_contact)  # (N,)
+
+        env._blue_was_airborne |= ~foot_in_contact
+
+        goal_x_w = env.scene.env_origins[:, 0]
+        floor_z_w = env.scene.env_origins[:, 2]
+        target_point = torch.stack([goal_x_w, half_y, floor_z_w + 0.10], dim=-1)  # (N, 3)
+        dist_to_blue = torch.norm(assigned_foot_pos - target_point, dim=-1)
+
+        newly_landed = wide & env._blue_was_airborne & foot_in_contact & (dist_to_blue < landing_radius)
+        env._blue_landed |= newly_landed
+
+    phase1_active = wide & first_half & ~env._blue_landed
+    return torch.where(phase1_active, half_y, full_y)
 
 
 def footreach(
@@ -228,7 +276,7 @@ def footreach(
     crossing_y = _get_ball_crossing_y(env, ball_name)                  # (N,)
     # Reach target: full crossing point, or the two-stage midpoint-then-full schedule
     # on wide crossings (2026-07-03). See _get_reach_target_y.
-    reach_target_y = _get_reach_target_y(env, ball_name)               # (N,)
+    reach_target_y = _get_reach_target_y(env, ball_name, asset_cfg=asset_cfg)  # (N,)
 
     # Phase 1: pre-position laterally when ball is far (> 1.5 m in front).
     lateral_error = reach_target_y - robot_y_w                         # positive → target right
@@ -309,7 +357,7 @@ def foot_proximity(
     crossing_y = _get_ball_crossing_y(env, ball_name)                  # (N,)
     # Reach target: full crossing point, or the two-stage midpoint-then-full
     # schedule on wide crossings (2026-07-03). See _get_reach_target_y.
-    reach_target_y = _get_reach_target_y(env, ball_name)               # (N,)
+    reach_target_y = _get_reach_target_y(env, ball_name, asset_cfg=asset_cfg)  # (N,)
     goal_x_w = env.scene.env_origins[:, 0]
     env_z    = env.scene.env_origins[:, 2]
 
