@@ -79,16 +79,22 @@ def test_footreach_rewards_midpoint_foot_more_in_phase_1_than_phase_2():
     env_phase1 = _make_env(foot_y=0.45, rel_cross_y=0.9, episode_step=10)  # elapsed 0.2s < 0.5s
     r1 = footreach(env_phase1, "ball", asset_cfg=_feet_cfg())
 
-    # Phase 2 (elapsed >= t_flight/2): target snaps to the full point (0.9) -> the
-    # SAME foot position is now 0.45 m from target instead of 0.0 m.
-    env_phase2 = _make_env(foot_y=0.45, rel_cross_y=0.9, episode_step=30)  # elapsed 0.6s >= 0.5s
+    # Phase 2 (landing already occurred): target snaps to the full point (0.9)
+    # -- pre-set both latches directly (this file has no feet_contact sensor
+    # mock; the physical airborne-then-contact detection itself is covered by
+    # test_blue_ball_landing_gate.py) so _get_reach_target_y's init block
+    # doesn't overwrite them, and its no-op KeyError guard (no "feet_contact"
+    # in this fake env's scene) leaves them untouched afterward.
+    env_phase2 = _make_env(foot_y=0.45, rel_cross_y=0.9, episode_step=30)
+    env_phase2._blue_was_airborne = torch.tensor([True])
+    env_phase2._blue_landed = torch.tensor([True])
     r2 = footreach(env_phase2, "ball", asset_cfg=_feet_cfg())
 
     assert r1.item() > r2.item(), (
         "a foot parked at the midpoint must score better once phase 1 has snapped "
-        "to the midpoint target than after the schedule flips to the full point — "
-        "this is the self-correcting property the design relies on to discourage "
-        "lingering instead of continuing the second step"
+        "to the midpoint target than after a genuine landing has snapped the target "
+        "to the full point — this is the self-correcting property the design relies "
+        "on to discourage lingering instead of continuing the second step"
     )
 
 
@@ -107,6 +113,8 @@ def test_foot_proximity_rewards_midpoint_foot_more_in_phase_1_than_phase_2():
     r1 = foot_proximity(env_phase1, "ball", asset_cfg=_feet_cfg())
 
     env_phase2 = _make_env(foot_y=0.45, rel_cross_y=0.9, episode_step=30)
+    env_phase2._blue_was_airborne = torch.tensor([True])
+    env_phase2._blue_landed = torch.tensor([True])
     r2 = foot_proximity(env_phase2, "ball", asset_cfg=_feet_cfg())
 
     assert r1.item() > r2.item()

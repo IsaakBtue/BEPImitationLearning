@@ -111,15 +111,18 @@ def test_landing_fires_after_airborne_then_contact_within_radius():
     assert torch.allclose(target, full_y)
 
 
-def test_landing_gate_fallback_advances_at_half_flight_time_when_never_landed():
-    # Foot stays airborne the whole time (never lands near the target) -- the
-    # schedule must still fall back to the full target once elapsed >= t_flight/2,
-    # exactly like the pre-landing-gate behavior.
+def test_no_landing_means_target_stays_at_midpoint_indefinitely():
+    # Foot stays airborne the whole time (never lands near the target) --
+    # under the 2026-07-04 hard gate there is no more time-based fallback, so
+    # the target must STAY at the midpoint even well past the OLD t_flight/2
+    # boundary, unlike the pre-hard-gate behavior this replaces.
     env = _make_env(foot_y=0.0, rel_cross_y=0.9, episode_step=30, found_left=False, found_right=False)
     full_y = _get_ball_crossing_y(env, "ball")
+    start_y = env.scene.env_origins[:, 1]
+    expected_mid = start_y + (full_y - start_y) / 2.0
     target = _get_reach_target_y(env, "ball", asset_cfg=_feet_cfg())
     assert not env._blue_landed[0].item()
-    assert torch.allclose(target, full_y)
+    assert torch.allclose(target, expected_mid, atol=1e-5)
 
 
 def test_landing_far_from_target_does_not_count():

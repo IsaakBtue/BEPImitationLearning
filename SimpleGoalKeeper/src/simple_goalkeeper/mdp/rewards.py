@@ -147,33 +147,37 @@ def _get_reach_target_y(
     asset_cfg: SceneEntityCfg = _DEFAULT_FEET_CFG,
     landing_radius: float = 0.3,
 ) -> torch.Tensor:
-    """Two-stage reach target for wide crossings (2026-07-03, extended 2026-07-04).
+    """Two-stage reach target for wide crossings (2026-07-03, hard-gated 2026-07-04).
 
     For crossings where |crossing_y - start_y| > wide_threshold (same threshold
     _tier_npz_reset uses to seed a double/triple-step RSI pose, events.py), the
-    target is the MIDPOINT between the robot's stance and the true crossing point
-    for the first half of the ball's flight time, then switches to the full
-    crossing point for the second half. Narrow crossings always target the full
-    point, unchanged from before this feature.
+    target is the MIDPOINT between the robot's stance and the true crossing
+    point until the assigned foot (_get_correct_foot_idx) physically lands
+    there, then switches to the full crossing point. Narrow crossings always
+    target the full point, unchanged from before this feature.
 
-    2026-07-04 landing gate (user-directed design): the switch to the full point
-    now ALSO fires early, as soon as the assigned foot (_get_correct_foot_idx)
-    physically lands near the midpoint -- it must be airborne at some point after
-    reset, then come into ground contact (feet_contact sensor) within
-    landing_radius of the midpoint target. This replaces the pure-time switch
-    with a hard gate + timeout fallback: landing before t_flight/2 advances the
-    target early; never landing still falls back to the exact original
-    elapsed >= t_flight/2 behavior, so episodes can never stall. Motivation: the
-    original pure-time schedule let the policy glide/leap through the midpoint
-    without ever placing a foot near it, since nothing checked it actually
-    arrived -- see docs/superpowers/specs/2026-07-04-blue-ball-landing-gate-design.md.
+    2026-07-04 hard gate (user-directed design, REMOVES the prior timeout
+    fallback): the switch to the full point now ONLY happens on a genuine
+    landing -- the assigned foot must be airborne at some point after reset,
+    then come into ground contact (feet_contact sensor) within landing_radius
+    of the midpoint target. There is no elapsed-time escape hatch anymore: a
+    robot that never lands stays targeting the midpoint for the whole flight.
+    This is intentionally more aggressive than the prior soft/timeout gate --
+    see docs/superpowers/specs/2026-07-04-blue-ball-hard-gate-rsi-rebalance-design.md
+    for the research behind this change (the old gate's ~35-40% apparent
+    landing rate was mostly RSI free credit, not learned behavior; play-mode
+    observation showed ~0% genuine landings). The episode still cannot stall:
+    footreach/foot_proximity's separate ball_close (< 0.5 m) switch to the
+    live ball position is unaffected by this function and remains the true
+    backstop.
 
-    Landing state (env._blue_was_airborne, env._blue_landed) is only tracked when
-    both a "robot" entity and a "feet_contact" sensor are present in env.scene --
-    absent in the lightweight fake envs used by test_reach_target_two_stage.py,
-    which exercise the time-based schedule in isolation and are unaffected by
-    this extension (KeyError on either lookup silently skips the landing check,
-    matching the exact original behavior).
+    Landing state (env._blue_was_airborne, env._blue_landed) is only tracked
+    when both a "robot" entity and a "feet_contact" sensor are present in
+    env.scene -- absent in the lightweight fake envs used by
+    test_reach_target_two_stage.py, which exercise the two-stage switch in
+    isolation (KeyError on either lookup silently skips the landing check, so
+    those envs always see plain `wide` gating with landing never occurring --
+    narrow crossings are unaffected either way).
 
     Root XY is pinned to env.scene.env_origins at every reset (reset_base,
     goalkeeper_env_cfg.py; _write_rsi_state, events.py, only ever overwrites Z),
@@ -181,8 +185,8 @@ def _get_reach_target_y(
 
     Does not affect the separate live-ball switch already in footreach/
     foot_proximity (ball_x_local < 0.5 m), which still takes priority once the
-    ball is genuinely close — this only changes the FROZEN target fed into that
-    existing logic.
+    ball is genuinely close — this only changes the FROZEN target fed into
+    that existing logic.
     """
     full_y = _get_ball_crossing_y(env, ball_name)                 # (N,) world Y
     start_y = env.scene.env_origins[:, 1]                         # (N,) world Y
@@ -191,16 +195,9 @@ def _get_reach_target_y(
     lateral = rel if rel is not None else (full_y - start_y)
     wide = lateral.abs() > wide_threshold
 
-    t_flight = getattr(env, "_ball_t_flight", None)
-    if t_flight is None:
-        return full_y
-
-    elapsed = env.episode_length_buf.to(full_y.dtype) * env.step_dt
-    first_half = elapsed < (t_flight / 2.0)
-
     half_y = start_y + (full_y - start_y) / 2.0
 
-    # --- landing gate (2026-07-04) ---
+    # --- landing gate (2026-07-04, hardened: no time fallback) ---
     n = env.num_envs
     if not hasattr(env, "_blue_was_airborne"):
         env._blue_was_airborne = torch.zeros(n, dtype=torch.bool, device=env.device)
@@ -237,7 +234,7 @@ def _get_reach_target_y(
         newly_landed = wide & env._blue_was_airborne & foot_in_contact & (dist_to_blue < landing_radius)
         env._blue_landed |= newly_landed
 
-    phase1_active = wide & first_half & ~env._blue_landed
+    phase1_active = wide & ~env._blue_landed
     return torch.where(phase1_active, half_y, full_y)
 
 

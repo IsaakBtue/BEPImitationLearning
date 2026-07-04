@@ -78,12 +78,17 @@ def test_wide_crossing_first_half_targets_midpoint():
     assert abs(expected_mid - full_y) > 1e-6
 
 
-def test_wide_crossing_second_half_targets_full_point():
-    # elapsed = 30 * 0.02 = 0.6s >= half (0.5s) -> second half -> full target.
+def test_wide_crossing_stays_at_midpoint_past_former_half_flight_boundary():
+    # Under the 2026-07-04 hard gate there is no more time-based fallback:
+    # elapsed = 30*0.02 = 0.6s (past the OLD t_flight/2 = 0.5s boundary) must
+    # STILL target the midpoint, since this fake env has no "robot"/
+    # "feet_contact" in scene and can therefore never satisfy the landing gate.
     env = _make_env(rel_cross_y=0.8, t_flight=1.0, episode_step=30)
-    full_y = _get_ball_crossing_y(env, "ball")
+    start_y = env.scene.env_origins[0, 1].item()
+    full_y = _get_ball_crossing_y(env, "ball")[0].item()
+    expected_mid = start_y + (full_y - start_y) / 2.0
     target = _get_reach_target_y(env, "ball")
-    assert torch.allclose(target, full_y)
+    assert torch.allclose(target, torch.tensor([expected_mid]), atol=1e-5)
 
 
 def test_wide_crossing_negative_side_midpoint_direction():
@@ -115,24 +120,16 @@ def test_wide_threshold_just_over_0_6_is_wide():
     assert abs(target - (start_y + (full_y - start_y) / 2.0)) < 1e-5
 
 
-def test_flight_time_half_boundary_is_second_half_not_first():
-    # elapsed == t_flight/2 exactly -> first_half uses strict '<', so this must
-    # already be the full-target phase.
-    # t_flight=1.0, step_dt=0.02 -> half=0.5s -> step 25 gives exactly 0.5s.
+def test_elapsed_time_no_longer_affects_phase_selection():
+    # Under the hard gate, elapsed time plays no role at all -- exactly
+    # t_flight/2 (the OLD boundary, step 25 at step_dt=0.02) must still be
+    # midpoint, not full target.
     env = _make_env(rel_cross_y=0.8, t_flight=1.0, episode_step=25, step_dt=0.02)
-    full_y = _get_ball_crossing_y(env, "ball")
+    start_y = env.scene.env_origins[0, 1].item()
+    full_y = _get_ball_crossing_y(env, "ball")[0].item()
+    expected_mid = start_y + (full_y - start_y) / 2.0
     target = _get_reach_target_y(env, "ball")
-    assert torch.allclose(target, full_y)
-
-
-def test_missing_t_flight_falls_back_to_full_target():
-    # Safety fallback: if _ball_t_flight was never populated (shouldn't happen
-    # post-reset in practice, but must not crash), always return the full target.
-    env = _make_env(rel_cross_y=0.9, t_flight=1.0, episode_step=2)
-    del env._ball_t_flight
-    full_y = _get_ball_crossing_y(env, "ball")
-    target = _get_reach_target_y(env, "ball")
-    assert torch.allclose(target, full_y)
+    assert torch.allclose(target, torch.tensor([expected_mid]), atol=1e-5)
 
 
 def test_missing_rsi_cross_y_falls_back_to_crossing_minus_origin():
@@ -147,8 +144,12 @@ def test_missing_rsi_cross_y_falls_back_to_crossing_minus_origin():
     assert torch.allclose(target, torch.tensor([expected_mid]), atol=1e-5)
 
 
-def test_mixed_batch_wide_narrow_and_both_flight_halves_independently():
-    # Four envs in one call: narrow / wide-first-half / wide-second-half / wide-negative-first-half.
+def test_mixed_batch_wide_narrow_independent_of_elapsed_time():
+    # Four envs in one call: narrow / wide (early step) / wide (late step, past
+    # the OLD t_flight/2 boundary) / wide-negative (early step). Under the hard
+    # gate elapsed time is irrelevant -- both wide envs must behave identically
+    # regardless of episode_step, since neither can ever land (no "robot"/
+    # "feet_contact" in this fake env's scene).
     n = 4
     env_origins = torch.zeros(n, 3)
     env_origins[:, 1] = 5.0
@@ -163,10 +164,11 @@ def test_mixed_batch_wide_narrow_and_both_flight_halves_independently():
 
     # env 0: narrow -> full target.
     assert torch.allclose(target[0], full_y[0])
-    # env 1: wide, elapsed=0.2s < 0.5s -> midpoint.
+    # env 1: wide, early step -> midpoint.
     assert torch.allclose(target[1], start_y[1] + (full_y[1] - start_y[1]) / 2.0, atol=1e-5)
-    # env 2: wide, elapsed=0.6s >= 0.5s -> full target.
-    assert torch.allclose(target[2], full_y[2])
-    # env 3: wide negative side, elapsed=0.2s < 0.5s -> midpoint, correct direction.
+    # env 2: wide, late step (past the OLD t_flight/2 boundary) -> STILL
+    # midpoint, since elapsed time no longer matters and this env can never land.
+    assert torch.allclose(target[2], start_y[2] + (full_y[2] - start_y[2]) / 2.0, atol=1e-5)
+    # env 3: wide negative side, early step -> midpoint, correct direction.
     assert torch.allclose(target[3], start_y[3] + (full_y[3] - start_y[3]) / 2.0, atol=1e-5)
     assert target[3] < start_y[3]
