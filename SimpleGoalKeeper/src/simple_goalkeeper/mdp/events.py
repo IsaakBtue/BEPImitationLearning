@@ -266,20 +266,22 @@ class MotionResetManager:
         env: "ManagerBasedRlEnv",
         env_ids: torch.Tensor | None,
         asset_cfg: SceneEntityCfg = _DEFAULT_ROBOT_CFG,
-        tier_rsi_fraction: float = 0.5,
-        live_rsi_fraction: float = 0.3,
+        tier_rsi_fraction: float = 0.1,
+        live_rsi_fraction: float = 0.7,
     ) -> None:
         """Three-way reset split (2026-07-03, user request; fractions raised same day
         from 30/50/20 to 50/30/20 — the tier-agnostic 50% live-donor branch was
         diluting exposure to deliberately-seeded double/triple-step poses on wide
-        crossings):
+        crossings; rebalanced again 2026-07-04, 50/30/20 -> 10/70/20, to cut the
+        tier-RSI branch's "free landing" credit found by the blue-ball hard gate
+        — see docs/superpowers/specs/2026-07-04-blue-ball-hard-gate-rsi-rebalance-design.md):
 
-          tier_rsi_fraction (default 50%): ball-conditioned NPZ RSI — see
+          tier_rsi_fraction (default 10%): ball-conditioned NPZ RSI — see
             _tier_npz_reset. DELIBERATE divergence from the literal G1 port:
             the policy was not converging to double-stepping, so wide-crossing
             episodes are seeded with double/triple-step poses again (the
             pre-2026-07-01 tier mechanism, minus its live-donor/maturity layers).
-          live_rsi_fraction (default 30%): G1 continue_keep — unchanged
+          live_rsi_fraction (default 70%): G1 continue_keep — unchanged
             literal port (see below).
           remainder (default 20%): G1 randomized default standing pose —
             unchanged literal port.
@@ -364,8 +366,8 @@ def reset_from_motion_data(
     env: "ManagerBasedRlEnv",
     env_ids: torch.Tensor | None,
     asset_cfg: SceneEntityCfg = _DEFAULT_ROBOT_CFG,
-    tier_rsi_fraction: float = 0.5,
-    live_rsi_fraction: float = 0.3,
+    tier_rsi_fraction: float = 0.1,
+    live_rsi_fraction: float = 0.7,
 ) -> None:
     """Reset event: tier NPZ RSI vs continue_keep donor copy vs default pose.
 
@@ -373,8 +375,18 @@ def reset_from_motion_data(
     (50% ball-conditioned NPZ / 30% G1 live donor / 20% G1 randomized standing)
     — see MotionResetManager.reset for the dilution rationale.
 
-    FIX 2026-07-01: this wrapper hardcoded rsi_fraction=0.5 (a silent 50/50
-    split), diverging from both G1's actual 80/20 (`torch.rand(1).item() > 0.2`,
+    2026-07-04: rebalanced 50/30/20 -> 10/70/20. The hard-gated blue-ball
+    landing (mdp.rewards._get_reach_target_y) found the tier-RSI branch's
+    random mid-clip DoubleStep/TripleStep frames can start with the assigned
+    foot already lifted near the target, satisfying the landing latch "for
+    free" — inflating the apparent landing rate without the policy learning
+    anything. Cutting tier share to 10% forces most wide-crossing episodes to
+    learn the landing from a normal starting state. See
+    docs/superpowers/specs/2026-07-04-blue-ball-hard-gate-rsi-rebalance-design.md.
+    Standing share (20%) unchanged.
+
+    FIX 2026-07-01: this wrapper hardcoded rsi_fraction=0.5, a silent 50/50
+    split, diverging from both G1's actual 80/20 (`torch.rand(1).item() > 0.2`,
     legged_robot.py:669) and this project's own reset()/CLAUDE.md-documented
     80/20 intent. Caught by an independent fidelity audit — see
     docs/superpowers/plans/2026-07-01-live-env-rsi.md.
