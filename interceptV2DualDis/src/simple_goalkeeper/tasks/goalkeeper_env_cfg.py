@@ -196,12 +196,14 @@ def goalkeeper_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
 
     # ------------------------------------------------------------------
     # Observations
-    # REVERT 2026-07-02: 8803b6e gated the actor's ball_pos_b with
-    # always_visible=False (matching G1's flying/vanish mask). That change
-    # was wrong for this project and is reverted here — ball is always
-    # visible during training so the policy has a clean signal from the
-    # start. Visibility gating (warmup + vanish) is left for play/sim2real
-    # evaluation, not baked into the training observation itself.
+    # Ball is fully visible during the entire approach and save (always_visible
+    # =True — the full G1 visibility port was reverted, see CLAUDE.md). The
+    # post-save release is the v2 gate (ported from SimpleGoalKeeper, ce69f36):
+    # obs zeroes once the ball is behind the torso (x_body < 0.05, G1
+    # flying-mask front edge) or the 75-step window since launch closes (G1
+    # catchstep analog; > max 1.3 s flight so it never blinds a ball still en
+    # route). The policy learns to disengage and recover to the default pose
+    # in the guaranteed blind tail of every episode.
     # ------------------------------------------------------------------
     # Actor: only terms available at deployment on real hardware.
     # base_lin_vel, ball_vel_b, foot_pos_b removed — not measurable at deployment.
@@ -225,10 +227,19 @@ def goalkeeper_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
         ),
         "actions": ObservationTermCfg(func=mjlab_mdp.last_action),
         # XY only — matches BoosterT1mjlab kick task for deployment compatibility.
+        # Noise lives INSIDE the term (noise_scale), not on the manager: mjlab
+        # applies manager noise after the term returns, which would re-noise the
+        # gated zeros into a phantom ball. G1 noises first, then masks
+        # (legged_robot.py:425-426) — noise_scale reproduces that ordering.
         "ball_pos_b": ObservationTermCfg(
             func=gk_mdp.ball_pos_xy_b,
-            params={"ball_name": BALL_NAME, "always_visible": True},
-            noise=Unoise(n_min=-0.05, n_max=0.05),
+            params={
+                "ball_name": BALL_NAME,
+                "always_visible": True,
+                "hide_behind_torso": True,
+                "hide_after_steps": 75,
+                "noise_scale": 0.05,
+            },
         ),
     }
     # Critic: actor terms + privileged info not available at deployment.
@@ -311,7 +322,7 @@ def goalkeeper_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
         "cleanstop": RewardTermCfg(
             func=gk_mdp.cleanstop,
             weight=25.0,
-            params={"ball_name": BALL_NAME, "speed_threshold": 0.25},
+            params={"ball_name": BALL_NAME, "speed_threshold": 0.10},
         ),
         # --- save quality bonuses (fire on top of softstop, not as a gate) ---
         "inner_face_orientation_save": RewardTermCfg(
@@ -585,6 +596,10 @@ def goalkeeper_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
     # ------------------------------------------------------------------
     if play:
         cfg.observations["actor"].enable_corruption = False
+        # In-term ball noise must be zeroed explicitly — enable_corruption only
+        # disables manager-level noise, and ball_pos_b noises inside the term
+        # (G1 noise-before-mask ordering).
+        cfg.observations["actor"].terms["ball_pos_b"].params["noise_scale"] = 0.0
         cfg.terminations.pop("out_of_terrain_bounds", None)
         # No disturbance pushes during play/eval — mirrors kick task play mode.
         cfg.events.pop("push_robot", None)
