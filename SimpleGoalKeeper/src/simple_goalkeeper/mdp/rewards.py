@@ -460,10 +460,20 @@ def stopball(
     Ball approaches with negative X velocity; foot contact reverses or decelerates it.
     Fires exactly once per episode when delta_vx > threshold, providing the primary
     training signal for a successful save. Mirrors Imitationlearningbooster stopball.
+
+    Landing gate (2026-07-05): on wide crossings (env._blue_wide), this can only fire
+    once the assigned foot has genuinely landed at the blue midpoint (env._blue_landed)
+    -- see _get_reach_target_y. Before this gate, a wide-crossing policy could skip the
+    two-stage waypoint entirely and still collect the full stopball reward by beelining
+    straight for the true crossing point, since stopball never referenced the two-stage
+    state at all (only the much smaller footreach/blue_ball_landed shaping rewards did).
+    Narrow crossings (~env._blue_wide) are unaffected -- they have no waypoint to skip.
     """
     ball: Entity = env.scene[ball_name]
     ball_x_vel = ball.data.root_link_lin_vel_w[:, 0]
     ball_x_local = ball.data.root_link_pos_w[:, 0] - env.scene.env_origins[:, 0]
+
+    _get_reach_target_y(env, ball_name)  # ensure _blue_wide/_blue_landed are fresh this step
 
     if not hasattr(env, "_sb_init_vx"):
         env._sb_init_vx = ball_x_vel.clone()
@@ -475,7 +485,8 @@ def stopball(
 
     delta_vx = ball_x_vel - env._sb_init_vx
     in_front = ball_x_local > -0.3  # allow 0.3 m past goal line: deflection accumulates gradually
-    fired = (delta_vx > delta_vel_threshold) & in_front & ~env._sb_flag
+    landing_ok = ~env._blue_wide | env._blue_landed
+    fired = (delta_vx > delta_vel_threshold) & in_front & landing_ok & ~env._sb_flag
     env._sb_flag |= fired
     return fired.float()
 
@@ -493,10 +504,18 @@ def softstop(
 
     Also gates _ball_is_behind and tracks which foot was in contact when softstop fires
     (used by single_foot_save, inner_face_orientation_save, cleanstop, airborne_at_save).
+
+    Landing gate (2026-07-05): on wide crossings (env._blue_wide), this -- and therefore
+    _softstop_flag/_softstop_correct_foot and everything keyed off them -- can only latch
+    once the assigned foot has genuinely landed at the blue midpoint (env._blue_landed).
+    See stopball's docstring for the full rationale; same fix, independent flag. Narrow
+    crossings (~env._blue_wide) are unaffected.
     """
     ball: Entity = env.scene[ball_name]
     ball_x_vel = ball.data.root_link_lin_vel_w[:, 0]
     ball_x_local = ball.data.root_link_pos_w[:, 0] - env.scene.env_origins[:, 0]
+
+    _get_reach_target_y(env, ball_name)  # ensure _blue_wide/_blue_landed are fresh this step
 
     if not hasattr(env, "_softstop_flag"):
         env._softstop_flag = torch.zeros(env.num_envs, dtype=torch.bool, device=env.device)
@@ -507,7 +526,8 @@ def softstop(
     env._softstop_correct_foot[just_reset] = False
 
     in_front = ball_x_local > -0.3
-    fired = (ball_x_vel > velocity_threshold) & in_front & ~env._softstop_flag
+    landing_ok = ~env._blue_wide | env._blue_landed
+    fired = (ball_x_vel > velocity_threshold) & in_front & landing_ok & ~env._softstop_flag
 
     # Track correct foot contact at softstop moment.
     if fired.any():
