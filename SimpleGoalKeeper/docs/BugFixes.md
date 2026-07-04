@@ -94,6 +94,20 @@
 
 ---
 
+## 2026-07-03 — `cleanstop` false-fires on floor friction: tightened threshold instead of making it continuous
+
+**What changed:** `cleanstop` `speed_threshold` param (`goalkeeper_env_cfg.py:324`) lowered from `0.25` to `0.10` m/s. Mechanism unchanged — still a one-time bonus (weight 25.0, curriculum-gated `activate_at_cu=3`) requiring `softstop` already fired, ball total speed under the threshold, and correct-foot contact at the softstop moment.
+
+**Why it was wrong:** user observed `cleanstop` sometimes firing from floor friction alone rather than a genuine clean trap. After a deflection the ball is typically sliding (its spin doesn't match its new linear velocity), and translational friction during the slide-to-roll transition bleeds speed on its own — at the previous 0.25 m/s bar this decay alone could cross the threshold with no further robot action.
+
+**Rejected alternative — making it a continuous post-save reward:** considered (scale reward across 0.5→0.05 m/s, active post-save like `postlinvel`/`postorientation`/`postangvel`) but rejected. Those continuous terms reward quantities the robot actively steers every step (its own body velocity/orientation); post-deflection ball speed is not actuated step-to-step once the ball leaves the foot — its decay is passive friction. Making the reward continuous would not improve credit assignment and would turn the friction false-positive from a single 25-point payout into a per-step payout for the rest of the episode, enlarging the exact exploit being fixed rather than closing it.
+
+**Correct value:** `speed_threshold=0.10`. Cheaper, falsifiable fix in the existing one-shot mechanism: harder for pure friction decay to clear within the post-save window, still reachable by an actual foot-trap.
+
+**Evidence:** not yet validated against a training run — next checkpoint should be compared against prior runs for `cleanstop` fire-rate (via the `Episode_Reward` one-shot-rate formula in `CLAUDE.md`) and checked in `sgk_play` for genuine trap vs. friction-decay saves.
+
+---
+
 ## 2026-07-04 — footreach/foot_proximity: landing gate on the two-stage schedule
 
 **What changed:** `mdp.rewards._get_reach_target_y` gains a landing gate: the assigned foot (`_get_correct_foot_idx`) must be airborne (`feet_contact` sensor) at some point after reset, then land in ground contact within 0.3 m of the phase-1 midpoint ("blue ball") target on wide crossings (`|crossing_y - start_y| > 0.6`). Landing switches the target to the full crossing point ("green ball") immediately; the original `elapsed >= t_flight/2` time-based switch remains as a fallback for episodes that never land, so episodes cannot stall. New one-shot bonus reward `blue_ball_landed` (weight +10.0, no curriculum) pays out the first time the landing latch fires per episode. Landing state (`env._blue_was_airborne`, `env._blue_landed`) is only tracked when both a `robot` entity and `feet_contact` sensor are present in `env.scene`; absent in the lightweight fake envs used by the pre-existing `test_reach_target_two_stage.py`/`test_footreach_two_stage_wiring.py` suites, which remain fully unaffected. `mdp/rewards.py:_get_reach_target_y,blue_ball_landed`, `mdp/__init__.py`, `tasks/goalkeeper_env_cfg.py`.

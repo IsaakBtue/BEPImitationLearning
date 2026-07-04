@@ -334,7 +334,7 @@ def goalkeeper_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
         "cleanstop": RewardTermCfg(
             func=gk_mdp.cleanstop,
             weight=25.0,
-            params={"ball_name": BALL_NAME, "speed_threshold": 0.25},
+            params={"ball_name": BALL_NAME, "speed_threshold": 0.10},
         ),
         # --- save quality bonuses (fire on top of softstop, not as a gate) ---
         "inner_face_orientation_save": RewardTermCfg(
