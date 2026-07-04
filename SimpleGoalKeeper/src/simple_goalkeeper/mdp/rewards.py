@@ -166,10 +166,24 @@ def _get_reach_target_y(
     see docs/superpowers/specs/2026-07-04-blue-ball-hard-gate-rsi-rebalance-design.md
     for the research behind this change (the old gate's ~35-40% apparent
     landing rate was mostly RSI free credit, not learned behavior; play-mode
-    observation showed ~0% genuine landings). The episode still cannot stall:
-    footreach/foot_proximity's separate ball_close (< 0.5 m) switch to the
-    live ball position is unaffected by this function and remains the true
-    backstop.
+    observation showed ~0% genuine landings).
+
+    2026-07-05 correction: footreach/foot_proximity's separate ball_close
+    (< 0.5 m) switch to the live ball position used to be unconditional,
+    which silently reintroduced exactly the bypass this hard gate was meant
+    to remove -- the policy could always skip landing at the midpoint
+    entirely and still get full reward once the ball closed to 0.5 m, since
+    nothing there checked env._blue_landed. Confirmed by play-mode
+    observation (robot runs straight to the true crossing point, never
+    landing at the intermediate waypoint) and by the fact that footreach's
+    per-step dive reward (weight 10-25, up to 10x via vel_sigma, applied
+    every step of the approach) dwarfs blue_ball_landed's one-shot bonus
+    (same weight range, fires once) -- skipping the waypoint was always the
+    higher-reward strategy. Fixed by gating ball_close on env._blue_landed
+    for wide crossings (env._blue_wide, cached below); narrow crossings are
+    unaffected. No timing fallback was added back -- consistent with this
+    function's own hard gate, a wide crossing that never lands keeps
+    targeting the midpoint for the rest of the episode.
 
     Landing state (env._blue_was_airborne, env._blue_landed,
     env._blue_airborne_at_reset) is only tracked when both a "robot" entity
@@ -192,10 +206,10 @@ def _get_reach_target_y(
     goalkeeper_env_cfg.py; _write_rsi_state, events.py, only ever overwrites Z),
     so "robot start Y" can always be read live with no new per-episode cache.
 
-    Does not affect the separate live-ball switch already in footreach/
-    foot_proximity (ball_x_local < 0.5 m), which still takes priority once the
-    ball is genuinely close — this only changes the FROZEN target fed into
-    that existing logic.
+    footreach/foot_proximity's live-ball switch (ball_x_local < 0.5 m) is now
+    ALSO gated on landing for wide crossings (2026-07-04, closes the gap where
+    that switch used to fire unconditionally and let the policy skip the blue
+    waypoint entirely) — see env._blue_wide, cached above.
     """
     full_y = _get_ball_crossing_y(env, ball_name)                 # (N,) world Y
     start_y = env.scene.env_origins[:, 1]                         # (N,) world Y
@@ -203,6 +217,9 @@ def _get_reach_target_y(
     rel = getattr(env, "_rsi_cross_y", None)
     lateral = rel if rel is not None else (full_y - start_y)
     wide = lateral.abs() > wide_threshold
+    # Cached so footreach/foot_proximity's ball_close switch can be gated on
+    # "wide AND not yet landed" without recomputing the crossing geometry.
+    env._blue_wide = wide
 
     half_y = start_y + (full_y - start_y) / 2.0
 
@@ -305,7 +322,11 @@ def footreach(
     floor_z_w = env.scene.env_origins[:, 2]       # (N,)
     live_y = ball_pos_w[:, 1]
     live_z = ball_pos_w[:, 2]
-    ball_close = ball_x_local < 0.5               # (N,) bool — mirrors G1 balllocal < 0.5
+    # (N,) bool — mirrors G1 balllocal < 0.5, but on wide crossings this switch is
+    # ALSO gated on having genuinely landed at the blue midpoint (2026-07-05):
+    # previously unconditional, which let the policy skip the landing gate
+    # entirely and still converge on the live ball. See _get_reach_target_y.
+    ball_close = (ball_x_local < 0.5) & (~env._blue_wide | env._blue_landed)
 
     # Switch from frozen (two-stage) target to live ball Y/Z when ball is within 0.5 m.
     target_y = torch.where(ball_close, live_y, reach_target_y)
@@ -353,10 +374,12 @@ def foot_proximity(
     then-full schedule on wide crossings — see _get_reach_target_y, mirrors footreach)
     as the target when the ball is far (>= 0.5 m from goal line). When the ball is
     within 0.5 m, switches to the live ball Y/Z position (mirrors G1 end_target
-    update in post_physics_step lines 203-206). Rewards exp(-sigma * dist) so there
-    is always a gradient pulling the foot toward the arrival point, unlike the
-    one-shot stopball. Deactivates once the ball is behind (same gate as footreach).
-    Weight: +5.0.
+    update in post_physics_step lines 203-206) — on wide crossings this switch is
+    ALSO gated on env._blue_landed (2026-07-05), so the policy cannot skip the
+    blue midpoint and still get full credit once the ball closes in. Rewards
+    exp(-sigma * dist) so there is always a gradient pulling the foot toward the
+    arrival point, unlike the one-shot stopball. Deactivates once the ball is
+    behind (same gate as footreach). Weight: +5.0.
     """
     robot: Entity = env.scene[asset_cfg.name]
     ball: Entity = env.scene[ball_name]
@@ -375,7 +398,9 @@ def foot_proximity(
 
     # Live ball switch: when ball is within 0.5 m of goal line, track live position.
     # Mirrors G1 post_physics_step: end_target = ball_states[:, :3] when balllocal < 0.5.
-    ball_close = ball_x_local < 0.5               # (N,) bool
+    # On wide crossings this is ALSO gated on having genuinely landed at the blue
+    # midpoint (2026-07-05, mirrors footreach) — see _get_reach_target_y.
+    ball_close = (ball_x_local < 0.5) & (~env._blue_wide | env._blue_landed)
     live_y = ball_pos_w[:, 1]
     live_z = ball_pos_w[:, 2]
     target_y = torch.where(ball_close, live_y, reach_target_y)

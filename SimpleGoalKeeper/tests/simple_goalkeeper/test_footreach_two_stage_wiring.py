@@ -52,7 +52,7 @@ def _feet_cfg():
     return cfg
 
 
-def _make_env(foot_y: float, rel_cross_y: float, episode_step: int, t_flight: float = 1.0):
+def _make_env(foot_y: float, rel_cross_y: float, episode_step: int, t_flight: float = 1.0, ball_x: float = 2.0):
     n = 1
     env_origins = torch.zeros(n, 3)  # start_y = 0.0, goal_x_w = 0.0, floor_z = 0.0
 
@@ -66,7 +66,7 @@ def _make_env(foot_y: float, rel_cross_y: float, episode_step: int, t_flight: fl
     )
     # Ball still well in front (x_local > 1.5) so foot_proximity/footreach use the
     # frozen target path, not the live-ball switch (ball_close requires x_local<0.5).
-    ball = _Entity(root_link_pos_w=torch.tensor([[2.0, rel_cross_y, 0.11]]))
+    ball = _Entity(root_link_pos_w=torch.tensor([[ball_x, rel_cross_y, 0.11]]))
 
     rel = torch.tensor([rel_cross_y])
     t_flight_t = torch.tensor([t_flight])
@@ -133,3 +133,72 @@ def test_footreach_foot_side_selection_unaffected_by_two_stage_target():
     env_phase1 = _make_env(foot_y=0.45, rel_cross_y=0.9, episode_step=10)
     r1 = footreach(env_phase1, "ball", asset_cfg=_feet_cfg())
     assert r1.item() > 0.0
+
+
+def test_footreach_ball_close_does_not_bypass_landing_gate_on_wide_crossing():
+    # Regression test for the 2026-07-05 fix: ball_close (ball_x_local < 0.5)
+    # used to switch the target to the live ball position unconditionally, even
+    # on a wide crossing where the assigned foot never landed at the blue
+    # midpoint -- letting the policy skip the landing gate entirely. A foot
+    # parked at the midpoint (0.45) must still score higher than one parked at
+    # the full/live point (0.9) while the ball is close AND _blue_landed is
+    # still false.
+    env_not_landed = _make_env(foot_y=0.45, rel_cross_y=0.9, episode_step=10, ball_x=0.3)
+    r_at_midpoint = footreach(env_not_landed, "ball", asset_cfg=_feet_cfg())
+
+    env_not_landed_full = _make_env(foot_y=0.9, rel_cross_y=0.9, episode_step=10, ball_x=0.3)
+    r_at_full = footreach(env_not_landed_full, "ball", asset_cfg=_feet_cfg())
+
+    assert r_at_midpoint.item() > r_at_full.item(), (
+        "with the ball close but no genuine landing, the target must still be "
+        "the blue midpoint, not the live ball position -- otherwise the policy "
+        "can skip the landing gate and still get full credit once the ball "
+        "closes in"
+    )
+
+
+def test_footreach_ball_close_switches_to_live_target_once_landed():
+    # Companion to the regression test above: once _blue_landed is genuinely
+    # true, ball_close SHOULD switch the target to the live ball position (this
+    # is the pre-existing "cannot stall" backstop, still intended to work once
+    # landing has actually happened).
+    env_landed = _make_env(foot_y=0.9, rel_cross_y=0.9, episode_step=10, ball_x=0.3)
+    env_landed._blue_was_airborne = torch.tensor([True])
+    env_landed._blue_landed = torch.tensor([True])
+    env_landed._blue_airborne_at_reset = torch.tensor([False])
+    r_at_full = footreach(env_landed, "ball", asset_cfg=_feet_cfg())
+
+    env_landed_mid = _make_env(foot_y=0.45, rel_cross_y=0.9, episode_step=10, ball_x=0.3)
+    env_landed_mid._blue_was_airborne = torch.tensor([True])
+    env_landed_mid._blue_landed = torch.tensor([True])
+    env_landed_mid._blue_airborne_at_reset = torch.tensor([False])
+    r_at_midpoint = footreach(env_landed_mid, "ball", asset_cfg=_feet_cfg())
+
+    assert r_at_full.item() > r_at_midpoint.item(), (
+        "once genuinely landed, ball_close should switch the target to the "
+        "live ball position -- a foot at the full point must score higher "
+        "than one still parked at the midpoint"
+    )
+
+
+def test_foot_proximity_ball_close_does_not_bypass_landing_gate_on_wide_crossing():
+    env_not_landed = _make_env(foot_y=0.45, rel_cross_y=0.9, episode_step=10, ball_x=0.3)
+    r_at_midpoint = foot_proximity(env_not_landed, "ball", asset_cfg=_feet_cfg())
+
+    env_not_landed_full = _make_env(foot_y=0.9, rel_cross_y=0.9, episode_step=10, ball_x=0.3)
+    r_at_full = foot_proximity(env_not_landed_full, "ball", asset_cfg=_feet_cfg())
+
+    assert r_at_midpoint.item() > r_at_full.item()
+
+
+def test_footreach_narrow_crossing_ball_close_unaffected_by_landing_gate():
+    # Narrow crossings (0.4 <= 0.6) never go through the two-stage/landing
+    # mechanism at all -- ball_close must still switch to the live target
+    # exactly as before this fix, with no dependency on _blue_landed.
+    env = _make_env(foot_y=0.4, rel_cross_y=0.4, episode_step=10, ball_x=0.3)
+    r_at_target = footreach(env, "ball", asset_cfg=_feet_cfg())
+
+    env_off_target = _make_env(foot_y=0.0, rel_cross_y=0.4, episode_step=10, ball_x=0.3)
+    r_off_target = footreach(env_off_target, "ball", asset_cfg=_feet_cfg())
+
+    assert r_at_target.item() > r_off_target.item()
