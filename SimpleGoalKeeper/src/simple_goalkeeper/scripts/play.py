@@ -200,13 +200,16 @@ def _patch_viewer_intercept_vis(native_viewer: "NativeMujocoViewer", env) -> Non
     changes.
 
     Two-stage wide-crossing visualization (2026-07-03, mirrors
-    mdp.rewards._get_reach_target_y exactly): when |crossing_y - start_y| > 0.6
-    and the ball's flight is still in its first half, draws a BLUE sphere at the
-    midpoint between the robot's stance and the true crossing point instead of
-    the usual green one. Once flight time / 2 has elapsed (or the crossing is
-    narrow), draws the usual GREEN sphere at the full crossing point — i.e. blue
-    disappears and green appears (at the full, farther point) once the schedule
-    flips. Lets a human watching sgk_play confirm the timing visually.
+    mdp.rewards._get_reach_target_y exactly). 2026-07-04 hard gate: reads the
+    real env._blue_landed latch instead of re-deriving a time-based
+    approximation (the prior elapsed < t_flight/2 check this docstring used to
+    describe no longer exists in _get_reach_target_y — see
+    docs/superpowers/specs/2026-07-04-blue-ball-hard-gate-rsi-rebalance-design.md).
+    When |crossing_y - start_y| > 0.6 and the assigned foot has not yet landed
+    at the midpoint, draws a BLUE sphere there instead of the usual green one.
+    Once landing has occurred (or the crossing is narrow), draws the usual
+    GREEN sphere at the full crossing point. Lets a human watching sgk_play
+    confirm landing timing visually.
     """
     orig_update = native_viewer._update_debug_visualizers
 
@@ -268,14 +271,14 @@ def _patch_viewer_intercept_vis(native_viewer: "NativeMujocoViewer", env) -> Non
         rel = float(rel_t[0].item()) if rel_t is not None else (cross_y - start_y)
         wide = abs(rel) > 0.6
 
-        t_flight_t = getattr(raw_env, "_ball_t_flight", None)
-        first_half = False
-        if wide and t_flight_t is not None:
-            step_dt = float(getattr(raw_env, "step_dt", 0.02))
-            elapsed = float(raw_env.episode_length_buf[0].item()) * step_dt
-            first_half = elapsed < (float(t_flight_t[0].item()) / 2.0)
+        # 2026-07-04 hard gate: phase 1 (blue) now lasts until a genuine
+        # landing (env._blue_landed), not until elapsed time passes
+        # t_flight/2 -- read the actual latch _get_reach_target_y maintains
+        # rather than re-deriving the now-removed time-based approximation.
+        landed_t = getattr(raw_env, "_blue_landed", None)
+        landed = bool(landed_t[0].item()) if landed_t is not None else False
 
-        if wide and first_half:
+        if wide and not landed:
             # Phase 1: BLUE sphere at the midpoint — half the distance, half as far.
             mid_y = start_y + (cross_y - start_y) / 2.0
             _add_sphere(goal_x, mid_y, sphere_z, 0.08, [0.15, 0.4, 1.0, 0.75])
