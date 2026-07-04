@@ -147,7 +147,7 @@ Phase 1 reward structure (ported from proven Imitationlearningbooster pattern):
 | Term | Weight | Purpose |
 |------|--------|---------|
 | `stopball` | +100→250 (curriculum) | One-time bonus when ball is deflected (delta_vx > 1 m/s). Primary signal. |
-| `footreach` | +10→20 (curriculum) | Phase1: lateral alignment. Phase2: sigmoid reach × vel_sigma (1–10×). Deactivates on deflection. |
+| `footreach` | +10→25 (curriculum) | Phase1: lateral alignment. Phase2: sigmoid reach × vel_sigma (1–10×). Deactivates on deflection. |
 | `blue_ball_landed` | +10→25 (curriculum, 2026-07-04) | One-shot bonus when the assigned foot lands (airborne-then-contact) within 0.3 m of the blue-ball midpoint target on a wide crossing. Since 2026-07-04 this is the ONLY way the two-stage schedule advances to the green target on wide crossings — the prior time-based fallback was removed. |
 | `stayonline` | -2.0 | Penalty for drifting away from goal line (X displacement) |
 | `noretreat` | -2.0 | Penalty for retreating backward (negative body-frame X velocity) |
@@ -173,7 +173,7 @@ Phase 1 reward structure (ported from proven Imitationlearningbooster pattern):
 | `dof_vel` | -5e-4 | Joint velocity regularisation |
 | `dof_acc` | -2.5e-7 | Joint acceleration penalty (jerk reduction; matches ILB) |
 
-**Diagnostics (not rewards, no weight/dt scaling — `cfg.metrics`, 2026-07-04):** `blue_landed_genuine` and `blue_landed_rsi_assisted` (`Episode_Metrics/*`) classify each `blue_ball_landed` firing as policy-driven or RSI-seeded, using `env._blue_airborne_at_reset` (true if the assigned foot's first airborne transition happens within 2 steps of reset). Read directly as per-episode rates — unlike `Episode_Reward/*` one-shot values, no conversion formula needed.
+**Diagnostics (not rewards, no weight/dt scaling — `cfg.metrics`, 2026-07-04):** `blue_landed_genuine` and `blue_landed_rsi_assisted` (`Episode_Metrics/*`) classify each `blue_ball_landed` firing as policy-driven or RSI-seeded, using `env._blue_airborne_at_reset` (true if the assigned foot's first airborne transition happens within 2 steps of reset). Read directly as per-episode rates — unlike `Episode_Reward/*` one-shot values, no conversion formula needed. Note: `_blue_airborne_at_reset` latches for an airborne-near-reset foot from ANY reset branch (not just tier-RSI) — after the rebalance below, the dominant contributor is the 70%-share live-donor branch, not the 10%-share tier branch, so read `blue_landed_genuine` staying near zero (not `blue_landed_rsi_assisted`'s magnitude) as the signal that the RSI-rebalance risk has materialized.
 
 **Terminations:** `time_out`, `bad_orientation` (>57°), `base_height` (<0.4 m), `ball_exit` (behind goal -0.5 m), `sharpforce` (>1500 N mean foot force).
 
