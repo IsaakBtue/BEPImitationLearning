@@ -345,6 +345,14 @@ def goalkeeper_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
             weight=5.0,
             params={"ball_name": BALL_NAME, "sigma": 5.0, "asset_cfg": _FEET_CFG},
         ),
+        # --- landing gate bonus: rewards physically landing at the blue-ball
+        # midpoint target before the two-stage schedule advances to the green
+        # target (2026-07-04, see _get_reach_target_y) ---
+        "blue_ball_landed": RewardTermCfg(
+            func=gk_mdp.blue_ball_landed,
+            weight=10.0,
+            params={"ball_name": BALL_NAME, "asset_cfg": _FEET_CFG},
+        ),
         # --- active stepping: reward lifting feet during approach ---
         "foot_clearance": RewardTermCfg(
             func=gk_mdp.foot_clearance,
