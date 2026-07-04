@@ -73,8 +73,8 @@ already keys off the true `crossing_y`, not the staged target.
 One-shot bonus, same flag idiom as `cleanstop`/`airborne_at_save`:
 
 ```python
-def blue_ball_landed(env, ball_name: str) -> torch.Tensor:
-    _get_reach_target_y(env, ball_name)  # ensure _blue_landed is fresh this step
+def blue_ball_landed(env, ball_name: str, asset_cfg: SceneEntityCfg = _DEFAULT_FEET_CFG) -> torch.Tensor:
+    _get_reach_target_y(env, ball_name, asset_cfg=asset_cfg)  # ensure _blue_landed is fresh this step
     if not hasattr(env, "_blue_landed_bonus_flag"):
         env._blue_landed_bonus_flag = torch.zeros(env.num_envs, dtype=torch.bool, device=env.device)
     just_reset = env.episode_length_buf <= 1
@@ -84,9 +84,13 @@ def blue_ball_landed(env, ball_name: str) -> torch.Tensor:
     return fired.float()
 ```
 
-The explicit `_get_reach_target_y(env, ball_name)` call guards against reward-term
-evaluation order in the config — this function must not silently read a stale flag if it
-happens to run before `footreach`/`foot_proximity` in a given step.
+The explicit `_get_reach_target_y(env, ball_name, asset_cfg=asset_cfg)` call guards against
+reward-term evaluation order in the config — this function must not silently read a stale
+flag if it happens to run before `footreach`/`foot_proximity` in a given step. `asset_cfg` is
+threaded through (not left as the module default) so it resolves to the same config-wired
+`SceneEntityCfg` (with populated `body_ids`) that `footreach`/`foot_proximity` already use —
+added during implementation (Task 1's rewrite of `_get_reach_target_y`), not present in this
+earlier draft; corrected here 2026-07-04 per final-review finding of spec/implementation drift.
 
 **Weight: +10.0 flat, no curriculum.** Auxiliary shaping signal for an intermediate
 sub-goal, not a primary outcome like `stopball` (100→250) or `cleanstop` (+25) — comparable
