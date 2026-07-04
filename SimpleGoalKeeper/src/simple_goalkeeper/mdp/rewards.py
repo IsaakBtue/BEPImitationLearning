@@ -171,13 +171,22 @@ def _get_reach_target_y(
     live ball position is unaffected by this function and remains the true
     backstop.
 
-    Landing state (env._blue_was_airborne, env._blue_landed) is only tracked
-    when both a "robot" entity and a "feet_contact" sensor are present in
-    env.scene -- absent in the lightweight fake envs used by
-    test_reach_target_two_stage.py, which exercise the two-stage switch in
-    isolation (KeyError on either lookup silently skips the landing check, so
-    those envs always see plain `wide` gating with landing never occurring --
-    narrow crossings are unaffected either way).
+    Landing state (env._blue_was_airborne, env._blue_landed,
+    env._blue_airborne_at_reset) is only tracked when both a "robot" entity
+    and a "feet_contact" sensor are present in env.scene -- absent in the
+    lightweight fake envs used by test_reach_target_two_stage.py, which
+    exercise the two-stage switch in isolation (KeyError on either lookup
+    silently skips the landing check, so those envs always see plain `wide`
+    gating with landing never occurring -- narrow crossings are unaffected
+    either way).
+
+    env._blue_airborne_at_reset (2026-07-04, diagnostic only, does not affect
+    the schedule): latched true if the assigned foot's FIRST transition to
+    airborne happens within 2 steps of reset -- a proxy for "this episode's
+    RSI pose plausibly started with the foot already lifted" rather than the
+    policy causing the lift. See mdp.metrics.blue_landed_genuine /
+    blue_landed_rsi_assisted, which classify blue_ball_landed's firing using
+    this latch.
 
     Root XY is pinned to env.scene.env_origins at every reset (reset_base,
     goalkeeper_env_cfg.py; _write_rsi_state, events.py, only ever overwrites Z),
@@ -202,9 +211,11 @@ def _get_reach_target_y(
     if not hasattr(env, "_blue_was_airborne"):
         env._blue_was_airborne = torch.zeros(n, dtype=torch.bool, device=env.device)
         env._blue_landed = torch.zeros(n, dtype=torch.bool, device=env.device)
+        env._blue_airborne_at_reset = torch.zeros(n, dtype=torch.bool, device=env.device)
     just_reset = env.episode_length_buf <= 1
     env._blue_was_airborne[just_reset] = False
     env._blue_landed[just_reset] = False
+    env._blue_airborne_at_reset[just_reset] = False
 
     try:
         robot: Entity = env.scene[asset_cfg.name]
@@ -224,7 +235,11 @@ def _get_reach_target_y(
         right_in_contact = (found[:, 4:] > 0).any(dim=-1)
         foot_in_contact = torch.where(foot_idx == 0, left_in_contact, right_in_contact)  # (N,)
 
-        env._blue_was_airborne |= ~foot_in_contact
+        currently_airborne = ~foot_in_contact
+        first_time_airborne = currently_airborne & ~env._blue_was_airborne
+        near_reset = env.episode_length_buf <= 2
+        env._blue_airborne_at_reset |= first_time_airborne & near_reset
+        env._blue_was_airborne |= currently_airborne
 
         goal_x_w = env.scene.env_origins[:, 0]
         floor_z_w = env.scene.env_origins[:, 2]

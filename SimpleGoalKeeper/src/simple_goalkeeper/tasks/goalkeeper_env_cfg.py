@@ -15,6 +15,7 @@ from mjlab.managers.reward_manager import RewardTermCfg
 from mjlab.managers.scene_entity_config import SceneEntityCfg
 from mjlab.managers.termination_manager import TerminationTermCfg
 from mjlab.managers.curriculum_manager import CurriculumTermCfg
+from mjlab.managers.metrics_manager import MetricsTermCfg
 from mjlab.tasks.tracking.mdp.commands import MotionCommandCfg
 from mjlab.tasks.velocity.velocity_env_cfg import make_velocity_env_cfg
 from mjlab.sensor import ContactMatch, ContactSensorCfg
@@ -491,6 +492,24 @@ def goalkeeper_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
             func=mjlab_mdp.joint_acc_l2,
             weight=-2.5e-7,
             params={"asset_cfg": _ALL_JOINTS_CFG},
+        ),
+    }
+
+    # ------------------------------------------------------------------
+    # Metrics — diagnostics only, no weight/dt scaling (mjlab.managers.
+    # metrics_manager). Distinguishes a genuine (policy-driven) blue-ball
+    # landing from an RSI-assisted one (2026-07-04, see mdp/metrics.py).
+    # ------------------------------------------------------------------
+    cfg.metrics = {
+        "blue_landed_genuine": MetricsTermCfg(
+            func=gk_mdp.blue_landed_genuine,
+            params={"ball_name": BALL_NAME, "asset_cfg": _FEET_CFG},
+            reduce="last",
+        ),
+        "blue_landed_rsi_assisted": MetricsTermCfg(
+            func=gk_mdp.blue_landed_rsi_assisted,
+            params={"ball_name": BALL_NAME, "asset_cfg": _FEET_CFG},
+            reduce="last",
         ),
     }
 

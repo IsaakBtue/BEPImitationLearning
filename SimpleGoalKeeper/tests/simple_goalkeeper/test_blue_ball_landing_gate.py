@@ -13,6 +13,7 @@ import types
 import torch
 
 from simple_goalkeeper.mdp.rewards import _get_reach_target_y, _get_ball_crossing_y
+from simple_goalkeeper.mdp.metrics import blue_landed_genuine, blue_landed_rsi_assisted
 
 
 class _EntityData:
@@ -193,6 +194,7 @@ def test_blue_ball_landed_resets_on_new_episode():
     env = _make_env(foot_y=0.45, rel_cross_y=0.9, episode_step=6, found_left=True, found_right=False)
     env._blue_landed = torch.ones(1, dtype=torch.bool)
     env._blue_was_airborne = torch.ones(1, dtype=torch.bool)
+    env._blue_airborne_at_reset = torch.zeros(1, dtype=torch.bool)  # last episode's latch state
     env._blue_landed_bonus_flag = torch.ones(1, dtype=torch.bool)  # already paid last episode
 
     env.episode_length_buf[:] = 1  # new episode (reset step)
@@ -200,3 +202,87 @@ def test_blue_ball_landed_resets_on_new_episode():
     assert not env._blue_landed_bonus_flag[0].item()
     assert not env._blue_landed[0].item()  # never airborne THIS episode -- must not land for free
     assert r.item() == 0.0
+
+
+def test_airborne_at_reset_latches_when_lift_happens_within_two_steps():
+    # Foot airborne on episode_step=1 (within the 2-step grace window) ->
+    # _blue_airborne_at_reset must latch true, flagging this as a plausible
+    # RSI artifact rather than something the policy did.
+    env = _make_env(foot_y=0.0, rel_cross_y=0.9, episode_step=1, found_left=False, found_right=False)
+    _get_reach_target_y(env, "ball", asset_cfg=_feet_cfg())
+    assert env._blue_airborne_at_reset[0].item()
+
+
+def test_airborne_at_reset_does_not_latch_when_lift_happens_later():
+    # Foot in contact at steps 1-2 (within the grace window), THEN airborne at
+    # step 5 -- this is a policy-driven lift, not an RSI artifact, so
+    # _blue_airborne_at_reset must stay false even though _blue_was_airborne
+    # does become true.
+    env = _make_env(foot_y=0.0, rel_cross_y=0.9, episode_step=1, found_left=True, found_right=False)
+    _get_reach_target_y(env, "ball", asset_cfg=_feet_cfg())
+    assert not env._blue_was_airborne[0].item()
+    assert not env._blue_airborne_at_reset[0].item()
+
+    env.episode_length_buf[:] = 5
+    env.scene["feet_contact"].data.found[:, :4] = 0.0  # left foot now airborne
+    _get_reach_target_y(env, "ball", asset_cfg=_feet_cfg())
+    assert env._blue_was_airborne[0].item()
+    assert not env._blue_airborne_at_reset[0].item()
+
+
+def test_airborne_at_reset_resets_on_new_episode():
+    env = _make_env(foot_y=0.0, rel_cross_y=0.9, episode_step=1, found_left=False, found_right=False)
+    _get_reach_target_y(env, "ball", asset_cfg=_feet_cfg())
+    assert env._blue_airborne_at_reset[0].item()
+
+    env.episode_length_buf[:] = 1  # new episode reset step
+    env.scene["feet_contact"].data.found[:, :4] = 1.0  # foot in contact again
+    _get_reach_target_y(env, "ball", asset_cfg=_feet_cfg())
+    assert not env._blue_airborne_at_reset[0].item()
+
+
+def test_blue_landed_genuine_fires_when_airborne_transition_is_not_at_reset():
+    # Foot in contact through step 2 (past the grace window already, but
+    # still not airborne), THEN airborne at step 5, THEN lands at step 6 --
+    # a policy-driven landing, so blue_landed_genuine must fire and
+    # blue_landed_rsi_assisted must not.
+    env = _make_env(foot_y=0.0, rel_cross_y=0.9, episode_step=2, found_left=True, found_right=False)
+    _get_reach_target_y(env, "ball", asset_cfg=_feet_cfg())
+
+    env.episode_length_buf[:] = 5
+    env.scene["feet_contact"].data.found[:, :4] = 0.0  # left foot airborne
+    _get_reach_target_y(env, "ball", asset_cfg=_feet_cfg())
+
+    env.episode_length_buf[:] = 6
+    env.scene["robot"].data.body_link_pos_w = torch.tensor([[[0.0, 0.45, 0.0], [0.0, 0.45, 0.0]]])
+    env.scene["feet_contact"].data.found[:, :4] = 1.0  # left foot lands at the midpoint
+
+    genuine = blue_landed_genuine(env, "ball", asset_cfg=_feet_cfg())
+    rsi_assisted = blue_landed_rsi_assisted(env, "ball", asset_cfg=_feet_cfg())
+    assert genuine.item() == 1.0
+    assert rsi_assisted.item() == 0.0
+
+
+def test_blue_landed_rsi_assisted_fires_when_airborne_transition_is_at_reset():
+    # Foot airborne already on step 1 (within the grace window -- e.g. an RSI
+    # reset pose with the foot mid-step), THEN lands at step 2. Landing must
+    # be classified as RSI-assisted, not genuine.
+    env = _make_env(foot_y=0.0, rel_cross_y=0.9, episode_step=1, found_left=False, found_right=False)
+    _get_reach_target_y(env, "ball", asset_cfg=_feet_cfg())
+
+    env.episode_length_buf[:] = 2
+    env.scene["robot"].data.body_link_pos_w = torch.tensor([[[0.0, 0.45, 0.0], [0.0, 0.45, 0.0]]])
+    env.scene["feet_contact"].data.found[:, :4] = 1.0  # left foot lands at the midpoint
+
+    genuine = blue_landed_genuine(env, "ball", asset_cfg=_feet_cfg())
+    rsi_assisted = blue_landed_rsi_assisted(env, "ball", asset_cfg=_feet_cfg())
+    assert genuine.item() == 0.0
+    assert rsi_assisted.item() == 1.0
+
+
+def test_blue_landed_diagnostics_both_zero_without_a_landing():
+    env = _make_env(foot_y=0.0, rel_cross_y=0.9, episode_step=5, found_left=False, found_right=False)
+    genuine = blue_landed_genuine(env, "ball", asset_cfg=_feet_cfg())
+    rsi_assisted = blue_landed_rsi_assisted(env, "ball", asset_cfg=_feet_cfg())
+    assert genuine.item() == 0.0
+    assert rsi_assisted.item() == 0.0

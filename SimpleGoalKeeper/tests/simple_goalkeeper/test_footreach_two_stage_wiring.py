@@ -88,6 +88,7 @@ def test_footreach_rewards_midpoint_foot_more_in_phase_1_than_phase_2():
     env_phase2 = _make_env(foot_y=0.45, rel_cross_y=0.9, episode_step=30)
     env_phase2._blue_was_airborne = torch.tensor([True])
     env_phase2._blue_landed = torch.tensor([True])
+    env_phase2._blue_airborne_at_reset = torch.tensor([False])
     r2 = footreach(env_phase2, "ball", asset_cfg=_feet_cfg())
 
     assert r1.item() > r2.item(), (
@@ -115,6 +116,7 @@ def test_foot_proximity_rewards_midpoint_foot_more_in_phase_1_than_phase_2():
     env_phase2 = _make_env(foot_y=0.45, rel_cross_y=0.9, episode_step=30)
     env_phase2._blue_was_airborne = torch.tensor([True])
     env_phase2._blue_landed = torch.tensor([True])
+    env_phase2._blue_airborne_at_reset = torch.tensor([False])
     r2 = foot_proximity(env_phase2, "ball", asset_cfg=_feet_cfg())
 
     assert r1.item() > r2.item()
