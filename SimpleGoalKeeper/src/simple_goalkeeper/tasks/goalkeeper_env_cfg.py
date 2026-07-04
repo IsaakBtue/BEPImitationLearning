@@ -168,6 +168,18 @@ def goalkeeper_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
                 "ep_len_divisor":  47,
             },
         )
+        # blue_ball_landed is now load-bearing for the double-step choreography
+        # (2026-07-04 hard gate removed its time-based fallback), not just an
+        # auxiliary bonus -- ramp it like footreach, the subsystem it's coupled to.
+        cfg.curriculum["blue_ball_landed_curriculum"] = CurriculumTermCfg(
+            func=gk_mdp.reward_curriculum_ep_len,
+            params={
+                "reward_name": "blue_ball_landed",
+                "base_weight": 10.0,     # unchanged seed value → max 25 at cu=3
+                "update_interval": 500,
+                "ep_len_divisor":  47,
+            },
+        )
         # G1 lines 363-364: stopball weight also grows with curriculum (same formula as eereach).
         # Keep base 15 (max 37.5 at cu=3) well below softstop base 105 (max 262.5) so softstop
         # remains the dominant primary signal. 5 shifted to softstop to make it the clear end goal.
