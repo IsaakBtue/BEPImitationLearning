@@ -21,6 +21,7 @@ from .goalkeeper_env_cfg import goalkeeper_env_cfg, goalkeeper_env_cfg_withoverl
 from .goalkeeper_multidisc_amp_cfg import (
     goalkeeper_multidisc_amp_runner_cfg,
     goalkeeper_multidisc_env_cfg,
+    goalkeeper_multidisc_env_cfg_withoverlay,
 )
 from simple_goalkeeper.rsl_rl_multi.him_amp_on_policy_runner import (
     HimAMPOnPolicyRunner,
@@ -46,6 +47,14 @@ register_mjlab_task(
     task_id="Mjlab-BeyondAMP-Goalkeeper-T1-MultiDisc",
     env_cfg=goalkeeper_multidisc_env_cfg(),
     play_env_cfg=goalkeeper_multidisc_env_cfg(play=True),
+    rl_cfg=goalkeeper_multidisc_amp_runner_cfg(),
+    runner_cls=HimAMPOnPolicyRunner,
+)
+
+register_mjlab_task(
+    task_id="Mjlab-BeyondAMP-Goalkeeper-T1-MultiDisc-WithOverlay",
+    env_cfg=goalkeeper_multidisc_env_cfg(),
+    play_env_cfg=goalkeeper_multidisc_env_cfg_withoverlay(),
     rl_cfg=goalkeeper_multidisc_amp_runner_cfg(),
     runner_cls=HimAMPOnPolicyRunner,
 )

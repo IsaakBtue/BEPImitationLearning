@@ -98,6 +98,53 @@ REGION_MOTION_FILES: dict[str, str] = {
 }
 
 
+def goalkeeper_multidisc_env_cfg_withoverlay(
+    motion_file: str | None = None,
+) -> ManagerBasedRlEnvCfg:
+    """Play-mode multi-disc config with ghost-robot overlay.
+
+    Mirrors goalkeeper_env_cfg.goalkeeper_env_cfg_withoverlay(), but cycles
+    through this task's own 4-file AMP dataset (REGION_MOTION_FILES) instead
+    of SimpleGoalKeeper's full 14-file motions/data/ set -- those files are
+    what this track's 4 discriminators were actually trained against.
+    """
+    from mjlab.tasks.tracking.mdp.commands import MotionCommandCfg
+    from simple_goalkeeper.mdp.commands import (
+        CyclingGhostMotionCommandCfg,
+        GhostMotionCommandCfg,
+    )
+    from simple_goalkeeper.tasks.goalkeeper_env_cfg import _T1_HEADLESS_BODY_NAMES
+
+    cfg = goalkeeper_multidisc_env_cfg(play=True)
+    cfg.scene.num_envs = 1
+
+    if motion_file is not None:
+        cfg.commands["motion_ghost"] = GhostMotionCommandCfg(
+            motion_file=motion_file,
+            anchor_body_name="Trunk",
+            body_names=_T1_HEADLESS_BODY_NAMES,
+            entity_name="robot",
+            debug_vis=True,
+            resampling_time_range=(10.0, 10.0),
+            viz=MotionCommandCfg.VizCfg(mode="ghost", ghost_color=(0.3, 0.8, 0.4, 0.45)),
+        )
+    else:
+        npz_files = list(REGION_MOTION_FILES.values())
+        cmd = CyclingGhostMotionCommandCfg(
+            motion_file=npz_files[0],  # required by parent cfg; overridden at build
+            anchor_body_name="Trunk",
+            body_names=_T1_HEADLESS_BODY_NAMES,
+            entity_name="robot",
+            debug_vis=True,
+            resampling_time_range=(10.0, 10.0),
+            viz=MotionCommandCfg.VizCfg(mode="ghost", ghost_color=(0.3, 0.8, 0.4, 0.45)),
+        )
+        cmd.motion_files = npz_files
+        cfg.commands["motion_ghost"] = cmd
+
+    return cfg
+
+
 def goalkeeper_multidisc_amp_runner_cfg() -> dict:
     amp_data = {
         name: MotionDatasetCfg(

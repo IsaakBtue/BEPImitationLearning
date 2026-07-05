@@ -20,6 +20,11 @@ Usage:
     # Visualise reference motions only (no policy, ghost overlay):
     uv run sgk_play Mjlab-BeyondAMP-Goalkeeper-T1-WithOverlay \\
         --agent zero --no-terminations True
+
+    # Multi-disc (intercept) checkpoint, with ghost overlay cycling through
+    # this task's own 4-motion AMP dataset (REGION_MOTION_FILES):
+    uv run sgk_play Mjlab-BeyondAMP-Goalkeeper-T1-MultiDisc-WithOverlay \\
+        --checkpoint-file logs/rsl_rl/intercept_simple_goalkeeper_multidisc/<run>/model_5250.pt
 """
 from __future__ import annotations
 
@@ -37,12 +42,15 @@ import torch
 import tyro
 
 from mjlab.envs import ManagerBasedRlEnv
-from mjlab.tasks.registry import list_tasks, load_env_cfg, load_rl_cfg
+from mjlab.tasks.registry import list_tasks, load_env_cfg, load_rl_cfg, load_runner_cls
 from mjlab.utils.torch import configure_torch_backends
 from mjlab.viewer import NativeMujocoViewer, ViserPlayViewer
 
 from beyondAMP.mjlab.rsl_rl import AMPEnvWrapper, AMPRunnerCfg
 from rsl_rl_amp.runners.amp_on_policy_runner import AMPOnPolicyRunner
+from simple_goalkeeper.rsl_rl_multi.him_amp_on_policy_runner import (
+    _get_actor_current_obs,
+)
 
 
 @dataclass(frozen=True)
@@ -271,9 +279,13 @@ def run_play(task_id: str, cfg: PlayConfig) -> None:
 
     env_cfg = load_env_cfg(task_id, play=True)
     agent_cfg = load_rl_cfg(task_id)
-    assert isinstance(agent_cfg, AMPRunnerCfg), (
+    assert isinstance(agent_cfg, (AMPRunnerCfg, dict)), (
         f"Task '{task_id}' is not an AMP task — got {type(agent_cfg).__name__}."
     )
+    # Multi-disc tasks (e.g. Mjlab-BeyondAMP-Goalkeeper-T1-MultiDisc) register a
+    # plain dict rl_cfg consumed by HimAMPOnPolicyRunner instead of the stock
+    # AMPOnPolicyRunner -- mirrors train.py's TrainConfig.from_task dispatch.
+    is_multidisc = isinstance(agent_cfg, dict)
 
     if cfg.num_envs is not None:
         env_cfg.scene.num_envs = cfg.num_envs
@@ -339,7 +351,15 @@ def run_play(task_id: str, cfg: PlayConfig) -> None:
         f"speed ~{spd_min:.1f}–{spd_max:.1f} m/s"
     )
 
-    env = AMPEnvWrapper(env, clip_actions=agent_cfg.clip_actions, motion_dataset=agent_cfg.amp_data)
+    if is_multidisc:
+        # Multi-disc RSI/motion loading never reads AMPEnvWrapper.motion_dataset,
+        # and its amp_data is a dict of 4 per-region cfgs the single-dataset
+        # wrapper path cannot consume -- mirrors train.py's run_train. clip_actions
+        # has no override in the dict, so it keeps mjlab's own default (None),
+        # same value used at training time.
+        env = AMPEnvWrapper(env, clip_actions=None, motion_dataset=None)
+    else:
+        env = AMPEnvWrapper(env, clip_actions=agent_cfg.clip_actions, motion_dataset=agent_cfg.amp_data)
 
     DUMMY_MODE = cfg.agent in {"zero", "random"}
     if DUMMY_MODE:
@@ -368,9 +388,24 @@ def run_play(task_id: str, cfg: PlayConfig) -> None:
         if not resume_path.exists():
             raise FileNotFoundError(f"Checkpoint not found: {resume_path}")
         print(f"[INFO] Loading checkpoint: {resume_path.name}")
-        runner = AMPOnPolicyRunner(env, asdict(agent_cfg), log_dir=None, device=device)
-        runner.load(str(resume_path), load_optimizer=False)
-        policy = runner.get_inference_policy(device=device)
+        if is_multidisc:
+            runner_cls = load_runner_cls(task_id)
+            runner = runner_cls(env, agent_cfg, log_dir=None, device=device)
+            runner.load(str(resume_path), load_optimizer=False)
+            act_inference = runner.get_inference_policy(device=device)
+
+            # HimActorCritic.act_inference needs (obs_current, obs_history), not
+            # the single obs tensor the viewer's loop calls policy(obs) with.
+            # env.get_observations() (what the viewer passes as `obs`) is the
+            # same "actor" history-stacked group as obs_history, so it's reused
+            # directly -- only obs_current needs a separate fetch.
+            def policy(obs_history: torch.Tensor) -> torch.Tensor:
+                obs_current = _get_actor_current_obs(env)
+                return act_inference(obs_current, obs_history)
+        else:
+            runner = AMPOnPolicyRunner(env, asdict(agent_cfg), log_dir=None, device=device)
+            runner.load(str(resume_path), load_optimizer=False)
+            policy = runner.get_inference_policy(device=device)
 
     # Wrap policy with analytics printer (always constructed, enabled by flag).
     analytics = AnalyticsPolicy(policy, env, enabled=cfg.analytics)
@@ -404,7 +439,7 @@ def main() -> None:
 
     import mjlab
 
-    amp_tasks = [t for t in list_tasks() if isinstance(load_rl_cfg(t), AMPRunnerCfg)]
+    amp_tasks = [t for t in list_tasks() if isinstance(load_rl_cfg(t), (AMPRunnerCfg, dict))]
     if not amp_tasks:
         raise RuntimeError("No AMP tasks registered.")
 
