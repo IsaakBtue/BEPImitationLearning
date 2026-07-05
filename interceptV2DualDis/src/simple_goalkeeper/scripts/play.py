@@ -65,6 +65,11 @@ class PlayConfig:
     viewer: Literal["auto", "native", "viser"] = "auto"
     difficulty: float | None = None
     """Override ball difficulty (0.0 = easiest, 1.0 = hardest). Default: use curriculum value."""
+    difficulty_outer_only_frac: float | None = None
+    """Ignore the difficulty curriculum for the ball's lateral target offset (y_end
+    magnitude) and pin it to the outer band of each region's own range instead --
+    e.g. 0.8 samples only the top 20% of the max offset, regardless of --difficulty.
+    Only affects the region-conditioned reset (Mjlab-BeyondAMP-Goalkeeper-T1-MultiDisc*)."""
     rsi: bool = False
     """Enable Random State Initialization in play (default: off — starts from standing keyframe)."""
     analytics: bool = True
@@ -300,6 +305,19 @@ def run_play(task_id: str, cfg: PlayConfig) -> None:
             func=_rsi_fn, mode="reset",
         )
         print("[INFO]: RSI enabled — episodes start from random motion frames")
+
+    if cfg.difficulty_outer_only_frac is not None:
+        if "reset_ball" not in env_cfg.events:
+            raise RuntimeError(
+                "--difficulty-outer-only-frac requires a 'reset_ball' event "
+                f"(task '{task_id}' has none)."
+            )
+        env_cfg.events["reset_ball"].params["y_end_outer_frac"] = cfg.difficulty_outer_only_frac
+        print(
+            f"[INFO]: Outer-only difficulty enabled — ball's lateral target offset "
+            f"pinned to the top {100 * (1 - cfg.difficulty_outer_only_frac):.0f}% "
+            f"of each region's range"
+        )
 
     # Override motion file for WithOverlay task if specified on CLI.
     if cfg.motion_file is not None and "motion_ghost" in env_cfg.commands:

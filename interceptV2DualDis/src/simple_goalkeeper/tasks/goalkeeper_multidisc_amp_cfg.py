@@ -170,7 +170,13 @@ def goalkeeper_multidisc_amp_runner_cfg() -> dict:
             "num_learning_epochs": 5,
             "num_mini_batches": 4,
             "learning_rate": 1.0e-3,
-            "schedule": "adaptive",
+            # region_estimator trains through its own optimizer param group
+            # (see MultiDiscAMPPPO.__init__), fully decoupled from the shared
+            # actor/critic/history_encoder/ball_estimator group above -- a
+            # higher rate here carries no risk to the already-converged rest
+            # of the network, unlike bumping the shared "learning_rate".
+            "region_estimator_learning_rate": 3.0e-3,
+            "schedule": "fixed",
             "gamma": 0.99,
             "lam": 0.95,
             "desired_kl": 0.01,
@@ -181,11 +187,16 @@ def goalkeeper_multidisc_amp_runner_cfg() -> dict:
         "num_steps_per_env": 24,
         "max_iterations": 50_000,
         "save_interval": 250,
-        "experiment_name": "simple_goalkeeper_multidisc",
-        "run_name": "phase1",
+        # 2026-07-05: "intercept_" prefix on both experiment_name (top-level
+        # local log folder + W&B group) and run_name (per-run folder suffix +
+        # W&B run name/tags) so intercept runs are clearly labeled everywhere
+        # while sharing the same W&B project as SimpleGoalKeeper itself
+        # (wandb_project below), rather than a separate "-MultiDisc" project.
+        "experiment_name": "intercept_simple_goalkeeper_multidisc",
+        "run_name": "intercept_phase1",
         "empirical_normalization": True,
         "use_wandb": True,
-        "wandb_project": "SimpleGoalKeeper-MultiDisc",
+        "wandb_project": "SimpleGoalKeeper",
         "amp_discr_hidden_dims": [256, 256],
         "amp_reward_coef": 0.5,
         "amp_task_reward_lerp": 0.6,

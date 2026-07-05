@@ -708,6 +708,7 @@ def reset_ball_rolling(
     y_end_range: tuple[float, float] = (-0.5, 0.5),
     t_flight_range: tuple[float, float] = (0.7, 1.1),
     spawn_z: float = 0.10,
+    y_end_outer_frac: float | None = None,
 ) -> None:
     """Spawn ball at ground level in world (global) frame — rolling ground pass.
 
@@ -751,8 +752,16 @@ def reset_ball_rolling(
     _Y_INNER = 0.15   # minimum offset from center at d=0
     _Y_OUTER = 0.35   # maximum offset from center at d=0
     max_half = max(abs(y_end_range[0]), abs(y_end_range[1]))
-    inner = max(_Y_INNER * (1.0 - d), 0.1)
-    outer = _Y_OUTER + (max_half - _Y_OUTER) * d
+    if y_end_outer_frac is not None:
+        # Testing/play override: ignore the difficulty curriculum entirely for
+        # this dimension and pin to the outer band of the true (max-difficulty)
+        # range -- e.g. y_end_outer_frac=0.8 samples only the top 20% of
+        # max_half, regardless of env._ball_difficulty's current value.
+        inner = max_half * max(0.0, min(1.0, y_end_outer_frac))
+        outer = max_half
+    else:
+        inner = max(_Y_INNER * (1.0 - d), 0.1)
+        outer = _Y_OUTER + (max_half - _Y_OUTER) * d
     mag   = sample_uniform(inner, outer, (n,), env.device)
     side  = torch.where(torch.rand(n, device=env.device) > 0.5,
                         torch.ones(n, device=env.device),

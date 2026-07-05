@@ -65,10 +65,16 @@ def reset_ball_rolling_by_region(
     dist_range: tuple[float, float] = (1.5, 3.5),
     t_flight_range: tuple[float, float] = (0.7, 1.1),
     spawn_z: float = 0.12,
+    y_end_outer_frac: float | None = None,
 ) -> None:
     """Region-conditioned ball spawn: calls reset_ball_rolling once per region
     subset of env_ids, using that region's y_start_range/y_end_range so the
     spawned ball actually produces that region's category of shot.
+
+    y_end_outer_frac: passthrough to reset_ball_rolling -- testing/play
+    override that pins the lateral target offset to the outer band of each
+    region's own range, ignoring the difficulty curriculum for that
+    dimension. See scripts/play.py's --difficulty-outer-only-frac.
     """
     if env_ids is None:
         env_ids = torch.arange(env.num_envs, device=env.device, dtype=torch.long)
@@ -86,6 +92,7 @@ def reset_ball_rolling_by_region(
             y_end_range=_REGION_Y_END_RANGE[r],
             t_flight_range=t_flight_range,
             spawn_z=spawn_z,
+            y_end_outer_frac=y_end_outer_frac,
         )
 
 

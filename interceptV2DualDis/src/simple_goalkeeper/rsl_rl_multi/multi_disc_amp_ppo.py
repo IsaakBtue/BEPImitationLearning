@@ -47,6 +47,7 @@ class MultiDiscAMPPPO:
         device: str = "cpu",
         amp_replay_buffer_size: int = 100_000,
         min_std=None,
+        region_estimator_learning_rate: float | None = None,
         **kwargs,
     ):
         self.device = device
@@ -73,7 +74,36 @@ class MultiDiscAMPPPO:
         self.actor_critic.to(device)
         self.storage: RolloutStorage | None = None
 
-        params = [{"params": self.actor_critic.parameters(), "name": "actor_critic"}]
+        # region_estimator gets its own param group / learning rate, decoupled
+        # from the shared actor_critic group. Rationale (2026-07-05, see
+        # CLAUDE.md's "Multi-disc PPO schedule" divergence row): region_arg
+        # (torch.argmax(estimate_region)) is a discrete value feeding the
+        # actor's own input, so small logit shifts in a still-training
+        # region_estimator can flip it between minibatch/epoch passes within
+        # one PPO update -- inflating the *measured* policy KL divergence for
+        # reasons unrelated to real policy movement. With one shared LR for
+        # the whole actor_critic, that spurious KL signal (under an adaptive
+        # schedule) or a manual LR bump (tested via resume, see BugFixes.md)
+        # either freezes region_estimator's capacity or destabilizes the
+        # already-converged actor/critic/ball_estimator. Splitting it out
+        # lets region_estimator use a distinctly higher LR to escape a bad
+        # local optimum without touching the rest of the network at all.
+        region_estimator_params = list(actor_critic.region_estimator.parameters())
+        region_estimator_param_ids = {id(p) for p in region_estimator_params}
+        main_params = [
+            p for p in actor_critic.parameters()
+            if id(p) not in region_estimator_param_ids
+        ]
+        params = [
+            {"params": main_params, "name": "actor_critic"},
+            {
+                "params": region_estimator_params,
+                "name": "region_estimator",
+                "lr": region_estimator_learning_rate
+                if region_estimator_learning_rate is not None
+                else learning_rate,
+            },
+        ]
         for name, d in self.discriminators.items():
             params.append({"params": d.trunk.parameters(), "weight_decay": 10e-4, "name": f"amp_trunk_{name}"})
             params.append({"params": d.amp_linear.parameters(), "weight_decay": 10e-2, "name": f"amp_head_{name}"})
@@ -153,17 +183,26 @@ class MultiDiscAMPPPO:
 
     def predict_region_routed_amp_reward(self, amp_obs, next_amp_obs, region_id, task_reward):
         """Rollout-time style reward, routed per-sample by region id. Mirrors
-        him_on_policy_runner.py:161-178's masked predict_reward loop."""
+        him_on_policy_runner.py:161-178's masked predict_reward loop.
+
+        2026-07-05: also returns per-sample d_logits/amp_reward (previously
+        discarded via `_, _`) so the runner can log Train/mean_amp_reward and
+        Train/mean_discri_logits like the stock single-discriminator runner.
+        """
         num_envs = amp_obs.shape[0]
         reward = torch.zeros(num_envs, device=amp_obs.device)
+        d_logits = torch.zeros(num_envs, device=amp_obs.device)
+        amp_reward = torch.zeros(num_envs, device=amp_obs.device)
         for r, name in enumerate(REGION_NAMES):
             mask = region_id == r
             if not mask.any():
                 continue
-            r_out, _, _ = self.discriminators[name].predict_amp_reward(
+            r_out, d_out, a_out = self.discriminators[name].predict_amp_reward(
                 amp_obs[mask], next_amp_obs[mask], task_reward[mask], normalizer=self.amp_normalizer)
             reward[mask] = r_out
-        return reward
+            d_logits[mask] = d_out
+            amp_reward[mask] = a_out
+        return reward, d_logits, amp_reward
 
     def update(self):
         mean_value_loss = mean_surrogate_loss = mean_amp_loss = mean_grad_pen_loss = 0.0
@@ -210,8 +249,12 @@ class MultiDiscAMPPPO:
                         self.learning_rate = max(1e-5, self.learning_rate / 1.5)
                     elif kl_mean < self.desired_kl / 2.0 and kl_mean > 0.0:
                         self.learning_rate = min(1e-2, self.learning_rate * 1.5)
+                    # region_estimator keeps its own independent lr (see
+                    # __init__) -- policy KL says nothing about whether that
+                    # head has converged, so it must never be rescaled here.
                     for pg in self.optimizer.param_groups:
-                        pg["lr"] = self.learning_rate
+                        if pg.get("name") != "region_estimator":
+                            pg["lr"] = self.learning_rate
 
             ratio = torch.exp(actions_log_prob_batch - torch.squeeze(old_actions_log_prob_batch))
             surrogate = -torch.squeeze(advantages_batch) * ratio
