@@ -15,6 +15,7 @@ from mjlab.managers.reward_manager import RewardTermCfg
 from mjlab.managers.scene_entity_config import SceneEntityCfg
 from mjlab.managers.termination_manager import TerminationTermCfg
 from mjlab.managers.curriculum_manager import CurriculumTermCfg
+from mjlab.managers.metrics_manager import MetricsTermCfg
 from mjlab.tasks.tracking.mdp.commands import MotionCommandCfg
 from mjlab.tasks.velocity.velocity_env_cfg import make_velocity_env_cfg
 from mjlab.sensor import ContactMatch, ContactSensorCfg
@@ -164,6 +165,17 @@ def goalkeeper_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
             params={
                 "reward_name": "footreach",
                 "base_weight": 10.0,     # G1 eereach_init=10 → max 25 at cu=3
+                "update_interval": 500,
+                "ep_len_divisor":  47,
+            },
+        )
+        # Two-stage waypoint bonus (ported from SimpleGoalKeeper): same curriculum
+        # shape as footreach, since it's a component of the same reach behavior.
+        cfg.curriculum["blue_ball_landed_curriculum"] = CurriculumTermCfg(
+            func=gk_mdp.reward_curriculum_ep_len,
+            params={
+                "reward_name": "blue_ball_landed",
+                "base_weight": 10.0,
                 "update_interval": 500,
                 "ep_len_divisor":  47,
             },
@@ -345,6 +357,12 @@ def goalkeeper_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
             func=gk_mdp.foot_proximity,
             weight=5.0,
             params={"ball_name": BALL_NAME, "sigma": 5.0, "asset_cfg": _FEET_CFG},
+        ),
+        # --- two-stage blue->green waypoint bonus (ported from SimpleGoalKeeper) ---
+        "blue_ball_landed": RewardTermCfg(
+            func=gk_mdp.blue_ball_landed,
+            weight=10.0,
+            params={"ball_name": BALL_NAME, "asset_cfg": _FEET_CFG},
         ),
         # --- active stepping: reward lifting feet during approach ---
         "foot_clearance": RewardTermCfg(
@@ -582,6 +600,26 @@ def goalkeeper_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
             time_out=False,
         ),
     }
+
+    # ------------------------------------------------------------------
+    # Metrics — diagnostics only, no weight/dt scaling (mjlab.managers.
+    # metrics_manager). Distinguishes a genuine (policy-driven) blue-ball
+    # landing from an RSI-assisted one (ported from SimpleGoalKeeper, see
+    # mdp/metrics.py). update(), not assignment: cfg.metrics already carries
+    # "mean_action_acc" from make_velocity_env_cfg's base config.
+    # ------------------------------------------------------------------
+    cfg.metrics.update({
+        "blue_landed_genuine": MetricsTermCfg(
+            func=gk_mdp.blue_landed_genuine,
+            params={"ball_name": BALL_NAME, "asset_cfg": _FEET_CFG},
+            reduce="last",
+        ),
+        "blue_landed_rsi_assisted": MetricsTermCfg(
+            func=gk_mdp.blue_landed_rsi_assisted,
+            params={"ball_name": BALL_NAME, "asset_cfg": _FEET_CFG},
+            reduce="last",
+        ),
+    })
 
     # ------------------------------------------------------------------
     # Episode length

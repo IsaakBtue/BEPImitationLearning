@@ -140,6 +140,96 @@ def _get_ball_crossing_y(env: "ManagerBasedRlEnv", ball_name: str) -> torch.Tens
     return env._ball_crossing_y
 
 
+def _get_reach_target_y(
+    env: "ManagerBasedRlEnv",
+    ball_name: str,
+    asset_cfg: SceneEntityCfg = _DEFAULT_FEET_CFG,
+    wide_threshold: float = 0.5,
+    landing_radius: float = 0.05,
+) -> torch.Tensor:
+    """Two-stage reach target for wide crossings (ported from SimpleGoalKeeper
+    2026-07-03/07-04/07-05, see SimpleGoalKeeper/CLAUDE.md divergence table).
+
+    For crossings where |crossing_y - start_y| > wide_threshold, the target is
+    the MIDPOINT between the robot's stance and the true crossing point until
+    the assigned foot (_get_correct_foot_idx) physically lands there (airborne
+    then in ground contact via the feet_contact sensor, within landing_radius
+    of the midpoint), then switches to the full crossing point. Narrow
+    crossings always target the full point. There is no elapsed-time fallback
+    -- a crossing that never lands stays targeting the midpoint for the whole
+    episode (hard gate, per SGK's 2026-07-04 finding that a soft/timeout gate
+    let the policy skip the waypoint and still collect full credit).
+
+    Ported because AMP's 2-frame transition discriminator cannot judge global
+    trajectory shape or step count -- a smooth fast leap to the far target
+    satisfies it as well as a genuine multi-step reference clip, so nothing in
+    the existing reward pushed toward a paced multi-step approach. See
+    SimpleGoalKeeper's own investigation (footreach/vel_sigma rewards raw
+    speed toward a single fixed target, not gait).
+
+    Root XY is pinned to env.scene.env_origins at reset in this project too
+    (reset_base event), so "robot start Y" can be read live with no new cache.
+    """
+    full_y = _get_ball_crossing_y(env, ball_name)                 # (N,) world Y
+    start_y = env.scene.env_origins[:, 1]                         # (N,) world Y
+
+    rel = getattr(env, "_rsi_cross_y", None)
+    lateral = rel if rel is not None else (full_y - start_y)
+    wide = lateral.abs() > wide_threshold
+    # Cached so footreach/foot_proximity/stopball/softstop can gate on
+    # "wide AND not yet landed" without recomputing the crossing geometry.
+    env._blue_wide = wide
+
+    half_y = start_y + (full_y - start_y) / 2.0
+
+    n = env.num_envs
+    if not hasattr(env, "_blue_was_airborne"):
+        env._blue_was_airborne = torch.zeros(n, dtype=torch.bool, device=env.device)
+        env._blue_landed = torch.zeros(n, dtype=torch.bool, device=env.device)
+        env._blue_airborne_at_reset = torch.zeros(n, dtype=torch.bool, device=env.device)
+    just_reset = env.episode_length_buf <= 1
+    env._blue_was_airborne[just_reset] = False
+    env._blue_landed[just_reset] = False
+    env._blue_airborne_at_reset[just_reset] = False
+
+    try:
+        robot: Entity = env.scene[asset_cfg.name]
+        feet_contact: ContactSensor = env.scene["feet_contact"]
+    except KeyError:
+        robot = None
+        feet_contact = None
+
+    if robot is not None and feet_contact is not None:
+        foot_pos_w = robot.data.body_link_pos_w[:, asset_cfg.body_ids, :]   # (N, 2, 3)
+        foot_idx = _get_correct_foot_idx(env, ball_name)                    # (N,)
+        arange_n = torch.arange(n, device=env.device)
+        assigned_foot_pos = foot_pos_w[arange_n, foot_idx]                  # (N, 3)
+
+        found = feet_contact.data.found                                    # (N, 8)
+        left_in_contact = (found[:, :4] > 0).any(dim=-1)
+        right_in_contact = (found[:, 4:] > 0).any(dim=-1)
+        foot_in_contact = torch.where(foot_idx == 0, left_in_contact, right_in_contact)  # (N,)
+
+        currently_airborne = ~foot_in_contact
+        first_time_airborne = currently_airborne & ~env._blue_was_airborne
+        near_reset = env.episode_length_buf <= 2
+        env._blue_airborne_at_reset |= first_time_airborne & near_reset
+        env._blue_was_airborne |= currently_airborne
+
+        goal_x_w = env.scene.env_origins[:, 0]
+        target_point_xy = torch.stack([goal_x_w, half_y], dim=-1)  # (N, 2)
+        # Horizontal-only distance -- foot_in_contact already guarantees ground
+        # height whenever this fires, so a Z term would be redundant at best,
+        # actively unsatisfiable at worst (see SGK's 2026-07-05 fix).
+        dist_to_blue = torch.norm(assigned_foot_pos[:, :2] - target_point_xy, dim=-1)
+
+        newly_landed = wide & env._blue_was_airborne & foot_in_contact & (dist_to_blue < landing_radius)
+        env._blue_landed |= newly_landed
+
+    phase1_active = wide & ~env._blue_landed
+    return torch.where(phase1_active, half_y, full_y)
+
+
 def footreach(
     env: "ManagerBasedRlEnv",
     ball_name: str,
@@ -169,27 +259,36 @@ def footreach(
     ball_x_local = ball_pos_w[:, 0] - env.scene.env_origins[:, 0]     # (N,)
     robot_y_w = robot.data.root_link_pos_w[:, 1]                       # (N,)
 
-    # Frozen crossing Y: where the ball will arrive at the goal line.
+    # True frozen crossing Y (final arrival point) — used only for foot-side selection
+    # below, which must not flip mid-episode based on the two-stage reach target.
     crossing_y = _get_ball_crossing_y(env, ball_name)                  # (N,)
+    # Reach target: full crossing point, or the two-stage midpoint-then-full schedule
+    # on wide crossings (ported from SimpleGoalKeeper). See _get_reach_target_y.
+    reach_target_y = _get_reach_target_y(env, ball_name, asset_cfg=asset_cfg)  # (N,)
 
     # Phase 1: pre-position laterally when ball is far (> 1.5 m in front).
-    lateral_error = crossing_y - robot_y_w                             # positive → target right
+    lateral_error = reach_target_y - robot_y_w                          # positive → target right
     asidegoal = lateral_error.clamp(-1.0, 1.0)
     asidegoal = torch.where(asidegoal.abs() < 0.3, torch.zeros_like(asidegoal), asidegoal)
     phase1_rew = 1.0 - asidegoal.abs()                                  # 1=aligned, 0=1 m off
 
-    # Phase 2 crossing point: frozen when far, live ball when close (mirrors G1 end_target update).
-    # G1 post_physics_step lines 203-206: end_target switches to ball_states[:, :3] when
-    # balllocal < 0.5 — robot converges on the actual ball in the final 0.5 m. The X
-    # coordinate stays at goal_x_w (stayonline constraint keeps the foot at the goal line).
+    # Phase 2 crossing point: frozen (two-stage) when far, live ball when close (mirrors
+    # G1 end_target update). G1 post_physics_step lines 203-206: end_target switches to
+    # ball_states[:, :3] when balllocal < 0.5 — robot converges on the actual ball in the
+    # final 0.5 m. The X coordinate stays at goal_x_w (stayonline constraint keeps the
+    # foot at the goal line).
     goal_x_w  = env.scene.env_origins[:, 0]       # (N,)
     floor_z_w = env.scene.env_origins[:, 2]       # (N,)
     live_y = ball_pos_w[:, 1]
     live_z = ball_pos_w[:, 2]
-    ball_close = ball_x_local < 0.5               # (N,) bool — mirrors G1 balllocal < 0.5
+    # (N,) bool — mirrors G1 balllocal < 0.5, but on wide crossings this switch is
+    # ALSO gated on having genuinely landed at the blue midpoint: otherwise the
+    # policy can skip the landing gate entirely and still converge on the live
+    # ball once it closes to 0.5 m. See _get_reach_target_y.
+    ball_close = (ball_x_local < 0.5) & (~env._blue_wide | env._blue_landed)
 
-    # Switch from frozen crossing Y/Z to live ball Y/Z when ball is within 0.5 m.
-    target_y = torch.where(ball_close, live_y, crossing_y)
+    # Switch from frozen (two-stage) target to live ball Y/Z when ball is within 0.5 m.
+    target_y = torch.where(ball_close, live_y, reach_target_y)
     target_z = torch.where(ball_close, live_z, floor_z_w + 0.10)
 
     crossing_point = torch.stack(
@@ -242,16 +341,23 @@ def foot_proximity(
     ball_pos_w = ball.data.root_link_pos_w                              # (N, 3)
     ball_x_local = ball_pos_w[:, 0] - env.scene.env_origins[:, 0]     # (N,)
 
+    # True frozen crossing Y (final arrival point) — used only for foot-side
+    # selection below, which must not flip mid-episode with the two-stage target.
     crossing_y = _get_ball_crossing_y(env, ball_name)                  # (N,)
+    # Reach target: full crossing point, or the two-stage midpoint-then-full
+    # schedule on wide crossings (ported from SimpleGoalKeeper). See _get_reach_target_y.
+    reach_target_y = _get_reach_target_y(env, ball_name, asset_cfg=asset_cfg)  # (N,)
     goal_x_w = env.scene.env_origins[:, 0]
     env_z    = env.scene.env_origins[:, 2]
 
     # Live ball switch: when ball is within 0.5 m of goal line, track live position.
     # Mirrors G1 post_physics_step: end_target = ball_states[:, :3] when balllocal < 0.5.
-    ball_close = ball_x_local < 0.5               # (N,) bool
+    # On wide crossings this is ALSO gated on having genuinely landed at the blue
+    # midpoint (mirrors footreach) — see _get_reach_target_y.
+    ball_close = (ball_x_local < 0.5) & (~env._blue_wide | env._blue_landed)
     live_y = ball_pos_w[:, 1]
     live_z = ball_pos_w[:, 2]
-    target_y = torch.where(ball_close, live_y, crossing_y)
+    target_y = torch.where(ball_close, live_y, reach_target_y)
     target_z = torch.where(ball_close, live_z, env_z + 0.10)
 
     crossing_point = torch.stack(
@@ -270,6 +376,32 @@ def foot_proximity(
     return torch.exp(-sigma * min_dist) * (~behind).float()
 
 
+def blue_ball_landed(
+    env: "ManagerBasedRlEnv",
+    ball_name: str,
+    asset_cfg: SceneEntityCfg = _DEFAULT_FEET_CFG,
+) -> torch.Tensor:
+    """One-shot bonus when the assigned foot lands at the blue (midpoint) target.
+
+    Ported from SimpleGoalKeeper. Fires the first step the two-stage gate
+    (env._blue_landed) becomes true -- the assigned foot was airborne at some
+    point after reset, then came into ground contact within landing_radius of
+    the midpoint target. Narrow crossings never fire this (env._blue_wide is
+    always false for them). See _get_reach_target_y.
+    """
+    _get_reach_target_y(env, ball_name, asset_cfg=asset_cfg)  # ensure _blue_landed is fresh this step
+
+    if not hasattr(env, "_blue_landed_bonus_flag"):
+        env._blue_landed_bonus_flag = torch.zeros(env.num_envs, dtype=torch.bool, device=env.device)
+
+    just_reset = env.episode_length_buf <= 1
+    env._blue_landed_bonus_flag[just_reset] = False
+
+    fired = env._blue_landed & ~env._blue_landed_bonus_flag
+    env._blue_landed_bonus_flag |= fired
+    return fired.float()
+
+
 def stopball(
     env: "ManagerBasedRlEnv",
     ball_name: str,
@@ -280,7 +412,15 @@ def stopball(
     Ball approaches with negative X velocity; foot contact reverses or decelerates it.
     Fires exactly once per episode when delta_vx > threshold, providing the primary
     training signal for a successful save. Mirrors Imitationlearningbooster stopball.
+
+    Landing gate (ported from SimpleGoalKeeper 2026-07-05): on wide crossings
+    (env._blue_wide), this can only fire once the assigned foot has genuinely
+    landed at the blue midpoint (env._blue_landed) -- otherwise the policy can
+    skip the two-stage waypoint entirely with one continuous reach and still
+    collect the full save reward. Narrow crossings are unaffected.
     """
+    _get_reach_target_y(env, ball_name)  # ensure _blue_wide/_blue_landed are fresh this step
+
     ball: Entity = env.scene[ball_name]
     ball_x_vel = ball.data.root_link_lin_vel_w[:, 0]
     ball_x_local = ball.data.root_link_pos_w[:, 0] - env.scene.env_origins[:, 0]
@@ -295,7 +435,8 @@ def stopball(
 
     delta_vx = ball_x_vel - env._sb_init_vx
     in_front = ball_x_local > -0.3  # allow 0.3 m past goal line: deflection accumulates gradually
-    fired = (delta_vx > delta_vel_threshold) & in_front & ~env._sb_flag
+    landing_ok = ~env._blue_wide | env._blue_landed
+    fired = (delta_vx > delta_vel_threshold) & in_front & landing_ok & ~env._sb_flag
     env._sb_flag |= fired
     return fired.float()
 
@@ -313,7 +454,12 @@ def softstop(
 
     Also gates _ball_is_behind and tracks which foot was in contact when softstop fires
     (used by single_foot_save, inner_face_orientation_save, cleanstop, airborne_at_save).
+
+    Landing gate (ported from SimpleGoalKeeper 2026-07-05): same wide-crossing
+    landing gate as stopball -- see that function's docstring.
     """
+    _get_reach_target_y(env, ball_name)  # ensure _blue_wide/_blue_landed are fresh this step
+
     ball: Entity = env.scene[ball_name]
     ball_x_vel = ball.data.root_link_lin_vel_w[:, 0]
     ball_x_local = ball.data.root_link_pos_w[:, 0] - env.scene.env_origins[:, 0]
@@ -327,7 +473,8 @@ def softstop(
     env._softstop_correct_foot[just_reset] = False
 
     in_front = ball_x_local > -0.3
-    fired = (ball_x_vel > velocity_threshold) & in_front & ~env._softstop_flag
+    landing_ok = ~env._blue_wide | env._blue_landed
+    fired = (ball_x_vel > velocity_threshold) & in_front & landing_ok & ~env._softstop_flag
 
     # Track correct foot contact at softstop moment.
     if fired.any():

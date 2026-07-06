@@ -47,7 +47,6 @@ class MultiDiscAMPPPO:
         device: str = "cpu",
         amp_replay_buffer_size: int = 100_000,
         min_std=None,
-        region_estimator_learning_rate: float | None = None,
         **kwargs,
     ):
         self.device = device
@@ -74,35 +73,28 @@ class MultiDiscAMPPPO:
         self.actor_critic.to(device)
         self.storage: RolloutStorage | None = None
 
-        # region_estimator gets its own param group / learning rate, decoupled
-        # from the shared actor_critic group. Rationale (2026-07-05, see
-        # CLAUDE.md's "Multi-disc PPO schedule" divergence row): region_arg
-        # (torch.argmax(estimate_region)) is a discrete value feeding the
-        # actor's own input, so small logit shifts in a still-training
-        # region_estimator can flip it between minibatch/epoch passes within
-        # one PPO update -- inflating the *measured* policy KL divergence for
-        # reasons unrelated to real policy movement. With one shared LR for
-        # the whole actor_critic, that spurious KL signal (under an adaptive
-        # schedule) or a manual LR bump (tested via resume, see BugFixes.md)
-        # either freezes region_estimator's capacity or destabilizes the
-        # already-converged actor/critic/ball_estimator. Splitting it out
-        # lets region_estimator use a distinctly higher LR to escape a bad
-        # local optimum without touching the rest of the network at all.
-        region_estimator_params = list(actor_critic.region_estimator.parameters())
-        region_estimator_param_ids = {id(p) for p in region_estimator_params}
-        main_params = [
-            p for p in actor_critic.parameters()
-            if id(p) not in region_estimator_param_ids
-        ]
+        # region_estimator shares the single actor_critic param group/LR with
+        # actor, critic, history_encoder, and ball_estimator -- matching G1
+        # exactly (Humanoid-Goalkeeper/rsl_rl/rsl_rl/algorithms/him_ppo.py:
+        # 101-116: one 'actor_critic' group covers the whole ActorCritic,
+        # region_estimator included, no separate LR).
+        #
+        # 2026-07-05 this fork briefly split region_estimator into its own
+        # undamped, always-high-LR param group (region_estimator_learning_rate,
+        # exempted from the adaptive-KL throttle) to fix a real regression
+        # (region_estimator accuracy collapsing under schedule="adaptive").
+        # That rationale rested on a factual error: it assumed G1 uses
+        # schedule="fixed" as its proven config. It doesn't -- G1's actual
+        # config chain (g1_29_config.py -> legged_robot_config.py:326)
+        # inherits schedule="adaptive" unmodified, with region_estimator
+        # fully exposed to the same KL-based throttle as everything else, and
+        # G1 has no documented region_estimator collapse. The split was a net
+        # new divergence from G1, not a fix, and every training run since it
+        # landed has diverged (to NaN) far earlier than the pre-split
+        # baseline. Reverted 2026-07-06; see docs/BugFixes.md.
+        self.main_params = list(actor_critic.parameters())
         params = [
-            {"params": main_params, "name": "actor_critic"},
-            {
-                "params": region_estimator_params,
-                "name": "region_estimator",
-                "lr": region_estimator_learning_rate
-                if region_estimator_learning_rate is not None
-                else learning_rate,
-            },
+            {"params": self.main_params, "name": "actor_critic"},
         ]
         for name, d in self.discriminators.items():
             params.append({"params": d.trunk.parameters(), "weight_decay": 10e-4, "name": f"amp_trunk_{name}"})
@@ -141,6 +133,14 @@ class MultiDiscAMPPPO:
         self.actor_critic.train()
 
     def act(self, obs_current, obs_history, critic_obs, amp_obs):
+        # Ported from Humanoid-Goalkeeper/rsl_rl/algorithms/him_ppo.py:138-140 --
+        # G1 zeros out a NaN'd observation batch before it reaches the network,
+        # rather than letting it propagate into the actor/critic and corrupt
+        # their weights on the next backward pass.
+        if obs_current.isnan().any() or obs_history.isnan().any():
+            obs_current = torch.zeros_like(obs_current)
+            obs_history = torch.zeros_like(obs_history)
+            critic_obs = torch.zeros_like(critic_obs)
         combined_obs = torch.cat([obs_current, obs_history], dim=-1)
         self.transition_actions = self.actor_critic.act(obs_current.detach(), obs_history.detach()).detach()
         self.transition_values = self.actor_critic.evaluate(critic_obs.detach()).detach()
@@ -228,6 +228,24 @@ class MultiDiscAMPPPO:
              returns_batch, old_actions_log_prob_batch, old_mu_batch, old_sigma_batch,
              hid_states_batch, masks_batch) = sample
 
+            # 2026-07-06: run 2026-07-06_01-14-09_intercept_phase1 showed
+            # action_rate_l2/action_acc_l2 (unbounded quadratic penalties on
+            # raw policy output, mjlab_mdp default) occasionally exploding to
+            # -1e8/-1e9 for a subset of envs. Bootstrapped through GAE this
+            # produced value_function loss up to 1e26 and never recovered.
+            # G1 (Humanoid-Goalkeeper/rsl_rl/algorithms/him_ppo.py) has no
+            # equivalent clamp, but it also has no unbounded-magnitude reward
+            # source like this and additionally runs a value/policy
+            # smooth_loss regularizer this fork's plain RolloutStorage can't
+            # support (no next_obs/cont tracking) -- porting that is a larger
+            # storage change, deferred. This clamp is the minimal targeted
+            # fix: bound the value regression target so one anomalous step
+            # can never blow up value_loss's gradient magnitude by 20 orders
+            # of magnitude. 1000 is >> any plausible genuine return here
+            # (softstop alone maxes out at curriculum weight 250 one-shot).
+            returns_batch = returns_batch.clamp(-1000.0, 1000.0)
+            target_values_batch = target_values_batch.clamp(-1000.0, 1000.0)
+
             obs_current_batch = obs_batch[:, :self._obs_current_dim]
             obs_history_batch = obs_batch[:, self._obs_current_dim:]
 
@@ -249,12 +267,10 @@ class MultiDiscAMPPPO:
                         self.learning_rate = max(1e-5, self.learning_rate / 1.5)
                     elif kl_mean < self.desired_kl / 2.0 and kl_mean > 0.0:
                         self.learning_rate = min(1e-2, self.learning_rate * 1.5)
-                    # region_estimator keeps its own independent lr (see
-                    # __init__) -- policy KL says nothing about whether that
-                    # head has converged, so it must never be rescaled here.
+                    # Matches G1 (him_ppo.py:208-209): every param group,
+                    # region_estimator included, gets rescaled -- no exemption.
                     for pg in self.optimizer.param_groups:
-                        if pg.get("name") != "region_estimator":
-                            pg["lr"] = self.learning_rate
+                        pg["lr"] = self.learning_rate
 
             ratio = torch.exp(actions_log_prob_batch - torch.squeeze(old_actions_log_prob_batch))
             surrogate = -torch.squeeze(advantages_batch) * ratio
@@ -316,7 +332,9 @@ class MultiDiscAMPPPO:
 
             self.optimizer.zero_grad()
             loss.backward()
-            nn.utils.clip_grad_norm_(self.actor_critic.parameters(), self.max_grad_norm)
+            # Single joint clip over the whole actor_critic, matching G1
+            # exactly (him_ppo.py:310).
+            nn.utils.clip_grad_norm_(self.main_params, self.max_grad_norm)
             self.optimizer.step()
 
             if not self.actor_critic.fixed_std and self.min_std is not None:

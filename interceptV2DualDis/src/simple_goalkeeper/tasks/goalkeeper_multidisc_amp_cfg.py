@@ -170,13 +170,14 @@ def goalkeeper_multidisc_amp_runner_cfg() -> dict:
             "num_learning_epochs": 5,
             "num_mini_batches": 4,
             "learning_rate": 1.0e-3,
-            # region_estimator trains through its own optimizer param group
-            # (see MultiDiscAMPPPO.__init__), fully decoupled from the shared
-            # actor/critic/history_encoder/ball_estimator group above -- a
-            # higher rate here carries no risk to the already-converged rest
-            # of the network, unlike bumping the shared "learning_rate".
-            "region_estimator_learning_rate": 3.0e-3,
-            "schedule": "fixed",
+            # 2026-07-06: reverted to "adaptive" to match G1's actual,
+            # effective config (g1_29_config.py inherits schedule="adaptive"
+            # from legged_robot_config.py:326, unmodified) -- the prior switch
+            # to "fixed" here was based on the false premise that G1 uses a
+            # constant LR. region_estimator shares this single schedule/LR
+            # with the rest of actor_critic, also matching G1
+            # (him_ppo.py:101-116, no separate group). See docs/BugFixes.md.
+            "schedule": "adaptive",
             "gamma": 0.99,
             "lam": 0.95,
             "desired_kl": 0.01,

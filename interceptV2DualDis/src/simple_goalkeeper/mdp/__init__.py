@@ -1,4 +1,4 @@
-from . import observations, events, rewards, commands, regions
+from . import observations, events, rewards, commands, regions, metrics
 from .observations import ball_pos_b, ball_pos_xy_b, ball_vel_b, left_foot_pos_b, right_foot_pos_b, base_lin_vel, joint_pos_abs, joint_vel_abs
 from .events import init_motion_loader, reset_from_motion_data, reset_ball_local_frame, reset_ball_global_frame, reset_ball_rolling, tick_catchstep, ball_difficulty_curriculum, reward_curriculum_ep_len, correct_foot_save_curriculum, ball_exit_termination, sharpforce_termination, shank_height_termination
 from .regions import REGION_NAMES, assign_static_regions, reset_ball_rolling_by_region, ball_state_gt, region_id_gt
@@ -12,5 +12,7 @@ from .rewards import (
     torques_normalized_l2, torque_limits,
     postupperdofpos, postwaistdofpos,
     penalize_sharpcontact, penalize_self_collision, feet_slippage,
+    blue_ball_landed,
 )
+from .metrics import blue_landed_genuine, blue_landed_rsi_assisted
 from .commands import GhostMotionCommand, GhostMotionCommandCfg

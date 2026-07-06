@@ -744,29 +744,60 @@ def reset_ball_rolling(
     y_start  = sample_uniform(*y_start_r,  (n,), env.device)
     t_flight = sample_uniform(*t_flight_r, (n,), env.device)
 
-    # Two-sided dead zone for y_end (mirrors G1's ±0.2 m minimum offset).
-    # At d=0: ball always arrives 0.15–0.35 m left or right of center — never
-    # through the robot's legs regardless of RSI stance width.
-    # At d=1: magnitude range opens to [0.0, max_half] covering the full range.
-    # The dead zone shrinks linearly so there is no curriculum cliff at any d.
-    _Y_INNER = 0.15   # minimum offset from center at d=0
-    _Y_OUTER = 0.35   # maximum offset from center at d=0
-    max_half = max(abs(y_end_range[0]), abs(y_end_range[1]))
-    if y_end_outer_frac is not None:
-        # Testing/play override: ignore the difficulty curriculum entirely for
-        # this dimension and pin to the outer band of the true (max-difficulty)
-        # range -- e.g. y_end_outer_frac=0.8 samples only the top 20% of
-        # max_half, regardless of env._ball_difficulty's current value.
-        inner = max_half * max(0.0, min(1.0, y_end_outer_frac))
-        outer = max_half
+    if y_end_range[0] * y_end_range[1] > 0:
+        # One-sided range (region-conditioned calls via reset_ball_rolling_by_region,
+        # e.g. left_near=(0.15,0.5), right_far=(-0.9,-0.5)): the sign is the whole
+        # point of the region label (left vs right) -- it must never be randomized.
+        # BUG (fixed 2026-07-06): this branch used to fall through to the two-sided
+        # dead-zone logic below, which (a) re-randomizes side with a 50/50 coin flip
+        # regardless of y_end_range's actual sign, and (b) derives its magnitude
+        # bounds from a fixed generic constant (_Y_OUTER=0.35) and max_half, ignoring
+        # the region's own inner bound entirely -- so e.g. a "far" region
+        # (0.5,0.9) sampled magnitudes as low as 0.1, spilling deep into "near"
+        # territory. Verified empirically: ~50% wrong sign, and "far" regions landed
+        # in their own intended [0.5,0.9] band only ~25% of the time. This silently
+        # decorrelated the region_estimator's ground-truth label (env._region_id)
+        # from the ball's actual observable trajectory, and fed the actor a
+        # region_arg conditioning signal that didn't match the real shot ~50-75%
+        # of the time -- the direct cause of the region_estimator's persistent
+        # left/right confusion and the failure to converge on far-side
+        # double/triple-step motions. Fix: derive lo/hi from this range's own
+        # bounds and lerp the sampled magnitude within [lo,hi] only, sign fixed.
+        lo = min(abs(y_end_range[0]), abs(y_end_range[1]))
+        hi = max(abs(y_end_range[0]), abs(y_end_range[1]))
+        sign_val = 1.0 if y_end_range[1] > 0 else -1.0
+        if y_end_outer_frac is not None:
+            inner = lo + (hi - lo) * max(0.0, min(1.0, y_end_outer_frac))
+            outer = hi
+        else:
+            inner = lo
+            outer = lo + (hi - lo) * d
+        mag = sample_uniform(inner, outer, (n,), env.device)
+        y_end = sign_val * mag
     else:
-        inner = max(_Y_INNER * (1.0 - d), 0.1)
-        outer = _Y_OUTER + (max_half - _Y_OUTER) * d
-    mag   = sample_uniform(inner, outer, (n,), env.device)
-    side  = torch.where(torch.rand(n, device=env.device) > 0.5,
-                        torch.ones(n, device=env.device),
-                        -torch.ones(n, device=env.device))
-    y_end = side * mag
+        # Two-sided dead zone for y_end (mirrors G1's ±0.2 m minimum offset).
+        # At d=0: ball always arrives 0.15–0.35 m left or right of center — never
+        # through the robot's legs regardless of RSI stance width.
+        # At d=1: magnitude range opens to [0.0, max_half] covering the full range.
+        # The dead zone shrinks linearly so there is no curriculum cliff at any d.
+        _Y_INNER = 0.15   # minimum offset from center at d=0
+        _Y_OUTER = 0.35   # maximum offset from center at d=0
+        max_half = max(abs(y_end_range[0]), abs(y_end_range[1]))
+        if y_end_outer_frac is not None:
+            # Testing/play override: ignore the difficulty curriculum entirely for
+            # this dimension and pin to the outer band of the true (max-difficulty)
+            # range -- e.g. y_end_outer_frac=0.8 samples only the top 20% of
+            # max_half, regardless of env._ball_difficulty's current value.
+            inner = max_half * max(0.0, min(1.0, y_end_outer_frac))
+            outer = max_half
+        else:
+            inner = max(_Y_INNER * (1.0 - d), 0.1)
+            outer = _Y_OUTER + (max_half - _Y_OUTER) * d
+        mag   = sample_uniform(inner, outer, (n,), env.device)
+        side  = torch.where(torch.rand(n, device=env.device) > 0.5,
+                            torch.ones(n, device=env.device),
+                            -torch.ones(n, device=env.device))
+        y_end = side * mag
 
     # Ball spawns in world frame: x_start metres in front of goal line, y_start to the side.
     ball_pos = torch.stack([
