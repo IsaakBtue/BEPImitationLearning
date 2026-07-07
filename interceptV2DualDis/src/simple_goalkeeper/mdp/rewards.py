@@ -151,7 +151,8 @@ def _get_reach_target_y(
     ball_name: str,
     asset_cfg: SceneEntityCfg = _DEFAULT_FEET_CFG,
     wide_threshold: float = 0.5,
-    landing_radius: float = 0.02,
+    landing_radius: float = 0.08,
+    landing_speed_threshold: float = 0.5,
 ) -> torch.Tensor:
     """Two-stage reach target for wide crossings (ported from SimpleGoalKeeper
     2026-07-03/07-04/07-05, see SimpleGoalKeeper/CLAUDE.md divergence table).
@@ -166,24 +167,44 @@ def _get_reach_target_y(
     episode (hard gate, per SGK's 2026-07-04 finding that a soft/timeout gate
     let the policy skip the waypoint and still collect full credit).
 
-    FIX 2026-07-07: landing_radius tightened 0.05 -> 0.02. User-reported
-    symptom: blue_ball_landed fired even when the assigned foot's actual
-    ground contact was near the GREEN target, with the policy still doing one
-    continuous big step/leap rather than a genuine paced double-step. Blue and
-    green are collinear (same X, only Y differs) and always >= wide_threshold/2
-    apart for a wide crossing, so a foot planting AT green cannot itself be
-    within 0.05m of blue -- the actual mechanism is a foot sweeping through
-    (not stopping at) the blue Y-coordinate mid-swing during one continuous
-    stride toward green, catching a momentary/glancing ground-contact reading
-    (feet_contact sensor noise, a low-clearance shuffle step, foot-scuff during
-    swing phase) while passing near blue's exact coordinate, before continuing
-    on to plant at green. This satisfies "airborne, then in contact, within
-    landing_radius of blue" without the policy ever having intended to stop
-    there. Shrinking the radius doesn't eliminate this in principle (a sweep
-    could still graze an arbitrarily small radius by chance) but makes it
-    require a much more precise, unlikely-by-accident pass-through, matching
-    SGK's own history of tightening this same parameter for the same reason
-    (0.3 -> 0.05, 2026-07-05) when it turned out too generous.
+    FIX 2026-07-07 (superseded below): landing_radius tightened 0.05 -> 0.02.
+    User-reported symptom: blue_ball_landed fired even when the assigned
+    foot's actual ground contact was near the GREEN target, with the policy
+    still doing one continuous big step/leap rather than a genuine paced
+    double-step. Blue and green are collinear (same X, only Y differs) and
+    always >= wide_threshold/2 apart for a wide crossing, so a foot planting
+    AT green cannot itself be within 0.05m of blue -- the actual mechanism is
+    a foot sweeping through (not stopping at) the blue Y-coordinate mid-swing
+    during one continuous stride toward green, catching a momentary/glancing
+    ground-contact reading (feet_contact sensor noise, a low-clearance
+    shuffle step, foot-scuff during swing phase) while passing near blue's
+    exact coordinate, before continuing on to plant at green.
+
+    FIX 2026-07-07 (radical tightening of stopball/softstop, then this):
+    after gating stopball/softstop on genuine (non-RSI) landings too, the
+    user reported the play script showing the robot sweep straight past blue
+    to the intercept point, correctly earning zero footreach/stopball/
+    softstop for it -- the gate was finally airtight, but a fresh policy
+    still wasn't discovering the genuine two-stage plant. Root cause: a
+    *pure position* landing check has no way to distinguish a deliberate
+    stop from a fast pass-through, and footreach's own vel_sigma term
+    (up to 10x, rewards speed toward whichever point is currently the reach
+    target -- see footreach()) actively rewards NOT decelerating while
+    approaching blue. At landing_radius=0.02 this combination made a
+    genuine, deliberate plant almost geometrically impossible to land
+    exactly (2 cm, single 0.02s physics step) while doing nothing to
+    disincentivize sweeping through fast -- shrinking the radius alone
+    fights the symptom (accidental grazes) without fixing the cause
+    (nothing requires the foot to actually stop). Added a velocity gate
+    (landing_speed_threshold) instead: the assigned foot's horizontal speed
+    must be below this threshold at the moment of contact, in addition to
+    being within landing_radius. This directly rules out fast sweeps
+    regardless of radius, so the radius itself was loosened back up
+    (0.02 -> 0.08) to make a genuine, deliberate plant actually achievable
+    -- precision now comes from requiring the foot to be slow, not from
+    requiring pixel-perfect position. Matches the follow-up flagged in the
+    prior fix entry ("a velocity-based check ... to distinguish a genuine
+    plant from a foot merely passing through at speed"). See docs/BugFixes.md.
 
     Ported because AMP's 2-frame transition discriminator cannot judge global
     trajectory shape or step count -- a smooth fast leap to the far target
@@ -240,9 +261,11 @@ def _get_reach_target_y(
 
     if robot is not None and feet_contact is not None:
         foot_pos_w = robot.data.body_link_pos_w[:, asset_cfg.body_ids, :]   # (N, 2, 3)
+        foot_vel_w = robot.data.body_link_lin_vel_w[:, asset_cfg.body_ids, :]  # (N, 2, 3)
         foot_idx = _get_correct_foot_idx(env, ball_name)                    # (N,)
         arange_n = torch.arange(n, device=env.device)
         assigned_foot_pos = foot_pos_w[arange_n, foot_idx]                  # (N, 3)
+        assigned_foot_vel = foot_vel_w[arange_n, foot_idx]                  # (N, 3)
 
         found = feet_contact.data.found                                    # (N, 8)
         left_in_contact = (found[:, :4] > 0).any(dim=-1)
@@ -261,8 +284,17 @@ def _get_reach_target_y(
         # height whenever this fires, so a Z term would be redundant at best,
         # actively unsatisfiable at worst (see SGK's 2026-07-05 fix).
         dist_to_blue = torch.norm(assigned_foot_pos[:, :2] - target_point_xy, dim=-1)
+        # FIX 2026-07-07: horizontal speed gate -- a foot merely sweeping
+        # through blue's coordinate at speed (mid-swing toward green) must
+        # not count as landing there. Only a foot that has actually
+        # decelerated (genuine plant) satisfies this alongside the position
+        # check. See docstring above.
+        foot_speed = torch.norm(assigned_foot_vel[:, :2], dim=-1)
 
-        newly_landed = wide & env._blue_was_airborne & foot_in_contact & (dist_to_blue < landing_radius)
+        newly_landed = (
+            wide & env._blue_was_airborne & foot_in_contact
+            & (dist_to_blue < landing_radius) & (foot_speed < landing_speed_threshold)
+        )
         env._blue_landed |= newly_landed
 
     phase1_active = wide & ~env._blue_landed
