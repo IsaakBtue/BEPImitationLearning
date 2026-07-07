@@ -10,8 +10,14 @@ from mjlab.managers.scene_entity_config import SceneEntityCfg
 from mjlab.sensor import ContactSensor
 from mjlab.utils.lab_api.math import quat_apply, quat_inv
 
+from .regions import REGION_NAMES as _REGION_NAMES
+
 if TYPE_CHECKING:
     from mjlab.envs import ManagerBasedRlEnv
+
+# Region-conditioned task only (env._region_id set by regions.assign_static_regions):
+# which REGION_NAMES entries are a "_far" region. See _get_reach_target_y.
+_REGION_IS_FAR = torch.tensor([name.endswith("_far") for name in _REGION_NAMES], dtype=torch.bool)
 
 _DEFAULT_FEET_CFG = SceneEntityCfg("robot", body_names=("left_foot_link", "right_foot_link"))
 _DEFAULT_ROBOT_CFG = SceneEntityCfg("robot")
@@ -176,6 +182,20 @@ def _get_reach_target_y(
     rel = getattr(env, "_rsi_cross_y", None)
     lateral = rel if rel is not None else (full_y - start_y)
     wide = lateral.abs() > wide_threshold
+
+    # FIX 2026-07-07: for the region-conditioned task, a region's own far/near
+    # label (env._region_id) is authoritative over the threshold check above.
+    # _rsi_cross_y is the ball's position AT the goal line (x=0); _REGION_Y_END_RANGE
+    # is defined on y_end, the aim point 0.3m BEHIND the goal line. Since
+    # _rsi_cross_y = y_start + (y_end-y_start)*f with f = x_start/(x_start+0.3) < 1,
+    # the crossing point is always smaller in magnitude than y_end -- silently
+    # misclassifying ~17-20% of legitimately-far episodes (those with |y_end| near
+    # the region's own 0.5m inner edge) as narrow. No G1 equivalent (regions are a
+    # new mechanism, see regions.py); see docs/BugFixes.md.
+    region_id = getattr(env, "_region_id", None)
+    if region_id is not None:
+        wide = wide | _REGION_IS_FAR.to(env.device)[region_id]
+
     # Cached so footreach/foot_proximity/stopball/softstop can gate on
     # "wide AND not yet landed" without recomputing the crossing geometry.
     env._blue_wide = wide
