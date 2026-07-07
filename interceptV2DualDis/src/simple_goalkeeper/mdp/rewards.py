@@ -151,7 +151,7 @@ def _get_reach_target_y(
     ball_name: str,
     asset_cfg: SceneEntityCfg = _DEFAULT_FEET_CFG,
     wide_threshold: float = 0.5,
-    landing_radius: float = 0.05,
+    landing_radius: float = 0.02,
 ) -> torch.Tensor:
     """Two-stage reach target for wide crossings (ported from SimpleGoalKeeper
     2026-07-03/07-04/07-05, see SimpleGoalKeeper/CLAUDE.md divergence table).
@@ -165,6 +165,25 @@ def _get_reach_target_y(
     -- a crossing that never lands stays targeting the midpoint for the whole
     episode (hard gate, per SGK's 2026-07-04 finding that a soft/timeout gate
     let the policy skip the waypoint and still collect full credit).
+
+    FIX 2026-07-07: landing_radius tightened 0.05 -> 0.02. User-reported
+    symptom: blue_ball_landed fired even when the assigned foot's actual
+    ground contact was near the GREEN target, with the policy still doing one
+    continuous big step/leap rather than a genuine paced double-step. Blue and
+    green are collinear (same X, only Y differs) and always >= wide_threshold/2
+    apart for a wide crossing, so a foot planting AT green cannot itself be
+    within 0.05m of blue -- the actual mechanism is a foot sweeping through
+    (not stopping at) the blue Y-coordinate mid-swing during one continuous
+    stride toward green, catching a momentary/glancing ground-contact reading
+    (feet_contact sensor noise, a low-clearance shuffle step, foot-scuff during
+    swing phase) while passing near blue's exact coordinate, before continuing
+    on to plant at green. This satisfies "airborne, then in contact, within
+    landing_radius of blue" without the policy ever having intended to stop
+    there. Shrinking the radius doesn't eliminate this in principle (a sweep
+    could still graze an arbitrarily small radius by chance) but makes it
+    require a much more precise, unlikely-by-accident pass-through, matching
+    SGK's own history of tightening this same parameter for the same reason
+    (0.3 -> 0.05, 2026-07-05) when it turned out too generous.
 
     Ported because AMP's 2-frame transition discriminator cannot judge global
     trajectory shape or step count -- a smooth fast leap to the far target
