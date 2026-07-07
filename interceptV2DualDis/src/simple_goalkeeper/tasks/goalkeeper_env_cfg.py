@@ -364,6 +364,16 @@ def goalkeeper_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
             weight=10.0,
             params={"ball_name": BALL_NAME, "asset_cfg": _FEET_CFG},
         ),
+        # FEAT 2026-07-08: without this, ignoring the blue waypoint entirely on a
+        # wide crossing earns the same reward (zero, from the landing-gated terms
+        # above) as attempting and failing -- no gradient discourages skipping it.
+        # Penalizes the assigned foot for advancing past blue toward green before
+        # landing there. See rewards.blue_overshoot_penalty docstring.
+        "blue_overshoot_penalty": RewardTermCfg(
+            func=gk_mdp.blue_overshoot_penalty,
+            weight=-30.0,
+            params={"ball_name": BALL_NAME, "asset_cfg": _FEET_CFG},
+        ),
         # --- active stepping: reward lifting feet during approach ---
         "foot_clearance": RewardTermCfg(
             func=gk_mdp.foot_clearance,

@@ -12,7 +12,7 @@ from .rewards import (
     torques_normalized_l2, torque_limits,
     postupperdofpos, postwaistdofpos,
     penalize_sharpcontact, penalize_self_collision, feet_slippage,
-    blue_ball_landed,
+    blue_ball_landed, blue_overshoot_penalty,
 )
 from .metrics import blue_landed_genuine, blue_landed_rsi_assisted
 from .commands import GhostMotionCommand, GhostMotionCommandCfg

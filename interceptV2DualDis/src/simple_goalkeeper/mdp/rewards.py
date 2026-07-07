@@ -473,6 +473,70 @@ def blue_ball_landed(
     return fired.float()
 
 
+def blue_overshoot_penalty(
+    env: "ManagerBasedRlEnv",
+    ball_name: str,
+    asset_cfg: SceneEntityCfg = _DEFAULT_FEET_CFG,
+    landing_radius: float = 0.08,
+    max_overshoot: float = 0.5,
+) -> torch.Tensor:
+    """FEAT 2026-07-08: penalize the assigned foot for advancing past the blue
+    midpoint, toward green, on a wide crossing that hasn't been genuinely
+    landed yet -- makes "walk straight past blue" actively costly instead of
+    merely unrewarded.
+
+    Rationale: before this term, a wide episode where the policy ignores the
+    blue waypoint entirely earned exactly the same reward (zero, from the
+    landing-gated stopball/softstop/blue_ball_landed) as one where it tried
+    and failed. With no cost differential, PPO has no gradient pushing it
+    away from ignoring wide episodes altogether -- and since narrow episodes
+    (~half the region-sampled distribution) already pay out fully with
+    minimal movement, "specialize in narrow, ignore wide" is a stable local
+    optimum. This term breaks that: overshooting past blue while unlanded is
+    now worse than stopping short of it or reaching it, on every step, not
+    just a missed one-time bonus.
+
+    Deliberately does NOT touch footreach's vel_sigma (which already
+    amplifies reward for velocity toward whichever point is the CURRENT
+    reach target -- reach_target_y flips from blue to green exactly on
+    env._blue_landed, see _get_reach_target_y -- so it already only rewards
+    speed toward blue pre-landing, never toward green early). The combination
+    is intentional: vel_sigma still rewards approaching blue fast, while this
+    term makes carrying that speed past blue without stopping costly --
+    together they should shape the same accelerate-then-decelerate-to-a-plant
+    profile actually observed in the LeftDoubleStep/RightDoubleStep AMP demo
+    clips (see docs/BugFixes.md "do i need a better dataset" investigation),
+    rather than requiring a separate deceleration reward term.
+
+    landing_radius matches _get_reach_target_y's own arrival radius (0.08) as
+    a deadband -- being within it counts as "at blue", not overshooting.
+    max_overshoot bounds the per-step penalty for episodes where the policy
+    is still far past blue (e.g. early in training, mid-flight toward green)
+    so a single step can't dominate the return.
+
+    Zero on narrow crossings (env._blue_wide always false) and once genuinely
+    landed (env._blue_landed true) -- see _get_reach_target_y for both.
+    """
+    _get_reach_target_y(env, ball_name, asset_cfg=asset_cfg)  # ensure _blue_wide/_blue_landed fresh
+
+    full_y = _get_ball_crossing_y(env, ball_name)                 # (N,) world Y
+    start_y = env.scene.env_origins[:, 1]                         # (N,) world Y
+    half_y = start_y + (full_y - start_y) / 2.0
+    direction = torch.sign(full_y - start_y)
+
+    robot: Entity = env.scene[asset_cfg.name]
+    foot_pos_w = robot.data.body_link_pos_w[:, asset_cfg.body_ids, :]  # (N, 2, 3)
+    foot_idx = _get_correct_foot_idx(env, ball_name)                   # (N,)
+    arange_n = torch.arange(env.num_envs, device=env.device)
+    assigned_foot_y = foot_pos_w[arange_n, foot_idx, 1]                # (N,)
+
+    signed_progress = direction * (assigned_foot_y - half_y)
+    overshoot = torch.clamp(signed_progress - landing_radius, min=0.0, max=max_overshoot)
+
+    phase1_active = env._blue_wide & ~env._blue_landed
+    return overshoot * phase1_active.float()
+
+
 def stopball(
     env: "ManagerBasedRlEnv",
     ball_name: str,
