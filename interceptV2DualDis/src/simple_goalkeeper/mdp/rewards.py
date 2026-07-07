@@ -457,6 +457,19 @@ def stopball(
     landed at the blue midpoint (env._blue_landed) -- otherwise the policy can
     skip the two-stage waypoint entirely with one continuous reach and still
     collect the full save reward. Narrow crossings are unaffected.
+
+    FIX 2026-07-07 (radical tightening): landing_ok used to accept ANY
+    _blue_landed, including RSI-assisted "free" landings where the reset
+    donor pose already had the assigned foot airborne near the blue midpoint
+    at episode start (env._blue_airborne_at_reset). A live diagnostic against
+    model_4500.pt of this run measured 30.8% of wide episodes satisfying the
+    old gate, but only 1.4% (of all wide episodes) were genuine -- 29.4% were
+    pure RSI credit, meaning the gate was being bypassed for free most of the
+    time and never forcing the policy to learn the two-stage step. Now
+    requires env._blue_landed & ~env._blue_airborne_at_reset (same definition
+    as metrics.blue_landed_genuine) so only a landing the policy actually
+    caused this episode unlocks stopball/softstop on wide crossings. See
+    docs/BugFixes.md.
     """
     _get_reach_target_y(env, ball_name)  # ensure _blue_wide/_blue_landed are fresh this step
 
@@ -474,7 +487,7 @@ def stopball(
 
     delta_vx = ball_x_vel - env._sb_init_vx
     in_front = ball_x_local > -0.3  # allow 0.3 m past goal line: deflection accumulates gradually
-    landing_ok = ~env._blue_wide | env._blue_landed
+    landing_ok = ~env._blue_wide | (env._blue_landed & ~env._blue_airborne_at_reset)
     fired = (delta_vx > delta_vel_threshold) & in_front & landing_ok & ~env._sb_flag
     env._sb_flag |= fired
     return fired.float()
@@ -495,7 +508,8 @@ def softstop(
     (used by single_foot_save, inner_face_orientation_save, cleanstop, airborne_at_save).
 
     Landing gate (ported from SimpleGoalKeeper 2026-07-05): same wide-crossing
-    landing gate as stopball -- see that function's docstring.
+    landing gate as stopball -- see that function's docstring, including the
+    2026-07-07 tightening to genuine-only landings.
     """
     _get_reach_target_y(env, ball_name)  # ensure _blue_wide/_blue_landed are fresh this step
 
@@ -512,7 +526,7 @@ def softstop(
     env._softstop_correct_foot[just_reset] = False
 
     in_front = ball_x_local > -0.3
-    landing_ok = ~env._blue_wide | env._blue_landed
+    landing_ok = ~env._blue_wide | (env._blue_landed & ~env._blue_airborne_at_reset)
     fired = (ball_x_vel > velocity_threshold) & in_front & landing_ok & ~env._softstop_flag
 
     # Track correct foot contact at softstop moment.
