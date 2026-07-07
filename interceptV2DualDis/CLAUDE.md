@@ -208,6 +208,21 @@ uv run sgk_play Mjlab-BeyondAMP-Goalkeeper-T1 --agent zero --num-envs 1
 uv run sgk_play Mjlab-BeyondAMP-Goalkeeper-T1 --checkpoint-file logs/rsl_rl/simple_goalkeeper/<run>/model_500.pt
 ```
 
+## Training Run Monitoring
+
+**After launching any training run, ask the user: "Do you want scheduled monitoring?"** Don't set it up unasked, and don't re-explain this workflow each time — just do it once they say yes.
+
+If yes, set up a session cron job with this standing behavior:
+
+- **Every 2 hours:** health check. Confirm the worker process is still alive. Read the latest TensorBoard scalars and check for divergence — `Episode/Episode_Metrics/mean_action_acc` should stay O(1), not blow up toward O(1e6)+; `Loss/*` terms (surrogate, AMP, AMP_grad, est_ball, est_region, etc.) should stay small and finite, never NaN/inf. Report the reward terms actually relevant to whatever's being iterated on. If a live diagnostic script exists for the specific behavior being trained (e.g. a success-rate or landing-rate probe), run it once the run has enough iterations for the result to be meaningful, and report the number.
+- **At iteration 5000:** a deeper checkpoint, not just another routine ping. Look at the full trend (not just the latest value) for the key diagnostic and the loss curves, and form a judgment: is this run fundamentally stuck, or genuinely progressing? If it looks stuck:
+  1. **Stop it** (kill the process).
+  2. Decide which subsystem is the more likely culprit — if it looks like the motion-prior/AMP mechanism itself is still off, dispatch a fresh, independently-framed subagent (skeptical, verify-from-scratch, no access to prior conclusions) to re-compare against the frozen G1 reference for anything still missed. If it looks like the task-specific reward mechanism is the problem, think through concrete tweaks and **implement one directly** — don't just report and wait.
+  3. Follow the standard fix cycle: run tests, live smoke test, document in `docs/BugFixes.md` and `HANDOFF.md`, commit the fix, push the final checkpoint of the stopped run, launch the new run, confirm a clean start, and update the monitoring cron to track it.
+  4. If the run looks like it's genuinely progressing, don't stop it — just report the trend and keep going with routine bihourly checks.
+
+**Always push the latest checkpoint before stopping or restarting any run**, whether for a scheduled-monitoring fix or an ad hoc one — never let a checkpoint go un-pushed when a run is about to be killed.
+
 ## Reading TensorBoard / WandB Episode Reward Metrics
 
 mjlab's `reward_manager` logs `Episode_Reward/X` with **two scaling factors** baked in:
