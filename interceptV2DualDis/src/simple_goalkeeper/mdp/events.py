@@ -839,18 +839,18 @@ def reset_ball_rolling(
     )
 
     # Store predicted goal-line crossing Y (relative to env origin) for RSI pool selection.
-    # Computes where ball crosses goal line, accounting for diagonal trajectory.
-    # Ball travels from (x_start, y_start) to (-0.3, y_end) along a straight line.
-    # At x = -0.3 (goal line), Y = y_start + (y_end - y_start) * (distance along X) / (total distance).
-    # Total horizontal distance = sqrt((x_start + 0.3)^2 + (y_end - y_start)^2)
-    # Distance along X at goal line = x_start + 0.3
-    # So cross_y = y_start + (y_end - y_start) * (x_start + 0.3) / horiz_dist
-    # Computed here while x_start/y_start/y_end are in scope — avoids the entity data
-    # buffer lag that would corrupt a post-write read of ball.data.root_link_lin_vel_w.
+    # Ball travels from (x_start, y_start) to (-0.3, y_end) along a straight line, linearly
+    # parametrized by fraction f in [0,1]: X(f) = x_start - f*(x_start+0.3). The goal line is
+    # at X=0 (NOT at the aim point X=-0.3), so solving X(f)=0 gives f = x_start/(x_start+0.3).
+    # cross_y = y_start + (y_end - y_start) * f.
+    # FIX 2026-07-07: previously used f = (x_start+0.3)/horiz_dist (horiz_dist = the Euclidean
+    # spawn-to-aim-point distance) -- that's cos(trajectory angle), not the goal-line crossing
+    # fraction, and it silently overestimated f for every diagonal shot (e.g. x_start=2.0,
+    # dy=0.5: buggy f=0.977 vs correct f=0.870). Ported from the same bug in SimpleGoalKeeper's
+    # reset_ball_rolling (fixed there same day) -- see docs/BugFixes.md.
     if not hasattr(env, "_rsi_cross_y"):
         env._rsi_cross_y = torch.zeros(env.num_envs, device=env.device)
-    horiz_dist = torch.sqrt((x_start + 0.3) ** 2 + (y_end - y_start) ** 2)
-    env._rsi_cross_y[env_ids] = y_start + (y_end - y_start) * (x_start + 0.3) / horiz_dist
+    env._rsi_cross_y[env_ids] = y_start + (y_end - y_start) * (x_start / (x_start + 0.3))
 
     _init_visibility_state(env, env_ids)
 

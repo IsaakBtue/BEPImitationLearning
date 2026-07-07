@@ -908,20 +908,6 @@ def reset_ball_rolling(
         env_ids=env_ids,
     )
 
-    # Store predicted goal-line crossing Y (relative to env origin) for RSI pool selection.
-    # Computes where ball crosses goal line, accounting for diagonal trajectory.
-    # Ball travels from (x_start, y_start) to (-0.3, y_end) along a straight line.
-    # At x = -0.3 (goal line), Y = y_start + (y_end - y_start) * (distance along X) / (total distance).
-    # Total horizontal distance = sqrt((x_start + 0.3)^2 + (y_end - y_start)^2)
-    # Distance along X at goal line = x_start + 0.3
-    # So cross_y = y_start + (y_end - y_start) * (x_start + 0.3) / horiz_dist
-    # Computed here while x_start/y_start/y_end are in scope — avoids the entity data
-    # buffer lag that would corrupt a post-write read of ball.data.root_link_lin_vel_w.
-    if not hasattr(env, "_rsi_cross_y"):
-        env._rsi_cross_y = torch.zeros(env.num_envs, device=env.device)
-    horiz_dist = torch.sqrt((x_start + 0.3) ** 2 + (y_end - y_start) ** 2)
-    env._rsi_cross_y[env_ids] = y_start + (y_end - y_start) * (x_start + 0.3) / horiz_dist
-
     # Store sampled flight time per env (2026-07-03): footreach/foot_proximity's
     # two-stage wide-crossing target needs the ball's own flight time to know
     # when "halfway there" has elapsed. t_flight is otherwise only a local
