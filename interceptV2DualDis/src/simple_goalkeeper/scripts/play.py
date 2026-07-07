@@ -278,6 +278,23 @@ def _patch_viewer_intercept_vis(native_viewer: "NativeMujocoViewer", env) -> Non
         rel_t = getattr(raw_env, "_rsi_cross_y", None)
         rel = float(rel_t[0].item()) if rel_t is not None else (cross_y - start_y)
         wide = abs(rel) > 0.5
+        # FIX 2026-07-07: region-conditioned task's own far/near label is authoritative
+        # over the threshold check above (mirrors _get_reach_target_y's region override,
+        # added same day) -- without this, a region-far episode with a small actual
+        # crossing magnitude (near the 0.5m boundary) is internally wide=True (reward
+        # side requires the blue landing gate) but this viewer showed it as narrow,
+        # rendering only the phantom green marker at the wrong point for the entire
+        # episode while the robot correctly walked to and landed at the (never-shown)
+        # blue target -- looked exactly like "blue_ball_landed fires with the foot not
+        # even close to anything visible." See docs/BugFixes.md.
+        region_id_t = getattr(raw_env, "_region_id", None)
+        if region_id_t is not None:
+            region_names = getattr(raw_env, "_REGION_NAMES_CACHE", None)
+            if region_names is None:
+                from simple_goalkeeper.mdp.regions import REGION_NAMES
+                region_names = REGION_NAMES
+                raw_env._REGION_NAMES_CACHE = region_names
+            wide = wide or region_names[int(region_id_t[0].item())].endswith("_far")
 
         landed_t = getattr(raw_env, "_blue_landed", None)
         landed = bool(landed_t[0].item()) if landed_t is not None else False
