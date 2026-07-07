@@ -191,7 +191,9 @@ class AnalyticsPolicy:
             reset_fn()
 
 
-def _patch_viewer_intercept_vis(native_viewer: "NativeMujocoViewer", env) -> None:
+def _patch_viewer_intercept_vis(
+    native_viewer: "NativeMujocoViewer", env, y_end_range: tuple[float, float] | None = None,
+) -> None:
     """Monkey-patch NativeMujocoViewer to draw the predicted interception sphere.
 
     Adds a sphere at the current reach target (env 0) and a vertical line from
@@ -210,6 +212,13 @@ def _patch_viewer_intercept_vis(native_viewer: "NativeMujocoViewer", env) -> Non
     Once landing has occurred (or the crossing is narrow), draws the usual
     GREEN sphere at the full crossing point. Lets a human watching sgk_play
     confirm landing timing visually.
+
+    y_end_range (2026-07-07): if given (the task's actual `reset_ball` event
+    param, read by the caller so this stays correct if the range is retuned
+    again -- it already has been twice, ±0.9 then ±1.1), also draws a static
+    white ground bar spanning the full possible lateral target range at the
+    goal line, so a human watching sgk_play can see at a glance how far the
+    current episode's target is from the theoretical maximum.
     """
     orig_update = native_viewer._update_debug_visualizers
 
@@ -263,6 +272,18 @@ def _patch_viewer_intercept_vis(native_viewer: "NativeMujocoViewer", env) -> Non
                 width=width,
                 from_=from_,
                 to=to,
+            )
+
+        # Static range indicator (2026-07-07): ground bar spanning the full
+        # y_end_range this task is configured with, at the goal line. y_end is
+        # sampled as an offset from env_origin_y (same frame reset_ball_rolling
+        # uses for y_start/ball_pos), so the bar's endpoints use that same frame.
+        if y_end_range is not None:
+            bar_z = floor_z + 0.005
+            _add_line(
+                np.array([goal_x, origins[1] + y_end_range[0], bar_z], dtype=np.float64),
+                np.array([goal_x, origins[1] + y_end_range[1], bar_z], dtype=np.float64),
+                0.015, [0.9, 0.9, 0.9, 0.9],
             )
 
         # Two-stage wide-crossing schedule (mirrors mdp.rewards._get_reach_target_y).
@@ -422,7 +443,9 @@ def run_play(task_id: str, cfg: PlayConfig) -> None:
             if key == KEY_V:
                 analytics.toggle()
         native_viewer = NativeMujocoViewer(env, final_policy, key_callback=_key_cb)
-        _patch_viewer_intercept_vis(native_viewer, env)
+        _reset_ball_cfg = env_cfg.events.get("reset_ball")
+        _y_end_range = _reset_ball_cfg.params.get("y_end_range") if _reset_ball_cfg else None
+        _patch_viewer_intercept_vis(native_viewer, env, y_end_range=_y_end_range)
         native_viewer.run()
     elif resolved_viewer == "viser":
         ViserPlayViewer(env, final_policy).run()
