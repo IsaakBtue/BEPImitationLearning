@@ -46,6 +46,12 @@ def assign_static_regions(env: "ManagerBasedRlEnv", env_ids: torch.Tensor | None
     Sets env._region_id (int64, shape (num_envs,), values 0-3). Called once
     with mode="startup" — env_ids is ignored (region assignment always
     covers the full batch and is never reassigned on reset).
+
+    Training-only (see randomize_region_on_reset for the play-mode
+    equivalent): the region_estimator is trained assuming a stable, balanced
+    ground-truth distribution across the parallel batch, so this permanent
+    per-env split is intentional for training, matching G1's end_regions
+    mechanism (legged_gym/legged_gym/envs/base/legged_robot.py:916-924).
     """
     n = env.num_envs
     quarter = n // 4
@@ -56,6 +62,32 @@ def assign_static_regions(env: "ManagerBasedRlEnv", env_ids: torch.Tensor | None
         for r in range(4)
     ])
     env._region_id = region_id
+
+
+def randomize_region_on_reset(env: "ManagerBasedRlEnv", env_ids: torch.Tensor | None) -> None:
+    """Play-mode event (mode="reset"): re-samples env._region_id uniformly at
+    random for each resetting env, every episode, instead of a permanent
+    per-env split fixed once at startup.
+
+    FIX 2026-07-07: assign_static_regions degenerates for small num_envs --
+    at num_envs=1 (the play default), quarter=0/remainder=1 pins the single
+    env to region index 3 (right_far) for the entire session, so a single-
+    agent play session could never show a genuinely near-region episode at
+    all (only far-region episodes with a small sampled magnitude, which still
+    correctly require the blue gate by region label -- easy to mistake for
+    "close balls incorrectly getting split", see docs/BugFixes.md). This event
+    replaces assign_static_regions in play mode only (goalkeeper_multidisc_
+    env_cfg wires one or the other depending on the play flag) so that a
+    single agent's episodes cycle through all 4 regions over time, giving a
+    representative view of the full agent's behavior with num_envs=1. Must
+    run before reset_ball_rolling_by_region in the same reset cycle (dict
+    registration order in goalkeeper_multidisc_env_cfg preserves this).
+    """
+    if env_ids is None:
+        env_ids = torch.arange(env.num_envs, device=env.device, dtype=torch.long)
+    if not hasattr(env, "_region_id"):
+        env._region_id = torch.zeros(env.num_envs, dtype=torch.int64, device=env.device)
+    env._region_id[env_ids] = torch.randint(0, 4, (len(env_ids),), device=env.device)
 
 
 def reset_ball_rolling_by_region(

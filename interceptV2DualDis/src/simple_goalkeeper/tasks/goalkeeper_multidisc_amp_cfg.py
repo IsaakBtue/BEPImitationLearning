@@ -53,18 +53,50 @@ def goalkeeper_multidisc_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
         params={},
     )
 
-    # (c) Static region assignment, once at startup.
-    cfg.events["assign_static_regions"] = EventTermCfg(
-        func=gk_regions.assign_static_regions,
-        mode="startup",
-        params={},
-    )
+    # (c) Region assignment. Training keeps the permanent per-env split (the
+    # region_estimator is trained assuming a stable, balanced ground-truth
+    # distribution across the parallel batch). Play re-randomizes on every
+    # reset instead -- assign_static_regions degenerates at num_envs=1 (the
+    # play default), permanently pinning the single env to one region for the
+    # whole session; randomize_region_on_reset lets a single agent's episodes
+    # cycle through all 4 regions over time. FIX 2026-07-07, docs/BugFixes.md.
+    #
+    # Must execute before "reset_ball" (reset_ball_rolling_by_region reads
+    # env._region_id) and "reset_ball" must in turn stay before
+    # "reset_from_motion_data" (its tier-routing depends on reset_ball's
+    # freshly-computed trajectory, an existing convention from goalkeeper_
+    # env_cfg). For mode="reset" events, mjlab's EventManager executes terms
+    # in dict/registration order, not by key. "reset_ball" (and, if present,
+    # "reset_from_motion_data"/"tick_catchstep") already exist in cfg.events
+    # from the base goalkeeper_env_cfg() call above, inserted *before* this
+    # function adds "assign_static_regions" -- a plain `cfg.events[key] = ...`
+    # reassignment updates the value in place but does NOT move an existing
+    # key's position, so simply reassigning "reset_ball" below would leave it
+    # in its too-early original slot. Pop the order-sensitive keys first so
+    # they get fresh (later) insertion positions once re-added, in the
+    # correct relative order.
+    reset_ball_cfg = cfg.events.pop("reset_ball")
+    reset_from_motion_data_cfg = cfg.events.pop("reset_from_motion_data", None)
+    tick_catchstep_cfg = cfg.events.pop("tick_catchstep", None)
+
+    if play:
+        cfg.events["assign_static_regions"] = EventTermCfg(
+            func=gk_regions.randomize_region_on_reset,
+            mode="reset",
+            params={},
+        )
+    else:
+        cfg.events["assign_static_regions"] = EventTermCfg(
+            func=gk_regions.assign_static_regions,
+            mode="startup",
+            params={},
+        )
 
     # (d) Replace the shared-range ball spawn with the region-conditioned one.
     # Reuses the existing reset_ball event's ball_name/dist_range/
     # t_flight_range/spawn_z; drops y_start_range/y_end_range since those are
     # now resolved per-region inside reset_ball_rolling_by_region.
-    existing = cfg.events["reset_ball"].params
+    existing = reset_ball_cfg.params
     cfg.events["reset_ball"] = EventTermCfg(
         func=gk_regions.reset_ball_rolling_by_region,
         mode="reset",
@@ -75,6 +107,10 @@ def goalkeeper_multidisc_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
             "spawn_z": existing["spawn_z"],
         },
     )
+    if reset_from_motion_data_cfg is not None:
+        cfg.events["reset_from_motion_data"] = reset_from_motion_data_cfg
+    if tick_catchstep_cfg is not None:
+        cfg.events["tick_catchstep"] = tick_catchstep_cfg
 
     return cfg
 
