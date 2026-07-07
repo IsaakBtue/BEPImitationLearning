@@ -278,12 +278,17 @@ def _patch_viewer_intercept_vis(
         # y_end_range this task is configured with, at the goal line. y_end is
         # sampled as an offset from env_origin_y (same frame reset_ball_rolling
         # uses for y_start/ball_pos), so the bar's endpoints use that same frame.
+        # 2026-07-07 fix: raised from floor_z+0.005 (invisible -- too close to
+        # the floor plane, likely z-fighting/occluded) to +0.03, same order as
+        # the sphere/line z-offsets above (which are confirmed visible), and
+        # switched white->yellow + thickened for contrast against the green/
+        # blue spheres and the floor.
         if y_end_range is not None:
-            bar_z = floor_z + 0.005
+            bar_z = floor_z + 0.03
             _add_line(
                 np.array([goal_x, origins[1] + y_end_range[0], bar_z], dtype=np.float64),
                 np.array([goal_x, origins[1] + y_end_range[1], bar_z], dtype=np.float64),
-                0.015, [0.9, 0.9, 0.9, 0.9],
+                0.03, [1.0, 0.85, 0.0, 1.0],
             )
 
         # Two-stage wide-crossing schedule (mirrors mdp.rewards._get_reach_target_y).
