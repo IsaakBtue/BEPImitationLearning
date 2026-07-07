@@ -234,8 +234,17 @@ def goalkeeper_multidisc_amp_runner_cfg() -> dict:
         "empirical_normalization": True,
         "use_wandb": True,
         "wandb_project": "SimpleGoalKeeper",
-        "amp_discr_hidden_dims": [256, 256],
+        # FIX 2026-07-08: match G1's discriminator width exactly
+        # (Humanoid-Goalkeeper/rsl_rl/rsl_rl/modules/amp.py:87, AMP.__init__'s
+        # hidden_dims=[512, 256] default, which G1 never overrides). Was
+        # [256, 256] -- half the trunk capacity, an undocumented divergence.
+        "amp_discr_hidden_dims": [512, 256],
         "amp_reward_coef": 0.5,
         "amp_task_reward_lerp": 0.6,
+        # NOT a G1-equivalent AMP parameter despite the name -- this is the
+        # actor's action-noise std floor (min_std), consumed by
+        # MultiDiscAMPPPO/HimAmpOnPolicyRunner, unrelated to the AMP
+        # discriminator/reward mechanism G1 uses. G1 has no equivalent; left
+        # unchanged as an intentional, already-documented, non-AMP addition.
         "amp_min_normalized_std": 0.05,
     }

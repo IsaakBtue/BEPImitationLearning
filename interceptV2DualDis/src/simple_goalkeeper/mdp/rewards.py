@@ -247,10 +247,12 @@ def _get_reach_target_y(
         env._blue_was_airborne = torch.zeros(n, dtype=torch.bool, device=env.device)
         env._blue_landed = torch.zeros(n, dtype=torch.bool, device=env.device)
         env._blue_airborne_at_reset = torch.zeros(n, dtype=torch.bool, device=env.device)
+        env._blue_settle_count = torch.zeros(n, dtype=torch.int64, device=env.device)
     just_reset = env.episode_length_buf <= 1
     env._blue_was_airborne[just_reset] = False
     env._blue_landed[just_reset] = False
     env._blue_airborne_at_reset[just_reset] = False
+    env._blue_settle_count[just_reset] = 0
 
     try:
         robot: Entity = env.scene[asset_cfg.name]
@@ -291,9 +293,26 @@ def _get_reach_target_y(
         # check. See docstring above.
         foot_speed = torch.norm(assigned_foot_vel[:, :2], dim=-1)
 
+        # FIX 2026-07-08: settle window, not an instantaneous check. A live
+        # diagnostic (docs/BugFixes.md, 2026-07-07) showed the pure
+        # instantaneous version of this check (speed < threshold on the exact
+        # same step as the position check) drove genuine landings to 0% --
+        # a real footstrike still carries residual swing velocity for a few
+        # steps after first ground contact, decaying toward zero as weight
+        # transfers and friction/contact damping take hold, not instantly.
+        # Require the foot to stay in contact AND within landing_radius for
+        # _BLUE_SETTLE_STEPS consecutive steps (ruling out a fast sweep-
+        # through, which can't hold position that long) before checking
+        # velocity, giving a genuine plant time to actually decelerate.
+        candidate = wide & env._blue_was_airborne & foot_in_contact & (dist_to_blue < landing_radius)
+        env._blue_settle_count = torch.where(
+            candidate, env._blue_settle_count + 1, torch.zeros_like(env._blue_settle_count)
+        )
+        _BLUE_SETTLE_STEPS = 3
         newly_landed = (
-            wide & env._blue_was_airborne & foot_in_contact
-            & (dist_to_blue < landing_radius) & (foot_speed < landing_speed_threshold)
+            (env._blue_settle_count >= _BLUE_SETTLE_STEPS)
+            & (foot_speed < landing_speed_threshold)
+            & ~env._blue_landed
         )
         env._blue_landed |= newly_landed
 

@@ -321,8 +321,20 @@ class MultiDiscAMPPPO:
                 policy_d = discr(torch.cat([policy_state_n, policy_next_state_n], dim=-1))
                 expert_loss = torch.nn.MSELoss()(expert_d, torch.ones(expert_d.size(), device=self.device))
                 policy_loss = torch.nn.MSELoss()(policy_d, -1 * torch.ones(policy_d.size(), device=self.device))
-                grad_pen = discr.compute_grad_pen(expert_state_n, expert_next_state_n, lambda_=10)
-                amp_loss = amp_loss + 0.5 * expert_loss + 0.5 * policy_loss
+                # FIX 2026-07-08: match G1 exactly (Humanoid-Goalkeeper/rsl_rl/
+                # rsl_rl/modules/amp.py:124-173). G1's compute_grad_pen defaults
+                # to lambda_=5, then compute_loss applies an additional *0.1
+                # scaling on top (grad_pen = self.compute_grad_pen(...) * 0.1),
+                # net effective coefficient 0.5. This port previously called
+                # lambda_=10 with no further scaling -- effective coefficient
+                # 10, ~20x stronger regularization than G1, which over-flattens
+                # the discriminator's logit landscape. Also: G1's gail_loss is
+                # the unweighted sum (expert_loss + policy_loss); this port
+                # previously averaged (0.5 * each), halving amp_loss's relative
+                # magnitude against the rest of the total loss. Both now match
+                # G1's actual formula, not just its outcome. See docs/BugFixes.md.
+                grad_pen = discr.compute_grad_pen(expert_state_n, expert_next_state_n, lambda_=5) * 0.1
+                amp_loss = amp_loss + expert_loss + policy_loss
                 grad_pen_loss = grad_pen_loss + grad_pen
                 expert_preds.append(expert_d.mean().item())
                 policy_preds.append(policy_d.mean().item())
@@ -364,6 +376,18 @@ class MultiDiscAMPPPO:
 
         num_updates = self.num_learning_epochs * self.num_mini_batches
         self.storage.clear()
+        # FIX 2026-07-08: match G1's on-policy-only AMP discriminator training
+        # (Humanoid-Goalkeeper/rsl_rl/rsl_rl/algorithms/him_ppo.py -- its
+        # "policy" sample for the discriminator loss comes directly from the
+        # same HIMRolloutStorage minibatch as everything else, cleared every
+        # update). This port previously left amp_storages as a persistent
+        # 250k-transition FIFO buffer, training the discriminator against a
+        # stale mix of past-policy behavior across many updates instead of
+        # strictly the current on-policy rollout. Clearing here makes each
+        # amp_storages[name] hold only the transitions collected since the
+        # last update, matching G1's semantics exactly. See docs/BugFixes.md.
+        for rb in self.amp_storages.values():
+            rb.clear()
         return (mean_value_loss / num_updates, mean_surrogate_loss / num_updates,
                 mean_amp_loss / num_updates, mean_grad_pen_loss / num_updates,
                 mean_est_loss / num_updates, mean_region_loss / num_updates,
