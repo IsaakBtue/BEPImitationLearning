@@ -53,6 +53,24 @@ def goalkeeper_multidisc_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
         params={},
     )
 
+    # (b2) FIX 2026-07-08: G1's AMP discriminator observes joint POSITIONS
+    # ONLY (Humanoid-Goalkeeper/legged_gym/legged_gym/envs/base/legged_robot.py:
+    # get_amp_observations() returns self.dof_pos.clone(), nothing else --
+    # confirmed by an independent verification pass after an initial AMP-
+    # parity fix this same day was found to have missed this specific
+    # divergence). The base goalkeeper_env_cfg()'s shared "amp" group (used by
+    # SimpleGoalKeeper's single-disc track too -- not modified here) includes
+    # joint_vel alongside joint_pos, a real content divergence from G1, not an
+    # equivalent restatement. Overriding just this task's "amp" group to
+    # match G1 exactly; MotionDatasetCfg's amp_obs_terms is overridden to
+    # match below (goalkeeper_multidisc_amp_runner_cfg), keeping expert/policy
+    # obs dimensions in sync. See docs/BugFixes.md.
+    cfg.observations["amp"] = ObservationGroupCfg(
+        terms={"joint_pos": cfg.observations["amp"].terms["joint_pos"]},
+        concatenate_terms=True,
+        enable_corruption=False,
+    )
+
     # (c) Region assignment. Training keeps the permanent per-env split (the
     # region_estimator is trained assuming a stable, balanced ground-truth
     # distribution across the parallel batch). Play re-randomizes on every
@@ -122,7 +140,12 @@ from simple_goalkeeper.tasks.goalkeeper_amp_cfg import (
     GOALKEEPER_ANCHOR_NAME,
     GOALKEEPER_KEY_BODY_NAMES,
 )
-from beyondAMP.mjlab.obs_groups import AMPObsBaiscTerms
+# FIX 2026-07-08: G1's AMP discriminator observes joint positions only (see
+# the "amp" observation group override above) -- a task-local override, NOT
+# a change to the shared AMPObsBaiscTerms constant (["joint_pos","joint_vel"]),
+# which SimpleGoalKeeper's single-disc AMP track (goalkeeper_amp_cfg.py) and
+# several other beyondAMP example tasks still use unmodified.
+_MULTIDISC_AMP_OBS_TERMS: list[str] = ["joint_pos"]
 
 _MOTIONS_DIR = Path(__file__).parents[1] / "motions" / "data"
 
@@ -186,7 +209,7 @@ def goalkeeper_multidisc_amp_runner_cfg() -> dict:
         name: MotionDatasetCfg(
             motion_files=[path],
             body_names=GOALKEEPER_KEY_BODY_NAMES,
-            amp_obs_terms=AMPObsBaiscTerms,
+            amp_obs_terms=_MULTIDISC_AMP_OBS_TERMS,
             anchor_name=GOALKEEPER_ANCHOR_NAME,
         )
         for name, path in REGION_MOTION_FILES.items()
