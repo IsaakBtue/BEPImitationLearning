@@ -152,7 +152,7 @@ def _get_reach_target_y(
     asset_cfg: SceneEntityCfg = _DEFAULT_FEET_CFG,
     wide_threshold: float = 0.5,
     landing_radius: float = 0.08,
-    landing_speed_threshold: float = 0.5,
+    landing_speed_threshold: float = 0.8,
 ) -> torch.Tensor:
     """Two-stage reach target for wide crossings (ported from SimpleGoalKeeper
     2026-07-03/07-04/07-05, see SimpleGoalKeeper/CLAUDE.md divergence table).
@@ -205,6 +205,19 @@ def _get_reach_target_y(
     requiring pixel-perfect position. Matches the follow-up flagged in the
     prior fix entry ("a velocity-based check ... to distinguish a genuine
     plant from a foot merely passing through at speed"). See docs/BugFixes.md.
+
+    FIX 2026-07-08 (6500-iteration escalation): landing_speed_threshold
+    loosened 0.5 -> 0.8. After adding blue_stick_landing's dense "close and
+    slow" shaping (see that function's docstring) and a settle-window
+    requirement (both above), genuine landings still measured 0.0% across
+    5 consecutive checks (one single 0.1% fluke) despite blue_stick_landing
+    itself showing consistent nonzero reward -- the policy was demonstrably
+    getting closer and slower over time without ever crossing the discrete
+    threshold to register as landed. 0.5 m/s may simply be stricter than a
+    real, deliberate footstrike's residual velocity even once decelerating
+    -- not yet independently confirmed against real footstrike dynamics,
+    flagged for revisit if this doesn't move the genuine-landing rate.
+    See docs/BugFixes.md.
 
     Ported because AMP's 2-frame transition discriminator cannot judge global
     trajectory shape or step count -- a smooth fast leap to the far target
