@@ -281,6 +281,9 @@ def _get_reach_target_y(
         # why this replaces _blue_airborne_at_reset as the genuine/free
         # classification signal.
         env._blue_landed_was_free = torch.zeros(n, dtype=torch.bool, device=env.device)
+        # FIX 2026-07-09: see the settle-count increment below for why this
+        # per-step memoization guard exists.
+        env._blue_last_settle_step = torch.full((n,), -1, dtype=torch.int64, device=env.device)
     just_reset = env.episode_length_buf <= 1
     env._blue_was_airborne[just_reset] = False
     env._blue_landed[just_reset] = False
@@ -339,8 +342,28 @@ def _get_reach_target_y(
         # through, which can't hold position that long) before checking
         # velocity, giving a genuine plant time to actually decelerate.
         candidate = wide & env._blue_was_airborne & foot_in_contact & (dist_to_blue < landing_radius)
+        # FIX 2026-07-09: memoization guard, confirmed via independent code
+        # audit (2026-07-09). This function is called up to 7 times per real
+        # environment step -- once each from stopball, softstop, footreach,
+        # foot_proximity, blue_ball_landed, blue_overshoot_penalty, and
+        # blue_stick_landing, all evaluated by mjlab's RewardManager against
+        # the same unchanged post-physics snapshot. `candidate` depends only
+        # on that fixed snapshot, so without this guard the settle-count
+        # incremented once PER CALL, not once per real physics tick --
+        # letting `_BLUE_SETTLE_STEPS=3` be satisfied within a SINGLE real
+        # 0.02s tick (3+ of the 7 calls landing while `candidate` is true),
+        # completely defeating the settle window's documented purpose of
+        # requiring 3 consecutive REAL steps to rule out a single-tick graze.
+        # Only increment on the first call for a given env this tick,
+        # tracked via episode_length_buf (unique per real step, shared by
+        # all 7 callers). Reset-to-zero when candidate is false stays
+        # unguarded -- idempotent regardless of call count. See docs/BugFixes.md.
+        is_first_call_this_tick = env.episode_length_buf != env._blue_last_settle_step
+        env._blue_last_settle_step = env.episode_length_buf.clone()
         env._blue_settle_count = torch.where(
-            candidate, env._blue_settle_count + 1, torch.zeros_like(env._blue_settle_count)
+            candidate,
+            torch.where(is_first_call_this_tick, env._blue_settle_count + 1, env._blue_settle_count),
+            torch.zeros_like(env._blue_settle_count),
         )
         _BLUE_SETTLE_STEPS = 3
         newly_landed = (
