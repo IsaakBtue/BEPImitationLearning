@@ -152,7 +152,7 @@ def _get_reach_target_y(
     asset_cfg: SceneEntityCfg = _DEFAULT_FEET_CFG,
     wide_threshold: float = 0.5,
     landing_radius: float = 0.08,
-    landing_speed_threshold: float = 0.8,
+    landing_speed_threshold: float = 1.0,
 ) -> torch.Tensor:
     """Two-stage reach target for wide crossings (ported from SimpleGoalKeeper
     2026-07-03/07-04/07-05, see SimpleGoalKeeper/CLAUDE.md divergence table).
@@ -219,6 +219,22 @@ def _get_reach_target_y(
     flagged for revisit if this doesn't move the genuine-landing rate.
     See docs/BugFixes.md.
 
+    FIX 2026-07-08 (user-reported "still skipping blue", live diagnostic):
+    landing_speed_threshold loosened again, 0.8 -> 1.0. A live diagnostic
+    driving the actual trained policy (model_2250.pt) measured, over 499
+    wide episodes: 97.6% got the assigned foot within landing_radius WHILE
+    IN GROUND CONTACT at least once (footreach/foot_proximity targeting
+    confirmed correct, empirically, not just by code review -- the "skips
+    blue" symptom is not a footreach bug). At that closest in-contact
+    moment, foot speed clustered at median 0.815 m/s (just above the 0.8
+    threshold) -- only 41.7% of those moments were below 0.8, but 98.6%
+    were below 1.0. The foot is genuinely touching down near blue almost
+    every episode; it's moving slightly too fast, most of the time by a
+    small margin, to count as a deliberate plant under the old threshold.
+    Precision now comes from a threshold that matches where the policy's
+    current gait actually operates, rather than an arbitrary value near but
+    not matching the natural cluster. See docs/BugFixes.md.
+
     Ported because AMP's 2-frame transition discriminator cannot judge global
     trajectory shape or step count -- a smooth fast leap to the far target
     satisfies it as well as a genuine multi-step reference clip, so nothing in
@@ -261,11 +277,16 @@ def _get_reach_target_y(
         env._blue_landed = torch.zeros(n, dtype=torch.bool, device=env.device)
         env._blue_airborne_at_reset = torch.zeros(n, dtype=torch.bool, device=env.device)
         env._blue_settle_count = torch.zeros(n, dtype=torch.int64, device=env.device)
+        # FIX 2026-07-08: see the "landing_ok"/newly_landed block below for
+        # why this replaces _blue_airborne_at_reset as the genuine/free
+        # classification signal.
+        env._blue_landed_was_free = torch.zeros(n, dtype=torch.bool, device=env.device)
     just_reset = env.episode_length_buf <= 1
     env._blue_was_airborne[just_reset] = False
     env._blue_landed[just_reset] = False
     env._blue_airborne_at_reset[just_reset] = False
     env._blue_settle_count[just_reset] = 0
+    env._blue_landed_was_free[just_reset] = False
 
     try:
         robot: Entity = env.scene[asset_cfg.name]
@@ -328,6 +349,34 @@ def _get_reach_target_y(
             & ~env._blue_landed
         )
         env._blue_landed |= newly_landed
+
+        # FIX 2026-07-08: _blue_airborne_at_reset (still computed above, for
+        # any other diagnostic that wants it) is a STICKY per-episode latch
+        # -- once any foot is airborne within the first 2 steps (near-
+        # universal here: RSI donor poses are mid-motion by construction, see
+        # _blue_was_airborne), it never resets for the rest of a potentially
+        # 150-step episode. A live diagnostic driving the actual trained
+        # policy measured landing timing directly: genuine landings NEVER
+        # fired before episode step 28 (median 35, max 86) across 522 sampled
+        # landings -- yet 100% were still flagged _blue_airborne_at_reset,
+        # because that flag says nothing about when THIS landing happened,
+        # only whether ANY foot was briefly airborne near reset. Since
+        # stopball/softstop's landing_ok gates on `~_blue_airborne_at_reset`,
+        # this silently blocked stopball/softstop from EVER firing on ANY
+        # wide-crossing episode, regardless of how much genuine approach work
+        # (30-85 steps, clearly not "free") preceded the landing -- and made
+        # every "genuine landing rate" measurement taken today read 0%
+        # regardless of actual policy behavior. Replaced with a direct
+        # per-landing-event check: was THIS SPECIFIC landing achieved
+        # suspiciously early (few steps since reset) -- a landing at step 3
+        # can't reflect real approach work; a landing at step 28+ (the entire
+        # observed range) demonstrably can. See docs/BugFixes.md.
+        _BLUE_LANDING_FREE_STEP_THRESHOLD = 10
+        env._blue_landed_was_free = torch.where(
+            newly_landed,
+            env.episode_length_buf < _BLUE_LANDING_FREE_STEP_THRESHOLD,
+            env._blue_landed_was_free,
+        )
 
     phase1_active = wide & ~env._blue_landed
     return torch.where(phase1_active, half_y, full_y)
@@ -668,6 +717,20 @@ def stopball(
     as metrics.blue_landed_genuine) so only a landing the policy actually
     caused this episode unlocks stopball/softstop on wide crossings. See
     docs/BugFixes.md.
+
+    FIX 2026-07-08: env._blue_airborne_at_reset turned out to be a broken
+    signal for this purpose -- a sticky per-episode latch that goes True
+    almost universally within the first 2 steps (RSI donor poses are
+    mid-motion by construction) and never resets, so it says nothing about
+    whether the LANDING ITSELF was free. A live diagnostic driving the
+    trained policy measured genuine landing timing directly: landings never
+    fired before episode step 28 (median 35, max 86, 522 samples) -- yet
+    100% were still flagged _blue_airborne_at_reset, meaning this gate had
+    been silently unsatisfiable for ALL wide episodes regardless of how much
+    real approach work preceded the landing. Replaced with
+    env._blue_landed_was_free, a per-landing-event check (was episode_length_buf
+    suspiciously small -- <10 steps -- at the moment THIS landing fired).
+    See docs/BugFixes.md.
     """
     _get_reach_target_y(env, ball_name)  # ensure _blue_wide/_blue_landed are fresh this step
 
@@ -685,7 +748,7 @@ def stopball(
 
     delta_vx = ball_x_vel - env._sb_init_vx
     in_front = ball_x_local > -0.3  # allow 0.3 m past goal line: deflection accumulates gradually
-    landing_ok = ~env._blue_wide | (env._blue_landed & ~env._blue_airborne_at_reset)
+    landing_ok = ~env._blue_wide | (env._blue_landed & ~env._blue_landed_was_free)
     fired = (delta_vx > delta_vel_threshold) & in_front & landing_ok & ~env._sb_flag
     env._sb_flag |= fired
     return fired.float()
@@ -707,7 +770,8 @@ def softstop(
 
     Landing gate (ported from SimpleGoalKeeper 2026-07-05): same wide-crossing
     landing gate as stopball -- see that function's docstring, including the
-    2026-07-07 tightening to genuine-only landings.
+    2026-07-07 tightening to genuine-only landings and the 2026-07-08 fix
+    replacing the broken env._blue_airborne_at_reset signal.
     """
     _get_reach_target_y(env, ball_name)  # ensure _blue_wide/_blue_landed are fresh this step
 
@@ -724,7 +788,7 @@ def softstop(
     env._softstop_correct_foot[just_reset] = False
 
     in_front = ball_x_local > -0.3
-    landing_ok = ~env._blue_wide | (env._blue_landed & ~env._blue_airborne_at_reset)
+    landing_ok = ~env._blue_wide | (env._blue_landed & ~env._blue_landed_was_free)
     fired = (ball_x_vel > velocity_threshold) & in_front & landing_ok & ~env._softstop_flag
 
     # Track correct foot contact at softstop moment.

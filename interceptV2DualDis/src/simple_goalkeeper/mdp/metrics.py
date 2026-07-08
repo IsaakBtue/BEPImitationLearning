@@ -26,15 +26,23 @@ def blue_landed_genuine(
     ball_name: str,
     asset_cfg: SceneEntityCfg = _DEFAULT_FEET_CFG,
 ) -> torch.Tensor:
-    """1.0 while env._blue_landed is true and it was NOT an RSI-assisted
-    landing (env._blue_airborne_at_reset is false), else 0.0.
+    """1.0 while env._blue_landed is true and it was NOT a free landing
+    (env._blue_landed_was_free is false), else 0.0.
 
     Wired with reduce="last" in MetricsTermCfg (goalkeeper_env_cfg.py), so the
     logged Episode_Metrics value is this exact per-episode 0/1 outcome, not a
     mean over the episode. See _get_reach_target_y for both latches.
+
+    FIX 2026-07-08: was env._blue_airborne_at_reset -- a sticky per-episode
+    latch found via live diagnostic to be true almost universally (RSI donor
+    poses are mid-motion by construction) and to never reset, so it flagged
+    100% of even clearly-genuine landings (episode step 28+, median 35,
+    across 522 sampled landings) as "free". Replaced with
+    env._blue_landed_was_free, a per-landing-event check of whether THIS
+    SPECIFIC landing happened suspiciously early. See docs/BugFixes.md.
     """
     _get_reach_target_y(env, ball_name, asset_cfg=asset_cfg)  # ensure latches are fresh
-    return (env._blue_landed & ~env._blue_airborne_at_reset).float()
+    return (env._blue_landed & ~env._blue_landed_was_free).float()
 
 
 def blue_landed_rsi_assisted(
@@ -42,11 +50,10 @@ def blue_landed_rsi_assisted(
     ball_name: str,
     asset_cfg: SceneEntityCfg = _DEFAULT_FEET_CFG,
 ) -> torch.Tensor:
-    """1.0 while env._blue_landed is true and the assigned foot's first
-    airborne transition happened within 2 steps of reset (env.
-    _blue_airborne_at_reset), else 0.0. Mutually exclusive with
-    blue_landed_genuine given _blue_landed true; both zero when _blue_landed
-    is false. See blue_landed_genuine.
+    """1.0 while env._blue_landed is true and this specific landing happened
+    suspiciously early (env._blue_landed_was_free), else 0.0. Mutually
+    exclusive with blue_landed_genuine given _blue_landed true; both zero
+    when _blue_landed is false. See blue_landed_genuine.
     """
     _get_reach_target_y(env, ball_name, asset_cfg=asset_cfg)
-    return (env._blue_landed & env._blue_airborne_at_reset).float()
+    return (env._blue_landed & env._blue_landed_was_free).float()
