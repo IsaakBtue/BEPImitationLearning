@@ -374,6 +374,17 @@ def goalkeeper_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
             weight=-30.0,
             params={"ball_name": BALL_NAME, "asset_cfg": _FEET_CFG},
         ),
+        # FEAT 2026-07-08: dense reward for "close AND slow" near blue -- the
+        # exact joint condition the settle-window landing check requires.
+        # Added after two escalation checks (iter 2000, 3750 of
+        # amp_g1_parity_2026-07-08b) both measured 0.0% genuine landings and
+        # blue_overshoot_penalty staying flat/negative instead of shrinking.
+        # See rewards.blue_stick_landing docstring.
+        "blue_stick_landing": RewardTermCfg(
+            func=gk_mdp.blue_stick_landing,
+            weight=8.0,
+            params={"ball_name": BALL_NAME, "asset_cfg": _FEET_CFG},
+        ),
         # --- active stepping: reward lifting feet during approach ---
         "foot_clearance": RewardTermCfg(
             func=gk_mdp.foot_clearance,

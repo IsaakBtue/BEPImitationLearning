@@ -556,6 +556,76 @@ def blue_overshoot_penalty(
     return overshoot * phase1_active.float()
 
 
+def blue_stick_landing(
+    env: "ManagerBasedRlEnv",
+    ball_name: str,
+    asset_cfg: SceneEntityCfg = _DEFAULT_FEET_CFG,
+    dist_sigma: float = 15.0,
+    speed_sigma: float = 3.0,
+) -> torch.Tensor:
+    """FEAT 2026-07-08: dense reward for the assigned foot being simultaneously
+    CLOSE to and SLOW near the blue midpoint on a wide, unlanded crossing --
+    exp(-dist_sigma * dist_to_blue) * exp(-speed_sigma * foot_speed), peaking
+    exactly at "close AND stopped" (a genuine plant), zero elsewhere.
+
+    Rationale: two escalation-triggered health checks (iteration 2000 and
+    3750 of run amp_g1_parity_2026-07-08b, docs/BugFixes.md) measured genuine
+    blue landings at exactly 0.0% each time, over 2600+ wide episodes per
+    check, despite the settle-window landing-check fix and full AMP-parity
+    pass both already being in effect. blue_overshoot_penalty's per-episode
+    value stayed flat and strongly negative across the whole run (~-0.65 to
+    -0.86, iterations 0-5500) instead of shrinking -- the policy wasn't
+    learning to avoid it. Diagnosis: nothing in the reward stack gives dense
+    credit for the EXACT joint condition (close + slow) the settle-window
+    check requires -- footreach/foot_proximity reward proximity to blue, and
+    vel_sigma rewards speed toward blue, but nothing rewards decelerating
+    once close. The only payoff for actually achieving "close and slow" was
+    the sparse, conjunctive settle-window event itself (contact + radius for
+    3 consecutive steps + speed threshold) -- a policy has to discover that
+    combination by chance before any gradient reinforces it, and evidently
+    hasn't in 5500+ iterations. This term gives a smooth reward basin that
+    peaks at the target joint condition, so ordinary gradient ascent can find
+    it incrementally (get closer -> more reward; get slower while close ->
+    more reward) instead of requiring the exact conjunction to be stumbled
+    into blind. Mirrors this project's own existing `cleanstop` (rewards low
+    BALL speed near a target after softstop) -- same "reward stillness near a
+    point" pattern, applied to the FOOT approaching blue instead of the ball
+    after a save.
+
+    dist_sigma=15 makes the distance factor decay to ~0.5 by ~5cm, ~0.1 by
+    ~15cm -- tight enough to require actually being near blue, not just
+    anywhere on the approach path. speed_sigma=3 makes the speed factor decay
+    to ~0.5 by ~0.23 m/s, ~0.1 by ~0.77 m/s -- rewards genuine deceleration
+    without demanding literal zero velocity. Neither tuned against real
+    footstrike dynamics; flagged for revisit if this doesn't move the
+    genuine-landing rate.
+
+    Zero on narrow crossings and once genuinely landed -- mirrors
+    blue_overshoot_penalty's phase1_active gate exactly (_get_reach_target_y).
+    """
+    _get_reach_target_y(env, ball_name, asset_cfg=asset_cfg)  # ensure _blue_wide/_blue_landed fresh
+
+    full_y = _get_ball_crossing_y(env, ball_name)                 # (N,) world Y
+    start_y = env.scene.env_origins[:, 1]                         # (N,) world Y
+    half_y = start_y + (full_y - start_y) / 2.0
+    goal_x_w = env.scene.env_origins[:, 0]
+    target_xy = torch.stack([goal_x_w, half_y], dim=-1)           # (N, 2)
+
+    robot: Entity = env.scene[asset_cfg.name]
+    foot_pos_w = robot.data.body_link_pos_w[:, asset_cfg.body_ids, :]  # (N, 2, 3)
+    foot_vel_w = robot.data.body_link_lin_vel_w[:, asset_cfg.body_ids, :]  # (N, 2, 3)
+    foot_idx = _get_correct_foot_idx(env, ball_name)                   # (N,)
+    arange_n = torch.arange(env.num_envs, device=env.device)
+    assigned_foot_pos = foot_pos_w[arange_n, foot_idx]                 # (N, 3)
+    assigned_foot_vel = foot_vel_w[arange_n, foot_idx]                 # (N, 3)
+
+    dist = torch.norm(assigned_foot_pos[:, :2] - target_xy, dim=-1)
+    speed = torch.norm(assigned_foot_vel[:, :2], dim=-1)
+
+    phase1_active = env._blue_wide & ~env._blue_landed
+    return torch.exp(-dist_sigma * dist) * torch.exp(-speed_sigma * speed) * phase1_active.float()
+
+
 def stopball(
     env: "ManagerBasedRlEnv",
     ball_name: str,
