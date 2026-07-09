@@ -209,6 +209,7 @@ class MotionResetManager:
         env_ids: torch.Tensor | None,
         asset_cfg: SceneEntityCfg = _DEFAULT_ROBOT_CFG,
         rsi_fraction: float = 0.8,
+        blue_practice_fraction: float = 0.0,
     ) -> None:
         """Literal port of Humanoid-Goalkeeper G1's continue_keep mechanism.
 
@@ -249,6 +250,25 @@ class MotionResetManager:
         _reset_root_states also randomizes root velocity ±0.3 unconditionally
         on every reset, which this project's reset_base does not — a known,
         separate divergence outside reset_from_motion_data's scope).
+
+        FEAT 2026-07-10 (blue_practice_fraction, no G1 equivalent -- see
+        docs/BugFixes.md "RSI-style episode-start curriculum"): on the
+        continue_keep (rsi_fraction) branch, donor selection is normally
+        uniform over ALL currently-running envs. For a curriculum-controlled
+        fraction of resets, instead bias donor selection toward envs
+        CURRENTLY mid-approach on a wide crossing and not yet landed
+        (env._blue_wide & ~env._blue_landed) -- giving a freshly-reset
+        episode a joint pose that resembles already being partway through
+        the hard approach-and-plant behavior, rather than always starting
+        cold. Directly manufactures more training exposure to the rare,
+        hard-to-reach state that genuine landing requires (JSRL / reverse-
+        curriculum-generation pattern), annealed down as training matures
+        (see reward_curriculum_ep_len-driven fraction in
+        reset_from_motion_data). Falls back to uniform selection if no
+        candidate envs currently satisfy the condition (e.g. very early in
+        training). Root position/ball state are unaffected -- only the
+        donor's joint pose is borrowed, exactly as continue_keep already
+        does for any other donor.
         """
         if env_ids is None:
             env_ids = torch.arange(env.num_envs, device=env.device, dtype=torch.int32)
@@ -259,7 +279,18 @@ class MotionResetManager:
         n = len(env_ids)
 
         if torch.rand(1, device=env.device).item() > (1.0 - rsi_fraction):
-            donor_idx = torch.randint(0, env.num_envs, (n,), device=env.device)
+            uniform_donor = torch.randint(0, env.num_envs, (n,), device=env.device)
+            donor_idx = uniform_donor
+            if blue_practice_fraction > 0.0:
+                candidate_mask = getattr(env, "_blue_wide", None)
+                landed_mask = getattr(env, "_blue_landed", None)
+                if candidate_mask is not None and landed_mask is not None:
+                    practice_pool = torch.nonzero(candidate_mask & ~landed_mask, as_tuple=False).flatten()
+                    if practice_pool.numel() > 0:
+                        practice_mask = torch.rand(n, device=env.device) < blue_practice_fraction
+                        practice_local_idx = torch.randint(0, practice_pool.numel(), (n,), device=env.device)
+                        practice_donor = practice_pool[practice_local_idx]
+                        donor_idx = torch.where(practice_mask, practice_donor, uniform_donor)
             joint_pos = robot.data.joint_pos[donor_idx].clone()
         else:
             default_pos = robot.data.default_joint_pos[env_ids]
@@ -280,6 +311,9 @@ def init_motion_loader(env: "ManagerBasedRlEnv", env_ids: torch.Tensor | None) -
     MotionResetManager.get().init(env)
 
 
+_BLUE_PRACTICE_BASE_FRACTION = 0.4
+
+
 def reset_from_motion_data(
     env: "ManagerBasedRlEnv",
     env_ids: torch.Tensor | None,
@@ -292,10 +326,23 @@ def reset_from_motion_data(
     legged_robot.py:669) and this project's own reset()/CLAUDE.md-documented
     80/20 intent. Caught by an independent fidelity audit — see
     docs/superpowers/plans/2026-07-01-live-env-rsi.md.
+
+    FEAT 2026-07-10: computes blue_practice_fraction from the shared
+    env._curriculumupdate (0-3, bidirectional as of the curriculum-ratchet
+    fix), linearly annealed from _BLUE_PRACTICE_BASE_FRACTION at cu=0 down
+    to 0 at cu>=3 -- heaviest early in training when genuinely reaching a
+    near-blue state through organic exploration is rarest, tapering off as
+    the policy matures and no longer needs the assist. Since
+    env._curriculumupdate is itself now bidirectional (can drop back down
+    after a regression, not just climb), this fraction will naturally climb
+    back up too if training regresses -- consistent with the rest of this
+    curriculum system. See mgr.reset's docstring for the mechanism itself.
     """
     mgr = MotionResetManager.get()
     mgr.init(env)
-    mgr.reset(env, env_ids, asset_cfg, rsi_fraction=0.8)
+    cu = getattr(env, "_curriculumupdate", 0)
+    blue_practice_fraction = _BLUE_PRACTICE_BASE_FRACTION * max(0.0, 1.0 - cu / 3.0)
+    mgr.reset(env, env_ids, asset_cfg, rsi_fraction=0.8, blue_practice_fraction=blue_practice_fraction)
 
 
 def reset_ball_local_frame(

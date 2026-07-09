@@ -375,14 +375,18 @@ def test_reset_from_motion_data_passes_rsi_fraction_0_8_to_reset(monkeypatch):
         def init(self, env):
             pass
 
-        def reset(self, env, env_ids, asset_cfg, rsi_fraction):
+        def reset(self, env, env_ids, asset_cfg, rsi_fraction, blue_practice_fraction=0.0):
             captured["rsi_fraction"] = rsi_fraction
+            captured["blue_practice_fraction"] = blue_practice_fraction
 
     monkeypatch.setattr(events_mod.MotionResetManager, "get", staticmethod(lambda: _StubMgr()))
 
     events_mod.reset_from_motion_data(env=object(), env_ids=None)
 
     assert captured["rsi_fraction"] == 0.8
+    # env has no _curriculumupdate (bare object()) -> cu defaults to 0 ->
+    # blue_practice_fraction should be the full base fraction (2026-07-10 feat).
+    assert captured["blue_practice_fraction"] == pytest.approx(events_mod._BLUE_PRACTICE_BASE_FRACTION)
 
 
 @pytest.mark.parametrize("rsi_fraction", [0.2, 0.5, 0.8, 0.95])
