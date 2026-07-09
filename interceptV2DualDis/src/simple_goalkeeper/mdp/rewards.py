@@ -645,8 +645,8 @@ def blue_stick_landing(
     env: "ManagerBasedRlEnv",
     ball_name: str,
     asset_cfg: SceneEntityCfg = _DEFAULT_FEET_CFG,
-    dist_sigma: float = 15.0,
-    speed_sigma: float = 3.0,
+    dist_sigma: float = 8.0,
+    speed_sigma: float = 1.5,
 ) -> torch.Tensor:
     """FEAT 2026-07-08: dense reward for the assigned foot being simultaneously
     CLOSE to and SLOW near the blue midpoint on a wide, unlanded crossing --
@@ -677,13 +677,22 @@ def blue_stick_landing(
     point" pattern, applied to the FOOT approaching blue instead of the ball
     after a save.
 
-    dist_sigma=15 makes the distance factor decay to ~0.5 by ~5cm, ~0.1 by
-    ~15cm -- tight enough to require actually being near blue, not just
-    anywhere on the approach path. speed_sigma=3 makes the speed factor decay
-    to ~0.5 by ~0.23 m/s, ~0.1 by ~0.77 m/s -- rewards genuine deceleration
-    without demanding literal zero velocity. Neither tuned against real
-    footstrike dynamics; flagged for revisit if this doesn't move the
-    genuine-landing rate.
+    FIX 2026-07-09: dist_sigma 15->8, speed_sigma 3->1.5. Original values made
+    this a near-cliff (decayed to ~0.1 by 15cm / 0.77 m/s), consistent with the
+    "zero collapse" failure mode identified in research dispatched after
+    curriculum_ratchet_fix_2026-07-09's genuine landing rate collapsed
+    43.4%->1.9% over ~3000 iterations while general stability metrics stayed
+    flat/improved: once stochastic exploration pushes the policy just past this
+    narrow basin, gradient here vanishes, and the cheap/immediate/high-sample-
+    count overshoot penalty dominates the policy-gradient batch by sample count
+    even though the rarer landing payoff has higher expected value -- a
+    self-reinforcing drift, not a one-off regression. Widened so a near-miss
+    (overshooting the basin, or still carrying some speed) still carries
+    usable gradient back toward genuine landing instead of falling into a flat
+    zero region. New values: dist_sigma=8 decays to ~0.5 by ~9cm, ~0.1 by
+    ~29cm; speed_sigma=1.5 decays to ~0.5 by ~0.46 m/s, ~0.1 by ~1.5 m/s.
+    Neither tuned against real footstrike dynamics; flagged for revisit if
+    this doesn't move the genuine-landing rate. See docs/BugFixes.md.
 
     Zero on narrow crossings and once genuinely landed -- mirrors
     blue_overshoot_penalty's phase1_active gate exactly (_get_reach_target_y).

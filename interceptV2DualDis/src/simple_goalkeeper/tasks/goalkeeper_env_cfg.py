@@ -192,6 +192,37 @@ def goalkeeper_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
                 "ep_len_divisor":  47,
             },
         )
+        # FIX 2026-07-09: blue_overshoot_penalty/blue_stick_landing previously had
+        # fixed weights while stopball/softstop/footreach/blue_ball_landed all grow
+        # via curriculum -- an asymmetry that let the "must land at blue first"
+        # incentive shrink relative to the growing downstream payoff as training
+        # matured. Live run curriculum_ratchet_fix_2026-07-09 showed genuine landing
+        # collapse 43.4% (iter 1750) -> 1.9% (iter 5000) with general stability
+        # metrics staying flat/improving over the same window -- research (two
+        # dispatched passes, see docs/BugFixes.md) converged on this as a
+        # rare-event/credit-assignment collapse where the cheap, immediate,
+        # high-sample-count overshoot penalty dominates the policy-gradient batch
+        # over the rarer, delayed, higher-expected-value landing payoff. Tying both
+        # terms to the same bidirectional curriculum as the terms they gate is the
+        # lowest-risk fix both research passes independently ranked first.
+        cfg.curriculum["blue_overshoot_penalty_curriculum"] = CurriculumTermCfg(
+            func=gk_mdp.reward_curriculum_ep_len,
+            params={
+                "reward_name": "blue_overshoot_penalty",
+                "base_weight": -30.0,
+                "update_interval": 500,
+                "ep_len_divisor":  47,
+            },
+        )
+        cfg.curriculum["blue_stick_landing_curriculum"] = CurriculumTermCfg(
+            func=gk_mdp.reward_curriculum_ep_len,
+            params={
+                "reward_name": "blue_stick_landing",
+                "base_weight": 8.0,
+                "update_interval": 500,
+                "ep_len_divisor":  47,
+            },
+        )
         # Correct-foot-save quality bonuses: weights double at cu >= 3 (ep_len ≈ 144 steps).
         # Only makes sense once the robot already saves reliably (cu=3 = footreach fully ramped).
         # One entry per reward, same pattern as reward_curriculum_ep_len.
