@@ -555,9 +555,17 @@ class reward_curriculum_ep_len:
             else:
                 mean_ep_len = 0.0
             cu = int(mean_ep_len / self._ep_len_divisor)
-            # Monotonic: once a level is reached it never drops. Prevents oscillation
-            # near the boundary (e.g. ep_len flickering across 144 = 48×3).
-            env._curriculumupdate = max(env._curriculumupdate, cu)
+            # FIX 2026-07-09: was `max(env._curriculumupdate, cu)` (monotonic
+            # ratchet, never drops). G1 (legged_robot.py:329) has no such floor
+            # -- curriculumupdate is a fresh recomputation every update, so
+            # reward/difficulty scales ease back down if performance regresses.
+            # The ratchet meant a policy that hit a hard patch after advancing
+            # (e.g. a difficulty jump it couldn't yet handle) had no path back
+            # to easier practice -- confirmed live: ball_difficulty hit 1.0,
+            # shank_height terminations and episode length regressed hard, and
+            # never recovered over 2500+ further iterations because nothing
+            # could ease back off. See docs/BugFixes.md.
+            env._curriculumupdate = cu
 
         # G1 formula — weight = base * (1 + 0.5 * cu), cu capped at 3 naturally by ep_len.
         new_weight = self._base_weight * (1.0 + 0.5 * env._curriculumupdate)
@@ -615,15 +623,14 @@ class ball_difficulty_curriculum:
     Longer completed episodes → robot has mastered current difficulty → advance faster.
     Short episodes (robot falling, ball escaping) → advance slowly or not at all.
 
-    SGK maps G1's raw range expansion onto the 0→1 `_ball_difficulty` scalar:
-        difficulty += step_size × curriculumupdate   (clamped to [0, 1])
+    SGK maps G1's curriculumupdate onto the 0→1 `_ball_difficulty` scalar:
+        difficulty = min(1.0, curriculumupdate / 3.0)   -- recomputed fresh
+        every update, not accumulated (FIX 2026-07-09: previously ratcheted
+        via max(), see the FIX comment below).
 
     Default params mirror G1 exactly:
         ep_len_divisor = 50   (same as G1)
         update_interval = 500 (same as G1, in per-env steps)
-        step_size = 0.01      (difficulty units per curriculumupdate per check;
-                               at ep_len=144→curriculumupdate=2, reaches 1.0
-                               in ~50 checks ≈ 1000 iters with 24 steps/iter)
     """
 
     def __init__(self, cfg: "CurriculumTermCfg", env: "ManagerBasedRlEnv") -> None:
@@ -656,10 +663,18 @@ class ball_difficulty_curriculum:
         curriculumupdate = int(mean_ep_len / self._ep_len_divisor)
 
         # Direct curriculum mapping (matches G1: difficulty = f(cu) only, not accumulated).
-        # At cu=3 (ep_len≈144), difficulty = 1.0. Monotonic: never goes backward even
-        # if ep_len temporarily drops (e.g., during policy collapse or harder balls).
+        # At cu=3 (ep_len≈144), difficulty = 1.0.
+        # FIX 2026-07-09: was `max(env._ball_difficulty, new_difficulty)` (monotonic
+        # ratchet, never drops). G1 (legged_robot.py:329,333-336) has no such floor --
+        # curriculumupdate and the command ranges it drives are recomputed fresh every
+        # update, so difficulty eases back down if performance regresses. The ratchet
+        # meant a policy that hit max difficulty and then regressed (more falls,
+        # shorter episodes) had no path back to easier practice to recover -- confirmed
+        # live: ball_difficulty hit 1.0 at iteration ~6496, shank_height terminations
+        # and episode length regressed hard immediately after, and never recovered over
+        # 2500+ further iterations. See docs/BugFixes.md.
         new_difficulty = min(1.0, curriculumupdate / 3.0)
-        env._ball_difficulty = max(env._ball_difficulty, new_difficulty)
+        env._ball_difficulty = new_difficulty
         return {"ball_difficulty": torch.tensor(env._ball_difficulty)}
 
 
