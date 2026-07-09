@@ -417,3 +417,24 @@ This is the real number. The policy has not actually learned genuine multi-step 
 **Evidence:** 48/48 tests pass. Config loads correctly (both new curriculum terms confirmed present in a fresh `load_env_cfg` call). Not yet validated on a live run — this is the first of a planned series of experiments, each to be run to 5k iterations and judged on the genuine-landing-rate trend (not just whether it avoids the specific 43%→2% collapse shape) before deciding whether to keep iterating on this direction or move to the RSI-episode-start-curriculum fallback.
 
 **Not yet resolved:** whether this combination (curriculum-scaled penalty/bonus + widened basin) is sufficient, or whether the rare-event-scarcity mechanism specifically requires attacking exposure/practice frequency directly (the RSI-style episode-start curriculum idea) rather than just incentive magnitude and gradient shape. This is exactly the open question the next 5k-iteration checkpoint is meant to answer.
+
+---
+
+## 2026-07-10 — Branch split: `blue-ball-waypoint` (preserved) + `green-ball-baseline` (two-stage mechanism removed)
+
+**Context:** while `curriculum_landing_gradient_fix_2026-07-09` continued training (landing rate climbing 7.9%→14.2%→19.9% across iterations 1500-4000, no collapse), user requested isolating the core AMP+PPO+save-reward mechanism from the two-stage blue-waypoint mechanism entirely, to verify the underlying system works correctly on the simpler "always target the true crossing point directly" task (closer to G1's own approach, which has no waypoint concept at all).
+
+**Branches created from master (commit `68f5d42`):**
+- `blue-ball-waypoint`: exact preservation of everything up to and including the curriculum-scaling/basin-widening fix. The live training experiment continues on `master`/this lineage.
+- `green-ball-baseline`: new branch with the entire two-stage waypoint mechanism removed.
+
+**Removed on `green-ball-baseline`:**
+- `mdp/rewards.py`: deleted `_get_reach_target_y` (the two-stage midpoint-then-full target scheduler, its settle-window landing detection, and all `env._blue_*` state), `blue_ball_landed`, `blue_overshoot_penalty`, `blue_stick_landing`. `footreach`/`foot_proximity` now target `_get_ball_crossing_y` (the true crossing point) directly and unconditionally, matching G1's own eereach (no waypoint concept upstream). `stopball`/`softstop` fire unconditionally on a qualifying deflection, no longer gated behind a prior blue-midpoint landing. Removed the now-unused `_REGION_IS_FAR` constant and its `regions` import.
+- `mdp/metrics.py`: deleted entirely (`blue_landed_genuine`/`blue_landed_rsi_assisted` were its only content).
+- `mdp/__init__.py`: removed blue-ball/metrics imports and exports.
+- `tasks/goalkeeper_env_cfg.py`: removed the three blue-ball `RewardTermCfg` entries, their three `CurriculumTermCfg` entries (`blue_ball_landed_curriculum`, `blue_overshoot_penalty_curriculum`, `blue_stick_landing_curriculum`), and the metrics-manager block (along with the now-unused `MetricsTermCfg` import).
+- `scripts/play.py`: removed the blue/green two-stage viewer overlay logic -- now always draws the green sphere at the direct crossing point.
+
+**Evidence:** 48/48 tests pass (no blue-ball-specific tests exist in this project's own suite -- those live in the separate `SimpleGoalKeeper/` project, untouched). Live smoke test: fresh `ManagerBasedRlEnv` construction, reset, and 50 steps with `num_envs=16` all succeed cleanly; `reward_manager`'s active-terms list confirmed no `blue_*` terms remain; `metrics_manager` shows only the base `mean_action_acc` term. Full sweep of the codebase for remaining "blue" references confirmed only historical/explanatory comments remain (documenting the removal itself), no active mechanism code.
+
+**Not yet resolved:** no training run launched yet on this branch -- this entry documents the removal only. Next step is a fresh training run to see whether the core mechanism (AMP style reward + stopball/softstop + footreach, no waypoint) converges cleanly on its own, as a baseline sanity check independent of the two-stage mechanism's own debugging saga.

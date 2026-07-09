@@ -212,12 +212,9 @@ def _patch_viewer_intercept_vis(native_viewer: "NativeMujocoViewer", env) -> Non
     each render frame — it moves when a new episode starts and the crossing_y
     changes.
 
-    Two-stage wide-crossing visualization (ported from SimpleGoalKeeper, mirrors
-    mdp.rewards._get_reach_target_y exactly). When |crossing_y - start_y| > 0.5
-    and the assigned foot has not yet landed at the midpoint, draws a BLUE
-    sphere there instead of the usual green one. Once landing has occurred (or
-    the crossing is narrow), draws the usual GREEN sphere at the full crossing
-    point. Lets a human watching sgk_play confirm landing timing visually.
+    green-ball-baseline (2026-07-10): always draws a GREEN sphere at the
+    direct crossing point -- the two-stage blue-waypoint mechanism has been
+    removed on this branch, see docs/BugFixes.md.
     """
     orig_update = native_viewer._update_debug_visualizers
 
@@ -273,49 +270,14 @@ def _patch_viewer_intercept_vis(native_viewer: "NativeMujocoViewer", env) -> Non
                 to=to,
             )
 
-        # Two-stage wide-crossing schedule (mirrors mdp.rewards._get_reach_target_y).
-        start_y = float(origins[1])
-        rel_t = getattr(raw_env, "_rsi_cross_y", None)
-        rel = float(rel_t[0].item()) if rel_t is not None else (cross_y - start_y)
-        wide = abs(rel) > 0.5
-        # FIX 2026-07-07: region-conditioned task's own far/near label is authoritative
-        # over the threshold check above (mirrors _get_reach_target_y's region override,
-        # added same day) -- without this, a region-far episode with a small actual
-        # crossing magnitude (near the 0.5m boundary) is internally wide=True (reward
-        # side requires the blue landing gate) but this viewer showed it as narrow,
-        # rendering only the phantom green marker at the wrong point for the entire
-        # episode while the robot correctly walked to and landed at the (never-shown)
-        # blue target -- looked exactly like "blue_ball_landed fires with the foot not
-        # even close to anything visible." See docs/BugFixes.md.
-        region_id_t = getattr(raw_env, "_region_id", None)
-        if region_id_t is not None:
-            region_names = getattr(raw_env, "_REGION_NAMES_CACHE", None)
-            if region_names is None:
-                from simple_goalkeeper.mdp.regions import REGION_NAMES
-                region_names = REGION_NAMES
-                raw_env._REGION_NAMES_CACHE = region_names
-            wide = wide or region_names[int(region_id_t[0].item())].endswith("_far")
-
-        landed_t = getattr(raw_env, "_blue_landed", None)
-        landed = bool(landed_t[0].item()) if landed_t is not None else False
-
-        if wide and not landed:
-            # Phase 1: BLUE sphere at the midpoint — half the distance, half as far.
-            mid_y = start_y + (cross_y - start_y) / 2.0
-            _add_sphere(goal_x, mid_y, sphere_z, 0.08, [0.15, 0.4, 1.0, 0.75])
-            _add_line(
-                np.array([goal_x, mid_y, floor_z], dtype=np.float64),
-                np.array([goal_x, mid_y, sphere_z], dtype=np.float64),
-                0.008, [0.15, 0.4, 1.0, 0.6],
-            )
-        else:
-            # Phase 2 (or narrow crossing): GREEN sphere at the full crossing point.
-            _add_sphere(goal_x, cross_y, sphere_z, 0.08, [0.1, 1.0, 0.2, 0.75])
-            _add_line(
-                np.array([goal_x, cross_y, floor_z], dtype=np.float64),
-                np.array([goal_x, cross_y, sphere_z], dtype=np.float64),
-                0.008, [0.1, 1.0, 0.2, 0.6],
-            )
+        # green-ball-baseline (2026-07-10): two-stage blue-waypoint mechanism
+        # removed on this branch -- always show the direct crossing point.
+        _add_sphere(goal_x, cross_y, sphere_z, 0.08, [0.1, 1.0, 0.2, 0.75])
+        _add_line(
+            np.array([goal_x, cross_y, floor_z], dtype=np.float64),
+            np.array([goal_x, cross_y, sphere_z], dtype=np.float64),
+            0.008, [0.1, 1.0, 0.2, 0.6],
+        )
 
     native_viewer._update_debug_visualizers = _patched_update
 
