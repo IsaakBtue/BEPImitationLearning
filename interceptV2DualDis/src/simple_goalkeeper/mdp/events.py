@@ -560,6 +560,46 @@ def tick_catchstep(
         env._catchstep = (env._catchstep - 1).clamp(min=0)
 
 
+_CURRICULUM_EMA_ALPHA = 0.3
+
+
+def _update_smoothed_ep_len(env: "ManagerBasedRlEnv", mean_ep_len: float) -> float:
+    """Exponentially smooth the raw per-window mean_ep_len reading before any
+    curriculum term computes cu from it. Shared across reward_curriculum_ep_len
+    and ball_difficulty_curriculum (both use the same ep_len_divisor=47) so
+    they stay synchronized rather than oscillating independently.
+
+    FIX 2026-07-10: the 2026-07-09 bidirectional-curriculum fix (removing the
+    monotonic ratchet) correctly stopped the "stuck forever at a level it
+    can't handle" failure, but a live run (rsi_practice_curriculum_2026-07-10)
+    showed the opposite overcorrection: with no damping, a single noisy
+    500-step window's mean_ep_len is enough to flip cu, and ball_difficulty
+    was observed oscillating 0.667<->0.333 repeatedly for the entire run
+    (never settling at either level for more than 1-2 updates), with
+    mean_episode_length bouncing noisily (78-113) and blue_overshoot_penalty
+    flat/oscillating around -0.4 to -0.5 the whole run instead of improving --
+    consistent with a policy that never gets a stable enough training
+    distribution to consolidate a behavior before the ground shifts again.
+    The original (removed) monotonic design's own docstring flagged this
+    exact risk ("prevents oscillation near the boundary") but fixed it the
+    wrong way (freezing forever) instead of damping the input signal.
+    OpenAI's ADR (arXiv 1910.07113) avoids this the right way: difficulty
+    boundaries move by small steps based on a rolling performance buffer, not
+    an instant snap to the latest noisy reading. This EMA (alpha=0.3, i.e.
+    30% weight to the newest window, 70% to history) is the minimal version
+    of that idea -- a genuine, sustained shift still moves cu within a few
+    updates, but a single noisy window can no longer flip it outright.
+    See docs/BugFixes.md.
+    """
+    if not hasattr(env, "_smoothed_ep_len"):
+        env._smoothed_ep_len = mean_ep_len
+    else:
+        env._smoothed_ep_len = (
+            _CURRICULUM_EMA_ALPHA * mean_ep_len + (1.0 - _CURRICULUM_EMA_ALPHA) * env._smoothed_ep_len
+        )
+    return env._smoothed_ep_len
+
+
 class reward_curriculum_ep_len:
     """G1-style episode-length-driven reward weight curriculum.
 
@@ -573,6 +613,10 @@ class reward_curriculum_ep_len:
     is identical across all ramped rewards (same as G1's single class variable).
 
     G1 extremes: ep_len=150 (full episode) → curriculumupdate=3 → weight = 2.5 × base.
+
+    FIX 2026-07-10: cu is now computed from an EMA-smoothed mean_ep_len
+    (_update_smoothed_ep_len), not the raw per-window reading -- see that
+    function's docstring for why.
     """
 
     def __init__(self, cfg: "CurriculumTermCfg", env: "ManagerBasedRlEnv") -> None:
@@ -601,7 +645,8 @@ class reward_curriculum_ep_len:
                 mean_ep_len = env.episode_length_buf[env_ids].float().mean().item()
             else:
                 mean_ep_len = 0.0
-            cu = int(mean_ep_len / self._ep_len_divisor)
+            smoothed_ep_len = _update_smoothed_ep_len(env, mean_ep_len)
+            cu = int(smoothed_ep_len / self._ep_len_divisor)
             # FIX 2026-07-09: was `max(env._curriculumupdate, cu)` (monotonic
             # ratchet, never drops). G1 (legged_robot.py:329) has no such floor
             # -- curriculumupdate is a fresh recomputation every update, so
@@ -703,11 +748,16 @@ class ball_difficulty_curriculum:
 
         # G1: curriculumupdate = int(mean_episode_length / 50)
         # Uses lengths of just-completed episodes (env_ids are resetting envs).
+        # FIX 2026-07-10: EMA-smoothed via the same shared _update_smoothed_ep_len
+        # as reward_curriculum_ep_len, so both curricula stay synchronized and
+        # neither oscillates independently on single-window noise. See that
+        # function's docstring.
         if len(env_ids) > 0:
             mean_ep_len = env.episode_length_buf[env_ids].float().mean().item()
         else:
             mean_ep_len = 0.0
-        curriculumupdate = int(mean_ep_len / self._ep_len_divisor)
+        smoothed_ep_len = _update_smoothed_ep_len(env, mean_ep_len)
+        curriculumupdate = int(smoothed_ep_len / self._ep_len_divisor)
 
         # Direct curriculum mapping (matches G1: difficulty = f(cu) only, not accumulated).
         # At cu=3 (ep_len≈144), difficulty = 1.0.
