@@ -802,17 +802,34 @@ def inner_face_orientation_save(
     asset_cfg: SceneEntityCfg = _DEFAULT_FEET_CFG,
     alignment_threshold: float = 0.7,
 ) -> torch.Tensor:
-    """One-time bonus when softstop fires and the closest foot is turned sideways (block posture).
+    """One-time bonus when softstop fires and the closest foot is turned sideways (block posture),
+    rotated toward the side it's actually saving on.
 
     Checks that the foot's long axis (toe-heel, local X) is parallel to world Y at the save
     moment — meaning the foot is rotated 90° so its broad inner face is presented to the ball
     rather than the toe or heel.
 
-    |quat_apply(foot_quat, [1,0,0]) · [0,1,0]| > threshold
-    threshold=0.7 ≈ cos(45°): foot long axis within 45° of world Y.
+    quat_apply(foot_quat, [1,0,0]) · [0,1,0] * expected_sign > threshold
+    threshold=0.7 ≈ cos(45°): foot long axis within 45° of world Y, in the correct direction.
+
+    FIX 2026-07-10: was `.abs()` on the alignment ("either +Y or -Y direction is a
+    valid sideways save"). That reasoning was wrong -- a left-side save needs the
+    foot rotated toward +Y, a right-side save needs -Y; they are mirror images, not
+    interchangeable. abs() rewarded either direction equally, so the policy had no
+    pressure to learn the correct, side-matched rotation -- it could satisfy this
+    reward on every save by consistently rotating one way, even when that's
+    backwards for half the saves. Confirmed live: a trained checkpoint's right foot
+    (right-side saves) learned a genuine ~38 degree rotation toward -Y, while the
+    left foot (left-side saves) stayed near-neutral (~3 degrees) -- it never
+    discovered the mirror-image +Y rotation, because nothing demanded it
+    specifically. expected_sign is +1 when the LEFT foot is closest (should rotate
+    toward +Y), -1 when the RIGHT foot is closest (should rotate toward -Y),
+    matching the empirically-confirmed-correct right-foot behavior mirrored to the
+    left. See docs/BugFixes.md.
 
     This is orthogonal to feetorientation (which constrains roll/pitch — foot flatness).
-    Together they enforce: flat foot AND turned sideways = correct block posture.
+    Together they enforce: flat foot AND turned sideways, in the correct direction = correct
+    block posture.
     """
     if not hasattr(env, "_ifos_ss_prev"):
         env._ifos_ss_prev = torch.zeros(env.num_envs, dtype=torch.bool, device=env.device)
@@ -852,11 +869,12 @@ def inner_face_orientation_save(
     # Pick the closer foot's long axis.
     foot_long_w = torch.where(left_closer[:, None], left_long_w, right_long_w)  # (N, 3)
 
-    # "Lengthy side parallel to Y" = long axis aligned with world Y.
-    # abs() because either +Y or -Y direction is a valid sideways save.
+    # "Lengthy side parallel to Y, in the correct direction" = long axis aligned
+    # with +Y when the left foot is closest, -Y when the right foot is closest.
     world_y = torch.tensor([0.0, 1.0, 0.0], device=env.device).expand(env.num_envs, -1)
-    y_alignment = (foot_long_w * world_y).sum(dim=-1).abs()                # (N,)
-    oriented_correctly = y_alignment > alignment_threshold
+    y_alignment_signed = (foot_long_w * world_y).sum(dim=-1)               # (N,)
+    expected_sign = torch.where(left_closer, 1.0, -1.0)                    # (N,)
+    oriented_correctly = (y_alignment_signed * expected_sign) > alignment_threshold
 
     correct_foot = getattr(env, "_softstop_correct_foot", torch.zeros(env.num_envs, dtype=torch.bool, device=env.device))
     fired = just_fired & oriented_correctly & correct_foot & ~env._ifos_flag
@@ -869,15 +887,28 @@ def foot_inner_face_continuous(
     ball_name: str,
     asset_cfg: SceneEntityCfg = _DEFAULT_FEET_CFG,
 ) -> torch.Tensor:
-    """Continuous reward for rotating the assigned foot's inner face toward the ball.
+    """Continuous reward for rotating the assigned foot's inner face toward the ball,
+    in the correct (side-matched) direction.
 
     Active every step while the ball is live (same ~behind gate as footreach).
     Uses the same assigned foot as footreach (_get_correct_foot_idx: left=0 for +Y
     balls, right=1 for -Y balls).
 
-    Metric: |foot_long_axis_w · robot_y_w| — 0 when foot points forward, 1 when
-    foot is fully turned sideways (inner face presented in the robot's lateral direction).
-    Uses robot local Y (not world Y) so a dive yaw doesn't degrade the signal.
+    Metric: foot_long_axis_w · robot_y_w * expected_sign — negative/zero when foot
+    points forward or the wrong way, up to 1 when fully turned sideways in the
+    correct direction (+Y for the left foot, -Y for the right foot). Uses robot
+    local Y (not world Y) so a dive yaw doesn't degrade the signal.
+
+    FIX 2026-07-10: was `.abs()` — same bug as inner_face_orientation_save (see
+    that function's docstring for the full analysis and live evidence). This is
+    the DENSE, per-step version of the same reward, so it was actually the
+    dominant source of the wrong-direction-tolerant gradient (far more total
+    signal than the one-shot bonus) -- fixing this one specifically should matter
+    most. Deliberately left unclamped (can go negative for a wrong-direction
+    rotation, not just zero) -- a mild, informative penalty gives clearer gradient
+    toward the correct mirror-image direction than merely withholding reward,
+    which would look identical to "never rotated at all" from the policy's
+    perspective.
     """
     robot: Entity = env.scene[asset_cfg.name]
 
@@ -895,7 +926,8 @@ def foot_inner_face_continuous(
     robot_y_local[:, 1] = 1.0
     robot_y_w = quat_apply(robot.data.root_link_quat_w, robot_y_local)      # (N, 3)
 
-    alignment = (foot_long_w * robot_y_w).sum(dim=-1).abs()                 # (N,) in [0, 1]
+    expected_sign = torch.where(foot_idx == 0, 1.0, -1.0)                   # (N,) left=+Y, right=-Y
+    alignment = (foot_long_w * robot_y_w).sum(dim=-1) * expected_sign       # (N,) in [-1, 1]
 
     behind = _ball_is_behind(env, ball_name)
     return alignment * (~behind).float()
