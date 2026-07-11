@@ -164,11 +164,23 @@ _MULTIDISC_AMP_OBS_TERMS: list[str] = ["joint_pos"]
 
 _MOTIONS_DIR = Path(__file__).parents[1] / "motions" / "data"
 
-REGION_MOTION_FILES: dict[str, str] = {
-    "left_near": str(_MOTIONS_DIR / "LeftStep_own_booster_t1.npz"),
-    "left_far": str(_MOTIONS_DIR / "LeftDoubleStep_own_booster_t1.npz"),
-    "right_near": str(_MOTIONS_DIR / "Rightstep_own_booster_t1.npz"),
-    "right_far": str(_MOTIONS_DIR / "RightDoubleStep_own_booster_t1.npz"),
+REGION_MOTION_FILES: dict[str, list[str]] = {
+    "left_near": [str(_MOTIONS_DIR / "LeftStep_own_booster_t1.npz")],
+    "left_far": [
+        str(_MOTIONS_DIR / "LeftDoubleStep_own_booster_t1.npz"),
+        # 2026-07-12: added the 1.5x-retimed variant (retime_motion.py) so the
+        # left_far discriminator sees the reference motion at both the
+        # original mocap pace and a pace closer to what the ball's timing
+        # budget actually allows -- see docs/BugFixes.md for the underlying
+        # timing-gap investigation. Discrete two-speed set, not continuous
+        # randomization, per FARM/VFIL precedent (see the same doc entry).
+        str(_MOTIONS_DIR / "LeftDoubleStep_own_booster_t1_1p5x.npz"),
+    ],
+    "right_near": [str(_MOTIONS_DIR / "Rightstep_own_booster_t1.npz")],
+    "right_far": [
+        str(_MOTIONS_DIR / "RightDoubleStep_own_booster_t1.npz"),
+        str(_MOTIONS_DIR / "RightDoubleStep_own_booster_t1_1p5x.npz"),
+    ],
 }
 
 
@@ -203,7 +215,10 @@ def goalkeeper_multidisc_env_cfg_withoverlay(
             viz=MotionCommandCfg.VizCfg(mode="ghost", ghost_color=(0.3, 0.8, 0.4, 0.45)),
         )
     else:
-        npz_files = list(REGION_MOTION_FILES.values())
+        # Flatten: REGION_MOTION_FILES values are now per-region lists (2026-07-12,
+        # 1.5x-retimed variants added alongside the originals for left_far/right_far)
+        # -- the ghost overlay just needs a flat set of files to cycle through.
+        npz_files = [p for paths in REGION_MOTION_FILES.values() for p in paths]
         cmd = CyclingGhostMotionCommandCfg(
             motion_file=npz_files[0],  # required by parent cfg; overridden at build
             anchor_body_name="Trunk",
@@ -222,12 +237,12 @@ def goalkeeper_multidisc_env_cfg_withoverlay(
 def goalkeeper_multidisc_amp_runner_cfg() -> dict:
     amp_data = {
         name: MotionDatasetCfg(
-            motion_files=[path],
+            motion_files=paths,
             body_names=GOALKEEPER_KEY_BODY_NAMES,
             amp_obs_terms=_MULTIDISC_AMP_OBS_TERMS,
             anchor_name=GOALKEEPER_ANCHOR_NAME,
         )
-        for name, path in REGION_MOTION_FILES.items()
+        for name, paths in REGION_MOTION_FILES.items()
     }
     return {
         "policy": {

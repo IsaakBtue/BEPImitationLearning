@@ -81,6 +81,14 @@ _STEM_TO_POOL: dict[str, tuple[str, str]] = {
     "lefttriplestep_own_booster_t1":  ("left",  "wide"),
     "rightdoublestep_own_booster_t1": ("right", "wide"),
     "righttriplestep_own_booster_t1": ("right", "wide"),
+    # 2026-07-12: 1.5x-retimed variants (retime_motion.py) of the same four
+    # clips, same (side, wide) pool -- _load_pool computes frame_frac per
+    # SOURCE FILE, so seed_blue_landed_practice's "late half" draw now pulls
+    # from either pace. See docs/BugFixes.md for the timing-gap rationale.
+    "leftdoublestep_own_booster_t1_1p5x":  ("left",  "wide"),
+    "lefttriplestep_own_booster_t1_1p5x":  ("left",  "wide"),
+    "rightdoublestep_own_booster_t1_1p5x": ("right", "wide"),
+    "righttriplestep_own_booster_t1_1p5x": ("right", "wide"),
     # single-range files (< 0.20 m, see _SINGLE_THRESH above) → standing pose,
     # not RSI pools; listed so the init loop doesn't warn about unknown files.
     "leftstep_own_booster_t1":        None,
@@ -788,7 +796,15 @@ def track_blue_landing_success(env: "ManagerBasedRlEnv", env_ids: torch.Tensor |
         env._blue_success_last_update = -500
 
     wide_mask = env._blue_wide[env_ids]
-    landed_mask = env._blue_landed[env_ids]
+    # 2026-07-11 FIX: exclude RSI-seeded free landings (env._blue_landed_was_free)
+    # -- without this, seed_blue_landed_practice's ~25%-of-far-region teleport
+    # landings (events.py, _BLUE_LANDED_SEED_FRACTION) pushed the rolling
+    # success rate to ~0.25 against the 0.3 target on their own, near-fully
+    # unlocking _blue_landing_reward_scale's stopball/softstop payoff boost
+    # regardless of true genuine-landing rate (measured 0.1-3%) -- exactly the
+    # "damp payoff while landing is still rare/lucky" behavior this rate exists
+    # to produce. Found by audit, not yet validated on a live training run.
+    landed_mask = env._blue_landed[env_ids] & ~env._blue_landed_was_free[env_ids]
     env._blue_wide_window_count += int(wide_mask.sum().item())
     env._blue_success_window_count += int((wide_mask & landed_mask).sum().item())
 

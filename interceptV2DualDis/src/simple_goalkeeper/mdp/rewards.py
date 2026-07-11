@@ -647,6 +647,15 @@ def blue_ball_landed(
     point after reset, then came into ground contact within landing_radius of
     the midpoint target. Narrow crossings never fire this (env._blue_wide is
     always false for them). See _get_reach_target_y.
+
+    2026-07-11 FIX: also requires ~env._blue_landed_was_free. Without this,
+    seed_blue_landed_practice's RSI teleport (events.py, _BLUE_LANDED_SEED_
+    FRACTION=0.25 of far-region resets) set env._blue_landed=True with zero
+    policy action, and this bonus paid out for free on ~12.5% of ALL episodes
+    every reset, uncurriculum-annealed -- the exact "free credit" failure mode
+    _blue_landed_was_free already exists to block for stopball/softstop (see
+    the landing_ok gate below), just never applied here. Found by audit, not
+    yet validated on a live training run.
     """
     _get_reach_target_y(env, ball_name, asset_cfg=asset_cfg)  # ensure _blue_landed is fresh this step
 
@@ -656,7 +665,7 @@ def blue_ball_landed(
     just_reset = env.episode_length_buf <= 1
     env._blue_landed_bonus_flag[just_reset] = False
 
-    fired = env._blue_landed & ~env._blue_landed_bonus_flag
+    fired = env._blue_landed & ~env._blue_landed_was_free & ~env._blue_landed_bonus_flag
     env._blue_landed_bonus_flag |= fired
     return fired.float()
 
