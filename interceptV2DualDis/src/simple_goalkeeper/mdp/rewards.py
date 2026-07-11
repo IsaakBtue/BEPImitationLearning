@@ -424,25 +424,45 @@ def footreach(
     vel_sigma = 1 + 3 * clamp(vel_toward_crossing_side, 0, 3).
 
     Upright gate suppresses reward when falling (mirrors eereach upright gate).
+
+    FIX 2026-07-11: phase1_rew and vel_sigma keyed off root position/velocity
+    (G1's _reward_eereach does the same: end_target_local = self.end_target -
+    self.torso_pos, vel_sigma from self.upper_body_index -- both torso-based,
+    since a hand can reach independently of torso position). For a FOOT this
+    torso/root proxy breaks down on wide two-stage crossings: the root can
+    sit near the target purely from stance width/weight-shift while the
+    task-ASSIGNED foot (_get_correct_foot_idx) overshoots or lags behind --
+    the lagging, non-assigned foot ends up implicitly "credited" via root
+    position, a false gradient the user observed empirically ("false gradient
+    for overstepping and then the lagging foot gets rewards"). Fixed by using
+    the assigned foot's own Y position/velocity instead of root, so credit
+    only flows for the foot actually responsible for the reach. Not ported to
+    green-ball-baseline (no two-stage waypoint there, so this failure mode is
+    far less likely) unless it shows the same symptom.
     """
     robot: Entity = env.scene[asset_cfg.name]
     ball: Entity = env.scene[ball_name]
 
     ball_pos_w = ball.data.root_link_pos_w                              # (N, 3)
     foot_pos_w = robot.data.body_link_pos_w[:, asset_cfg.body_ids, :]  # (N, 2, 3)
+    foot_vel_w = robot.data.body_link_lin_vel_w[:, asset_cfg.body_ids, :]  # (N, 2, 3)
 
     ball_x_local = ball_pos_w[:, 0] - env.scene.env_origins[:, 0]     # (N,)
-    robot_y_w = robot.data.root_link_pos_w[:, 1]                       # (N,)
 
-    # True frozen crossing Y (final arrival point) — used only for foot-side selection
-    # below, which must not flip mid-episode based on the two-stage reach target.
-    crossing_y = _get_ball_crossing_y(env, ball_name)                  # (N,)
+    # Fixed, task-assigned foot (not the geometrically-closest foot) -- computed
+    # once up front so phase1/vel_sigma/phase2 all credit the same foot.
+    foot_idx = _get_correct_foot_idx(env, ball_name)                   # (N,)
+    arange_n = torch.arange(env.num_envs, device=env.device)
+    assigned_foot_y = foot_pos_w[arange_n, foot_idx, 1]                # (N,)
+    assigned_foot_vel_y = foot_vel_w[arange_n, foot_idx, 1]            # (N,)
+
     # Reach target: full crossing point, or the two-stage midpoint-then-full schedule
     # on wide crossings (ported from SimpleGoalKeeper). See _get_reach_target_y.
     reach_target_y = _get_reach_target_y(env, ball_name, asset_cfg=asset_cfg)  # (N,)
 
     # Phase 1: pre-position laterally when ball is far (> 1.5 m in front).
-    lateral_error = reach_target_y - robot_y_w                          # positive → target right
+    # Uses the ASSIGNED FOOT's Y, not root -- see FIX 2026-07-11 above.
+    lateral_error = reach_target_y - assigned_foot_y                    # positive → target right
     asidegoal = lateral_error.clamp(-1.0, 1.0)
     asidegoal = torch.where(asidegoal.abs() < 0.3, torch.zeros_like(asidegoal), asidegoal)
     phase1_rew = 1.0 - asidegoal.abs()                                  # 1=aligned, 0=1 m off
@@ -469,18 +489,14 @@ def footreach(
     crossing_point = torch.stack(
         [goal_x_w, target_y, target_z], dim=-1
     )                                                                     # (N, 3)
-    # Side-specific foot: left foot (idx 0) for +Y crossing, right (idx 1) for -Y.
-    is_left_ball = crossing_y > env.scene.env_origins[:, 1]
-    foot_idx = torch.where(is_left_ball,
-                           torch.zeros(env.num_envs, dtype=torch.long, device=env.device),
-                           torch.ones(env.num_envs, dtype=torch.long, device=env.device))
-    foot_pos_active = foot_pos_w[torch.arange(env.num_envs, device=env.device), foot_idx]
+    # Side-specific foot already resolved above (foot_idx, assigned via crossing_y).
+    foot_pos_active = foot_pos_w[arange_n, foot_idx]
     dist_to_crossing = torch.norm(foot_pos_active - crossing_point, dim=-1)  # (N,)
     reach_rew = 1.0 - 1.0 / (1.0 + torch.exp(-sigma * (dist_to_crossing - reach_th)))
 
-    # Lateral velocity toward crossing side amplifies the reach reward.
-    lateral_vel_y = robot.data.root_link_lin_vel_w[:, 1]
-    vel_toward = torch.where(lateral_error > 0, lateral_vel_y, -lateral_vel_y)
+    # Lateral velocity toward crossing side amplifies the reach reward. Uses the
+    # ASSIGNED FOOT's Y velocity, not root -- see FIX 2026-07-11 above.
+    vel_toward = torch.where(lateral_error > 0, assigned_foot_vel_y, -assigned_foot_vel_y)
     vel_sigma = 1.0 + 3.0 * vel_toward.clamp(0.0, 3.0)                # 1–10× (matches G1 eereach)
 
     # Combine: phase1 when ball is far, phase2 sigmoid when close.
