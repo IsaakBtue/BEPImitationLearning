@@ -89,6 +89,11 @@ _STEM_TO_POOL: dict[str, tuple[str, str]] = {
     "lefttriplestep_own_booster_t1_1p5x":  ("left",  "wide"),
     "rightdoublestep_own_booster_t1_1p5x": ("right", "wide"),
     "righttriplestep_own_booster_t1_1p5x": ("right", "wide"),
+    # 2026-07-12 (same day): 2x-retimed variants too, same treatment.
+    "leftdoublestep_own_booster_t1_2x":  ("left",  "wide"),
+    "lefttriplestep_own_booster_t1_2x":  ("left",  "wide"),
+    "rightdoublestep_own_booster_t1_2x": ("right", "wide"),
+    "righttriplestep_own_booster_t1_2x": ("right", "wide"),
     # single-range files (< 0.20 m, see _SINGLE_THRESH above) → standing pose,
     # not RSI pools; listed so the init loop doesn't warn about unknown files.
     "leftstep_own_booster_t1":        None,

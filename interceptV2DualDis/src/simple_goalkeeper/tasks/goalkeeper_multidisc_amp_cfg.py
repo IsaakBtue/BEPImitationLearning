@@ -175,11 +175,19 @@ REGION_MOTION_FILES: dict[str, list[str]] = {
         # timing-gap investigation. Discrete two-speed set, not continuous
         # randomization, per FARM/VFIL precedent (see the same doc entry).
         str(_MOTIONS_DIR / "LeftDoubleStep_own_booster_t1_1p5x.npz"),
+        # 2026-07-12 (same day): added a 2x variant too, per user's direct
+        # visual check of the 1.5x clip in the ghost overlay -- still looked
+        # plausible, past FARM's generic 1.5x ceiling but confirmed by actual
+        # inspection of this specific clip rather than the literature alone.
+        # 0.72s duration, peak joint vel 3.82 rad/s -- still well under the
+        # 10 rad/s dof_vel_limits ceiling. Three-speed discrete set now.
+        str(_MOTIONS_DIR / "LeftDoubleStep_own_booster_t1_2x.npz"),
     ],
     "right_near": [str(_MOTIONS_DIR / "Rightstep_own_booster_t1.npz")],
     "right_far": [
         str(_MOTIONS_DIR / "RightDoubleStep_own_booster_t1.npz"),
         str(_MOTIONS_DIR / "RightDoubleStep_own_booster_t1_1p5x.npz"),
+        str(_MOTIONS_DIR / "RightDoubleStep_own_booster_t1_2x.npz"),
     ],
 }
 

@@ -623,3 +623,17 @@ Directly measured from the actual NPZ motion clips (`motions/data/*DoubleStep*.n
 - Live smoke test (`--num-envs 256 --agent.max-iterations 5`, then a second `--num-envs 4 --agent.max-iterations 1` run to inspect full startup logs): no errors either run. `[MotionResetManager] ('left', 'wide'): 242 frames from 4 file(s)` / `('right', 'wide'): 242 frames from 4 file(s)` confirms 73+73+48+48 -- both pools correctly include both paces. AMP loss computed without error for all 4 region discriminators (confirms the 2-file-per-region `MotionDatasetCfg` change loads correctly). Health metrics sane (`mean_action_acc` ~1.87, O(1); no NaN).
 
 **Not yet resolved:** none of this (retiming, RSI-seed pace mix) has been validated against the actual genuine-landing-rate metric on a real training run yet -- the smoke test is 5 iterations, correctness-only. This launches bundled with the already-fixed reward leak in the next run (`blue_sweepthrough_retiming_fix_2026-07-12` or similar) -- if genuine landing rate improves, the two changes are confounded and would need an ablation to attribute credit individually, same caveat this project has hit repeatedly before. The worst-case timing tail (per the entry above) is expected to remain hard even after this fix; watch `Episode_Metrics/blue_landed_genuine` specifically on wide-but-not-widest crossings for a clean read.
+
+---
+
+## 2026-07-12 (same day) -- Added a 2x-retimed variant alongside the 1.5x, per user's direct visual check
+
+**Context:** user watched the 1.5x-retimed clip in the ghost overlay (`sgk_play Mjlab-BeyondAMP-Goalkeeper-T1-MultiDisc-WithOverlay`) and judged it still looked plausible -- past FARM's generic 1.5x ceiling from the literature, but based on direct inspection of this specific clip rather than the literature alone, and explicitly asked for a 2x version too.
+
+**Implementation:** baked 4 more files via the same `retime_motion.py` tool (`--speed-factor 2.0 --suffix 2x`): 73->36 frames, 1.44s->0.72s. Peak joint velocity 3.12-5.45 rad/s (still comfortably under the 10 rad/s `dof_vel_limits` ceiling). `REGION_MOTION_FILES`'s `left_far`/`right_far` now carry THREE files each (original + 1.5x + 2x) -- each far-region discriminator trains against all three paces. `_STEM_TO_POOL` extended the same way, so `seed_blue_landed_practice`'s late-half draw and the RSI wide pool now span all three paces too.
+
+**Why this materially helps the timing gap:** 0.72s is very close to the *median* `t_cross` (0.80s at full difficulty, from the timing-gap entry above) and not far off even the tighter end of the distribution -- much closer to actually spanning the real timing budget than the 1.5x variant (0.94s) or the original (1.44s) alone.
+
+**Verification:** 53/53 tests pass (`test_multidisc_amp_cfg.py`'s far-region file-count assertion updated 2->3; `test_wide_pool_includes_retimed_variants.py`'s frame-count assertion updated to `73+73+48+48+36+36=314` frames / 6 files per side, confirmed live via smoke test: `[MotionResetManager] ('left', 'wide'): 314 frames from 6 file(s)`, same for right). Live smoke test (`--num-envs 4 --agent.max-iterations 1`) clean, no errors.
+
+**Not yet resolved:** same caveat as the 1.5x entry above -- not yet validated against genuine-landing-rate on a real run. Now THREE confounded reference-clip paces plus the reward-leak fix if launched together; if this is bundled into a restart, note it adds another axis to any future ablation.
