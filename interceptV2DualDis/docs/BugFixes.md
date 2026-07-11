@@ -541,3 +541,13 @@ The 2026-07-09 fix ("remove the monotonic ratchet, match G1's fresh recompute") 
 **Action taken:** pushed `model_1750.pt` (latest at time of stop), killed the run (PID 2815464/2815467). Did NOT restart with another incremental reward tweak on this cycle's own authority -- given the long, documented history of similar targeted fixes not resolving this exact problem, and given the user is actively engaged in this conversation (not purely unattended), this decision point (small additional reward tweak vs. a more structural rethink, e.g. the previously-deprioritized task/behavior stage-gate restructure) is being surfaced back to the user rather than picked unilaterally.
 
 **Not yet resolved:** the core double-step landing problem remains unsolved after this cycle. No new training launched pending user direction.
+
+---
+
+## 2026-07-11 — `blue_stick_landing` passive-reward fix implemented (user selected option 2)
+
+**Fix:** user chose the `env._blue_was_airborne` gate option from the entry above. `phase1_active` in `blue_stick_landing` (`rewards.py`) changed from `env._blue_wide & ~env._blue_landed` to `env._blue_wide & ~env._blue_landed & env._blue_was_airborne`. `dist_sigma`/`speed_sigma` untouched, per the reasoning already recorded above (their own history of an earlier over-tightening causing a zero-gradient collapse).
+
+**Verification:** 48/48 tests pass. Re-ran the same zero-action live probe used to originally find the bug: envs whose assigned foot never left the ground now show `actual_fn=0.0000` every time, even when the hand-computed `raw_reward` (pre-gate) is nonzero (e.g. step 140: `dist_to_blue=0.231, speed=0.252, raw_reward=0.1077, actual_fn=0.0000`) -- confirms the gate is doing exactly what it's supposed to, while envs whose foot did move at least once (e.g. from RSI-reset settling) still receive reward normally.
+
+**Not yet resolved:** not yet validated on a live training run -- this is one contributing fix among the several considered after the 2026-07-11 escalation (see entry above); the dominant failure mode (foot sweeping past blue rather than idling short of it, per the growing `blue_overshoot_penalty`) is not directly addressed by this change, so it should not be assumed to resolve the core genuine-landing-rate problem on its own. No new training launched yet pending user direction on whether/when to restart.

@@ -712,6 +712,18 @@ def blue_stick_landing(
 
     Zero on narrow crossings and once genuinely landed -- mirrors
     blue_overshoot_penalty's phase1_active gate exactly (_get_reach_target_y).
+
+    FIX 2026-07-11: also zero until env._blue_was_airborne (assigned foot has
+    left the ground at least once this episode). User-reported symptom,
+    confirmed via a live zero-action probe: at dist_sigma=8, a foot that
+    NEVER MOVES still sits ~0.20-0.25m from the blue midpoint on typical wide
+    crossings (measured directly) purely from the robot's passive default
+    stance -- well inside this basin (which decays to only ~0.1 by 29cm), so
+    it collected ~0.10-0.19 reward per step continuously for doing nothing.
+    Did not touch dist_sigma itself, given the FIX 2026-07-09 history above
+    (an earlier, tighter value caused a genuine zero-gradient collapse) --
+    gating on "foot has moved" removes the free reward without narrowing the
+    basin that fix depended on. See docs/BugFixes.md.
     """
     _get_reach_target_y(env, ball_name, asset_cfg=asset_cfg)  # ensure _blue_wide/_blue_landed fresh
 
@@ -732,7 +744,19 @@ def blue_stick_landing(
     dist = torch.norm(assigned_foot_pos[:, :2] - target_xy, dim=-1)
     speed = torch.norm(assigned_foot_vel[:, :2], dim=-1)
 
-    phase1_active = env._blue_wide & ~env._blue_landed
+    # FIX 2026-07-11: gate on env._blue_was_airborne (assigned foot has left
+    # the ground at least once this episode -- set by _get_reach_target_y,
+    # already refreshed above). User-reported symptom, confirmed via a live
+    # zero-action probe: dist_sigma=8's basin is wide enough (~0.5 by 9cm,
+    # ~0.1 by 29cm) to cover the robot's PASSIVE default-stance distance from
+    # the blue midpoint on typical wide crossings (~0.20-0.25m, measured
+    # directly), so a foot that never moves at all still earned ~0.10-0.19
+    # reward per step, continuously, for doing nothing. This did not require
+    # touching dist_sigma itself (which has its own documented history: an
+    # earlier, tighter dist_sigma=15 caused a zero-gradient collapse, fixed
+    # 2026-07-09 by widening to 8) -- gating on "foot has moved" rules out
+    # the free reward without narrowing the basin that fix depended on.
+    phase1_active = env._blue_wide & ~env._blue_landed & env._blue_was_airborne
     return torch.exp(-dist_sigma * dist) * torch.exp(-speed_sigma * speed) * phase1_active.float()
 
 
