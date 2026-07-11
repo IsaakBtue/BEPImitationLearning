@@ -151,10 +151,12 @@ def run() -> None:
         func=rsi_event, mode="reset",
     )
 
+    # 2026-07-05: corrected to match mdp.events._SINGLE/_DOUBLE/_TRIPLE_THRESH
+    # (this description had drifted out of sync with the actual thresholds).
     tier_desc = {
-        "wide":   "DoubleStep + TripleStep  (wide pool, |cross_y| ≥ 0.70)",
-        "double": "SafeMedium               (double pool, 0.30–0.50 m)",
-        "triple": "SafeFar                  (triple pool, 0.50–0.70 m)",
+        "wide":   "DoubleStep + TripleStep  (wide pool, |cross_y| ≥ 0.50)",
+        "double": "SafeMedium               (double pool, 0.20–0.40 m)",
+        "triple": "SafeFar                  (triple pool, 0.40–0.50 m)",
         "all":    "all motions combined",
     }
     print(f"[INFO]: RSI pool = {cfg.motion_pool}  ({tier_desc[cfg.motion_pool]})")

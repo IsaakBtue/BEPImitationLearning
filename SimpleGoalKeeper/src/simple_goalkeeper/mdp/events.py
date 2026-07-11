@@ -64,8 +64,10 @@ def _yaw_only_quat(q_wxyz: torch.Tensor) -> torch.Tensor:
 # Lateral crossing-Y thresholds for 4-tier distance-conditioned RSI.
 _SINGLE_THRESH = 0.20   # |cross_y| < 0.20          → single  (standing reset)
 _DOUBLE_THRESH = 0.40   # 0.20 ≤ |cross_y| < 0.40   → double  (MediumStep, SafeMedium)
-_TRIPLE_THRESH = 0.60   # 0.40 ≤ |cross_y| < 0.60   → triple  (FarStep, SafeFar)
-                        # |cross_y| ≥ 0.60           → wide    (DoubleStep, TripleStep)
+_TRIPLE_THRESH = 0.50   # 0.40 ≤ |cross_y| < 0.50   → triple  (FarStep, SafeFar)
+                        # |cross_y| ≥ 0.50           → wide    (DoubleStep, TripleStep)
+                        # 2026-07-05: lowered from 0.60, kept in sync with
+                        # mdp.rewards._get_reach_target_y's wide_threshold.
 
 # Exact filename stem (lowercased) → (side, pool) mapping.
 # Name-specific so adding new files never silently mis-classifies.
@@ -73,10 +75,10 @@ _STEM_TO_POOL: dict[str, tuple[str, str]] = {
     # double  (0.20–0.40 m, see _DOUBLE_THRESH above)
     "leftsafemedium1_booster_t1":     ("left",  "double"),
     "rightsafemedium1_booster_t1":    ("right", "double"),
-    # triple  (0.40–0.60 m, see _TRIPLE_THRESH above)
+    # triple  (0.40–0.50 m, see _TRIPLE_THRESH above)
     "leftsafefar1_booster_t1":        ("left",  "triple"),
     "rightsafefar1_booster_t1":       ("right", "triple"),
-    # wide    (≥ 0.60 m, see _TRIPLE_THRESH above)
+    # wide    (≥ 0.50 m, see _TRIPLE_THRESH above)
     "leftdoublestep_own_booster_t1":  ("left",  "wide"),
     "lefttriplestep_own_booster_t1":  ("left",  "wide"),
     "rightdoublestep_own_booster_t1": ("right", "wide"),
@@ -217,8 +219,12 @@ class MotionResetManager:
 
           |cy| <  0.20         → standing HOME pose (react freely near centre)
           0.20 ≤ |cy| < 0.40   → (side, double) pool  (SafeMedium)
-          0.40 ≤ |cy| < 0.60   → (side, triple) pool  (SafeFar)
-          |cy| ≥  0.60         → (side, wide)   pool  (DoubleStep + TripleStep)
+          0.40 ≤ |cy| < 0.50   → (side, triple) pool  (SafeFar)
+          |cy| ≥  0.50         → (side, wide)   pool  (DoubleStep + TripleStep)
+
+        2026-07-05: wide boundary lowered 0.60 -> 0.50 (_TRIPLE_THRESH), in
+        sync with mdp.rewards._get_reach_target_y's wide_threshold, which this
+        mirrors -- see that function's docstring for the rationale.
 
         side = left if cy > 0 else right. Writes the FULL RSI state (root Z +
         quat + velocities + joints) from a random pool frame via

@@ -143,9 +143,9 @@ def _get_ball_crossing_y(env: "ManagerBasedRlEnv", ball_name: str) -> torch.Tens
 def _get_reach_target_y(
     env: "ManagerBasedRlEnv",
     ball_name: str,
-    wide_threshold: float = 0.6,
+    wide_threshold: float = 0.5,
     asset_cfg: SceneEntityCfg = _DEFAULT_FEET_CFG,
-    landing_radius: float = 0.3,
+    landing_radius: float = 0.05,
 ) -> torch.Tensor:
     """Two-stage reach target for wide crossings (2026-07-03, hard-gated 2026-07-04).
 
@@ -210,6 +210,23 @@ def _get_reach_target_y(
     ALSO gated on landing for wide crossings (2026-07-04, closes the gap where
     that switch used to fire unconditionally and let the policy skip the blue
     waypoint entirely) — see env._blue_wide, cached above.
+
+    2026-07-05 tightened landing_radius (0.3 -> 0.05) and wide_threshold
+    (0.6 -> 0.5): play-mode observation showed the robot taking one continuous
+    dive straight to the green (full) target while still collecting the blue
+    landing bonus and having stopball/softstop unlock immediately -- the blue
+    and green targets are collinear (same X/Z, only Y differs), so a single
+    ordinary stride toward the true target passed close enough to the midpoint
+    to satisfy "landed" without ever stopping there. At the old 0.6 m
+    threshold the midpoint for a barely-wide crossing sat only 0.3 m from the
+    robot's own starting stance -- exactly the old landing_radius -- and this
+    project's own reference-motion measurements (see the two-stage-target
+    divergence table entry) put a single step's lateral reach at ~0.28-0.32 m,
+    i.e. statistically indistinguishable from that radius. Shrinking the
+    radius to 0.05 m requires the foot to actually plant at the waypoint
+    rather than pass through it; lowering wide_threshold to 0.5 m gives more
+    crossings the two-stage treatment (more training iterations exercising it)
+    without changing the mechanism itself.
     """
     full_y = _get_ball_crossing_y(env, ball_name)                 # (N,) world Y
     start_y = env.scene.env_origins[:, 1]                         # (N,) world Y
@@ -259,9 +276,17 @@ def _get_reach_target_y(
         env._blue_was_airborne |= currently_airborne
 
         goal_x_w = env.scene.env_origins[:, 0]
-        floor_z_w = env.scene.env_origins[:, 2]
-        target_point = torch.stack([goal_x_w, half_y, floor_z_w + 0.10], dim=-1)  # (N, 3)
-        dist_to_blue = torch.norm(assigned_foot_pos - target_point, dim=-1)
+        target_point_xy = torch.stack([goal_x_w, half_y], dim=-1)  # (N, 2)
+        # 2026-07-05: horizontal-only distance. The old 3D check compared
+        # against a hardcoded floor_z_w + 0.10 target height that was never
+        # meaningful -- foot_in_contact (below) already guarantees the foot is
+        # at ground height whenever this fires, so the Z term was redundant at
+        # best. It went from harmless (absorbed by the old 0.3 m radius) to
+        # actively breaking the gate once landing_radius shrank to 0.05 m (a
+        # perfectly-placed, genuinely grounded foot would still measure 0.10 m
+        # away and never land). Dropping Z removes the hardcoded-height
+        # assumption instead of trading it for a different guessed offset.
+        dist_to_blue = torch.norm(assigned_foot_pos[:, :2] - target_point_xy, dim=-1)
 
         newly_landed = wide & env._blue_was_airborne & foot_in_contact & (dist_to_blue < landing_radius)
         env._blue_landed |= newly_landed

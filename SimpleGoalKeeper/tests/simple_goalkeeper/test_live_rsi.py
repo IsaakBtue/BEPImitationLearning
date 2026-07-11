@@ -511,8 +511,10 @@ def _mgr_with_recording_pools():
 
 def test_tier_branch_routes_by_crossing_y_side_and_magnitude():
     """left = cy > 0; |cy| tiers: <0.20 standing, 0.20-0.40 double,
-    0.40-0.60 triple, >=0.60 wide (the DoubleStep/TripleStep pool)."""
-    env, robot = _make_tier_env([0.7, -0.7, 0.3, -0.5, 0.1, 1.05])
+    0.40-0.50 triple, >=0.50 wide (the DoubleStep/TripleStep pool).
+    2026-07-05: wide boundary lowered 0.60 -> 0.50, in sync with
+    mdp.rewards._get_reach_target_y's wide_threshold."""
+    env, robot = _make_tier_env([0.7, -0.7, 0.3, -0.45, 0.1, 1.05])
     mgr, calls = _mgr_with_recording_pools()
     env_ids = torch.arange(6, dtype=torch.int32)
 
@@ -522,7 +524,7 @@ def test_tier_branch_routes_by_crossing_y_side_and_magnitude():
     assert routed["left_wide"] == [0, 5]    # 0.7 and 1.05 -> wide, left
     assert routed["right_wide"] == [1]      # -0.7 -> wide, right
     assert routed["left_double"] == [2]     # 0.3 -> double, left
-    assert routed["right_triple"] == [3]    # -0.5 -> triple, right
+    assert routed["right_triple"] == [3]    # -0.45 -> triple, right
     # env 4 (|cy| = 0.1 < 0.20): standing HOME pose, written directly.
     assert robot.written_ids.tolist() == [4]
     assert torch.allclose(robot.written_pos, torch.zeros(1, 2))
@@ -530,7 +532,7 @@ def test_tier_branch_routes_by_crossing_y_side_and_magnitude():
 
 
 def test_tier_branch_wide_pool_serves_all_far_crossings_up_to_y_end_max():
-    """Every crossing the widened +-1.1 y_end can produce beyond 0.60 lands in
+    """Every crossing the widened +-1.1 y_end can produce beyond 0.50 lands in
     the wide pool — the DoubleStep/TripleStep frames the tier split exists for."""
     env, robot = _make_tier_env([0.61, 0.9, 1.1, -0.61, -0.9, -1.1])
     mgr, calls = _mgr_with_recording_pools()

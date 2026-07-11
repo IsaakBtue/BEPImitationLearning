@@ -2,8 +2,9 @@
 
 _get_reach_target_y (mdp.rewards) targets the MIDPOINT between the robot's stance
 and the true crossing point for the first half of the ball's flight time on wide
-(|crossing_y - start_y| > 0.6) crossings, then switches to the full crossing point
-for the second half. Narrow crossings always target the full point.
+(|crossing_y - start_y| > 0.5, lowered from 0.6 on 2026-07-05) crossings, then
+switches to the full crossing point for the second half. Narrow crossings always
+target the full point.
 
 Uses fake env objects (same approach as test_live_rsi.py / test_post_save_ball_
 release.py) — no mjlab env build. env._ball_crossing_y is set directly to the
@@ -50,22 +51,22 @@ def _make_env(rel_cross_y: float, t_flight: float, episode_step: int, step_dt: f
 
 
 def test_narrow_crossing_always_targets_full_point_early():
-    # rel = 0.5 <= wide_threshold (0.6) -> narrow, full target regardless of time.
-    env = _make_env(rel_cross_y=0.5, t_flight=1.0, episode_step=2)
+    # rel = 0.4 <= wide_threshold (0.5) -> narrow, full target regardless of time.
+    env = _make_env(rel_cross_y=0.4, t_flight=1.0, episode_step=2)
     full_y = _get_ball_crossing_y(env, "ball")
     target = _get_reach_target_y(env, "ball")
     assert torch.allclose(target, full_y)
 
 
 def test_narrow_crossing_always_targets_full_point_late():
-    env = _make_env(rel_cross_y=0.5, t_flight=1.0, episode_step=49)  # near end of flight
+    env = _make_env(rel_cross_y=0.4, t_flight=1.0, episode_step=49)  # near end of flight
     full_y = _get_ball_crossing_y(env, "ball")
     target = _get_reach_target_y(env, "ball")
     assert torch.allclose(target, full_y)
 
 
 def test_wide_crossing_first_half_targets_midpoint():
-    # rel = 0.8 > 0.6 -> wide. t_flight=1.0s, step_dt=0.02 -> half = 0.5s = step 25.
+    # rel = 0.8 > 0.5 -> wide. t_flight=1.0s, step_dt=0.02 -> half = 0.5s = step 25.
     # episode_step=10 -> elapsed=0.2s < 0.5s -> first half -> midpoint.
     env = _make_env(rel_cross_y=0.8, t_flight=1.0, episode_step=10)
     start_y = env.scene.env_origins[0, 1].item()
@@ -103,16 +104,16 @@ def test_wide_crossing_negative_side_midpoint_direction():
     assert target > full_y  # midpoint is closer to start than the full point
 
 
-def test_wide_threshold_boundary_exactly_0_6_is_narrow():
+def test_wide_threshold_boundary_exactly_0_5_is_narrow():
     # |rel| == wide_threshold exactly -> NOT wide (strict >), always full target.
-    env = _make_env(rel_cross_y=0.6, t_flight=1.0, episode_step=2)
+    env = _make_env(rel_cross_y=0.5, t_flight=1.0, episode_step=2)
     full_y = _get_ball_crossing_y(env, "ball")
     target = _get_reach_target_y(env, "ball")
     assert torch.allclose(target, full_y)
 
 
-def test_wide_threshold_just_over_0_6_is_wide():
-    env = _make_env(rel_cross_y=0.601, t_flight=1.0, episode_step=2)
+def test_wide_threshold_just_over_0_5_is_wide():
+    env = _make_env(rel_cross_y=0.501, t_flight=1.0, episode_step=2)
     start_y = env.scene.env_origins[0, 1].item()
     full_y = _get_ball_crossing_y(env, "ball")[0].item()
     target = _get_reach_target_y(env, "ball")[0].item()

@@ -122,7 +122,7 @@ def test_stopball_fires_on_wide_crossing_after_landing():
 
 
 def test_stopball_unaffected_on_narrow_crossing():
-    # Narrow crossing (rel_cross_y=0.2 <= wide_threshold 0.6) -- no waypoint to
+    # Narrow crossing (rel_cross_y=0.2 <= wide_threshold 0.5) -- no waypoint to
     # skip, so stopball fires as before with no landing ever recorded.
     env = _make_env(foot_y=0.0, rel_cross_y=0.2, episode_step=2,
                      found_left=False, found_right=False, ball_x=0.0, ball_x_vel=-2.0)

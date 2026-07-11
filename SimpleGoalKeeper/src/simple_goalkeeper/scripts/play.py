@@ -206,7 +206,8 @@ def _patch_viewer_intercept_vis(native_viewer: "NativeMujocoViewer", env) -> Non
     approximation (the prior elapsed < t_flight/2 check this docstring used to
     describe no longer exists in _get_reach_target_y — see
     docs/superpowers/specs/2026-07-04-blue-ball-hard-gate-rsi-rebalance-design.md).
-    When |crossing_y - start_y| > 0.6 and the assigned foot has not yet landed
+    When |crossing_y - start_y| > 0.5 (2026-07-05: was 0.6, see
+    mdp.rewards._get_reach_target_y) and the assigned foot has not yet landed
     at the midpoint, draws a BLUE sphere there instead of the usual green one.
     Once landing has occurred (or the crossing is narrow), draws the usual
     GREEN sphere at the full crossing point. Lets a human watching sgk_play
@@ -270,7 +271,7 @@ def _patch_viewer_intercept_vis(native_viewer: "NativeMujocoViewer", env) -> Non
         start_y = float(origins[1])
         rel_t = getattr(raw_env, "_rsi_cross_y", None)
         rel = float(rel_t[0].item()) if rel_t is not None else (cross_y - start_y)
-        wide = abs(rel) > 0.6
+        wide = abs(rel) > 0.5
 
         # 2026-07-04 hard gate: phase 1 (blue) now lasts until a genuine
         # landing (env._blue_landed), not until elapsed time passes
