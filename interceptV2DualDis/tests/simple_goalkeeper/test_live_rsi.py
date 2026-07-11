@@ -379,14 +379,26 @@ def test_reset_from_motion_data_passes_rsi_fraction_0_8_to_reset(monkeypatch):
             captured["rsi_fraction"] = rsi_fraction
             captured["blue_practice_fraction"] = blue_practice_fraction
 
+        def seed_blue_landed_practice(self, env, env_ids, asset_cfg, fraction):
+            captured["seed_env_ids"] = env_ids
+            captured["seed_fraction"] = fraction
+
     monkeypatch.setattr(events_mod.MotionResetManager, "get", staticmethod(lambda: _StubMgr()))
 
-    events_mod.reset_from_motion_data(env=object(), env_ids=None)
+    class _FakeEnv:
+        num_envs = 4
+        device = "cpu"
+
+    events_mod.reset_from_motion_data(env=_FakeEnv(), env_ids=None)
 
     assert captured["rsi_fraction"] == 0.8
     # env has no _curriculumupdate (bare object()) -> cu defaults to 0 ->
     # blue_practice_fraction should be the full base fraction (2026-07-10 feat).
     assert captured["blue_practice_fraction"] == pytest.approx(events_mod._BLUE_PRACTICE_BASE_FRACTION)
+    # FEAT 2026-07-11: reset_from_motion_data also seeds a fraction of
+    # far-region envs from real DoubleStep/TripleStep demonstration frames.
+    assert captured["seed_fraction"] == pytest.approx(events_mod._BLUE_LANDED_SEED_FRACTION)
+    assert len(captured["seed_env_ids"]) == 4
 
 
 @pytest.mark.parametrize("rsi_fraction", [0.2, 0.5, 0.8, 0.95])

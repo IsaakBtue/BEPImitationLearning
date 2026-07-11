@@ -244,7 +244,30 @@ def _get_reach_target_y(
 
     Root XY is pinned to env.scene.env_origins at reset in this project too
     (reset_base event), so "robot start Y" can be read live with no new cache.
+
+    FIX 2026-07-11: landing_radius/landing_speed_threshold were fixed
+    constants the whole time -- retuned three separate times (see the FIX
+    history above) but never EASED IN. A policy that has never once landed
+    has no gradient trace of what success feels like; requiring today's
+    strict thresholds from iteration 0 means the first successful landing
+    has to be discovered against the hardest version of the check. Both
+    thresholds now lerp from a loose value at env._ball_difficulty=0 to the
+    caller's (strict) default at difficulty=1, mirroring the bidirectional
+    lerp pattern already used for reward weights elsewhere in this project
+    (reward_curriculum_ep_len) and for ball_difficulty's own spawn ranges
+    (events.py). Intended to give a fresh run an easier first landing to
+    anchor the behavior on before the check tightens toward the values that
+    have to hold at full difficulty. See docs/BugFixes.md.
     """
+    d = float(getattr(env, "_ball_difficulty", 1.0))
+    d = max(0.0, min(1.0, d))
+    _EASY_LANDING_RADIUS = 0.20
+    _EASY_LANDING_SPEED_THRESHOLD = 2.0
+    landing_radius = _EASY_LANDING_RADIUS + (landing_radius - _EASY_LANDING_RADIUS) * d
+    landing_speed_threshold = (
+        _EASY_LANDING_SPEED_THRESHOLD + (landing_speed_threshold - _EASY_LANDING_SPEED_THRESHOLD) * d
+    )
+
     full_y = _get_ball_crossing_y(env, ball_name)                 # (N,) world Y
     start_y = env.scene.env_origins[:, 1]                         # (N,) world Y
 
@@ -285,11 +308,29 @@ def _get_reach_target_y(
         # per-step memoization guard exists.
         env._blue_last_settle_step = torch.full((n,), -1, dtype=torch.int64, device=env.device)
     just_reset = env.episode_length_buf <= 1
-    env._blue_was_airborne[just_reset] = False
-    env._blue_landed[just_reset] = False
-    env._blue_airborne_at_reset[just_reset] = False
-    env._blue_settle_count[just_reset] = 0
-    env._blue_landed_was_free[just_reset] = False
+    # FIX 2026-07-11: envs seeded by MotionResetManager.seed_blue_landed_practice
+    # start their episode already past blue (from a real demonstration
+    # frame) -- mark them landed-but-free instead of the normal "always
+    # unlanded on reset" zeroing below, else this block would silently
+    # discard the seed. env._blue_seed_landed_pending is READ-ONLY here --
+    # this function runs up to 7 times per real step and must not clear a
+    # flag its owner (seed_blue_landed_practice) needs to still see across
+    # all of them; see that method's docstring for why.
+    seed_pending = getattr(env, "_blue_seed_landed_pending", None)
+    seeded = (just_reset & seed_pending) if seed_pending is not None else torch.zeros_like(just_reset)
+    normal_reset = just_reset & ~seeded
+
+    env._blue_was_airborne[normal_reset] = False
+    env._blue_landed[normal_reset] = False
+    env._blue_airborne_at_reset[normal_reset] = False
+    env._blue_settle_count[normal_reset] = 0
+    env._blue_landed_was_free[normal_reset] = False
+
+    env._blue_was_airborne[seeded] = True
+    env._blue_landed[seeded] = True
+    env._blue_airborne_at_reset[seeded] = False
+    env._blue_settle_count[seeded] = 0
+    env._blue_landed_was_free[seeded] = True
 
     try:
         robot: Entity = env.scene[asset_cfg.name]
@@ -498,6 +539,33 @@ def footreach(
     # ASSIGNED FOOT's Y velocity, not root -- see FIX 2026-07-11 above.
     vel_toward = torch.where(lateral_error > 0, assigned_foot_vel_y, -assigned_foot_vel_y)
     vel_sigma = 1.0 + 3.0 * vel_toward.clamp(0.0, 3.0)                # 1–10× (matches G1 eereach)
+
+    # FIX 2026-07-11: decay vel_sigma's speed bonus toward neutral (1.0x) as
+    # the foot closes in on BLUE specifically (wide crossing, not yet
+    # landed -- reach_target_y == half_y here, see _get_reach_target_y).
+    # Quantified magnitude mismatch that motivated this: at cu=3, footreach's
+    # ceiling is weight(25) * vel_sigma(10) = 250/step, vs.
+    # blue_overshoot_penalty's ceiling of weight(-75) * max_overshoot(0.5) =
+    # -37.5/step -- the "approach blue fast" reward can be ~7x the "don't
+    # sweep past blue" penalty in the same window, targeting the same point.
+    # blue_overshoot_penalty's docstring assumed vel_sigma + this penalty
+    # would jointly shape an accelerate-then-decelerate profile; the ~10
+    # prior fixes targeting other parts of the landing mechanism without
+    # resolving the sweep-through failure mode suggest that assumption was
+    # never actually true at these magnitudes. Decaying the SPEED BONUS
+    # (not reach_rew itself, and not blue_overshoot_penalty/dist_sigma, both
+    # of which have their own fragile tuning history) removes the incentive
+    # to carry speed through the exact zone the foot should be planting in,
+    # without touching anything already tuned. Reaches neutral at
+    # landing_radius (0.08m, matching _get_reach_target_y's own default) so
+    # the taper lines up with where a genuine plant needs to happen. Zero
+    # effect on narrow crossings or once landed (footreach chasing the live
+    # ball). See docs/BugFixes.md.
+    blue_approach = env._blue_wide & ~env._blue_landed
+    _BLUE_DECEL_ZONE = 0.30   # start decaying the speed bonus at this distance from blue
+    _BLUE_DECEL_FLOOR = 0.08  # fully neutral (1.0x, no bonus) by here -- matches landing_radius
+    decay_frac = ((dist_to_crossing - _BLUE_DECEL_FLOOR) / (_BLUE_DECEL_ZONE - _BLUE_DECEL_FLOOR)).clamp(0.0, 1.0)
+    vel_sigma = torch.where(blue_approach, 1.0 + (vel_sigma - 1.0) * decay_frac, vel_sigma)
 
     # Combine: phase1 when ball is far, phase2 sigmoid when close.
     phase1_mask = ball_x_local > 1.5

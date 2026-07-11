@@ -93,10 +93,20 @@ _STEM_TO_POOL: dict[str, tuple[str, str]] = {
 
 
 def _load_pool(files: list, dev: str) -> dict[str, torch.Tensor]:
-    """Concatenate NPZ frames from a list of files into one pool dict."""
+    """Concatenate NPZ frames from a list of files into one pool dict.
+
+    Also computes `frame_frac`: this frame's position within ITS OWN source
+    file, 0.0 (first frame) to 1.0 (last frame) -- reset per file, not global
+    across the concatenated pool. Added 2026-07-11 so callers can bias
+    sampling toward the back half of a clip (e.g. the post-plant/push-off
+    portion of a DoubleStep/TripleStep demonstration) without needing
+    per-file frame-range bookkeeping of their own. See
+    MotionResetManager._seed_blue_landed_practice.
+    """
     arrays: dict[str, list] = {k: [] for k in
                                 ("joint_pos", "joint_vel", "root_pos",
                                  "root_quat", "root_lin_vel", "root_ang_vel")}
+    fracs: list = []
     for f in files:
         data = np.load(str(f))
         arrays["joint_pos"].append(data["joint_pos"])
@@ -105,7 +115,12 @@ def _load_pool(files: list, dev: str) -> dict[str, torch.Tensor]:
         arrays["root_quat"].append(data["body_quat_w"][:, 0, :])
         arrays["root_lin_vel"].append(data["body_lin_vel_w"][:, 0, :])
         arrays["root_ang_vel"].append(data["body_ang_vel_w"][:, 0, :])
-    return {k: torch.from_numpy(np.vstack(v)).float().to(dev) for k, v in arrays.items()}
+        n_frames = data["joint_pos"].shape[0]
+        fracs.append(np.linspace(0.0, 1.0, n_frames, dtype=np.float32) if n_frames > 1
+                     else np.zeros(n_frames, dtype=np.float32))
+    out = {k: torch.from_numpy(np.vstack(v)).float().to(dev) for k, v in arrays.items()}
+    out["frame_frac"] = torch.from_numpy(np.concatenate(fracs)).float().to(dev)
+    return out
 
 
 class MotionResetManager:
@@ -178,10 +193,18 @@ class MotionResetManager:
         ids: torch.Tensor,
         pool: dict[str, torch.Tensor],
         robot: "Entity",
+        frame_ids: torch.Tensor | None = None,
     ) -> None:
-        """Write root pose + velocity + joint state from a random frame in pool."""
+        """Write root pose + velocity + joint state from a frame in pool.
+
+        frame_ids: explicit per-env frame indices into `pool` (added
+        2026-07-11 for _seed_blue_landed_practice, which needs to bias
+        sampling toward late-clip frames). Defaults to uniform random over
+        the whole pool, matching original behavior, when not provided.
+        """
         n = len(ids)
-        frame_ids = torch.randint(0, pool["joint_pos"].shape[0], (n,), device=env.device)
+        if frame_ids is None:
+            frame_ids = torch.randint(0, pool["joint_pos"].shape[0], (n,), device=env.device)
 
         root_pos  = pool["root_pos"][frame_ids]
         root_quat = pool["root_quat"][frame_ids]
@@ -202,6 +225,100 @@ class MotionResetManager:
         limits = robot.data.soft_joint_pos_limits[ids]
         joint_pos.clamp_(limits[..., 0], limits[..., 1])
         robot.write_joint_state_to_sim(joint_pos, joint_vel, env_ids=ids)
+
+    def seed_blue_landed_practice(
+        self,
+        env: "ManagerBasedRlEnv",
+        env_ids: torch.Tensor,
+        asset_cfg: SceneEntityCfg,
+        fraction: float,
+    ) -> None:
+        """FEAT 2026-07-11: for a fraction of newly-reset WIDE-crossing envs,
+        seed the robot's starting state directly from a LATE-clip frame
+        (frame_frac >= 0.5) of the appropriate side's "wide" pool -- the real
+        LeftDoubleStep/RightDoubleStep/*TripleStep demonstration clips
+        (already 4x-weighted in AMP sampling, see goalkeeper_amp_cfg.py
+        _DOUBLE_TRIPLE_STEP_WEIGHT) -- rather than a static default pose or a
+        donor borrowed from another live env's current (possibly
+        already-failed) state, as blue_practice_fraction already does
+        (mgr.reset's own docstring).
+
+        Rationale: after ~10 fixes targeting the approach-and-plant mechanism
+        itself, genuine blue landing rate was still ~0.1-3% at saturated
+        ball_difficulty (docs/BugFixes.md, 2026-07-11 escalation). Even if a
+        landing is eventually discovered, the policy has essentially never
+        practiced what comes AFTER it (push off toward the real target,
+        intercept, recover) -- footreach/foot_proximity/stopball/softstop's
+        post-landing behavior for wide crossings has had almost no training
+        exposure at all. Seeding directly from real demonstration data
+        (rather than a live-env donor, which offers no guarantee of
+        representing a genuinely successful state) gives dense, cheap
+        exposure to that follow-through phase independent of whether the
+        approach-and-plant sub-problem is solved yet, while a SEPARATE
+        mechanism (rewards.py FIX 2026-07-11: footreach vel_sigma decay near
+        blue) targets the approach itself.
+
+        Only affects envs whose PERMANENT region assignment (env._region_id,
+        set once at startup by assign_static_regions) is a "far" region --
+        authoritative over any per-episode wide/narrow classification, same
+        convention as rewards._get_reach_target_y's FIX 2026-07-07. Selected
+        envs get env._blue_seed_landed_pending SET (and every other env in
+        env_ids gets it explicitly CLEARED first, since this is a per-episode
+        flag that must not leak from a previous episode) --
+        rewards._get_reach_target_y CHECKS but never clears this flag itself
+        (it's read-only there): _get_reach_target_y is called up to 7 times
+        per real step, and its own reset-detection (episode_length_buf <= 1)
+        stays true across all of them, so if it cleared the flag on the
+        first call, the remaining 6 calls that same step would see it already
+        gone and re-zero the seed they'd just set -- the flag's owner
+        (this method) is the only thing allowed to write it, exactly once
+        per real reset. When set, marks env._blue_landed=True,
+        env._blue_landed_was_free=True (deliberately -- this landing was NOT
+        policy-caused, so stopball/softstop's landing_ok gate must still
+        treat it as free/ineligible, exactly the anti-farming purpose
+        _blue_landed_was_free already exists for; footreach/foot_proximity's
+        dense proximity rewards have no such farming concern and DO benefit
+        from the unlocked post-landing target).
+        """
+        region_id = getattr(env, "_region_id", None)
+        if not hasattr(env, "_blue_seed_landed_pending"):
+            env._blue_seed_landed_pending = torch.zeros(env.num_envs, dtype=torch.bool, device=env.device)
+        if region_id is None or len(env_ids) == 0:
+            return
+        # Clear first -- every env in this reset batch starts a fresh
+        # episode, so any leftover pending flag from a past episode must not
+        # survive (only the "selected" subset below gets it re-set).
+        env._blue_seed_landed_pending[env_ids.long()] = False
+        rid = region_id[env_ids]
+        is_far = (rid == 1) | (rid == 3)   # left_far=1, right_far=3 (REGION_NAMES order)
+        is_left = (rid == 0) | (rid == 1)  # left_near=0, left_far=1
+        far_ids = env_ids[is_far]
+        if len(far_ids) == 0:
+            return
+        select_mask = torch.rand(len(far_ids), device=env.device) < fraction
+        selected = far_ids[select_mask]
+        if len(selected) == 0:
+            return
+        selected_is_left = is_left[is_far][select_mask]
+
+        robot: Entity = env.scene[asset_cfg.name]
+        if not hasattr(env, "_blue_seed_landed_pending"):
+            env._blue_seed_landed_pending = torch.zeros(env.num_envs, dtype=torch.bool, device=env.device)
+
+        for side, side_mask in (("left", selected_is_left), ("right", ~selected_is_left)):
+            ids = selected[side_mask]
+            if len(ids) == 0:
+                continue
+            pool = self.pools.get((side, "wide"))
+            if pool is None:
+                continue
+            late = torch.nonzero(pool["frame_frac"] >= 0.5, as_tuple=False).flatten()
+            if len(late) == 0:
+                continue
+            local_idx = torch.randint(0, len(late), (len(ids),), device=env.device)
+            frame_ids = late[local_idx]
+            self._write_rsi_state(env, ids, pool, robot, frame_ids=frame_ids)
+            env._blue_seed_landed_pending[ids] = True
 
     def reset(
         self,
@@ -313,6 +430,26 @@ def init_motion_loader(env: "ManagerBasedRlEnv", env_ids: torch.Tensor | None) -
 
 _BLUE_PRACTICE_BASE_FRACTION = 0.4
 
+# FEAT 2026-07-11: fraction of newly-reset FAR-region envs seeded directly
+# from a real, late-clip DoubleStep/TripleStep demonstration frame -- see
+# MotionResetManager.seed_blue_landed_practice's docstring. Deliberately NOT
+# curriculum-annealed like _BLUE_PRACTICE_BASE_FRACTION above: that fraction
+# exists to help DISCOVER the approach-and-plant behavior, which becomes
+# less necessary as the policy matures; this one exists to give the
+# post-landing follow-through phase ongoing training exposure independent of
+# whether genuine landing has been solved, which doesn't stop being useful
+# once training matures. Applied on top of (independent of) rsi_fraction/
+# blue_practice_fraction below -- this seeding happens AFTER mgr.reset()
+# writes a baseline joint state, and overrides it (root pose/velocity too)
+# only for the selected subset. 0.25 chosen as a middle ground: frequent
+# enough to give consistent, dense exposure (roughly 1 in 4 far-region
+# resets, far regions being about half of all resets given the region
+# split), without dominating the training distribution to the point the
+# policy could lean on being handed the hard part for free too often instead
+# of learning to reach it. Not tuned against an ablation; flagged for
+# revisit if it doesn't move the post-landing behavior.
+_BLUE_LANDED_SEED_FRACTION = 0.25
+
 
 def reset_from_motion_data(
     env: "ManagerBasedRlEnv",
@@ -337,12 +474,23 @@ def reset_from_motion_data(
     after a regression, not just climb), this fraction will naturally climb
     back up too if training regresses -- consistent with the rest of this
     curriculum system. See mgr.reset's docstring for the mechanism itself.
+
+    FEAT 2026-07-11: after mgr.reset() writes its baseline joint state, calls
+    mgr.seed_blue_landed_practice to override a fraction of far-region envs
+    with a real post-plant motion-capture frame instead -- see that method's
+    docstring and _BLUE_LANDED_SEED_FRACTION above.
     """
     mgr = MotionResetManager.get()
     mgr.init(env)
     cu = getattr(env, "_curriculumupdate", 0)
     blue_practice_fraction = _BLUE_PRACTICE_BASE_FRACTION * max(0.0, 1.0 - cu / 3.0)
     mgr.reset(env, env_ids, asset_cfg, rsi_fraction=0.8, blue_practice_fraction=blue_practice_fraction)
+
+    resolved_ids = env_ids
+    if resolved_ids is None:
+        resolved_ids = torch.arange(env.num_envs, device=env.device, dtype=torch.int32)
+    if len(resolved_ids) > 0:
+        mgr.seed_blue_landed_practice(env, resolved_ids, asset_cfg, _BLUE_LANDED_SEED_FRACTION)
 
 
 def reset_ball_local_frame(
