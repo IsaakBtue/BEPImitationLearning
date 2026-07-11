@@ -15,6 +15,7 @@ from mjlab.managers.event_manager import EventTermCfg
 from mjlab.managers.observation_manager import ObservationGroupCfg, ObservationTermCfg
 
 from simple_goalkeeper.mdp import regions as gk_regions
+from simple_goalkeeper.mdp.events import track_blue_landing_success
 from simple_goalkeeper.tasks.goalkeeper_env_cfg import BALL_NAME, goalkeeper_env_cfg
 
 
@@ -129,6 +130,20 @@ def goalkeeper_multidisc_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
         cfg.events["reset_from_motion_data"] = reset_from_motion_data_cfg
     if tick_catchstep_cfg is not None:
         cfg.events["tick_catchstep"] = tick_catchstep_cfg
+
+    # FEAT 2026-07-11: rolling blue-landing success rate, read by
+    # stopball/softstop to scale wide-crossing payoff -- see
+    # track_blue_landing_success's docstring (mdp/events.py) and
+    # docs/BugFixes.md. No ordering dependency on the events popped/
+    # re-added above (only reads env._blue_wide/_blue_landed, set by reward
+    # computation on the outgoing episode's last step, not by any other
+    # reset event).
+    if not play:
+        cfg.events["track_blue_landing_success"] = EventTermCfg(
+            func=track_blue_landing_success,
+            mode="reset",
+            params={},
+        )
 
     return cfg
 

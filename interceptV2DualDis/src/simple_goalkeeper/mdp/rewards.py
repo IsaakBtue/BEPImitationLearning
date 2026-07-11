@@ -720,6 +720,38 @@ def blue_stick_landing(
     return torch.exp(-dist_sigma * dist) * torch.exp(-speed_sigma * speed) * phase1_active.float()
 
 
+_BLUE_LANDING_SUCCESS_RATE_TARGET = 0.3
+
+
+def _blue_landing_reward_scale(env: "ManagerBasedRlEnv") -> float:
+    """Ramp factor for the wide-crossing-contributed portion of stopball/
+    softstop, based on the rolling blue-landing success rate tracked by
+    events.track_blue_landing_success. 0 when landing has never succeeded
+    recently, ramping linearly to 1.0 once the rolling success rate reaches
+    _BLUE_LANDING_SUCCESS_RATE_TARGET (0.3, matching the ">30%" healthy bar
+    used throughout today's diagnostics) or higher.
+
+    FEAT 2026-07-11: "decouple task and behavior" idea from the ranked
+    research list (see docs/BugFixes.md) -- rather than the existing
+    all-or-nothing per-episode landing_ok gate alone (still in place, a
+    landing must still genuinely happen for stopball/softstop to fire at
+    all on a wide crossing), damp the PAYOFF for wide-crossing saves while
+    landing is still rare/lucky, so an early, not-yet-reliable landing
+    doesn't get the same large reward as one from a policy that has
+    demonstrably mastered the behavior -- reducing the chance a rare event
+    dominates the policy-gradient batch before it's actually learned.
+    Ramps up smoothly (not a hard gate) since both research passes ranked
+    the continuous version lower-risk than a full stage-gate restructure.
+    Applies ONLY to wide-crossing saves -- narrow-crossing saves (the
+    majority of the reward-shaping signal early in training) are
+    completely unaffected, see stopball/softstop.
+    """
+    rate = getattr(env, "_blue_landing_success_rate", None)
+    if rate is None:
+        return 1.0  # narrow-only task variant (e.g. green-ball-baseline): no-op
+    return min(1.0, rate / _BLUE_LANDING_SUCCESS_RATE_TARGET)
+
+
 def stopball(
     env: "ManagerBasedRlEnv",
     ball_name: str,
@@ -763,6 +795,13 @@ def stopball(
     env._blue_landed_was_free, a per-landing-event check (was episode_length_buf
     suspiciously small -- <10 steps -- at the moment THIS landing fired).
     See docs/BugFixes.md.
+
+    FEAT 2026-07-11: the wide-crossing-contributed portion of this reward is
+    additionally scaled by a rolling landing-success ramp (_blue_landing_
+    reward_scale) -- landing_ok above still fully gates whether this can
+    fire on a wide crossing at all, this just damps the payoff further while
+    the policy hasn't yet made landing reliable. Narrow-crossing saves are
+    completely unaffected. See that function's docstring and docs/BugFixes.md.
     """
     _get_reach_target_y(env, ball_name)  # ensure _blue_wide/_blue_landed are fresh this step
 
@@ -783,7 +822,14 @@ def stopball(
     landing_ok = ~env._blue_wide | (env._blue_landed & ~env._blue_landed_was_free)
     fired = (delta_vx > delta_vel_threshold) & in_front & landing_ok & ~env._sb_flag
     env._sb_flag |= fired
-    return fired.float()
+
+    # FEAT 2026-07-11: damp the wide-crossing-contributed portion by the
+    # rolling landing-success ramp; narrow-crossing fires stay at full
+    # magnitude. See _blue_landing_reward_scale's docstring.
+    wide_fired = fired & env._blue_wide
+    narrow_fired = fired & ~env._blue_wide
+    scale = _blue_landing_reward_scale(env)
+    return narrow_fired.float() + wide_fired.float() * scale
 
 
 def softstop(
@@ -804,6 +850,9 @@ def softstop(
     landing gate as stopball -- see that function's docstring, including the
     2026-07-07 tightening to genuine-only landings and the 2026-07-08 fix
     replacing the broken env._blue_airborne_at_reset signal.
+
+    FEAT 2026-07-11: also same wide-crossing payoff damping as stopball
+    (_blue_landing_reward_scale) -- see that function's docstring.
     """
     _get_reach_target_y(env, ball_name)  # ensure _blue_wide/_blue_landed are fresh this step
 
@@ -836,7 +885,13 @@ def softstop(
         env._softstop_correct_foot[fired] = correct_foot_contact[fired]
 
     env._softstop_flag |= fired
-    return fired.float()
+
+    # FEAT 2026-07-11: same wide-crossing payoff damping as stopball -- see
+    # _blue_landing_reward_scale's docstring.
+    wide_fired = fired & env._blue_wide
+    narrow_fired = fired & ~env._blue_wide
+    scale = _blue_landing_reward_scale(env)
+    return narrow_fired.float() + wide_fired.float() * scale
 
 
 def single_foot_save(
@@ -1274,8 +1329,8 @@ def inner_face_orientation_save(
     asset_cfg: SceneEntityCfg = _DEFAULT_FEET_CFG,
     alignment_threshold: float = 0.7,
 ) -> torch.Tensor:
-    """One-time bonus when softstop fires and the closest foot is turned sideways (block posture),
-    rotated toward the side it's actually saving on.
+    """One-time bonus when softstop fires and the assigned foot is turned sideways
+    (block posture), rotated toward the side it's actually saving on.
 
     Checks that the foot's long axis (toe-heel, local X) is parallel to world Y at the save
     moment — meaning the foot is rotated 90° so its broad inner face is presented to the ball
@@ -1294,10 +1349,24 @@ def inner_face_orientation_save(
     (right-side saves) learned a genuine ~38 degree rotation toward -Y, while the
     left foot (left-side saves) stayed near-neutral (~3 degrees) -- it never
     discovered the mirror-image +Y rotation, because nothing demanded it
-    specifically. expected_sign is +1 when the LEFT foot is closest (should rotate
-    toward +Y), -1 when the RIGHT foot is closest (should rotate toward -Y),
-    matching the empirically-confirmed-correct right-foot behavior mirrored to the
-    left. See docs/BugFixes.md.
+    specifically. See docs/BugFixes.md.
+
+    FIX 2026-07-10 (assigned foot, not geometrically-closest foot): was
+    `left_closer = dist[:,0] <= dist[:,1]` -- the GEOMETRICALLY closest foot to the
+    ball's live position at the save moment, not the FIXED, task-assigned foot
+    (_get_correct_foot_idx, based on which side the ball crossed on). If the
+    assigned foot overshoots past the ball, the stationary lagging (wrong) foot can
+    become geometrically closer at that instant, so this orientation check would
+    silently evaluate the WRONG foot's quaternion -- while `correct_foot` below
+    (from _softstop_correct_foot, itself built from _get_correct_foot_idx) still
+    correctly requires the ASSIGNED foot to have made contact. That mismatch let
+    the assigned foot's genuinely-correct orientation go unrewarded (checking the
+    lagging foot instead, usually not correctly oriented -- false negative) or, in
+    the reverse case, let a coincidentally-oriented lagging foot fire the reward
+    despite the real save foot doing nothing to earn it (false positive). Now uses
+    _get_correct_foot_idx directly, consistent with `correct_foot`'s own gate.
+    expected_sign is +1 for the left foot (should rotate toward +Y), -1 for the
+    right foot (should rotate toward -Y).
 
     This is orthogonal to feetorientation (which constrains roll/pitch — foot flatness).
     Together they enforce: flat foot AND turned sideways, in the correct direction = correct
@@ -1322,15 +1391,14 @@ def inner_face_orientation_save(
         return torch.zeros(env.num_envs, device=env.device)
 
     robot: Entity = env.scene[asset_cfg.name]
-    ball: Entity  = env.scene[ball_name]
 
-    foot_pos_w  = robot.data.body_link_pos_w[:, asset_cfg.body_ids, :]   # (N, 2, 3)
     foot_quat_w = robot.data.body_link_quat_w[:, asset_cfg.body_ids, :]  # (N, 2, 4)
-    ball_pos_w  = ball.data.root_link_pos_w                               # (N, 3)
 
-    # Find which foot is closer to the ball.
-    dist = torch.norm(foot_pos_w - ball_pos_w[:, None, :], dim=-1)        # (N, 2)
-    left_closer = dist[:, 0] <= dist[:, 1]                                 # (N,)
+    # FIX 2026-07-10: was the geometrically-closest foot to the ball's live
+    # position (dist[:,0] <= dist[:,1]) -- see docstring. Now the fixed,
+    # task-assigned foot, matching correct_foot's own gate below.
+    foot_idx = _get_correct_foot_idx(env, ball_name)                       # (N,) 0=left, 1=right
+    is_left = foot_idx == 0
 
     # Foot long axis (toe direction) in local frame = (1, 0, 0).
     # Rotate into world frame for each foot.
@@ -1338,14 +1406,14 @@ def inner_face_orientation_save(
     left_long_w  = quat_apply(foot_quat_w[:, 0, :], foot_long_local)      # (N, 3)
     right_long_w = quat_apply(foot_quat_w[:, 1, :], foot_long_local)      # (N, 3)
 
-    # Pick the closer foot's long axis.
-    foot_long_w = torch.where(left_closer[:, None], left_long_w, right_long_w)  # (N, 3)
+    # Pick the assigned foot's long axis.
+    foot_long_w = torch.where(is_left[:, None], left_long_w, right_long_w)  # (N, 3)
 
     # "Lengthy side parallel to Y, in the correct direction" = long axis aligned
-    # with +Y when the left foot is closest, -Y when the right foot is closest.
+    # with +Y for the left foot, -Y for the right foot.
     world_y = torch.tensor([0.0, 1.0, 0.0], device=env.device).expand(env.num_envs, -1)
     y_alignment_signed = (foot_long_w * world_y).sum(dim=-1)               # (N,)
-    expected_sign = torch.where(left_closer, 1.0, -1.0)                    # (N,)
+    expected_sign = torch.where(is_left, 1.0, -1.0)                        # (N,)
     oriented_correctly = (y_alignment_signed * expected_sign) > alignment_threshold
 
     correct_foot = getattr(env, "_softstop_correct_foot", torch.zeros(env.num_envs, dtype=torch.bool, device=env.device))

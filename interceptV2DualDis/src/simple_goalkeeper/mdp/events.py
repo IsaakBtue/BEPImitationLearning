@@ -600,6 +600,60 @@ def _update_smoothed_ep_len(env: "ManagerBasedRlEnv", mean_ep_len: float) -> flo
     return env._smoothed_ep_len
 
 
+def track_blue_landing_success(env: "ManagerBasedRlEnv", env_ids: torch.Tensor | None) -> None:
+    """Reset event (mode="reset"): accumulates each just-ended episode's
+    wide/landed outcome into a windowed rolling success rate,
+    env._blue_landing_success_rate, updated every 500 steps (same cadence as
+    the other curricula here).
+
+    FEAT 2026-07-11: "decouple task and behavior" idea from the ranked
+    research list (docs/BugFixes.md, two dispatched research passes both
+    independently ranked this the first thing to try, before a harder
+    stage-gate restructure) -- rather than stopball/softstop's existing
+    all-or-nothing per-episode landing_ok gate (env._blue_landed, already in
+    place), track how RELIABLY the policy reproduces genuine landing across
+    recent wide episodes, and let mdp.rewards scale the downstream
+    stopball/softstop payoff for wide-crossing saves by that reliability --
+    full credit once landing is consistently reproduced, damped credit while
+    it's still rare/lucky. Deliberately reads env._blue_wide/env._blue_landed
+    (both already latched fresh for the whole episode by _get_reach_target_y)
+    on THIS reset event, which runs before _get_reach_target_y's own
+    just_reset clears them for the incoming episode -- so this always sees
+    the outgoing episode's final, correct outcome, not the reset value.
+
+    Runs at mode="reset" (fires only for envs that just terminated), separate
+    from the mode="reset"-driven reward_curriculum_ep_len/ball_difficulty_
+    curriculum classes above (which are CurriculumTermCfg, evaluated by the
+    curriculum manager on a different cadence/API) -- this is a plain
+    EventTermCfg since it only needs to accumulate counts, not return a
+    scale itself (mdp.rewards reads env._blue_landing_success_rate directly).
+    """
+    if env_ids is None or len(env_ids) == 0:
+        return
+    if not hasattr(env, "_blue_wide") or not hasattr(env, "_blue_landed"):
+        return  # narrow-only task variant (e.g. green-ball-baseline) has no blue mechanism
+
+    if not hasattr(env, "_blue_landing_success_rate"):
+        env._blue_landing_success_rate = 0.0
+        env._blue_success_window_count = 0
+        env._blue_wide_window_count = 0
+        env._blue_success_last_update = -500
+
+    wide_mask = env._blue_wide[env_ids]
+    landed_mask = env._blue_landed[env_ids]
+    env._blue_wide_window_count += int(wide_mask.sum().item())
+    env._blue_success_window_count += int((wide_mask & landed_mask).sum().item())
+
+    if env.common_step_counter - env._blue_success_last_update >= 500:
+        env._blue_success_last_update = env.common_step_counter
+        if env._blue_wide_window_count > 0:
+            env._blue_landing_success_rate = (
+                env._blue_success_window_count / env._blue_wide_window_count
+            )
+        env._blue_wide_window_count = 0
+        env._blue_success_window_count = 0
+
+
 class reward_curriculum_ep_len:
     """G1-style episode-length-driven reward weight curriculum.
 
