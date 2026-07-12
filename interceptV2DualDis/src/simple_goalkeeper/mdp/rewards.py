@@ -267,6 +267,10 @@ def _get_reach_target_y(
     landing_speed_threshold = (
         _EASY_LANDING_SPEED_THRESHOLD + (landing_speed_threshold - _EASY_LANDING_SPEED_THRESHOLD) * d
     )
+    # 2026-07-12: cache the CURRENT (curriculum-eased) landing_radius so
+    # footreach's vel_sigma decay zone can track it instead of a hardcoded
+    # strict-only floor -- see footreach's docstring for why this matters.
+    env._blue_landing_radius_current = landing_radius
 
     full_y = _get_ball_crossing_y(env, ball_name)                 # (N,) world Y
     start_y = env.scene.env_origins[:, 1]                         # (N,) world Y
@@ -563,7 +567,20 @@ def footreach(
     # ball). See docs/BugFixes.md.
     blue_approach = env._blue_wide & ~env._blue_landed
     _BLUE_DECEL_ZONE = 0.30   # start decaying the speed bonus at this distance from blue
-    _BLUE_DECEL_FLOOR = 0.08  # fully neutral (1.0x, no bonus) by here -- matches landing_radius
+    # FIX 2026-07-12: was a hardcoded 0.08 (the STRICT, full-difficulty
+    # landing_radius) -- but _get_reach_target_y's actual landing_radius is
+    # curriculum-eased, up to 0.20m at ball_difficulty=0. That mismatch meant
+    # the decel-zone's floor only reached full neutral (1.0x speed bonus) at
+    # 0.08m even when the real landing check the policy needs to satisfy was
+    # already loose enough (0.08-0.20m) to be met -- during most of training,
+    # the "slow down to land" incentive was inert exactly in the regime where
+    # landing should be easiest to first discover. Now reads the SAME eased
+    # value _get_reach_target_y computed this call (env._blue_landing_radius_
+    # current, cached there for this purpose), guaranteeing the taper always
+    # lines up with where a genuine plant actually needs to happen at the
+    # CURRENT curriculum stage, not just at full difficulty. Untested against
+    # a training run yet -- flagged in docs/BugFixes.md.
+    _BLUE_DECEL_FLOOR = float(getattr(env, "_blue_landing_radius_current", 0.08))
     decay_frac = ((dist_to_crossing - _BLUE_DECEL_FLOOR) / (_BLUE_DECEL_ZONE - _BLUE_DECEL_FLOOR)).clamp(0.0, 1.0)
     vel_sigma = torch.where(blue_approach, 1.0 + (vel_sigma - 1.0) * decay_frac, vel_sigma)
 

@@ -674,3 +674,17 @@ Monotonic decline, not noise -- regressing back toward the original ~0.1% floor 
 **Verification:** 53/53 tests pass (`test_multidisc_amp_cfg.py` reverted to single-file-per-region assertions; `test_wide_pool_includes_retimed_variants.py`'s frame count now `36+36=72` from 2 files per side, confirmed live via smoke test: `[MotionResetManager] ('left', 'wide'): 72 frames from 2 file(s)`, same for right). Live smoke test (`--num-envs 4 --agent.max-iterations 1`) clean, no errors, no warnings.
 
 **Not yet resolved:** not yet validated against genuine-landing-rate on a real run.
+
+---
+
+## 2026-07-12 -- Reward-shape fix bundled alongside the AMP change: `footreach`'s decel-zone floor now tracks the curriculum-eased `landing_radius` instead of a hardcoded strict value
+
+**Context:** user explicitly requested a reward-shape fix alongside the AMP-dilution fix above, correctly judging that the AMP change alone was unlikely to be sufficient. This closes a specific gap the reward-math audit found earlier in this investigation (see the audit's "Finding 2") but that was never actually fixed at the time.
+
+**Root cause:** `footreach`'s anti-sweep-through mechanism (`_BLUE_DECEL_ZONE`/`_BLUE_DECEL_FLOOR`, added 2026-07-11) decays the assigned foot's speed bonus to neutral (1.0x) as it closes within `_BLUE_DECEL_FLOOR` of blue -- intended to remove the incentive to carry speed through the exact zone the foot should be planting in. But `_BLUE_DECEL_FLOOR` was hardcoded to `0.08`, the STRICT, full-difficulty value of `_get_reach_target_y`'s `landing_radius` -- which is actually curriculum-eased, up to `0.20` at `ball_difficulty=0`. During most of training (anything short of full difficulty), the REAL landing check the policy needs to satisfy is looser than 0.08m, but the decel zone's floor still required closing to within 0.08m before the speed bonus fully decayed -- meaning a foot could already satisfy the actual (eased) landing radius while still collecting a substantial speed bonus, undermining the "slow down to land" incentive exactly in the regime where landing should be easiest to first discover and anchor on.
+
+**Fix:** `_get_reach_target_y` now caches its own current eased `landing_radius` as `env._blue_landing_radius_current` (right after computing it). `footreach` reads that instead of a hardcoded `0.08`. `_BLUE_DECEL_ZONE` (0.30, the outer edge where decay starts) is unchanged -- only the floor (where decay reaches full neutral) now tracks the curriculum. `mdp/rewards.py:_get_reach_target_y,footreach`.
+
+**Verification:** 55/55 tests pass (2 new: `tests/simple_goalkeeper/test_footreach_decel_floor_tracks_curriculum.py` -- confirms the cached radius eases 0.20 (d=0) -> 0.08 (d=1) linearly, and explicitly demonstrates the bug this fix closes by asserting the real eased radius at d=0 is looser than the old hardcoded floor). Live smoke test (`--num-envs 256 --agent.max-iterations 5`) clean, no errors, sane reward values.
+
+**Not yet resolved:** not yet validated against genuine-landing-rate on a real run -- launching bundled with the AMP-dilution fix above, so if genuine landing rate improves, the two changes are confounded (same caveat this project has hit repeatedly). Given both are relatively small, targeted, well-evidenced fixes (not another blind reward-magnitude guess) rather than large architectural changes, bundling them for one run is a reasonable risk this time.
