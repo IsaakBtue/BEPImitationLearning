@@ -637,3 +637,26 @@ Directly measured from the actual NPZ motion clips (`motions/data/*DoubleStep*.n
 **Verification:** 53/53 tests pass (`test_multidisc_amp_cfg.py`'s far-region file-count assertion updated 2->3; `test_wide_pool_includes_retimed_variants.py`'s frame-count assertion updated to `73+73+48+48+36+36=314` frames / 6 files per side, confirmed live via smoke test: `[MotionResetManager] ('left', 'wide'): 314 frames from 6 file(s)`, same for right). Live smoke test (`--num-envs 4 --agent.max-iterations 1`) clean, no errors.
 
 **Not yet resolved:** same caveat as the 1.5x entry above -- not yet validated against genuine-landing-rate on a real run. Now THREE confounded reference-clip paces plus the reward-leak fix if launched together; if this is bundled into a restart, note it adds another axis to any future ablation.
+
+---
+
+## 2026-07-12 -- `blue_sweepthrough_2x_retiming_2026-07-12` stopped: genuine landing rate REGRESSING (5.1%->1.5%->0.3%), not improving, across the strongest bundled fix set attempted yet
+
+**Context:** the run above (all six changes: four fixes from the 2026-07-11 escalation predecessor runs, the reward-leak fix, and 1.0x/1.5x/2x reference-clip paces) was monitored per the standing 4-hourly health check once `ball_difficulty` saturated to 1.0 at ~iteration 1750.
+
+**Evidence, three live-diagnostic readings 4h apart, all large-sample (1400-1900 wide episodes each):**
+- `model_1500.pt` (difficulty just reaching 1.0): 5.1% genuine (80/1563 wide), 0% RSI-assisted.
+- `model_3000.pt` (~1250 iterations later): 1.5% genuine (21/1407 wide).
+- `model_4500.pt` (~2850 iterations post-saturation total): **0.3% genuine (5/1895 wide)**.
+
+Monotonic decline, not noise -- regressing back toward the original ~0.1% floor (2/1748, the run that started this whole investigation) despite six more fixes on top, including the most aggressive timing-gap closure attempted (2x variant's 0.72s vs. the 0.80s median ball-crossing budget). `Episode_Metrics/blue_landed_genuine` corroborates: flat/oscillating 0.6-1.6% for the entire ~2850-iteration saturated window, no upward trend anywhere in it.
+
+**Not uniformly bad -- two signals actually improved:** `blue_overshoot_penalty` recovered from its worst point (-0.87 at iter 2100) to -0.46 by the end, a real sustained improvement unlike the pure-worsening signature from the 2026-07-11 escalation. `stopball`/`softstop` climbed ~2.7x each -- but `_blue_landing_reward_scale` (still active, damps wide-crossing payoff toward near-zero at this low a success rate) means this is almost certainly narrow-crossing-driven, not wide-crossing progress; flagging so this isn't misread as the core problem improving. **New finding this run:** `Episode_Termination/shank_height` climbed ~5x over the same window (5.8->29.4) with episode length declining in parallel, no plateau -- a stability regression independent of the blue-landing problem, not previously documented this clearly.
+
+**Interpretation:** closing nearly the entire timing gap did not help, and if anything genuine landing rate got *worse* with more training under these six changes, not better -- direct evidence against "insufficient reference-clip pace" as the dominant blocker, on top of ~10 prior reward-shaping fixes (documented above, back to 2026-07-03) already failing to solve this. Two structural hypotheses surfaced for the user's decision, neither implemented on this session's own authority:
+1. `_blue_landing_reward_scale` damps wide-crossing `stopball`/`softstop` toward near-zero while narrow-crossing reward on the same terms climbs unboundedly -- the policy may be rationally specializing entirely on narrow saves, since attempting a genuine wide-crossing landing now has a tiny expected payoff by comparison. This mechanism didn't exist before the 2026-07-11 escalation's predecessor run, so it's untested in isolation.
+2. Adding three paces to each far-region AMP discriminator's dataset may have broadened rather than sharpened what it accepts as "natural," diluting its ability to distinguish a genuine paced landing from a fast sweep -- the opposite of the intended effect, untested.
+
+**Action taken:** pushed `model_4500.pt` (`5c5a993`), killed PID `3322902`. Did not restart with another tweak on this cycle's own authority -- fourth escalation of this exact problem, and a regressing (not just flat) trend surviving the strongest fix attempted yet is a new, worse signal than any prior escalation. Documented in full in `HANDOFF.md` section 28. Surfaced to the user rather than picked unilaterally: continue reward/AMP mechanism iteration, or move to the previously-deprioritized structural rethink (multi-waypoint target, hierarchical skill-selection per the earlier literature research, or something else).
+
+**No new training running as of this entry.** Awaiting user direction.
