@@ -474,3 +474,13 @@ This is the real number. The policy has not actually learned genuine multi-step 
 **Evidence:** 48/48 tests pass. Standalone unit test verifying the sign logic against all four left/right x correct/wrong-direction combinations. Live smoke test: fresh env, reset, 60 steps, no errors.
 
 **Not yet resolved:** not yet validated on a live training run -- both trainings are being restarted fresh with this fix per user request.
+
+## 2026-07-12 -- replaced the full AMP motion dataset with only the 2.5x-retimed DoubleStep clips
+
+**Context:** ported from `blue-ball-waypoint`'s AMP-dilution fix (that branch's `docs/BugFixes.md`, `blue_amp2xonly_decelfix_2026-07-12`): a single AMP discriminator trained on many motion clips of very different pace/style mixes incompatible motion statistics (arXiv:2605.18611, arXiv:2606.08922). This branch's `goalkeeper_amp_cfg.py::_motion_files()` previously globbed ALL 14 NPZ files in `motions/data/` (single-step, double-step, triple-step, and various "safe" pose clips) into one AMP discriminator -- the same failure class, applied per user request even though this branch has no near/far region split (it uses one AMP discriminator for every crossing, unlike the multidisc blue-ball task).
+
+**Fix:** `_motion_files()` now returns exactly two files: `LeftDoubleStep_own_booster_t1_2p5x.npz` and `RightDoubleStep_own_booster_t1_2p5x.npz` (2.5x-retimed via `scripts/retime_motion.py`, copied over from `blue-ball-waypoint` where the retiming tool lives -- 73 -> 29 frames, 1.44s -> 0.576s). These two files are used for every crossing on this branch (no separate near/far dataset exists here to split between). Started at 2x per the initial port, then upgraded to 2.5x same day after the user watched blue-ball-waypoint's play with the 2x pace and reported it still looked too slow relative to the fastest observed wide-crossing window (0.58s at full difficulty) -- 2.5x's 0.576s matches that almost exactly, vs. 2x's 0.72s.
+
+**Verification:** 48/48 tests pass unchanged (`test_amp_motion_weights.py`'s dynamic tests adapt automatically since they call `_motion_files()` directly rather than hardcoding the file list). Live smoke test (`Mjlab-BeyondAMP-Goalkeeper-T1`, `--num-envs 64 --agent.max-iterations 5`) clean, no errors.
+
+**Not yet resolved:** not yet validated against a real training run on this branch (green-ball's own training was already stopped/plateaued this session, per `master`'s `model_19000` push -- this change would need a fresh run to evaluate).

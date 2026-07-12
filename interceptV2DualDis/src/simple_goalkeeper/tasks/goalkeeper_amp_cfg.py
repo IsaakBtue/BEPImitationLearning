@@ -34,9 +34,30 @@ GOALKEEPER_KEY_BODY_NAMES: list[str] = [
 
 
 def _motion_files() -> list[str]:
-    if not _MOTIONS_DIR.is_dir():
+    """2026-07-12: full AMP dataset replaced with ONLY the 2.5x-retimed
+    LeftDoubleStep/RightDoubleStep clips (produced by
+    scripts/retime_motion.py), dropping every other motion file (single-step,
+    triple-step, safe-pose clips, and the original/1.5x/2x paces of these
+    same two clips). Ported from blue-ball-waypoint's AMP-dilution fix
+    (docs/BugFixes.md, blue-amp2xonly_decelfix_2026-07-12): a single AMP
+    discriminator trained on many motions of very different pace/style mixes
+    incompatible motion statistics (arXiv:2605.18611, arXiv:2606.08922) --
+    the same failure class blue-ball-waypoint diagnosed and fixed for its
+    region-conditioned discriminators. This branch has only one AMP
+    discriminator (no near/far region split), so these two files are used
+    for every crossing regardless of distance -- there is no separate
+    near/far dataset to split here, unlike the multidisc blue-ball task.
+
+    2026-07-12 (later same day): 2x -> 2.5x. User watched play with the 2x
+    pace and reported it still looked too slow; 2.5x compresses the clip to
+    0.576s, matching the fastest observed wide-crossing window (0.58s at
+    full difficulty) almost exactly, vs. 2x's 0.72s.
+    """
+    left = _MOTIONS_DIR / "LeftDoubleStep_own_booster_t1_2p5x.npz"
+    right = _MOTIONS_DIR / "RightDoubleStep_own_booster_t1_2p5x.npz"
+    if not (left.is_file() and right.is_file()):
         return []
-    return sorted(str(p) for p in _MOTIONS_DIR.glob("*.npz"))
+    return [str(left), str(right)]
 
 
 # Relative sampling weight given to double/triple-step motions in the AMP
