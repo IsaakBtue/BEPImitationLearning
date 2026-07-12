@@ -513,6 +513,46 @@ def tick_catchstep(
         env._catchstep = (env._catchstep - 1).clamp(min=0)
 
 
+_CURRICULUM_EMA_ALPHA = 0.3
+
+
+def _update_smoothed_ep_len(env: "ManagerBasedRlEnv", mean_ep_len: float) -> float:
+    """Exponentially smooth the raw per-window mean_ep_len reading before any
+    curriculum term computes cu from it. Shared across reward_curriculum_ep_len
+    and ball_difficulty_curriculum (both use the same ep_len_divisor=47) so
+    they stay synchronized rather than oscillating independently.
+
+    FIX 2026-07-10: the 2026-07-09 bidirectional-curriculum fix (removing the
+    monotonic ratchet) correctly stopped the "stuck forever at a level it
+    can't handle" failure, but a live run (rsi_practice_curriculum_2026-07-10)
+    showed the opposite overcorrection: with no damping, a single noisy
+    500-step window's mean_ep_len is enough to flip cu, and ball_difficulty
+    was observed oscillating 0.667<->0.333 repeatedly for the entire run
+    (never settling at either level for more than 1-2 updates), with
+    mean_episode_length bouncing noisily (78-113) and blue_overshoot_penalty
+    flat/oscillating around -0.4 to -0.5 the whole run instead of improving --
+    consistent with a policy that never gets a stable enough training
+    distribution to consolidate a behavior before the ground shifts again.
+    The original (removed) monotonic design's own docstring flagged this
+    exact risk ("prevents oscillation near the boundary") but fixed it the
+    wrong way (freezing forever) instead of damping the input signal.
+    OpenAI's ADR (arXiv 1910.07113) avoids this the right way: difficulty
+    boundaries move by small steps based on a rolling performance buffer, not
+    an instant snap to the latest noisy reading. This EMA (alpha=0.3, i.e.
+    30% weight to the newest window, 70% to history) is the minimal version
+    of that idea -- a genuine, sustained shift still moves cu within a few
+    updates, but a single noisy window can no longer flip it outright.
+    See docs/BugFixes.md.
+    """
+    if not hasattr(env, "_smoothed_ep_len"):
+        env._smoothed_ep_len = mean_ep_len
+    else:
+        env._smoothed_ep_len = (
+            _CURRICULUM_EMA_ALPHA * mean_ep_len + (1.0 - _CURRICULUM_EMA_ALPHA) * env._smoothed_ep_len
+        )
+    return env._smoothed_ep_len
+
+
 class reward_curriculum_ep_len:
     """G1-style episode-length-driven reward weight curriculum.
 
@@ -526,6 +566,10 @@ class reward_curriculum_ep_len:
     is identical across all ramped rewards (same as G1's single class variable).
 
     G1 extremes: ep_len=150 (full episode) → curriculumupdate=3 → weight = 2.5 × base.
+
+    FIX 2026-07-10: cu is now computed from an EMA-smoothed mean_ep_len
+    (_update_smoothed_ep_len), not the raw per-window reading -- see that
+    function's docstring for why.
     """
 
     def __init__(self, cfg: "CurriculumTermCfg", env: "ManagerBasedRlEnv") -> None:
@@ -554,7 +598,8 @@ class reward_curriculum_ep_len:
                 mean_ep_len = env.episode_length_buf[env_ids].float().mean().item()
             else:
                 mean_ep_len = 0.0
-            cu = int(mean_ep_len / self._ep_len_divisor)
+            smoothed_ep_len = _update_smoothed_ep_len(env, mean_ep_len)
+            cu = int(smoothed_ep_len / self._ep_len_divisor)
             # FIX 2026-07-09: was `max(env._curriculumupdate, cu)` (monotonic
             # ratchet, never drops). G1 (legged_robot.py:329) has no such floor
             # -- curriculumupdate is a fresh recomputation every update, so
@@ -619,18 +664,37 @@ class ball_difficulty_curriculum:
 
     G1 legged_robot.py:325-336: every `update_interval` per-env steps compute
         curriculumupdate = int(mean_episode_length / ep_len_divisor)
-    and expand command ranges by `step_size × curriculumupdate`.
-    Longer completed episodes → robot has mastered current difficulty → advance faster.
-    Short episodes (robot falling, ball escaping) → advance slowly or not at all.
+    and expand command ranges by `step_size × curriculumupdate`:
+        command_ranges[i] = clip(command_ranges[i] ± 0.3*curriculumupdate, bound_lo, bound_hi)
+    This is an ACCUMULATOR, not a fresh recompute -- each update nudges the
+    range outward by a small bounded step. Since curriculumupdate = int(...)
+    is never negative, this can only grow or hold flat; a bad window just
+    means zero growth that cycle, not retreat. Contrast with G1's REWARD
+    weights (eereach/success/stopball, compute_reward() lines 359-364),
+    which ARE freshly, directly recomputed every step from curriculumupdate
+    and genuinely go up and down -- G1 uses two different patterns for two
+    different things.
 
-    SGK maps G1's curriculumupdate onto the 0→1 `_ball_difficulty` scalar:
-        difficulty = min(1.0, curriculumupdate / 3.0)   -- recomputed fresh
-        every update, not accumulated (FIX 2026-07-09: previously ratcheted
-        via max(), see the FIX comment below).
+    FIX 2026-07-10: the 2026-07-09 fix ("remove the monotonic ratchet")
+    correctly matched G1's reward-weight pattern for reward_curriculum_ep_len,
+    but WRONGLY applied that same "fresh, fully bidirectional recompute"
+    pattern here too (`difficulty = min(1.0, cu/3.0)` every update) --
+    this is G1's reward-weight pattern, not its difficulty pattern. A live
+    run (rsi_practice_curriculum_2026-07-10) showed ball_difficulty
+    oscillating 0.667<->0.333 repeatedly the entire run, never settling --
+    exactly the failure mode G1's accumulator can't have by construction
+    (it structurally cannot move backward). Reverted to a step-size-based
+    accumulator matching G1's actual command_ranges mechanism: difficulty
+    only ever increases (or holds flat), clipped to 1.0, never resets to a
+    fresh absolute value. See docs/BugFixes.md.
 
     Default params mirror G1 exactly:
         ep_len_divisor = 50   (same as G1)
         update_interval = 500 (same as G1, in per-env steps)
+        step_size = 0.01      (difficulty units per curriculumupdate per check;
+                               at cu=2 sustained, reaches 1.0 in ~25 checks;
+                               original project value, unused since the
+                               2026-07-09 fix, now restored to actual use)
     """
 
     def __init__(self, cfg: "CurriculumTermCfg", env: "ManagerBasedRlEnv") -> None:
@@ -656,25 +720,29 @@ class ball_difficulty_curriculum:
 
         # G1: curriculumupdate = int(mean_episode_length / 50)
         # Uses lengths of just-completed episodes (env_ids are resetting envs).
+        # FIX 2026-07-10: EMA-smoothed via the same shared _update_smoothed_ep_len
+        # as reward_curriculum_ep_len, so both curricula stay synchronized and
+        # neither oscillates independently on single-window noise. See that
+        # function's docstring.
         if len(env_ids) > 0:
             mean_ep_len = env.episode_length_buf[env_ids].float().mean().item()
         else:
             mean_ep_len = 0.0
-        curriculumupdate = int(mean_ep_len / self._ep_len_divisor)
+        smoothed_ep_len = _update_smoothed_ep_len(env, mean_ep_len)
+        curriculumupdate = int(smoothed_ep_len / self._ep_len_divisor)
 
-        # Direct curriculum mapping (matches G1: difficulty = f(cu) only, not accumulated).
-        # At cu=3 (ep_len≈144), difficulty = 1.0.
-        # FIX 2026-07-09: was `max(env._ball_difficulty, new_difficulty)` (monotonic
-        # ratchet, never drops). G1 (legged_robot.py:329,333-336) has no such floor --
-        # curriculumupdate and the command ranges it drives are recomputed fresh every
-        # update, so difficulty eases back down if performance regresses. The ratchet
-        # meant a policy that hit max difficulty and then regressed (more falls,
-        # shorter episodes) had no path back to easier practice to recover -- confirmed
-        # live: ball_difficulty hit 1.0 at iteration ~6496, shank_height terminations
-        # and episode length regressed hard immediately after, and never recovered over
-        # 2500+ further iterations. See docs/BugFixes.md.
-        new_difficulty = min(1.0, curriculumupdate / 3.0)
-        env._ball_difficulty = new_difficulty
+        # FIX 2026-07-10: accumulator, matching G1's ACTUAL command_ranges
+        # mechanism (legged_robot.py:329-335: range = clip(range ± 0.3*cu,
+        # bound_lo, bound_hi) -- an incremental nudge each update, never a
+        # fresh absolute recompute). curriculumupdate is never negative, so
+        # this can only grow or hold flat -- structurally cannot oscillate,
+        # unlike the 2026-07-09 version's `difficulty = min(1.0, cu/3.0)`
+        # direct recompute (that formula matches G1's REWARD weights, not
+        # its difficulty mechanism -- see class docstring). No ratchet
+        # needed here: G1's own mechanism has no floor/ceiling logic beyond
+        # the clip, because monotonic-non-decreasing is its natural,
+        # structural behavior, not a bolted-on guard.
+        env._ball_difficulty = min(1.0, env._ball_difficulty + self._step_size * curriculumupdate)
         return {"ball_difficulty": torch.tensor(env._ball_difficulty)}
 
 

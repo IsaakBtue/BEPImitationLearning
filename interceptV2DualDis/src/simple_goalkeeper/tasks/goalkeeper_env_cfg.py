@@ -15,7 +15,6 @@ from mjlab.managers.reward_manager import RewardTermCfg
 from mjlab.managers.scene_entity_config import SceneEntityCfg
 from mjlab.managers.termination_manager import TerminationTermCfg
 from mjlab.managers.curriculum_manager import CurriculumTermCfg
-from mjlab.managers.metrics_manager import MetricsTermCfg
 from mjlab.tasks.tracking.mdp.commands import MotionCommandCfg
 from mjlab.tasks.velocity.velocity_env_cfg import make_velocity_env_cfg
 from mjlab.sensor import ContactMatch, ContactSensorCfg
@@ -169,17 +168,6 @@ def goalkeeper_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
                 "ep_len_divisor":  47,
             },
         )
-        # Two-stage waypoint bonus (ported from SimpleGoalKeeper): same curriculum
-        # shape as footreach, since it's a component of the same reach behavior.
-        cfg.curriculum["blue_ball_landed_curriculum"] = CurriculumTermCfg(
-            func=gk_mdp.reward_curriculum_ep_len,
-            params={
-                "reward_name": "blue_ball_landed",
-                "base_weight": 10.0,
-                "update_interval": 500,
-                "ep_len_divisor":  47,
-            },
-        )
         # G1 lines 363-364: stopball weight also grows with curriculum (same formula as eereach).
         # Keep base 15 (max 37.5 at cu=3) well below softstop base 105 (max 262.5) so softstop
         # remains the dominant primary signal. 5 shifted to softstop to make it the clear end goal.
@@ -188,37 +176,6 @@ def goalkeeper_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
             params={
                 "reward_name": "stopball",
                 "base_weight": 15.0,     # was 20; 5 shifted to softstop; max 37.5 at cu=3
-                "update_interval": 500,
-                "ep_len_divisor":  47,
-            },
-        )
-        # FIX 2026-07-09: blue_overshoot_penalty/blue_stick_landing previously had
-        # fixed weights while stopball/softstop/footreach/blue_ball_landed all grow
-        # via curriculum -- an asymmetry that let the "must land at blue first"
-        # incentive shrink relative to the growing downstream payoff as training
-        # matured. Live run curriculum_ratchet_fix_2026-07-09 showed genuine landing
-        # collapse 43.4% (iter 1750) -> 1.9% (iter 5000) with general stability
-        # metrics staying flat/improving over the same window -- research (two
-        # dispatched passes, see docs/BugFixes.md) converged on this as a
-        # rare-event/credit-assignment collapse where the cheap, immediate,
-        # high-sample-count overshoot penalty dominates the policy-gradient batch
-        # over the rarer, delayed, higher-expected-value landing payoff. Tying both
-        # terms to the same bidirectional curriculum as the terms they gate is the
-        # lowest-risk fix both research passes independently ranked first.
-        cfg.curriculum["blue_overshoot_penalty_curriculum"] = CurriculumTermCfg(
-            func=gk_mdp.reward_curriculum_ep_len,
-            params={
-                "reward_name": "blue_overshoot_penalty",
-                "base_weight": -30.0,
-                "update_interval": 500,
-                "ep_len_divisor":  47,
-            },
-        )
-        cfg.curriculum["blue_stick_landing_curriculum"] = CurriculumTermCfg(
-            func=gk_mdp.reward_curriculum_ep_len,
-            params={
-                "reward_name": "blue_stick_landing",
-                "base_weight": 8.0,
                 "update_interval": 500,
                 "ep_len_divisor":  47,
             },
@@ -388,33 +345,6 @@ def goalkeeper_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
             func=gk_mdp.foot_proximity,
             weight=5.0,
             params={"ball_name": BALL_NAME, "sigma": 5.0, "asset_cfg": _FEET_CFG},
-        ),
-        # --- two-stage blue->green waypoint bonus (ported from SimpleGoalKeeper) ---
-        "blue_ball_landed": RewardTermCfg(
-            func=gk_mdp.blue_ball_landed,
-            weight=10.0,
-            params={"ball_name": BALL_NAME, "asset_cfg": _FEET_CFG},
-        ),
-        # FEAT 2026-07-08: without this, ignoring the blue waypoint entirely on a
-        # wide crossing earns the same reward (zero, from the landing-gated terms
-        # above) as attempting and failing -- no gradient discourages skipping it.
-        # Penalizes the assigned foot for advancing past blue toward green before
-        # landing there. See rewards.blue_overshoot_penalty docstring.
-        "blue_overshoot_penalty": RewardTermCfg(
-            func=gk_mdp.blue_overshoot_penalty,
-            weight=-30.0,
-            params={"ball_name": BALL_NAME, "asset_cfg": _FEET_CFG},
-        ),
-        # FEAT 2026-07-08: dense reward for "close AND slow" near blue -- the
-        # exact joint condition the settle-window landing check requires.
-        # Added after two escalation checks (iter 2000, 3750 of
-        # amp_g1_parity_2026-07-08b) both measured 0.0% genuine landings and
-        # blue_overshoot_penalty staying flat/negative instead of shrinking.
-        # See rewards.blue_stick_landing docstring.
-        "blue_stick_landing": RewardTermCfg(
-            func=gk_mdp.blue_stick_landing,
-            weight=8.0,
-            params={"ball_name": BALL_NAME, "asset_cfg": _FEET_CFG},
         ),
         # --- active stepping: reward lifting feet during approach ---
         "foot_clearance": RewardTermCfg(
@@ -652,26 +582,6 @@ def goalkeeper_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
             time_out=False,
         ),
     }
-
-    # ------------------------------------------------------------------
-    # Metrics — diagnostics only, no weight/dt scaling (mjlab.managers.
-    # metrics_manager). Distinguishes a genuine (policy-driven) blue-ball
-    # landing from an RSI-assisted one (ported from SimpleGoalKeeper, see
-    # mdp/metrics.py). update(), not assignment: cfg.metrics already carries
-    # "mean_action_acc" from make_velocity_env_cfg's base config.
-    # ------------------------------------------------------------------
-    cfg.metrics.update({
-        "blue_landed_genuine": MetricsTermCfg(
-            func=gk_mdp.blue_landed_genuine,
-            params={"ball_name": BALL_NAME, "asset_cfg": _FEET_CFG},
-            reduce="last",
-        ),
-        "blue_landed_rsi_assisted": MetricsTermCfg(
-            func=gk_mdp.blue_landed_rsi_assisted,
-            params={"ball_name": BALL_NAME, "asset_cfg": _FEET_CFG},
-            reduce="last",
-        ),
-    })
 
     # ------------------------------------------------------------------
     # Episode length
