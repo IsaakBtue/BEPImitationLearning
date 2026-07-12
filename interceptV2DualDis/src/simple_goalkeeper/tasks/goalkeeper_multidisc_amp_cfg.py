@@ -177,14 +177,22 @@ REGION_MOTION_FILES: dict[str, list[str]] = {
         # representing any one pace -- plausibly why genuine landing rate got
         # WORSE, not better, after the 2x variant was added on top of 1.5x
         # (see docs/BugFixes.md, 2026-07-12 escalation entry). Testing a
-        # single, physically-closest-to-required pace (0.72s vs. the 0.80s
-        # median ball-crossing budget) instead of a blended multi-pace set --
-        # user's explicit choice, "most physically possible one."
-        str(_MOTIONS_DIR / "LeftDoubleStep_own_booster_t1_2x.npz"),
+        # single, physically-closest-to-required pace instead of a blended
+        # multi-pace set -- user's explicit choice, "most physically possible
+        # one."
+        #
+        # 2026-07-12 (later same day): upgraded 2x -> 2.5x. The 2x clip
+        # (0.72s) was still slower than the fastest observed wide-crossing
+        # ball-flight window (0.58s at full difficulty, per
+        # scripts/retime_motion.py's own timing-gap docstring) -- user
+        # reported the 2x pace still looked too slow watching play. 2.5x
+        # compresses the clip to 0.576s, matching that tightest window
+        # almost exactly instead of only the 0.80s median.
+        str(_MOTIONS_DIR / "LeftDoubleStep_own_booster_t1_2p5x.npz"),
     ],
     "right_near": [str(_MOTIONS_DIR / "Rightstep_own_booster_t1.npz")],
     "right_far": [
-        str(_MOTIONS_DIR / "RightDoubleStep_own_booster_t1_2x.npz"),
+        str(_MOTIONS_DIR / "RightDoubleStep_own_booster_t1_2p5x.npz"),
     ],
 }
 

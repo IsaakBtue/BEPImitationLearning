@@ -76,7 +76,7 @@ _STEM_TO_POOL: dict[str, tuple[str, str]] = {
     # triple  (0.40–0.60 m, see _TRIPLE_THRESH above)
     "leftsafefar1_booster_t1":        ("left",  "triple"),
     "rightsafefar1_booster_t1":       ("right", "triple"),
-    # wide (>= 0.60 m, see _TRIPLE_THRESH above): ONLY the 2x-retimed pace
+    # wide (>= 0.60 m, see _TRIPLE_THRESH above): ONLY the 2.5x-retimed pace
     # (retime_motion.py). 2026-07-12 (revised, same day): the original 1.0x
     # and 1.5x paces were dropped from the wide pool entirely -- research
     # found that blending multiple paces into one AMP discriminator/reference
@@ -86,9 +86,15 @@ _STEM_TO_POOL: dict[str, tuple[str, str]] = {
     # landing rate got WORSE after the 2x variant was added on top of 1.5x
     # rather than better (docs/BugFixes.md, 2026-07-12 escalation entry).
     # Testing a single, physically-closest-to-required pace instead of a
-    # blended set -- user's explicit choice. The original/1.5x files stay
+    # blended set -- user's explicit choice. The original/1.5x/2x files stay
     # mapped to None (combined pool only, e.g. for sgk_play_rsi) rather than
     # removed entirely, so MotionResetManager.init() doesn't warn about them.
+    #
+    # 2026-07-12 (later same day): upgraded 2x -> 2.5x. The 2x clip (0.72s)
+    # was still slower than the fastest observed wide-crossing ball-flight
+    # window (0.58s at full difficulty) -- user reported the 2x pace still
+    # looked too slow watching play. 2.5x compresses the clip to 0.576s,
+    # matching that tightest window almost exactly.
     "leftdoublestep_own_booster_t1":       None,
     "lefttriplestep_own_booster_t1":       None,
     "rightdoublestep_own_booster_t1":      None,
@@ -97,10 +103,14 @@ _STEM_TO_POOL: dict[str, tuple[str, str]] = {
     "lefttriplestep_own_booster_t1_1p5x":  None,
     "rightdoublestep_own_booster_t1_1p5x": None,
     "righttriplestep_own_booster_t1_1p5x": None,
-    "leftdoublestep_own_booster_t1_2x":  ("left",  "wide"),
-    "lefttriplestep_own_booster_t1_2x":  ("left",  "wide"),
-    "rightdoublestep_own_booster_t1_2x": ("right", "wide"),
-    "righttriplestep_own_booster_t1_2x": ("right", "wide"),
+    "leftdoublestep_own_booster_t1_2x":  None,
+    "lefttriplestep_own_booster_t1_2x":  None,
+    "rightdoublestep_own_booster_t1_2x": None,
+    "righttriplestep_own_booster_t1_2x": None,
+    "leftdoublestep_own_booster_t1_2p5x":  ("left",  "wide"),
+    "lefttriplestep_own_booster_t1_2p5x":  ("left",  "wide"),
+    "rightdoublestep_own_booster_t1_2p5x": ("right", "wide"),
+    "righttriplestep_own_booster_t1_2p5x": ("right", "wide"),
     # single-range files (< 0.20 m, see _SINGLE_THRESH above) → standing pose,
     # not RSI pools; listed so the init loop doesn't warn about unknown files.
     "leftstep_own_booster_t1":        None,
