@@ -311,6 +311,10 @@ def _get_reach_target_y(
         # FIX 2026-07-09: see the settle-count increment below for why this
         # per-step memoization guard exists.
         env._blue_last_settle_step = torch.full((n,), -1, dtype=torch.int64, device=env.device)
+        # FIX 2026-07-12: cache the assigned foot's current ground-contact
+        # state so blue_stick_landing can gate on it too -- see that
+        # function's docstring for why this matters.
+        env._blue_foot_in_contact = torch.zeros(n, dtype=torch.bool, device=env.device)
     just_reset = env.episode_length_buf <= 1
     # FIX 2026-07-11: envs seeded by MotionResetManager.seed_blue_landed_practice
     # start their episode already past blue (from a real demonstration
@@ -355,6 +359,7 @@ def _get_reach_target_y(
         left_in_contact = (found[:, :4] > 0).any(dim=-1)
         right_in_contact = (found[:, 4:] > 0).any(dim=-1)
         foot_in_contact = torch.where(foot_idx == 0, left_in_contact, right_in_contact)  # (N,)
+        env._blue_foot_in_contact = foot_in_contact
 
         currently_airborne = ~foot_in_contact
         first_time_airborne = currently_airborne & ~env._blue_was_airborne
@@ -818,6 +823,40 @@ def blue_stick_landing(
     (an earlier, tighter value caused a genuine zero-gradient collapse) --
     gating on "foot has moved" removes the free reward without narrowing the
     basin that fix depended on. See docs/BugFixes.md.
+
+    FIX 2026-07-12: also gate on env._blue_foot_in_contact (assigned foot
+    currently touching the ground -- same feet_contact-sensor signal
+    _get_reach_target_y's settle-window `candidate` already requires,
+    cached there for this purpose). Root cause found via a targeted
+    diagnostic after blue_amp2xonly_decelfix_2026-07-12 replicated the same
+    near-zero genuine-landing plateau as every prior run despite two fresh
+    fixes: a live probe instrumenting env._blue_settle_count directly (not
+    just the aggregate landing rate) showed settle_count reached >=1 in only
+    1 of 2203 completed wide/unlanded episodes -- i.e. the settle-window's
+    `candidate` (contact AND within landing_radius) essentially never
+    becomes true at all, ruling out "contact keeps flickering and resetting
+    the counter" as the failure mode. Rereading this function's `dist`
+    computation showed why: it is PURELY horizontal (assigned_foot_pos[:, :2]
+    vs. target_xy), with no Z term and, until this fix, no contact
+    requirement -- so a foot hovering directly above the blue midpoint,
+    never touching down, scored identically to a foot planted there. That is
+    a stable, higher-availability local optimum than an actual footstrike
+    (hovering doesn't cost balance/weight-transfer effort a genuine plant
+    does), and it fully explains both the settle-window's near-zero
+    `candidate` rate and the concurrently-observed pattern of
+    blue_overshoot_penalty growing steadily more negative while
+    blue_stick_landing itself stayed substantial (~0.6-0.85) -- the foot was
+    getting dense reward for hovering close and slow, then continuing its
+    swing past blue while airborne, never for actually landing. Gating on
+    foot_in_contact closes this gap directly: the dense exp(-dist)*exp(-speed)
+    shape is now only available while the foot is actually touching the
+    ground, so it can only reinforce being close+slow ON AN ACTUAL PLANT,
+    which is exactly the joint condition the discrete settle-window check
+    needs. Does not touch dist_sigma/speed_sigma (their own separate, fragile
+    tuning history, see FIX 2026-07-09 above) or _BLUE_SETTLE_STEPS (the
+    near-miss data rules out settle-window LENGTH as the bottleneck --
+    candidate isn't failing to sustain for 3 steps, it's not being satisfied
+    even once). Not yet validated against a training run. See docs/BugFixes.md.
     """
     _get_reach_target_y(env, ball_name, asset_cfg=asset_cfg)  # ensure _blue_wide/_blue_landed fresh
 
@@ -850,7 +889,10 @@ def blue_stick_landing(
     # earlier, tighter dist_sigma=15 caused a zero-gradient collapse, fixed
     # 2026-07-09 by widening to 8) -- gating on "foot has moved" rules out
     # the free reward without narrowing the basin that fix depended on.
-    phase1_active = env._blue_wide & ~env._blue_landed & env._blue_was_airborne
+    foot_in_contact = getattr(
+        env, "_blue_foot_in_contact", torch.zeros(env.num_envs, dtype=torch.bool, device=env.device)
+    )
+    phase1_active = env._blue_wide & ~env._blue_landed & env._blue_was_airborne & foot_in_contact
     return torch.exp(-dist_sigma * dist) * torch.exp(-speed_sigma * speed) * phase1_active.float()
 
 
