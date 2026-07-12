@@ -535,7 +535,7 @@ def goalkeeper_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
             "dist_range":     (1.5, 3.5),
             "y_start_range":  (-0.3, 0.3),
             "y_end_range":    (-0.9, 0.9),
-            "t_flight_range": (0.7, 1.1),
+            "t_flight_range": (0.7, 1.5),
             "spawn_z":        0.12,
         },
     )
@@ -618,7 +618,7 @@ def goalkeeper_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
                 "dist_range":    (1.5, 3.5),
                 "y_start_range": (-0.3, 0.3),
                 "y_end_range":   (-0.9, 0.9),
-                "t_flight_range": (0.7, 1.1),
+                "t_flight_range": (0.7, 1.5),
                 "spawn_z":       0.12,
             },
         )

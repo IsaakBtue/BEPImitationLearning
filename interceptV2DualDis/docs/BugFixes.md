@@ -484,3 +484,13 @@ This is the real number. The policy has not actually learned genuine multi-step 
 **Verification:** 48/48 tests pass unchanged (`test_amp_motion_weights.py`'s dynamic tests adapt automatically since they call `_motion_files()` directly rather than hardcoding the file list). Live smoke test (`Mjlab-BeyondAMP-Goalkeeper-T1`, `--num-envs 64 --agent.max-iterations 5`) clean, no errors.
 
 **Not yet resolved:** not yet validated against a real training run on this branch (green-ball's own training was already stopped/plateaued this session, per `master`'s `model_19000` push -- this change would need a fresh run to evaluate).
+
+## 2026-07-12 -- widened green-ball's hard-difficulty `t_flight_range` upper bound from 1.1s to 1.5s
+
+**Context:** user request, alongside restarting this branch's training with the 2.5x AMP dataset fix above. `goalkeeper_env_cfg.py`'s `reset_ball` event (both training and play blocks) passed `t_flight_range=(0.7, 1.1)` as the full-difficulty (`ball_difficulty=1.0`) reaction-time range to `events.py::reset_ball_rolling` -- at max curriculum difficulty, ball flight time ranged from 0.7s (fastest) to only 1.1s (slowest), giving the robot at most 1.1s reaction time even on the "easiest" hard-difficulty ball.
+
+**Fix:** widened the upper bound to 1.5s: `t_flight_range=(0.7, 1.5)` in both the training and play `reset_ball` blocks (train/play parity rule, `CLAUDE.md`), plus `reset_ball_rolling`'s own default parameter value and inline comment for consistency (the default itself is unused in practice -- both call sites always pass explicit params -- but was left stale otherwise). Only the slow end widened; the fast end (0.7s, the hardest single-side of the range) is untouched, so peak difficulty is unchanged -- this only adds more slow-ball variety at full difficulty rather than making anything harder.
+
+**Verification:** 48/48 tests pass (none hardcoded the old `1.1` value). Live smoke test (`--num-envs 64 --agent.max-iterations 5`) clean, no errors.
+
+**Not yet resolved:** not yet validated against a real training run -- restarting this branch's training with both this change and the 2.5x AMP dataset fix together, so any effect on training is confounded between the two (both are small, well-reasoned, non-interacting changes -- one to the AMP reference data, one to the task's own ball-speed curriculum -- so bundling them for one restart is a reasonable risk).
