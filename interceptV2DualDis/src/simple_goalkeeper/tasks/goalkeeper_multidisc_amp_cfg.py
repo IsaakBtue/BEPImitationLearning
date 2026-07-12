@@ -167,26 +167,23 @@ _MOTIONS_DIR = Path(__file__).parents[1] / "motions" / "data"
 REGION_MOTION_FILES: dict[str, list[str]] = {
     "left_near": [str(_MOTIONS_DIR / "LeftStep_own_booster_t1.npz")],
     "left_far": [
-        str(_MOTIONS_DIR / "LeftDoubleStep_own_booster_t1.npz"),
-        # 2026-07-12: added the 1.5x-retimed variant (retime_motion.py) so the
-        # left_far discriminator sees the reference motion at both the
-        # original mocap pace and a pace closer to what the ball's timing
-        # budget actually allows -- see docs/BugFixes.md for the underlying
-        # timing-gap investigation. Discrete two-speed set, not continuous
-        # randomization, per FARM/VFIL precedent (see the same doc entry).
-        str(_MOTIONS_DIR / "LeftDoubleStep_own_booster_t1_1p5x.npz"),
-        # 2026-07-12 (same day): added a 2x variant too, per user's direct
-        # visual check of the 1.5x clip in the ghost overlay -- still looked
-        # plausible, past FARM's generic 1.5x ceiling but confirmed by actual
-        # inspection of this specific clip rather than the literature alone.
-        # 0.72s duration, peak joint vel 3.82 rad/s -- still well under the
-        # 10 rad/s dof_vel_limits ceiling. Three-speed discrete set now.
+        # 2026-07-12 (revised, same day): dropped the original 1.0x and 1.5x
+        # paces -- two dispatched research passes found that a single AMP
+        # discriminator trained on BLENDED paces exhibits exactly the "mixes
+        # incompatible motion statistics" failure mode documented in very
+        # recent (2026) state-dependent-AMP literature (arXiv:2605.18611,
+        # arXiv:2606.08922): the policy converges on an ambiguous blended
+        # motion that satisfies the discriminator without genuinely
+        # representing any one pace -- plausibly why genuine landing rate got
+        # WORSE, not better, after the 2x variant was added on top of 1.5x
+        # (see docs/BugFixes.md, 2026-07-12 escalation entry). Testing a
+        # single, physically-closest-to-required pace (0.72s vs. the 0.80s
+        # median ball-crossing budget) instead of a blended multi-pace set --
+        # user's explicit choice, "most physically possible one."
         str(_MOTIONS_DIR / "LeftDoubleStep_own_booster_t1_2x.npz"),
     ],
     "right_near": [str(_MOTIONS_DIR / "Rightstep_own_booster_t1.npz")],
     "right_far": [
-        str(_MOTIONS_DIR / "RightDoubleStep_own_booster_t1.npz"),
-        str(_MOTIONS_DIR / "RightDoubleStep_own_booster_t1_1p5x.npz"),
         str(_MOTIONS_DIR / "RightDoubleStep_own_booster_t1_2x.npz"),
     ],
 }

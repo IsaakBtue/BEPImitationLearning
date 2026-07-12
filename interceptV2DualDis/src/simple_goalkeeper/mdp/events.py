@@ -76,20 +76,27 @@ _STEM_TO_POOL: dict[str, tuple[str, str]] = {
     # triple  (0.40–0.60 m, see _TRIPLE_THRESH above)
     "leftsafefar1_booster_t1":        ("left",  "triple"),
     "rightsafefar1_booster_t1":       ("right", "triple"),
-    # wide    (≥ 0.60 m, see _TRIPLE_THRESH above)
-    "leftdoublestep_own_booster_t1":  ("left",  "wide"),
-    "lefttriplestep_own_booster_t1":  ("left",  "wide"),
-    "rightdoublestep_own_booster_t1": ("right", "wide"),
-    "righttriplestep_own_booster_t1": ("right", "wide"),
-    # 2026-07-12: 1.5x-retimed variants (retime_motion.py) of the same four
-    # clips, same (side, wide) pool -- _load_pool computes frame_frac per
-    # SOURCE FILE, so seed_blue_landed_practice's "late half" draw now pulls
-    # from either pace. See docs/BugFixes.md for the timing-gap rationale.
-    "leftdoublestep_own_booster_t1_1p5x":  ("left",  "wide"),
-    "lefttriplestep_own_booster_t1_1p5x":  ("left",  "wide"),
-    "rightdoublestep_own_booster_t1_1p5x": ("right", "wide"),
-    "righttriplestep_own_booster_t1_1p5x": ("right", "wide"),
-    # 2026-07-12 (same day): 2x-retimed variants too, same treatment.
+    # wide (>= 0.60 m, see _TRIPLE_THRESH above): ONLY the 2x-retimed pace
+    # (retime_motion.py). 2026-07-12 (revised, same day): the original 1.0x
+    # and 1.5x paces were dropped from the wide pool entirely -- research
+    # found that blending multiple paces into one AMP discriminator/reference
+    # pool exhibits the "mixes incompatible motion statistics" failure mode
+    # documented in very recent (2026) state-dependent-AMP literature
+    # (arXiv:2605.18611, arXiv:2606.08922), plausibly explaining why genuine
+    # landing rate got WORSE after the 2x variant was added on top of 1.5x
+    # rather than better (docs/BugFixes.md, 2026-07-12 escalation entry).
+    # Testing a single, physically-closest-to-required pace instead of a
+    # blended set -- user's explicit choice. The original/1.5x files stay
+    # mapped to None (combined pool only, e.g. for sgk_play_rsi) rather than
+    # removed entirely, so MotionResetManager.init() doesn't warn about them.
+    "leftdoublestep_own_booster_t1":       None,
+    "lefttriplestep_own_booster_t1":       None,
+    "rightdoublestep_own_booster_t1":      None,
+    "righttriplestep_own_booster_t1":      None,
+    "leftdoublestep_own_booster_t1_1p5x":  None,
+    "lefttriplestep_own_booster_t1_1p5x":  None,
+    "rightdoublestep_own_booster_t1_1p5x": None,
+    "righttriplestep_own_booster_t1_1p5x": None,
     "leftdoublestep_own_booster_t1_2x":  ("left",  "wide"),
     "lefttriplestep_own_booster_t1_2x":  ("left",  "wide"),
     "rightdoublestep_own_booster_t1_2x": ("right", "wide"),
