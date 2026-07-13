@@ -519,7 +519,7 @@ _CURRICULUM_EMA_ALPHA = 0.3
 def _update_smoothed_ep_len(env: "ManagerBasedRlEnv", mean_ep_len: float) -> float:
     """Exponentially smooth the raw per-window mean_ep_len reading before any
     curriculum term computes cu from it. Shared across reward_curriculum_ep_len
-    and ball_difficulty_curriculum (both use the same ep_len_divisor=47) so
+    and ball_difficulty_curriculum (both use the same ep_len_divisor=50) so
     they stay synchronized rather than oscillating independently.
 
     FIX 2026-07-10: the 2026-07-09 bidirectional-curriculum fix (removing the
@@ -789,7 +789,7 @@ def reset_ball_rolling(
     dist_range: tuple[float, float] = (1.5, 2.5),
     y_start_range: tuple[float, float] = (-0.5, 0.5),
     y_end_range: tuple[float, float] = (-0.5, 0.5),
-    t_flight_range: tuple[float, float] = (0.7, 1.5),
+    t_flight_range: tuple[float, float] = (0.7, 1.1),
     spawn_z: float = 0.10,
     y_end_outer_frac: float | None = None,
 ) -> None:
@@ -813,7 +813,7 @@ def reset_ball_rolling(
 
     _EASY_DIST_R      = (1.5, 2.0)
     _EASY_Y_ROLL      = (-0.05, 0.05)
-    _EASY_T_FLIGHT_R  = (0.9, 1.3)   # easy: long flight → slow balls; hard: 0.7–1.5 s
+    _EASY_T_FLIGHT_R  = (0.9, 1.3)   # easy: long flight → slow balls; hard: 0.7–1.1 s
 
     dist_r      = _lerp_range(_EASY_DIST_R,     dist_range,     d)
     y_start_r   = _lerp_range(_EASY_Y_ROLL,     y_start_range,  d)

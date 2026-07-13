@@ -494,3 +494,13 @@ This is the real number. The policy has not actually learned genuine multi-step 
 **Verification:** 48/48 tests pass (none hardcoded the old `1.1` value). Live smoke test (`--num-envs 64 --agent.max-iterations 5`) clean, no errors.
 
 **Not yet resolved:** not yet validated against a real training run -- restarting this branch's training with both this change and the 2.5x AMP dataset fix together, so any effect on training is confounded between the two (both are small, well-reasoned, non-interacting changes -- one to the AMP reference data, one to the task's own ball-speed curriculum -- so bundling them for one restart is a reasonable risk).
+
+## 2026-07-13 -- reverted the `t_flight_range` widening above; it was the wrong parameter entirely
+
+**Root cause:** user's original request was for a spatial spawn range to be "1.5 meters wide" -- a distance parameter (`dist_range`/`y_start_range`/`y_end_range`), not a time duration. `t_flight_range` was misread as "the range" and changed 1.1s -> 1.5s (a reaction-*time* upper bound, entirely unrelated to spatial width). This was flagged directly by the user and reverted: `t_flight_range=(0.7, 1.1)` restored in both `goalkeeper_env_cfg.py`'s training and play `reset_ball` blocks, `reset_ball_rolling`'s own default parameter, and its inline comment -- all back to the pre-2026-07-12 values. This run also collapsed for unrelated reasons (see the `mean_action_acc`/`action_acc_l2` explosion investigation, same conversation) and was going to need a fresh restart regardless.
+
+**Separately, per the same message:** `ep_len_divisor` (ball_difficulty, softstop, footreach, and stopball curricula, all in `goalkeeper_env_cfg.py`) reverted from `47` back to `50`, matching G1 and each curriculum class's own documented/coded default (`events.py`'s `ball_difficulty_curriculum`/`reward_curriculum_ep_len` both default `ep_len_divisor` to `50` already -- the `goalkeeper_env_cfg.py` override had drifted to `47` and is now realigned with that default). All four curricula still share the same value, preserving the original synchronization intent (avoiding the earlier documented desync bug) -- just at `50` instead of `47`.
+
+**Verification:** 48/48 tests pass (none hardcoded either old value). Live smoke test (`--num-envs 64 --agent.max-iterations 5`) clean, no errors.
+
+**Not yet resolved:** the original spatial-range request ("1.5 meters wide") is still open -- needs clarification on which parameter (`dist_range`, `y_start_range`, or `y_end_range`) and whether "1.5m wide" means a total span or a single bound, before implementing.

@@ -135,9 +135,9 @@ def goalkeeper_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
                 # difficulty += step_size × int(mean_ep_len / ep_len_divisor)
                 # every update_interval per-env steps. Longer episodes → faster advance.
                 "update_interval": 500,   # per-env steps between updates (same as G1)
-                "ep_len_divisor":  47,    # matches reward curricula divisor exactly so ball
-                                          # difficulty and reward weights advance at the same
-                                          # episode-length boundary (was 48, off by 1 step)
+                "ep_len_divisor":  50,    # same as G1 (matches reward curricula divisor exactly
+                                          # so ball difficulty and reward weights advance at the
+                                          # same episode-length boundary)
                 "step_size":       0.01,  # difficulty units per curriculumupdate per check
             },
         )
@@ -151,7 +151,7 @@ def goalkeeper_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
                 "reward_name": "softstop",
                 "base_weight": 105.0,    # G1 stop_init=100 + 5 shifted from stopball → max 262.5 at cu=3
                 "update_interval": 500,
-                "ep_len_divisor":  47,
+                "ep_len_divisor":  50,
             },
         )
         # NOTE: torque_limits and dof_pos_limits intentionally NOT in curriculum.
@@ -165,7 +165,7 @@ def goalkeeper_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
                 "reward_name": "footreach",
                 "base_weight": 10.0,     # G1 eereach_init=10 → max 25 at cu=3
                 "update_interval": 500,
-                "ep_len_divisor":  47,
+                "ep_len_divisor":  50,
             },
         )
         # G1 lines 363-364: stopball weight also grows with curriculum (same formula as eereach).
@@ -177,7 +177,7 @@ def goalkeeper_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
                 "reward_name": "stopball",
                 "base_weight": 15.0,     # was 20; 5 shifted to softstop; max 37.5 at cu=3
                 "update_interval": 500,
-                "ep_len_divisor":  47,
+                "ep_len_divisor":  50,
             },
         )
         # Correct-foot-save quality bonuses: weights double at cu >= 3 (ep_len ≈ 144 steps).
@@ -535,7 +535,7 @@ def goalkeeper_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
             "dist_range":     (1.5, 3.5),
             "y_start_range":  (-0.3, 0.3),
             "y_end_range":    (-0.9, 0.9),
-            "t_flight_range": (0.7, 1.5),
+            "t_flight_range": (0.7, 1.1),
             "spawn_z":        0.12,
         },
     )
@@ -618,7 +618,7 @@ def goalkeeper_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
                 "dist_range":    (1.5, 3.5),
                 "y_start_range": (-0.3, 0.3),
                 "y_end_range":   (-0.9, 0.9),
-                "t_flight_range": (0.7, 1.5),
+                "t_flight_range": (0.7, 1.1),
                 "spawn_z":       0.12,
             },
         )
