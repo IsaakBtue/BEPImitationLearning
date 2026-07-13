@@ -406,14 +406,44 @@ def _get_reach_target_y(
         # requiring 3 consecutive REAL steps to rule out a single-tick graze.
         # Only increment on the first call for a given env this tick,
         # tracked via episode_length_buf (unique per real step, shared by
-        # all 7 callers). Reset-to-zero when candidate is false stays
-        # unguarded -- idempotent regardless of call count. See docs/BugFixes.md.
+        # all 7 callers). See docs/BugFixes.md.
+        #
+        # FIX 2026-07-13: reset-to-zero-on-any-miss replaced with a leaky
+        # decrement (floor 0). Root cause found by directly measuring the
+        # actual AMP reference clips (LeftDoubleStep/RightDoubleStep): the
+        # real demonstration's own "plant" phase between the two swings is
+        # only ~11 frames (0.22s) wide even at 1.0x pace -- retiming to
+        # 2.5x (adopted for AMP-timing-budget reasons, see the 2026-07-12
+        # entries) compresses this proportionally to ~4.4 real sim steps.
+        # A hard reset-on-any-miss counter needs 3 back-to-back hits inside
+        # that ~4-frame window with zero interruption -- a single dropped
+        # frame (contact-sensor bounce during weight transfer, a half-step
+        # of noise from the stochastic policy not perfectly tracking the
+        # demo) throws away all accumulated progress and forces a full
+        # restart, which the window may not have room left to allow. A live
+        # diagnostic instrumenting env._blue_settle_count directly (not just
+        # the aggregate landing rate) found settle_count reached >=1 in only
+        # 1 of 2203 sampled unlanded wide episodes -- consistent with a
+        # counter that's being reset before ever building meaningful
+        # progress, not with candidate simply never being close. Decrementing
+        # by 1 (instead of zeroing) on a miss keeps the same overall
+        # requirement (net 3 worth of genuine proximity, still ruling out a
+        # policy that's never actually close) while tolerating brief,
+        # isolated single-frame dropouts within an already-narrow window --
+        # this does not touch AMP pace/retiming at all (per user direction
+        # to step back from further timing changes), it targets the gate's
+        # own fragility to noise directly. Not yet validated against a
+        # training run. See docs/BugFixes.md.
         is_first_call_this_tick = env.episode_length_buf != env._blue_last_settle_step
         env._blue_last_settle_step = env.episode_length_buf.clone()
         env._blue_settle_count = torch.where(
             candidate,
             torch.where(is_first_call_this_tick, env._blue_settle_count + 1, env._blue_settle_count),
-            torch.zeros_like(env._blue_settle_count),
+            torch.where(
+                is_first_call_this_tick,
+                (env._blue_settle_count - 1).clamp(min=0),
+                env._blue_settle_count,
+            ),
         )
         _BLUE_SETTLE_STEPS = 3
         newly_landed = (
