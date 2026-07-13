@@ -538,3 +538,11 @@ This is the real number. The policy has not actually learned genuine multi-step 
 **Verification:** 48/48 tests pass (`test_amp_motion_weights.py`'s hardcoded-weight test updated for the new 5.0/4.0 split and 2p5x filenames). Confirmed directly: 14 files total, `DoubleStep` weight 5.0, `TripleStep` weight 4.0, everything else 1.0. Live smoke test (`--num-envs 64 --agent.max-iterations 5`) clean, no errors.
 
 **Not yet resolved:** not yet validated against a real training run.
+
+## 2026-07-13 -- also interchanged `TripleStep` for its 2.5x-retimed pace
+
+**Context:** per user request, immediately following the `DoubleStep` interchange above. Same pattern: `LeftTripleStep_own_booster_t1.npz`/`RightTripleStep_own_booster_t1.npz` (1.0x) deleted, `_2p5x.npz` variants copied in from `blue-ball-waypoint` to replace them -- file count stays at 14. `_motion_weights()` needed no code change: it matches on the `"TripleStep"` substring regardless of filename suffix, so `TripleStep` keeps its existing `4.0` weight (unchanged, only the pace changed, not the weight -- user only asked for the speed increase this time).
+
+**Verification:** 48/48 tests pass (`test_amp_motion_weights.py` updated to use `_2p5x` filenames for both DoubleStep and TripleStep in its synthetic test list, still asserting the 5.0/4.0 split). Confirmed directly: 14 files total, `DoubleStep` and `TripleStep` both now 2.5x-retimed, weights unchanged (5.0/4.0/1.0). Live smoke test clean, no errors.
+
+**Not yet resolved:** not yet validated against a real training run -- relaunching with both interchanges together.

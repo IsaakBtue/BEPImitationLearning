@@ -1,15 +1,16 @@
 def test_double_and_triple_step_files_get_boosted_weight():
-    """2026-07-13: DoubleStep (now the 2.5x-retimed clips) weighted higher
-    (5.0) than TripleStep (still 1.0x, 4.0) -- both above the 1.0 baseline."""
+    """2026-07-13: DoubleStep and TripleStep both now the 2.5x-retimed clips,
+    but weighted differently -- DoubleStep 5.0, TripleStep 4.0 -- both above
+    the 1.0 baseline."""
     from simple_goalkeeper.tasks.goalkeeper_amp_cfg import _motion_weights
 
     files = [
         "/data/LeftDoubleStep_own_booster_t1_2p5x.npz",
         "/data/LeftSafe1_booster_t1.npz",
-        "/data/LeftTripleStep_own_booster_t1.npz",
+        "/data/LeftTripleStep_own_booster_t1_2p5x.npz",
         "/data/RightDoubleStep_own_booster_t1_2p5x.npz",
         "/data/RightSafeFar1_booster_t1.npz",
-        "/data/RightTripleStep_own_booster_t1.npz",
+        "/data/RightTripleStep_own_booster_t1_2p5x.npz",
     ]
 
     weights = _motion_weights(files)
