@@ -528,3 +528,13 @@ This is the real number. The policy has not actually learned genuine multi-step 
 **Kept from 2026-07-12/07-13 (not reverted):** `t_flight_range`/`ep_len_divisor` were already reverted in the prior entry; `y_end_range` widening to `(-1.3, 1.3)` stays, per user request -- unrelated to the AMP dataset and not implicated in the collapse.
 
 **Not yet resolved:** not yet validated against a real training run -- relaunching with this fix plus the kept `y_end_range` widening.
+
+## 2026-07-13 -- interchanged `DoubleStep` for the 2.5x-retimed pace within the full 14-file dataset, weighted higher than `TripleStep`
+
+**Context:** per user request, after reverting to the full 14-file AMP dataset above. The 1.0x `LeftDoubleStep`/`RightDoubleStep` clips were swapped out for their 2.5x-retimed counterparts (same files already used on blue-ball-waypoint's region discriminators) -- total file count stays at 14, only the pace of these 2 files changes. `TripleStep` stays at its original 1.0x pace, untouched.
+
+**Fix:** `motions/data/LeftDoubleStep_own_booster_t1.npz`/`RightDoubleStep_own_booster_t1.npz` (1.0x) deleted, `_2p5x.npz` variants copied in from blue-ball-waypoint to replace them (`_motion_files()`'s glob picks them up automatically, no code change needed there). Separately, `_motion_weights()` reworked so `DoubleStep` and `TripleStep` no longer share one boost constant: `_DOUBLE_STEP_WEIGHT = 5.0` (up from the shared 4.0, since DoubleStep is now the timing-matched 2.5x pace and per user request should be weighted higher), `_TRIPLE_STEP_WEIGHT = 4.0` (unchanged, still 1.0x pace).
+
+**Verification:** 48/48 tests pass (`test_amp_motion_weights.py`'s hardcoded-weight test updated for the new 5.0/4.0 split and 2p5x filenames). Confirmed directly: 14 files total, `DoubleStep` weight 5.0, `TripleStep` weight 4.0, everything else 1.0. Live smoke test (`--num-envs 64 --agent.max-iterations 5`) clean, no errors.
+
+**Not yet resolved:** not yet validated against a real training run.
