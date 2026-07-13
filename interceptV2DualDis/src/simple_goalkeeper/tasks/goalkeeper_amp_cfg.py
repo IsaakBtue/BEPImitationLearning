@@ -34,30 +34,24 @@ GOALKEEPER_KEY_BODY_NAMES: list[str] = [
 
 
 def _motion_files() -> list[str]:
-    """2026-07-12: full AMP dataset replaced with ONLY the 2.5x-retimed
-    LeftDoubleStep/RightDoubleStep clips (produced by
-    scripts/retime_motion.py), dropping every other motion file (single-step,
-    triple-step, safe-pose clips, and the original/1.5x/2x paces of these
-    same two clips). Ported from blue-ball-waypoint's AMP-dilution fix
-    (docs/BugFixes.md, blue-amp2xonly_decelfix_2026-07-12): a single AMP
-    discriminator trained on many motions of very different pace/style mixes
-    incompatible motion statistics (arXiv:2605.18611, arXiv:2606.08922) --
-    the same failure class blue-ball-waypoint diagnosed and fixed for its
-    region-conditioned discriminators. This branch has only one AMP
-    discriminator (no near/far region split), so these two files are used
-    for every crossing regardless of distance -- there is no separate
-    near/far dataset to split here, unlike the multidisc blue-ball task.
-
-    2026-07-12 (later same day): 2x -> 2.5x. User watched play with the 2x
-    pace and reported it still looked too slow; 2.5x compresses the clip to
-    0.576s, matching the fastest observed wide-crossing window (0.58s at
-    full difficulty) almost exactly, vs. 2x's 0.72s.
+    """2026-07-13: reverted back to the full 14-file glob. The 2026-07-12
+    "only 2.5x DoubleStep clips" experiment (docs/BugFixes.md) was ported
+    from blue-ball-waypoint's AMP-dilution fix, but that fix targeted a
+    *region-conditioned* discriminator that already only serves one specific
+    crossing type -- this branch's single discriminator serves EVERY
+    crossing (single-step, double-step, triple-step, recovery poses), so
+    cutting it down to 2 files removed the only source of "natural motion"
+    grounding for everything except double-stepping. The very next training
+    run (`green_2p5x_tflight_widen_2026-07-12`) saw its raw actions explode
+    into a jerky, high-frequency oscillation (`action_acc_l2`/`action_rate_l2`
+    diverging by 3-4 orders of magnitude and never recovering) -- a
+    discriminator that's stopped constraining most of the task's motion is a
+    plausible driver of exactly that kind of unconstrained actor behavior.
+    Reverted to the full dataset per user request.
     """
-    left = _MOTIONS_DIR / "LeftDoubleStep_own_booster_t1_2p5x.npz"
-    right = _MOTIONS_DIR / "RightDoubleStep_own_booster_t1_2p5x.npz"
-    if not (left.is_file() and right.is_file()):
+    if not _MOTIONS_DIR.is_dir():
         return []
-    return [str(left), str(right)]
+    return sorted(str(p) for p in _MOTIONS_DIR.glob("*.npz"))
 
 
 # Relative sampling weight given to double/triple-step motions in the AMP

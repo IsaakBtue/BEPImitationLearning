@@ -516,3 +516,15 @@ This is the real number. The policy has not actually learned genuine multi-step 
 **Verification:** 48/48 tests pass (none hardcoded the old `0.9` value). Live smoke test (`--num-envs 64 --agent.max-iterations 5`) clean, no errors.
 
 **Not yet resolved:** not yet validated against a real training run.
+
+## 2026-07-13 -- reverted green-ball's AMP dataset back to the full 14-file glob, undoing the 2026-07-12 2-file experiment
+
+**Root cause:** the 2026-07-12 "only 2.5x DoubleStep clips" change was ported from blue-ball-waypoint's AMP-dilution fix, but that fix targeted a *region-conditioned* discriminator that already only serves one specific crossing type (far, one side) -- cutting it to one pace of one clip removed a redundant blend, not the only source of motion data. This branch's single discriminator serves EVERY crossing (single-step, double-step, triple-step, recovery poses); cutting it to 2 files removed the only AMP grounding for everything except double-stepping. The very next run (`green_2p5x_tflight_widen_2026-07-12`) saw `action_acc_l2`/`action_rate_l2` explode by 3-4 orders of magnitude around iteration ~14665 and never recover (see the `mean_action_acc` investigation, same conversation) -- a discriminator no longer constraining most of the task's motion is a plausible driver of that unconstrained actor behavior.
+
+**Fix:** `_motion_files()` reverted to `sorted(_MOTIONS_DIR.glob("*.npz"))` (the original implementation). The two `_2p5x.npz` files added on 2026-07-12 were deleted from `motions/data/` so the glob picks up exactly the original 14 files, not 16.
+
+**Verification:** 48/48 tests pass (`test_amp_motion_weights.py`'s dynamic tests adapt automatically). Confirmed directly: `_motion_files()` now returns exactly 14 files, weights correctly boost the 3 DoubleStep/TripleStep files (4.0) over the other 11 (1.0), matching the pre-2026-07-12 behavior exactly. Live smoke test clean, no errors.
+
+**Kept from 2026-07-12/07-13 (not reverted):** `t_flight_range`/`ep_len_divisor` were already reverted in the prior entry; `y_end_range` widening to `(-1.3, 1.3)` stays, per user request -- unrelated to the AMP dataset and not implicated in the collapse.
+
+**Not yet resolved:** not yet validated against a real training run -- relaunching with this fix plus the kept `y_end_range` widening.
