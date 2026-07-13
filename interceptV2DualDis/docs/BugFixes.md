@@ -504,3 +504,15 @@ This is the real number. The policy has not actually learned genuine multi-step 
 **Verification:** 48/48 tests pass (none hardcoded either old value). Live smoke test (`--num-envs 64 --agent.max-iterations 5`) clean, no errors.
 
 **Not yet resolved:** the original spatial-range request ("1.5 meters wide") is still open -- needs clarification on which parameter (`dist_range`, `y_start_range`, or `y_end_range`) and whether "1.5m wide" means a total span or a single bound, before implementing.
+
+## 2026-07-13 -- widened `y_end_range` (the goal-target lateral spawn range) to ±1.3m each side
+
+**Context:** resolves the still-open item above. User confirmed the parameter is `y_end_range` (the hard-difficulty goal-target lateral spawn range in `goalkeeper_env_cfg.py`'s `reset_ball` event, both training and play blocks) and, after confirming the actual current value was `(-0.9, 0.9)` (not `1.1` as the user initially recalled), chose to widen the single-sided max reach from `0.9` to `1.3` meters each side.
+
+**Fix:** `y_end_range` changed from `(-0.9, 0.9)` to `(-1.3, 1.3)` in both the training and play `reset_ball` blocks (train/play parity rule). `reset_ball_rolling`'s own function default (`(-0.5, 0.5)`) is untouched -- it's unused in practice, both call sites always pass explicit params.
+
+**Also confirmed, no change needed:** user asked to check `single_foot_save` and any other open curriculum divisor. `single_foot_save`/`cleanstop`/`inner_face_orientation_save`/`foot_inner_face_continuous` use a different mechanism (`correct_foot_save_curriculum`, `activate_at_cu=3`) that reads the shared `env._curriculumupdate` produced by the already-fixed `ep_len_divisor=50` curricula -- they have no divisor parameter of their own, so the earlier `ep_len_divisor` revert already covers them.
+
+**Verification:** 48/48 tests pass (none hardcoded the old `0.9` value). Live smoke test (`--num-envs 64 --agent.max-iterations 5`) clean, no errors.
+
+**Not yet resolved:** not yet validated against a real training run.
