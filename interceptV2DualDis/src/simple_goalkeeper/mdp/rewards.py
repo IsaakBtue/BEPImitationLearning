@@ -216,7 +216,33 @@ def footreach(
     # Lateral velocity toward crossing side amplifies the reach reward.
     lateral_vel_y = robot.data.root_link_lin_vel_w[:, 1]
     vel_toward = torch.where(lateral_error > 0, lateral_vel_y, -lateral_vel_y)
-    vel_sigma = 1.0 + 3.0 * vel_toward.clamp(0.0, 3.0)                # 1–10× (matches G1 eereach)
+
+    # FIX 2026-07-15: G1's _reward_eereach uses a REGION-CONDITIONAL multiplier
+    # here -- its two most extreme regions (which require a dive, not a simple
+    # reach) get an escalating jump_scale = 3.0 + 3.0*curriculumupdate instead
+    # of the flat 3.0 every other region uses (legged_robot.py:1379-1388). This
+    # project used the SAME flat 3.0 multiplier for every region regardless of
+    # near/far, unlike G1 -- no extra incentive was ever given for the
+    # additional travel/step-count a far (double/triple-step) crossing needs
+    # in the same time budget as a near, single-step one. Confirmed empirically:
+    # far regions don't reliably learn double-stepping. Mirrors G1's mechanism
+    # exactly (same formula, same curriculum variable), adapted to lateral
+    # (not vertical/dive) velocity since this is a feet-only stepping task,
+    # not a hand-dive task. Falls back to the flat 3.0 when region_id doesn't
+    # exist (e.g. a future non-multi-disc caller).
+    region_id = getattr(env, "_region_id", None)
+    if region_id is not None:
+        is_far_region = (region_id == 1) | (region_id == 3)
+        cu = float(getattr(env, "_curriculumupdate", 0))
+        far_scale = 3.0 + 3.0 * cu
+        vel_scale = torch.where(
+            is_far_region,
+            torch.full_like(vel_toward, far_scale),
+            torch.full_like(vel_toward, 3.0),
+        )
+    else:
+        vel_scale = torch.full_like(vel_toward, 3.0)
+    vel_sigma = 1.0 + vel_scale * vel_toward.clamp(0.0, 3.0)  # near: 1-10x; far: 1-10x at cu=0 up to 1-37x at cu=3
 
     # Combine: phase1 when ball is far, phase2 sigmoid when close.
     phase1_mask = ball_x_local > 1.5
