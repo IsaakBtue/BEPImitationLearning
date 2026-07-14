@@ -149,11 +149,36 @@ _MULTIDISC_AMP_OBS_TERMS: list[str] = ["joint_pos"]
 
 _MOTIONS_DIR = Path(__file__).parents[1] / "motions" / "data"
 
-REGION_MOTION_FILES: dict[str, str] = {
-    "left_near": str(_MOTIONS_DIR / "LeftStep_own_booster_t1.npz"),
-    "left_far": str(_MOTIONS_DIR / "LeftDoubleStep_own_booster_t1.npz"),
-    "right_near": str(_MOTIONS_DIR / "Rightstep_own_booster_t1.npz"),
-    "right_far": str(_MOTIONS_DIR / "RightDoubleStep_own_booster_t1.npz"),
+REGION_MOTION_FILES: dict[str, list[str]] = {
+    "left_near": [str(_MOTIONS_DIR / "LeftStep_own_booster_t1.npz")],
+    "left_far": [
+        # 2026-07-12 (revised, same day): dropped the original 1.0x and 1.5x
+        # paces -- two dispatched research passes found that a single AMP
+        # discriminator trained on BLENDED paces exhibits exactly the "mixes
+        # incompatible motion statistics" failure mode documented in very
+        # recent (2026) state-dependent-AMP literature (arXiv:2605.18611,
+        # arXiv:2606.08922): the policy converges on an ambiguous blended
+        # motion that satisfies the discriminator without genuinely
+        # representing any one pace -- plausibly why genuine landing rate got
+        # WORSE, not better, after the 2x variant was added on top of 1.5x
+        # (see docs/BugFixes.md, 2026-07-12 escalation entry). Testing a
+        # single, physically-closest-to-required pace instead of a blended
+        # multi-pace set -- user's explicit choice, "most physically possible
+        # one."
+        #
+        # 2026-07-12 (later same day): upgraded 2x -> 2.5x. The 2x clip
+        # (0.72s) was still slower than the fastest observed wide-crossing
+        # ball-flight window (0.58s at full difficulty, per
+        # scripts/retime_motion.py's own timing-gap docstring) -- user
+        # reported the 2x pace still looked too slow watching play. 2.5x
+        # compresses the clip to 0.576s, matching that tightest window
+        # almost exactly instead of only the 0.80s median.
+        str(_MOTIONS_DIR / "LeftDoubleStep_own_booster_t1_2p5x.npz"),
+    ],
+    "right_near": [str(_MOTIONS_DIR / "Rightstep_own_booster_t1.npz")],
+    "right_far": [
+        str(_MOTIONS_DIR / "RightDoubleStep_own_booster_t1_2p5x.npz"),
+    ],
 }
 
 
@@ -188,7 +213,10 @@ def goalkeeper_multidisc_env_cfg_withoverlay(
             viz=MotionCommandCfg.VizCfg(mode="ghost", ghost_color=(0.3, 0.8, 0.4, 0.45)),
         )
     else:
-        npz_files = list(REGION_MOTION_FILES.values())
+        # Flatten: REGION_MOTION_FILES values are now per-region lists (2026-07-12,
+        # 1.5x-retimed variants added alongside the originals for left_far/right_far)
+        # -- the ghost overlay just needs a flat set of files to cycle through.
+        npz_files = [p for paths in REGION_MOTION_FILES.values() for p in paths]
         cmd = CyclingGhostMotionCommandCfg(
             motion_file=npz_files[0],  # required by parent cfg; overridden at build
             anchor_body_name="Trunk",
@@ -207,12 +235,12 @@ def goalkeeper_multidisc_env_cfg_withoverlay(
 def goalkeeper_multidisc_amp_runner_cfg() -> dict:
     amp_data = {
         name: MotionDatasetCfg(
-            motion_files=[path],
+            motion_files=paths,
             body_names=GOALKEEPER_KEY_BODY_NAMES,
             amp_obs_terms=_MULTIDISC_AMP_OBS_TERMS,
             anchor_name=GOALKEEPER_ANCHOR_NAME,
         )
-        for name, path in REGION_MOTION_FILES.items()
+        for name, paths in REGION_MOTION_FILES.items()
     }
     return {
         "policy": {
