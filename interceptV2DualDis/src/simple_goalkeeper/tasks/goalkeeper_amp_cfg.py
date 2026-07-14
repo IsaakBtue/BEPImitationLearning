@@ -34,6 +34,21 @@ GOALKEEPER_KEY_BODY_NAMES: list[str] = [
 
 
 def _motion_files() -> list[str]:
+    """2026-07-13: reverted back to the full 14-file glob. The 2026-07-12
+    "only 2.5x DoubleStep clips" experiment (docs/BugFixes.md) was ported
+    from blue-ball-waypoint's AMP-dilution fix, but that fix targeted a
+    *region-conditioned* discriminator that already only serves one specific
+    crossing type -- this branch's single discriminator serves EVERY
+    crossing (single-step, double-step, triple-step, recovery poses), so
+    cutting it down to 2 files removed the only source of "natural motion"
+    grounding for everything except double-stepping. The very next training
+    run (`green_2p5x_tflight_widen_2026-07-12`) saw its raw actions explode
+    into a jerky, high-frequency oscillation (`action_acc_l2`/`action_rate_l2`
+    diverging by 3-4 orders of magnitude and never recovering) -- a
+    discriminator that's stopped constraining most of the task's motion is a
+    plausible driver of exactly that kind of unconstrained actor behavior.
+    Reverted to the full dataset per user request.
+    """
     if not _MOTIONS_DIR.is_dir():
         return []
     return sorted(str(p) for p in _MOTIONS_DIR.glob("*.npz"))
@@ -43,15 +58,27 @@ def _motion_files() -> list[str]:
 # discriminator dataset. These are otherwise represented only in proportion to
 # their frame count alongside every other motion (~36% of all frames as of
 # 2026-07), so this boosts their share of AMP transitions independent of length.
-_DOUBLE_TRIPLE_STEP_WEIGHT = 4.0
+_TRIPLE_STEP_WEIGHT = 4.0
+# 2026-07-13: DoubleStep weighted higher than TripleStep (5.0 vs 4.0) --
+# LeftDoubleStep/RightDoubleStep are now the 2.5x-retimed clips (swapped in
+# for the original 1.0x pace, matching the ball's actual crossing timing
+# budget, see docs/BugFixes.md), so they get an extra boost on top of the
+# existing double/triple-step preference, per user request.
+_DOUBLE_STEP_WEIGHT = 5.0
 
 
-def _motion_weights(files: list[str], boost: float = _DOUBLE_TRIPLE_STEP_WEIGHT) -> list[float]:
-    """Per-motion AMP discriminator sampling weight: boost double/triple-step files."""
-    return [
-        boost if ("DoubleStep" in f or "TripleStep" in f) else 1.0
-        for f in files
-    ]
+def _motion_weights(files: list[str]) -> list[float]:
+    """Per-motion AMP discriminator sampling weight: boost double/triple-step files,
+    with DoubleStep (now 2.5x-retimed) weighted higher than TripleStep (still 1.0x)."""
+    weights = []
+    for f in files:
+        if "DoubleStep" in f:
+            weights.append(_DOUBLE_STEP_WEIGHT)
+        elif "TripleStep" in f:
+            weights.append(_TRIPLE_STEP_WEIGHT)
+        else:
+            weights.append(1.0)
+    return weights
 
 
 def goalkeeper_amp_runner_cfg() -> AMPRunnerCfg:

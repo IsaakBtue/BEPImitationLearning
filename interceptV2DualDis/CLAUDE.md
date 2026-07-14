@@ -194,18 +194,26 @@ no existing checkpoint (including model_9750) was trained under this gate.
 
 ## Training Commands
 
+**FIX 2026-07-14:** this section previously documented only the plain
+single-discriminator task. A training run was launched off this doc on
+2026-07-13 (`green_doubletriple25x_2026-07-13`) and silently used the wrong
+architecture for ~17 hours before being caught by comparing checkpoint
+`state_dict` keys against a known-multi-disc checkpoint. The real target
+architecture is the multi-discriminator task (region-conditioned AMP,
+history encoder, ball/region estimators) — use `-MultiDisc`.
+
 ```bash
 # Convert motions (once):
 uv run sgk_convert --input-dir /home/isaak/BEPImitationlearning/Motions --output-dir src/simple_goalkeeper/motions/data
 
 # Train:
-uv run sgk_train Mjlab-BeyondAMP-Goalkeeper-T1 --num-envs 4096
+uv run sgk_train Mjlab-BeyondAMP-Goalkeeper-T1-MultiDisc --num-envs 4096
 
 # Play (zero policy sanity check):
-uv run sgk_play Mjlab-BeyondAMP-Goalkeeper-T1 --agent zero --num-envs 1
+uv run sgk_play Mjlab-BeyondAMP-Goalkeeper-T1-MultiDisc --agent zero --num-envs 1
 
 # Play (trained checkpoint):
-uv run sgk_play Mjlab-BeyondAMP-Goalkeeper-T1 --checkpoint-file logs/rsl_rl/simple_goalkeeper/<run>/model_500.pt
+uv run sgk_play Mjlab-BeyondAMP-Goalkeeper-T1-MultiDisc --checkpoint-file logs/rsl_rl/intercept_simple_goalkeeper_multidisc/<run>/model_500.pt
 ```
 
 ## Training Run Monitoring

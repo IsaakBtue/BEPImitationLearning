@@ -802,8 +802,8 @@ def inner_face_orientation_save(
     asset_cfg: SceneEntityCfg = _DEFAULT_FEET_CFG,
     alignment_threshold: float = 0.7,
 ) -> torch.Tensor:
-    """One-time bonus when softstop fires and the closest foot is turned sideways (block posture),
-    rotated toward the side it's actually saving on.
+    """One-time bonus when softstop fires and the assigned foot is turned sideways
+    (block posture), rotated toward the side it's actually saving on.
 
     Checks that the foot's long axis (toe-heel, local X) is parallel to world Y at the save
     moment — meaning the foot is rotated 90° so its broad inner face is presented to the ball
@@ -822,10 +822,24 @@ def inner_face_orientation_save(
     (right-side saves) learned a genuine ~38 degree rotation toward -Y, while the
     left foot (left-side saves) stayed near-neutral (~3 degrees) -- it never
     discovered the mirror-image +Y rotation, because nothing demanded it
-    specifically. expected_sign is +1 when the LEFT foot is closest (should rotate
-    toward +Y), -1 when the RIGHT foot is closest (should rotate toward -Y),
-    matching the empirically-confirmed-correct right-foot behavior mirrored to the
-    left. See docs/BugFixes.md.
+    specifically. See docs/BugFixes.md.
+
+    FIX 2026-07-10 (assigned foot, not geometrically-closest foot): was
+    `left_closer = dist[:,0] <= dist[:,1]` -- the GEOMETRICALLY closest foot to the
+    ball's live position at the save moment, not the FIXED, task-assigned foot
+    (_get_correct_foot_idx, based on which side the ball crossed on). If the
+    assigned foot overshoots past the ball, the stationary lagging (wrong) foot can
+    become geometrically closer at that instant, so this orientation check would
+    silently evaluate the WRONG foot's quaternion -- while `correct_foot` below
+    (from _softstop_correct_foot, itself built from _get_correct_foot_idx) still
+    correctly requires the ASSIGNED foot to have made contact. That mismatch let
+    the assigned foot's genuinely-correct orientation go unrewarded (checking the
+    lagging foot instead, usually not correctly oriented -- false negative) or, in
+    the reverse case, let a coincidentally-oriented lagging foot fire the reward
+    despite the real save foot doing nothing to earn it (false positive). Now uses
+    _get_correct_foot_idx directly, consistent with `correct_foot`'s own gate.
+    expected_sign is +1 for the left foot (should rotate toward +Y), -1 for the
+    right foot (should rotate toward -Y).
 
     This is orthogonal to feetorientation (which constrains roll/pitch — foot flatness).
     Together they enforce: flat foot AND turned sideways, in the correct direction = correct
@@ -850,15 +864,14 @@ def inner_face_orientation_save(
         return torch.zeros(env.num_envs, device=env.device)
 
     robot: Entity = env.scene[asset_cfg.name]
-    ball: Entity  = env.scene[ball_name]
 
-    foot_pos_w  = robot.data.body_link_pos_w[:, asset_cfg.body_ids, :]   # (N, 2, 3)
     foot_quat_w = robot.data.body_link_quat_w[:, asset_cfg.body_ids, :]  # (N, 2, 4)
-    ball_pos_w  = ball.data.root_link_pos_w                               # (N, 3)
 
-    # Find which foot is closer to the ball.
-    dist = torch.norm(foot_pos_w - ball_pos_w[:, None, :], dim=-1)        # (N, 2)
-    left_closer = dist[:, 0] <= dist[:, 1]                                 # (N,)
+    # FIX 2026-07-10: was the geometrically-closest foot to the ball's live
+    # position (dist[:,0] <= dist[:,1]) -- see docstring. Now the fixed,
+    # task-assigned foot, matching correct_foot's own gate below.
+    foot_idx = _get_correct_foot_idx(env, ball_name)                       # (N,) 0=left, 1=right
+    is_left = foot_idx == 0
 
     # Foot long axis (toe direction) in local frame = (1, 0, 0).
     # Rotate into world frame for each foot.
@@ -866,14 +879,14 @@ def inner_face_orientation_save(
     left_long_w  = quat_apply(foot_quat_w[:, 0, :], foot_long_local)      # (N, 3)
     right_long_w = quat_apply(foot_quat_w[:, 1, :], foot_long_local)      # (N, 3)
 
-    # Pick the closer foot's long axis.
-    foot_long_w = torch.where(left_closer[:, None], left_long_w, right_long_w)  # (N, 3)
+    # Pick the assigned foot's long axis.
+    foot_long_w = torch.where(is_left[:, None], left_long_w, right_long_w)  # (N, 3)
 
     # "Lengthy side parallel to Y, in the correct direction" = long axis aligned
-    # with +Y when the left foot is closest, -Y when the right foot is closest.
+    # with +Y for the left foot, -Y for the right foot.
     world_y = torch.tensor([0.0, 1.0, 0.0], device=env.device).expand(env.num_envs, -1)
     y_alignment_signed = (foot_long_w * world_y).sum(dim=-1)               # (N,)
-    expected_sign = torch.where(left_closer, 1.0, -1.0)                    # (N,)
+    expected_sign = torch.where(is_left, 1.0, -1.0)                        # (N,)
     oriented_correctly = (y_alignment_signed * expected_sign) > alignment_threshold
 
     correct_foot = getattr(env, "_softstop_correct_foot", torch.zeros(env.num_envs, dtype=torch.bool, device=env.device))

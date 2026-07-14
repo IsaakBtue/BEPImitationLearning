@@ -38,17 +38,27 @@ class WandbSummaryWriter(SummaryWriter):
         # in the WandB UI when the default "Step" axis is used.
         self._wandb_buffer: dict = {}
         self._wandb_step: int | None = None
+        # him_amp_on_policy_runner.py logs some scalars keyed by training
+        # iteration (int) and some ("*/time" series) keyed by self.tot_time
+        # (float, wall-clock seconds) via the same add_scalar/global_step
+        # path. wandb.log requires an int step, so tracking the last INT step
+        # separately (instead of reusing whatever global_step this call used)
+        # keeps every flush wandb-valid regardless of which series triggered
+        # it -- TensorBoard is unaffected since it uses global_step directly.
+        self._last_int_step: int | None = None
 
     def _flush_wandb(self) -> None:
         if self._wandb_buffer:
             try:
-                wandb.log(self._wandb_buffer, step=self._wandb_step)
+                wandb.log(self._wandb_buffer, step=self._last_int_step)
             except Exception as e:
                 print(f"[WARN] W&B logging failed: {e}")
             self._wandb_buffer = {}
 
     def add_scalar(self, tag, scalar_value, global_step=None, walltime=None, new_style=False):
         super().add_scalar(tag, scalar_value, global_step=global_step, walltime=walltime, new_style=new_style)
+        if isinstance(global_step, int):
+            self._last_int_step = global_step
         if global_step != self._wandb_step:
             self._flush_wandb()
             self._wandb_step = global_step

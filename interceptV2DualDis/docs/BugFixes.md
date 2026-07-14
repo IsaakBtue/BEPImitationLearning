@@ -474,3 +474,88 @@ This is the real number. The policy has not actually learned genuine multi-step 
 **Evidence:** 48/48 tests pass. Standalone unit test verifying the sign logic against all four left/right x correct/wrong-direction combinations. Live smoke test: fresh env, reset, 60 steps, no errors.
 
 **Not yet resolved:** not yet validated on a live training run -- both trainings are being restarted fresh with this fix per user request.
+
+## 2026-07-12 -- replaced the full AMP motion dataset with only the 2.5x-retimed DoubleStep clips
+
+**Context:** ported from `blue-ball-waypoint`'s AMP-dilution fix (that branch's `docs/BugFixes.md`, `blue_amp2xonly_decelfix_2026-07-12`): a single AMP discriminator trained on many motion clips of very different pace/style mixes incompatible motion statistics (arXiv:2605.18611, arXiv:2606.08922). This branch's `goalkeeper_amp_cfg.py::_motion_files()` previously globbed ALL 14 NPZ files in `motions/data/` (single-step, double-step, triple-step, and various "safe" pose clips) into one AMP discriminator -- the same failure class, applied per user request even though this branch has no near/far region split (it uses one AMP discriminator for every crossing, unlike the multidisc blue-ball task).
+
+**Fix:** `_motion_files()` now returns exactly two files: `LeftDoubleStep_own_booster_t1_2p5x.npz` and `RightDoubleStep_own_booster_t1_2p5x.npz` (2.5x-retimed via `scripts/retime_motion.py`, copied over from `blue-ball-waypoint` where the retiming tool lives -- 73 -> 29 frames, 1.44s -> 0.576s). These two files are used for every crossing on this branch (no separate near/far dataset exists here to split between). Started at 2x per the initial port, then upgraded to 2.5x same day after the user watched blue-ball-waypoint's play with the 2x pace and reported it still looked too slow relative to the fastest observed wide-crossing window (0.58s at full difficulty) -- 2.5x's 0.576s matches that almost exactly, vs. 2x's 0.72s.
+
+**Verification:** 48/48 tests pass unchanged (`test_amp_motion_weights.py`'s dynamic tests adapt automatically since they call `_motion_files()` directly rather than hardcoding the file list). Live smoke test (`Mjlab-BeyondAMP-Goalkeeper-T1`, `--num-envs 64 --agent.max-iterations 5`) clean, no errors.
+
+**Not yet resolved:** not yet validated against a real training run on this branch (green-ball's own training was already stopped/plateaued this session, per `master`'s `model_19000` push -- this change would need a fresh run to evaluate).
+
+## 2026-07-12 -- widened green-ball's hard-difficulty `t_flight_range` upper bound from 1.1s to 1.5s
+
+**Context:** user request, alongside restarting this branch's training with the 2.5x AMP dataset fix above. `goalkeeper_env_cfg.py`'s `reset_ball` event (both training and play blocks) passed `t_flight_range=(0.7, 1.1)` as the full-difficulty (`ball_difficulty=1.0`) reaction-time range to `events.py::reset_ball_rolling` -- at max curriculum difficulty, ball flight time ranged from 0.7s (fastest) to only 1.1s (slowest), giving the robot at most 1.1s reaction time even on the "easiest" hard-difficulty ball.
+
+**Fix:** widened the upper bound to 1.5s: `t_flight_range=(0.7, 1.5)` in both the training and play `reset_ball` blocks (train/play parity rule, `CLAUDE.md`), plus `reset_ball_rolling`'s own default parameter value and inline comment for consistency (the default itself is unused in practice -- both call sites always pass explicit params -- but was left stale otherwise). Only the slow end widened; the fast end (0.7s, the hardest single-side of the range) is untouched, so peak difficulty is unchanged -- this only adds more slow-ball variety at full difficulty rather than making anything harder.
+
+**Verification:** 48/48 tests pass (none hardcoded the old `1.1` value). Live smoke test (`--num-envs 64 --agent.max-iterations 5`) clean, no errors.
+
+**Not yet resolved:** not yet validated against a real training run -- restarting this branch's training with both this change and the 2.5x AMP dataset fix together, so any effect on training is confounded between the two (both are small, well-reasoned, non-interacting changes -- one to the AMP reference data, one to the task's own ball-speed curriculum -- so bundling them for one restart is a reasonable risk).
+
+## 2026-07-13 -- reverted the `t_flight_range` widening above; it was the wrong parameter entirely
+
+**Root cause:** user's original request was for a spatial spawn range to be "1.5 meters wide" -- a distance parameter (`dist_range`/`y_start_range`/`y_end_range`), not a time duration. `t_flight_range` was misread as "the range" and changed 1.1s -> 1.5s (a reaction-*time* upper bound, entirely unrelated to spatial width). This was flagged directly by the user and reverted: `t_flight_range=(0.7, 1.1)` restored in both `goalkeeper_env_cfg.py`'s training and play `reset_ball` blocks, `reset_ball_rolling`'s own default parameter, and its inline comment -- all back to the pre-2026-07-12 values. This run also collapsed for unrelated reasons (see the `mean_action_acc`/`action_acc_l2` explosion investigation, same conversation) and was going to need a fresh restart regardless.
+
+**Separately, per the same message:** `ep_len_divisor` (ball_difficulty, softstop, footreach, and stopball curricula, all in `goalkeeper_env_cfg.py`) reverted from `47` back to `50`, matching G1 and each curriculum class's own documented/coded default (`events.py`'s `ball_difficulty_curriculum`/`reward_curriculum_ep_len` both default `ep_len_divisor` to `50` already -- the `goalkeeper_env_cfg.py` override had drifted to `47` and is now realigned with that default). All four curricula still share the same value, preserving the original synchronization intent (avoiding the earlier documented desync bug) -- just at `50` instead of `47`.
+
+**Verification:** 48/48 tests pass (none hardcoded either old value). Live smoke test (`--num-envs 64 --agent.max-iterations 5`) clean, no errors.
+
+**Not yet resolved:** the original spatial-range request ("1.5 meters wide") is still open -- needs clarification on which parameter (`dist_range`, `y_start_range`, or `y_end_range`) and whether "1.5m wide" means a total span or a single bound, before implementing.
+
+## 2026-07-13 -- widened `y_end_range` (the goal-target lateral spawn range) to ±1.3m each side
+
+**Context:** resolves the still-open item above. User confirmed the parameter is `y_end_range` (the hard-difficulty goal-target lateral spawn range in `goalkeeper_env_cfg.py`'s `reset_ball` event, both training and play blocks) and, after confirming the actual current value was `(-0.9, 0.9)` (not `1.1` as the user initially recalled), chose to widen the single-sided max reach from `0.9` to `1.3` meters each side.
+
+**Fix:** `y_end_range` changed from `(-0.9, 0.9)` to `(-1.3, 1.3)` in both the training and play `reset_ball` blocks (train/play parity rule). `reset_ball_rolling`'s own function default (`(-0.5, 0.5)`) is untouched -- it's unused in practice, both call sites always pass explicit params.
+
+**Also confirmed, no change needed:** user asked to check `single_foot_save` and any other open curriculum divisor. `single_foot_save`/`cleanstop`/`inner_face_orientation_save`/`foot_inner_face_continuous` use a different mechanism (`correct_foot_save_curriculum`, `activate_at_cu=3`) that reads the shared `env._curriculumupdate` produced by the already-fixed `ep_len_divisor=50` curricula -- they have no divisor parameter of their own, so the earlier `ep_len_divisor` revert already covers them.
+
+**Verification:** 48/48 tests pass (none hardcoded the old `0.9` value). Live smoke test (`--num-envs 64 --agent.max-iterations 5`) clean, no errors.
+
+**Not yet resolved:** not yet validated against a real training run.
+
+## 2026-07-13 -- reverted green-ball's AMP dataset back to the full 14-file glob, undoing the 2026-07-12 2-file experiment
+
+**Root cause:** the 2026-07-12 "only 2.5x DoubleStep clips" change was ported from blue-ball-waypoint's AMP-dilution fix, but that fix targeted a *region-conditioned* discriminator that already only serves one specific crossing type (far, one side) -- cutting it to one pace of one clip removed a redundant blend, not the only source of motion data. This branch's single discriminator serves EVERY crossing (single-step, double-step, triple-step, recovery poses); cutting it to 2 files removed the only AMP grounding for everything except double-stepping. The very next run (`green_2p5x_tflight_widen_2026-07-12`) saw `action_acc_l2`/`action_rate_l2` explode by 3-4 orders of magnitude around iteration ~14665 and never recover (see the `mean_action_acc` investigation, same conversation) -- a discriminator no longer constraining most of the task's motion is a plausible driver of that unconstrained actor behavior.
+
+**Fix:** `_motion_files()` reverted to `sorted(_MOTIONS_DIR.glob("*.npz"))` (the original implementation). The two `_2p5x.npz` files added on 2026-07-12 were deleted from `motions/data/` so the glob picks up exactly the original 14 files, not 16.
+
+**Verification:** 48/48 tests pass (`test_amp_motion_weights.py`'s dynamic tests adapt automatically). Confirmed directly: `_motion_files()` now returns exactly 14 files, weights correctly boost the 3 DoubleStep/TripleStep files (4.0) over the other 11 (1.0), matching the pre-2026-07-12 behavior exactly. Live smoke test clean, no errors.
+
+**Kept from 2026-07-12/07-13 (not reverted):** `t_flight_range`/`ep_len_divisor` were already reverted in the prior entry; `y_end_range` widening to `(-1.3, 1.3)` stays, per user request -- unrelated to the AMP dataset and not implicated in the collapse.
+
+**Not yet resolved:** not yet validated against a real training run -- relaunching with this fix plus the kept `y_end_range` widening.
+
+## 2026-07-13 -- interchanged `DoubleStep` for the 2.5x-retimed pace within the full 14-file dataset, weighted higher than `TripleStep`
+
+**Context:** per user request, after reverting to the full 14-file AMP dataset above. The 1.0x `LeftDoubleStep`/`RightDoubleStep` clips were swapped out for their 2.5x-retimed counterparts (same files already used on blue-ball-waypoint's region discriminators) -- total file count stays at 14, only the pace of these 2 files changes. `TripleStep` stays at its original 1.0x pace, untouched.
+
+**Fix:** `motions/data/LeftDoubleStep_own_booster_t1.npz`/`RightDoubleStep_own_booster_t1.npz` (1.0x) deleted, `_2p5x.npz` variants copied in from blue-ball-waypoint to replace them (`_motion_files()`'s glob picks them up automatically, no code change needed there). Separately, `_motion_weights()` reworked so `DoubleStep` and `TripleStep` no longer share one boost constant: `_DOUBLE_STEP_WEIGHT = 5.0` (up from the shared 4.0, since DoubleStep is now the timing-matched 2.5x pace and per user request should be weighted higher), `_TRIPLE_STEP_WEIGHT = 4.0` (unchanged, still 1.0x pace).
+
+**Verification:** 48/48 tests pass (`test_amp_motion_weights.py`'s hardcoded-weight test updated for the new 5.0/4.0 split and 2p5x filenames). Confirmed directly: 14 files total, `DoubleStep` weight 5.0, `TripleStep` weight 4.0, everything else 1.0. Live smoke test (`--num-envs 64 --agent.max-iterations 5`) clean, no errors.
+
+**Not yet resolved:** not yet validated against a real training run.
+
+## 2026-07-13 -- also interchanged `TripleStep` for its 2.5x-retimed pace
+
+**Context:** per user request, immediately following the `DoubleStep` interchange above. Same pattern: `LeftTripleStep_own_booster_t1.npz`/`RightTripleStep_own_booster_t1.npz` (1.0x) deleted, `_2p5x.npz` variants copied in from `blue-ball-waypoint` to replace them -- file count stays at 14. `_motion_weights()` needed no code change: it matches on the `"TripleStep"` substring regardless of filename suffix, so `TripleStep` keeps its existing `4.0` weight (unchanged, only the pace changed, not the weight -- user only asked for the speed increase this time).
+
+**Verification:** 48/48 tests pass (`test_amp_motion_weights.py` updated to use `_2p5x` filenames for both DoubleStep and TripleStep in its synthetic test list, still asserting the 5.0/4.0 split). Confirmed directly: 14 files total, `DoubleStep` and `TripleStep` both now 2.5x-retimed, weights unchanged (5.0/4.0/1.0). Live smoke test clean, no errors.
+
+## 2026-07-14 -- killed wrong-architecture green run, restored multi-disc as this branch's actual target, ported 3 fixes from blue-ball-waypoint
+
+**Context:** `green_doubletriple25x_2026-07-13` (single-disc task, `Mjlab-BeyondAMP-Goalkeeper-T1`) had been running for ~17 hours when a checkpoint `state_dict`/`discriminator_state_dict` key comparison against a known-multi-disc checkpoint confirmed it was on the wrong architecture. Root cause: `CLAUDE.md`'s "Training Commands" section documented only the plain single-disc task string and was never updated when the region-conditioned multi-discriminator task (`Mjlab-BeyondAMP-Goalkeeper-T1-MultiDisc` -- history encoder, ball/region estimators, 4 region-conditioned AMP discriminators) became this project's actual target; `HANDOFF.md` (blue-ball-waypoint's run log) had always used `-MultiDisc` correctly. The single-disc AMP-dataset tuning entries immediately above this one (2026-07-12/13, `goalkeeper_amp_cfg.py`'s 14-file weighted glob) are a separate, independent mechanism from the multi-disc task's `goalkeeper_multidisc_amp_cfg.py::REGION_MOTION_FILES` and don't carry over -- they were real, deliberate tuning of the wrong track, not accidentally-discarded work relevant to multi-disc.
+
+**Fix:** killed the wrong-architecture process. Ported 3 fixes from blue-ball-waypoint's post-2026-07-10 multi-disc work that are general (not blue-waypoint-specific) and were still missing here:
+1. `inner_face_orientation_save` (`mdp/rewards.py`): foot selection was the geometrically-closest foot to the ball's live position (`dist[:,0] <= dist[:,1]`), not the fixed task-assigned foot (`_get_correct_foot_idx`) that `correct_foot`'s own gate already requires -- an assigned-foot overshoot could let the stationary lagging foot's orientation get silently checked instead. Now uses `_get_correct_foot_idx` directly (blue's 3b638d9, Fix 1 only -- the same commit's `track_blue_landing_success`/wide-crossing payoff scaling is blue-waypoint-specific and intentionally not ported).
+2. `beyondAMP/source/rsl_rl_amp/rsl_rl_amp/utils/wandb_utils.py`: `WandbSummaryWriter._flush_wandb` reused whatever `global_step` triggered the flush for `wandb.log(..., step=...)`, which could be a float (the `*/time` series log wall-clock seconds through the same path as integer iteration-keyed scalars) and crash `wandb.log` (requires an int step). Now tracks the last int step seen separately (blue's 6f1563d, verbatim).
+3. `goalkeeper_multidisc_amp_cfg.py::REGION_MOTION_FILES`: was untouched since 2026-07-10 (`40e6936`) -- still a `dict[str, str]` pointing `left_far`/`right_far` at the original 1.0x-pace `DoubleStep` clips. Restructured to `dict[str, list[str]]`; `left_far`/`right_far` now use the `_2p5x.npz`-retimed clips (matching blue's converged choice after its own 1.5x/2x/2.5x escalation history), `left_near`/`right_near` stay single-item lists at the unchanged 1.0x pace. Ghost-overlay flattening and `amp_runner_cfg`'s per-region loop updated to match the list type. Verified byte-identical to blue-ball-waypoint's current code apart from the intentionally-excluded `track_blue_landing_success` wiring.
+
+**Verification:** all three ported blocks diffed line-for-line against blue-ball-waypoint's current tip after applying (see git history) -- confirmed no transcription drift. `py_compile` clean. Smoke test pending (next entry / HANDOFF.md).
+
+**Not yet resolved:** fresh multi-disc training run not yet launched at the time of this entry -- see HANDOFF.md for the run this restarts and its plan (resume decision: fresh start, not resuming `model_19000.pt`, per explicit user choice weighing avoidance of stale-checkpoint orientation/pace habits against the ~19k-iteration wall-clock cost).
+
+**Not yet resolved:** not yet validated against a real training run -- relaunching with both interchanges together.

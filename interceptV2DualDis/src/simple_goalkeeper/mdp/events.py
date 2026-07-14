@@ -519,7 +519,7 @@ _CURRICULUM_EMA_ALPHA = 0.3
 def _update_smoothed_ep_len(env: "ManagerBasedRlEnv", mean_ep_len: float) -> float:
     """Exponentially smooth the raw per-window mean_ep_len reading before any
     curriculum term computes cu from it. Shared across reward_curriculum_ep_len
-    and ball_difficulty_curriculum (both use the same ep_len_divisor=47) so
+    and ball_difficulty_curriculum (both use the same ep_len_divisor=50) so
     they stay synchronized rather than oscillating independently.
 
     FIX 2026-07-10: the 2026-07-09 bidirectional-curriculum fix (removing the
