@@ -299,6 +299,13 @@ def stopball(
     has been removed on this branch -- fires unconditionally on any qualifying
     deflection, no longer requires a prior blue-midpoint landing. See
     docs/BugFixes.md.
+
+    FIX 2026-07-14: was missing any check on WHICH foot deflected the ball --
+    a deflection off the wrong (non-assigned) foot fired full reward exactly
+    like a correct-foot save. Now requires the task-assigned foot
+    (_get_correct_foot_idx) to actually be in contact, matching softstop's
+    own correct-foot gate (which already existed but only fed downstream
+    quality bonuses, never gated softstop itself either -- see that fix).
     """
     ball: Entity = env.scene[ball_name]
     ball_x_vel = ball.data.root_link_lin_vel_w[:, 0]
@@ -314,7 +321,16 @@ def stopball(
 
     delta_vx = ball_x_vel - env._sb_init_vx
     in_front = ball_x_local > -0.3  # allow 0.3 m past goal line: deflection accumulates gradually
-    fired = (delta_vx > delta_vel_threshold) & in_front & ~env._sb_flag
+
+    foot_idx = _get_correct_foot_idx(env, ball_name)
+    sensor: ContactSensor = env.scene["feet_contact"]
+    found = sensor.data.found  # [B, 8]: 0-3=left, 4-7=right
+    left_in_contact = (found[:, :4] > 0).any(dim=-1)   # (B,)
+    right_in_contact = (found[:, 4:] > 0).any(dim=-1)  # (B,)
+    foot_in_contact = torch.stack([left_in_contact, right_in_contact], dim=-1)  # (B, 2)
+    correct_foot_contact = foot_in_contact[torch.arange(env.num_envs, device=env.device), foot_idx]
+
+    fired = (delta_vx > delta_vel_threshold) & in_front & correct_foot_contact & ~env._sb_flag
     env._sb_flag |= fired
     return fired.float()
 
@@ -335,6 +351,16 @@ def softstop(
 
     green-ball-baseline (2026-07-10): the two-stage blue-waypoint landing gate
     has been removed on this branch, see stopball's docstring.
+
+    FIX 2026-07-14: correct-foot contact was computed AFTER `fired`, only to
+    record env._softstop_correct_foot for downstream quality bonuses -- it
+    never gated `fired` itself, so a deflection off the wrong (non-assigned)
+    foot earned this reward's full weight (up to 262.5, the single largest
+    term in the whole reward table) exactly like a correct-foot save. Now
+    computed unconditionally and required in `fired`. env._softstop_correct_foot
+    is consequently always True whenever _softstop_flag is True -- downstream
+    gates on it become no-ops, which is fine (correct-foot is now guaranteed
+    at this point rather than merely tracked).
     """
     ball: Entity = env.scene[ball_name]
     ball_x_vel = ball.data.root_link_lin_vel_w[:, 0]
@@ -349,19 +375,17 @@ def softstop(
     env._softstop_correct_foot[just_reset] = False
 
     in_front = ball_x_local > -0.3
-    fired = (ball_x_vel > velocity_threshold) & in_front & ~env._softstop_flag
 
-    # Track correct foot contact at softstop moment.
-    if fired.any():
-        foot_idx = _get_correct_foot_idx(env, ball_name)
-        sensor: ContactSensor = env.scene["feet_contact"]
-        found = sensor.data.found  # [B, 8]: 0-3=left, 4-7=right
-        left_in_contact = (found[:, :4] > 0).any(dim=-1)   # (B,)
-        right_in_contact = (found[:, 4:] > 0).any(dim=-1)  # (B,)
-        foot_in_contact = torch.stack([left_in_contact, right_in_contact], dim=-1)  # (B, 2)
+    foot_idx = _get_correct_foot_idx(env, ball_name)
+    sensor: ContactSensor = env.scene["feet_contact"]
+    found = sensor.data.found  # [B, 8]: 0-3=left, 4-7=right
+    left_in_contact = (found[:, :4] > 0).any(dim=-1)   # (B,)
+    right_in_contact = (found[:, 4:] > 0).any(dim=-1)  # (B,)
+    foot_in_contact = torch.stack([left_in_contact, right_in_contact], dim=-1)  # (B, 2)
+    correct_foot_contact = foot_in_contact[torch.arange(env.num_envs, device=env.device), foot_idx]
 
-        correct_foot_contact = foot_in_contact[torch.arange(env.num_envs, device=env.device), foot_idx]
-        env._softstop_correct_foot[fired] = correct_foot_contact[fired]
+    fired = (ball_x_vel > velocity_threshold) & in_front & correct_foot_contact & ~env._softstop_flag
+    env._softstop_correct_foot[fired] = correct_foot_contact[fired]
 
     env._softstop_flag |= fired
     return fired.float()

@@ -559,3 +559,19 @@ This is the real number. The policy has not actually learned genuine multi-step 
 **Not yet resolved:** fresh multi-disc training run not yet launched at the time of this entry -- see HANDOFF.md for the run this restarts and its plan (resume decision: fresh start, not resuming `model_19000.pt`, per explicit user choice weighing avoidance of stale-checkpoint orientation/pace habits against the ~19k-iteration wall-clock cost).
 
 **Not yet resolved:** not yet validated against a real training run -- relaunching with both interchanges together.
+
+## 2026-07-14 -- `stopball`/`softstop` fired regardless of which foot deflected the ball; both now require the task-assigned foot
+
+**Context:** user reported watching play and noticing a wrong-foot exploit: if one leg touches the ball and it deflects toward the other leg's side, the save is still rewarded. Traced directly.
+
+**Root cause:** `softstop` already computed `correct_foot_contact` (via `_get_correct_foot_idx` + the `feet_contact` sensor), but only to *record* `env._softstop_correct_foot` for downstream quality bonuses (`single_foot_save`, `inner_face_orientation_save`) -- it never gated `softstop`'s own `fired` condition, which only checked ball physics (`ball_x_vel > threshold`, in front). `stopball` had the same gap but worse -- no foot-contact check at all, not even a post-hoc one. Between them these are the two primary save-detection rewards (`stopball` up to weight 37.5, `softstop` up to 262.5, the single largest term in the whole reward table), so any foot contact that deflected the ball earned full credit regardless of which foot did it.
+
+Checked G1 upstream (`_reward_stopball`, `legged_robot.py:1407`) per this project's verify-against-G1-first rule: G1 also has no foot-side gating, but that's not a divergence to fix -- G1 catches with either hand independently, no fixed per-side assignment, so there's no "wrong hand" concept there. This project already has a stricter per-crossing-side assigned-foot concept (`_get_correct_foot_idx`) that other reward terms already respect; it was just never applied to the two primary detection rewards themselves.
+
+**Fix:** both functions now compute `correct_foot_contact` unconditionally (same `_get_correct_foot_idx` + `feet_contact` sensor pattern already used) and require it in `fired`:
+- `stopball`: `fired = (delta_vx > delta_vel_threshold) & in_front & correct_foot_contact & ~env._sb_flag`.
+- `softstop`: `fired = (ball_x_vel > velocity_threshold) & in_front & correct_foot_contact & ~env._softstop_flag`. `env._softstop_correct_foot` is now always `True` whenever `_softstop_flag` is `True` (guaranteed rather than merely tracked) -- downstream gates on it become no-ops, which is harmless.
+
+**Verification:** 48/48 tests pass -- 2 pre-existing failures also fixed while in this file (`test_multidisc_amp_cfg.py`'s `test_region_motion_files_assignment`/`test_runner_cfg_amp_data_has_one_file_per_region_and_no_triple_step` were still asserting the old single-string `REGION_MOTION_FILES` format from before the 2026-07-14 list-restructure earlier this session, and `test_no_triple_step_anywhere_in_region_motion_files` had silently degraded to a vacuous check -- `"TripleStep" not in path` on a list checks list *membership*, not substring, so it always passed regardless of content once `path` became a list). All three updated to match the current list-based format and properly iterate paths. Live smoke test (`--num-envs 64 --agent.max-iterations 5`) clean, no errors; `stopball`/`softstop` still fire occasionally under the new gate (random early policy still gets correct-foot contact by chance sometimes).
+
+**Not yet resolved:** not yet validated against a real training run for whether removing the wrong-foot exploit changes learned behavior in the expected direction -- relaunching fresh (green-ball only; blue-ball-waypoint stays stopped per separate user direction).

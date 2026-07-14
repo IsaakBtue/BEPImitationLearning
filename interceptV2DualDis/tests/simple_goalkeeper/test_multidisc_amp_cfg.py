@@ -6,21 +6,22 @@ from simple_goalkeeper.tasks.goalkeeper_multidisc_amp_cfg import (
 
 
 def test_region_motion_files_assignment():
-    assert REGION_MOTION_FILES["left_near"].endswith("LeftStep_own_booster_t1.npz")
-    assert REGION_MOTION_FILES["left_far"].endswith("LeftDoubleStep_own_booster_t1.npz")
-    assert REGION_MOTION_FILES["right_near"].endswith("Rightstep_own_booster_t1.npz")
-    assert REGION_MOTION_FILES["right_far"].endswith("RightDoubleStep_own_booster_t1.npz")
+    assert REGION_MOTION_FILES["left_near"][0].endswith("LeftStep_own_booster_t1.npz")
+    assert REGION_MOTION_FILES["left_far"][0].endswith("LeftDoubleStep_own_booster_t1_2p5x.npz")
+    assert REGION_MOTION_FILES["right_near"][0].endswith("Rightstep_own_booster_t1.npz")
+    assert REGION_MOTION_FILES["right_far"][0].endswith("RightDoubleStep_own_booster_t1_2p5x.npz")
 
 
 def test_no_triple_step_anywhere_in_region_motion_files():
-    for path in REGION_MOTION_FILES.values():
-        assert "TripleStep" not in path
+    for paths in REGION_MOTION_FILES.values():
+        for path in paths:
+            assert "TripleStep" not in path
 
 
 def test_runner_cfg_amp_data_has_one_file_per_region_and_no_triple_step():
     cfg = goalkeeper_multidisc_amp_runner_cfg()
     assert set(cfg["amp_data"].keys()) == set(REGION_MOTION_FILES.keys())
     for name, motion_cfg in cfg["amp_data"].items():
-        assert len(motion_cfg.motion_files) == 1
-        assert motion_cfg.motion_files[0] == REGION_MOTION_FILES[name]
-        assert "TripleStep" not in motion_cfg.motion_files[0]
+        assert motion_cfg.motion_files == REGION_MOTION_FILES[name]
+        for path in motion_cfg.motion_files:
+            assert "TripleStep" not in path
