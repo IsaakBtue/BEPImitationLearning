@@ -47,6 +47,9 @@ class MultiDiscAMPPPO:
         device: str = "cpu",
         amp_replay_buffer_size: int = 100_000,
         min_std=None,
+        success_buffer=None,
+        sil_coef: float = 0.1,
+        sil_batch_size: int = 256,
         **kwargs,
     ):
         self.device = device
@@ -114,6 +117,13 @@ class MultiDiscAMPPPO:
         self._obs_current = None
         self._obs_history = None
         self._amp_obs = None
+
+        # FEAT 2026-07-14: self-imitation buffer, see success_buffer.py for
+        # the full rationale. Optional -- if None, update() behaves exactly
+        # as before (no SIL term added to the loss).
+        self.success_buffer = success_buffer
+        self.sil_coef = sil_coef
+        self.sil_batch_size = sil_batch_size
 
     def init_storage(self, num_envs, num_transitions_per_env, obs_current_shape,
                       obs_history_shape, critic_obs_shape, action_shape):
@@ -207,6 +217,7 @@ class MultiDiscAMPPPO:
     def update(self):
         mean_value_loss = mean_surrogate_loss = mean_amp_loss = mean_grad_pen_loss = 0.0
         mean_est_loss = mean_region_loss = mean_policy_pred = mean_expert_pred = 0.0
+        mean_sil_loss = 0.0
 
         generator = self.storage.mini_batch_generator(self.num_mini_batches, self.num_learning_epochs)
         minibatch_size = self.storage.num_envs * self.storage.num_transitions_per_env // self.num_mini_batches
@@ -296,6 +307,21 @@ class MultiDiscAMPPPO:
             loss = (surrogate_loss + self.value_loss_coef * value_loss
                     - self.entropy_coef * entropy_batch.mean() + est_loss + region_loss)
 
+            # FEAT 2026-07-14: self-imitation loss, see success_buffer.py.
+            # Behavior-cloning-style NLL of recorded successful actions under
+            # the CURRENT policy, sampled fresh every minibatch so it stays
+            # part of the same gradient step as the main PPO loss rather than
+            # a separate update pass. No-op (sil_loss stays 0) until the
+            # buffer has accumulated at least one full sample batch's worth
+            # of genuine-landing transitions.
+            sil_loss = torch.tensor(0.0, device=self.device)
+            if self.success_buffer is not None and len(self.success_buffer) >= self.sil_batch_size:
+                sil_obs_current, sil_obs_history, sil_actions = self.success_buffer.sample(self.sil_batch_size)
+                self.actor_critic.act(sil_obs_current.detach(), sil_obs_history.detach())
+                sil_log_prob = self.actor_critic.get_actions_log_prob(sil_actions)
+                sil_loss = -sil_log_prob.mean()
+                loss = loss + self.sil_coef * sil_loss
+
             # Region-routed AMP loss (ported from him_ppo.py:244-305).
             amp_loss = torch.tensor(0.0, device=self.device)
             grad_pen_loss = torch.tensor(0.0, device=self.device)
@@ -369,6 +395,7 @@ class MultiDiscAMPPPO:
             mean_grad_pen_loss += grad_pen_loss.item()
             mean_est_loss += est_loss.item()
             mean_region_loss += region_loss.item()
+            mean_sil_loss += sil_loss.item()
             if expert_preds:
                 mean_expert_pred += sum(expert_preds) / len(expert_preds)
             if policy_preds:
@@ -391,4 +418,5 @@ class MultiDiscAMPPPO:
         return (mean_value_loss / num_updates, mean_surrogate_loss / num_updates,
                 mean_amp_loss / num_updates, mean_grad_pen_loss / num_updates,
                 mean_est_loss / num_updates, mean_region_loss / num_updates,
-                mean_policy_pred / num_updates, mean_expert_pred / num_updates)
+                mean_policy_pred / num_updates, mean_expert_pred / num_updates,
+                mean_sil_loss / num_updates)

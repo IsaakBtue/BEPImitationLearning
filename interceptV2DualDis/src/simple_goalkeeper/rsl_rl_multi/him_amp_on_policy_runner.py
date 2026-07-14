@@ -33,6 +33,7 @@ from rsl_rl_amp.utils.utils import Normalizer
 
 from .him_actor_critic import HimActorCritic
 from .multi_disc_amp_ppo import REGION_NAMES, MultiDiscAMPPPO
+from .success_buffer import SuccessReplayBuffer
 
 
 def _get_actor_current_obs(env: AMPEnvWrapper) -> torch.Tensor:
@@ -113,6 +114,16 @@ class HimAMPOnPolicyRunner:
             * torch.abs(env.dof_pos_limits[0, :, 1] - env.dof_pos_limits[0, :, 0])
         )
 
+        # FEAT 2026-07-14: self-imitation buffer, see success_buffer.py.
+        self.success_buffer = SuccessReplayBuffer(
+            obs_current_dim=num_one_step_obs,
+            obs_history_dim=num_one_step_obs * 10,
+            action_dim=env.num_actions,
+            num_envs=env.num_envs,
+            device=device,
+        )
+        self._sil_prev_blue_landed = None
+
         self.alg = MultiDiscAMPPPO(
             actor_critic=actor_critic,
             discriminators=discriminators,
@@ -123,6 +134,7 @@ class HimAMPOnPolicyRunner:
             amp_obs_dim=amp_obs_dim,
             device=device,
             min_std=min_std,
+            success_buffer=self.success_buffer,
             **self.alg_cfg,
         )
         self.num_steps_per_env = train_cfg["num_steps_per_env"]
@@ -189,12 +201,28 @@ class HimAMPOnPolicyRunner:
         cur_discri_sum = torch.zeros(self.env.num_envs, device=self.device)
         cur_episode_length = torch.zeros(self.env.num_envs, device=self.device)
 
+        # FEAT 2026-07-14: self-imitation bookkeeping, see success_buffer.py.
+        # prev_dones marks which envs' CURRENT obs is a fresh post-reset
+        # observation (their episode ended on the previous real step), so
+        # record_step can clear their rolling window before this step's
+        # transition gets appended to it -- otherwise a new episode's early
+        # transitions could get glued onto the tail of a stale, unrelated
+        # previous episode's window.
+        sil_prev_dones = torch.zeros(self.env.num_envs, dtype=torch.bool, device=self.device)
+        # sil_prev_landed tracks env._blue_landed (genuine only) from the
+        # previous step so commit_success only fires on the rising edge --
+        # env._blue_landed itself resets to False on episode reset (rewards.py
+        # _get_reach_target_y), so this self-clears across episodes with no
+        # extra bookkeeping needed here.
+        sil_prev_landed = torch.zeros(self.env.num_envs, dtype=torch.bool, device=self.device)
+
         tot_iter = self.current_learning_iteration + num_learning_iterations
         for it in range(self.current_learning_iteration, tot_iter):
             start = time.time()
             with torch.inference_mode():
                 for _ in range(self.num_steps_per_env):
                     actions = self.alg.act(obs, obs_history, critic_obs, amp_obs)
+                    sil_pre_obs, sil_pre_obs_history = obs, obs_history
                     # step()'s first return value is the "actor" (history-stacked)
                     # group -- NOT obs_current. Discard it and re-fetch both the
                     # single-step and history observations independently.
@@ -224,6 +252,20 @@ class HimAMPOnPolicyRunner:
                     amp_obs = torch.clone(next_amp_obs)
                     self.alg.process_env_step(rewards, dones, infos, next_amp_obs_with_term)
 
+                    self.success_buffer.record_step(
+                        sil_pre_obs, sil_pre_obs_history, actions, reset_mask=sil_prev_dones
+                    )
+                    sil_prev_dones = dones.bool()
+                    raw_env = self.env.unwrapped
+                    blue_landed = getattr(raw_env, "_blue_landed", None)
+                    blue_landed_was_free = getattr(raw_env, "_blue_landed_was_free", None)
+                    if blue_landed is not None and blue_landed_was_free is not None:
+                        genuine_landed = blue_landed & ~blue_landed_was_free
+                        newly_genuine = genuine_landed & ~sil_prev_landed
+                        if newly_genuine.any():
+                            self.success_buffer.commit_success(torch.nonzero(newly_genuine).flatten())
+                        sil_prev_landed = genuine_landed.clone()
+
                     if self.log_dir is not None:
                         if "episode" in infos:
                             ep_infos.append(infos["episode"])
@@ -248,7 +290,8 @@ class HimAMPOnPolicyRunner:
                 self.alg.compute_returns(critic_obs)
 
             (mean_value_loss, mean_surrogate_loss, mean_amp_loss, mean_grad_pen_loss,
-             mean_est_loss, mean_region_loss, mean_policy_pred, mean_expert_pred) = self.alg.update()
+             mean_est_loss, mean_region_loss, mean_policy_pred, mean_expert_pred,
+             mean_sil_loss) = self.alg.update()
             learn_time = time.time() - start
 
             if self.log_dir is not None:
@@ -306,6 +349,8 @@ class HimAMPOnPolicyRunner:
         self.writer.add_scalar("Loss/AMP_grad", locs["mean_grad_pen_loss"], locs["it"])
         self.writer.add_scalar("Loss/est_ball", locs["mean_est_loss"], locs["it"])
         self.writer.add_scalar("Loss/est_region", locs["mean_region_loss"], locs["it"])
+        self.writer.add_scalar("Loss/SIL", locs["mean_sil_loss"], locs["it"])
+        self.writer.add_scalar("SIL/buffer_size", len(self.success_buffer), locs["it"])
         self.writer.add_scalar("Policy/mean_noise_std", mean_std.item(), locs["it"])
         self.writer.add_scalar("Perf/total_fps", fps, locs["it"])
         self.writer.add_scalar("Perf/collection time", locs["collection_time"], locs["it"])
@@ -335,6 +380,7 @@ class HimAMPOnPolicyRunner:
                 f"""{'AMP mean expert pred:':>{pad}} {locs['mean_expert_pred']:.4f}\n"""
                 f"""{'Ball estimator loss:':>{pad}} {locs['mean_est_loss']:.4f}\n"""
                 f"""{'Region estimator loss:':>{pad}} {locs['mean_region_loss']:.4f}\n"""
+                f"""{'SIL loss:':>{pad}} {locs['mean_sil_loss']:.4f} (buffer={len(self.success_buffer)})\n"""
                 f"""{'Mean action noise std:':>{pad}} {mean_std.item():.2f}\n"""
                 f"""{'Mean reward:':>{pad}} {statistics.mean(locs['rewbuffer']):.2f}\n"""
                 f"""{'Mean episode length:':>{pad}} {statistics.mean(locs['lenbuffer']):.2f}\n"""
@@ -348,6 +394,7 @@ class HimAMPOnPolicyRunner:
                 f"""{'Surrogate loss:':>{pad}} {locs['mean_surrogate_loss']:.4f}\n"""
                 f"""{'Ball estimator loss:':>{pad}} {locs['mean_est_loss']:.4f}\n"""
                 f"""{'Region estimator loss:':>{pad}} {locs['mean_region_loss']:.4f}\n"""
+                f"""{'SIL loss:':>{pad}} {locs['mean_sil_loss']:.4f} (buffer={len(self.success_buffer)})\n"""
                 f"""{'Mean action noise std:':>{pad}} {mean_std.item():.2f}\n"""
             )
 
