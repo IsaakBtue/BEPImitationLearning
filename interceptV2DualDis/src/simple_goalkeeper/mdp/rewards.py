@@ -1008,6 +1008,19 @@ def stopball(
     fire on a wide crossing at all, this just damps the payoff further while
     the policy hasn't yet made landing reliable. Narrow-crossing saves are
     completely unaffected. See that function's docstring and docs/BugFixes.md.
+
+    FIX 2026-07-15: landing_ok only constrains WIDE crossings (narrow
+    crossings pass it unconditionally via `~env._blue_wide`), and even on
+    wide crossings it only requires SOME genuine landing happened earlier in
+    the episode, not that the SAME foot deflecting the ball right now is the
+    assigned one. Neither path ever checked which foot was actually in
+    contact at the deflection moment -- a narrow crossing (roughly half of
+    all episodes) earned full credit from any foot touch, and a wide
+    crossing could in principle land genuinely with the assigned foot, then
+    have the OTHER foot clip the ball on continuation. Now requires the
+    assigned foot (_get_correct_foot_idx) to be the one in contact, same
+    sensor pattern softstop already used for its own (previously
+    non-gating) tracking. See docs/BugFixes.md.
     """
     _get_reach_target_y(env, ball_name)  # ensure _blue_wide/_blue_landed are fresh this step
 
@@ -1026,7 +1039,16 @@ def stopball(
     delta_vx = ball_x_vel - env._sb_init_vx
     in_front = ball_x_local > -0.3  # allow 0.3 m past goal line: deflection accumulates gradually
     landing_ok = ~env._blue_wide | (env._blue_landed & ~env._blue_landed_was_free)
-    fired = (delta_vx > delta_vel_threshold) & in_front & landing_ok & ~env._sb_flag
+
+    foot_idx = _get_correct_foot_idx(env, ball_name)
+    sensor: ContactSensor = env.scene["feet_contact"]
+    found = sensor.data.found  # [B, 8]: 0-3=left, 4-7=right
+    left_in_contact = (found[:, :4] > 0).any(dim=-1)   # (B,)
+    right_in_contact = (found[:, 4:] > 0).any(dim=-1)  # (B,)
+    foot_in_contact = torch.stack([left_in_contact, right_in_contact], dim=-1)  # (B, 2)
+    correct_foot_contact = foot_in_contact[torch.arange(env.num_envs, device=env.device), foot_idx]
+
+    fired = (delta_vx > delta_vel_threshold) & in_front & landing_ok & correct_foot_contact & ~env._sb_flag
     env._sb_flag |= fired
 
     # FEAT 2026-07-11: damp the wide-crossing-contributed portion by the
@@ -1059,6 +1081,15 @@ def softstop(
 
     FEAT 2026-07-11: also same wide-crossing payoff damping as stopball
     (_blue_landing_reward_scale) -- see that function's docstring.
+
+    FIX 2026-07-15: correct-foot contact was computed AFTER `fired`, only to
+    record env._softstop_correct_foot for downstream quality bonuses -- it
+    never gated `fired` itself, exactly the same gap as stopball's (see that
+    function's 2026-07-15 fix). On narrow crossings especially (landing_ok
+    unconditionally True there), any foot deflecting the ball earned full
+    credit. Now computed unconditionally and required in `fired`, same as
+    stopball. env._softstop_correct_foot is consequently always True
+    whenever _softstop_flag is True -- downstream gates on it become no-ops.
     """
     _get_reach_target_y(env, ball_name)  # ensure _blue_wide/_blue_landed are fresh this step
 
@@ -1076,19 +1107,17 @@ def softstop(
 
     in_front = ball_x_local > -0.3
     landing_ok = ~env._blue_wide | (env._blue_landed & ~env._blue_landed_was_free)
-    fired = (ball_x_vel > velocity_threshold) & in_front & landing_ok & ~env._softstop_flag
 
-    # Track correct foot contact at softstop moment.
-    if fired.any():
-        foot_idx = _get_correct_foot_idx(env, ball_name)
-        sensor: ContactSensor = env.scene["feet_contact"]
-        found = sensor.data.found  # [B, 8]: 0-3=left, 4-7=right
-        left_in_contact = (found[:, :4] > 0).any(dim=-1)   # (B,)
-        right_in_contact = (found[:, 4:] > 0).any(dim=-1)  # (B,)
-        foot_in_contact = torch.stack([left_in_contact, right_in_contact], dim=-1)  # (B, 2)
+    foot_idx = _get_correct_foot_idx(env, ball_name)
+    sensor: ContactSensor = env.scene["feet_contact"]
+    found = sensor.data.found  # [B, 8]: 0-3=left, 4-7=right
+    left_in_contact = (found[:, :4] > 0).any(dim=-1)   # (B,)
+    right_in_contact = (found[:, 4:] > 0).any(dim=-1)  # (B,)
+    foot_in_contact = torch.stack([left_in_contact, right_in_contact], dim=-1)  # (B, 2)
+    correct_foot_contact = foot_in_contact[torch.arange(env.num_envs, device=env.device), foot_idx]
 
-        correct_foot_contact = foot_in_contact[torch.arange(env.num_envs, device=env.device), foot_idx]
-        env._softstop_correct_foot[fired] = correct_foot_contact[fired]
+    fired = (ball_x_vel > velocity_threshold) & in_front & landing_ok & correct_foot_contact & ~env._softstop_flag
+    env._softstop_correct_foot[fired] = correct_foot_contact[fired]
 
     env._softstop_flag |= fired
 
