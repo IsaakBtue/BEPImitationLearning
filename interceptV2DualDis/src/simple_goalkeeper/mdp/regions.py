@@ -34,17 +34,13 @@ _REGION_Y_START_RANGE: dict[int, tuple[float, float]] = {
 }
 _REGION_Y_END_RANGE: dict[int, tuple[float, float]] = {
     0: (0.15, 0.5),    # left_near: crosses on the left, under 0.5 m
-    1: (0.5, 1.3),     # left_far: crosses on the left, at/above 0.5 m
+    1: (0.5, 0.9),     # left_far: crosses on the left, at/above 0.5 m
     2: (-0.5, -0.15),  # right_near
-    3: (-1.3, -0.5),   # right_far
+    3: (-0.9, -0.5),   # right_far
 }
-# FIX 2026-07-15: far bound was still 0.9 -- stale since this project's
-# single-disc track (goalkeeper_env_cfg.py's own reset_ball event) widened
-# its equivalent y_end_range from 0.9 to 1.3 on 2026-07-13. That widening
-# never propagated here because the multi-disc task's region-conditioned
-# reset (reset_ball_rolling_by_region) uses this dict's own fixed bounds
-# instead of the base config's y_end_range. Widened to match, so both
-# tracks target the same max lateral reach.
+# REVERTED 2026-07-15: back to 0.9 (was briefly 1.3, see git history) --
+# user wants to test the region-conditional footreach vel_sigma boost in
+# isolation, without also confounding it with a farther target range.
 
 
 def assign_static_regions(env: "ManagerBasedRlEnv", env_ids: torch.Tensor | None) -> None:
