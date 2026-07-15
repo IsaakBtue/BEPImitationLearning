@@ -13,9 +13,28 @@ import dataclasses
 from mjlab.envs import ManagerBasedRlEnvCfg
 from mjlab.managers.event_manager import EventTermCfg
 from mjlab.managers.observation_manager import ObservationGroupCfg, ObservationTermCfg
+from mjlab.managers.scene_entity_config import SceneEntityCfg
 
+from simple_goalkeeper.mdp import observations as gk_obs
 from simple_goalkeeper.mdp import regions as gk_regions
 from simple_goalkeeper.tasks.goalkeeper_env_cfg import BALL_NAME, goalkeeper_env_cfg
+
+# FIX 2026-07-15: the 13 non-arm T1 joints (Waist + 6 hip + 2 knee + 4 ankle),
+# excluding the 8 arm joints (4 per side: Shoulder_Pitch/Roll, Elbow_Pitch/Yaw).
+# Arms have no task-grounding reward (no equivalent of G1's hand-reach eereach
+# for this feet-only design -- see docs/BugFixes.md, 2026-07-10 entry). AMP-only
+# imitation of arm motion with nothing else constraining it was suspected of
+# producing a "fake gradient" -- weird, ungrounded arm swinging the user
+# observed watching play. Excluding arms from the AMP discriminator entirely
+# removes that incentive; see goalkeeper_multidisc_amp_runner_cfg for the
+# matching exclusion on the motion-dataset (expert) side.
+NON_ARM_JOINT_NAMES: tuple[str, ...] = (
+    "Waist",
+    "Left_Hip_Pitch", "Right_Hip_Pitch", "Left_Hip_Roll", "Left_Hip_Yaw",
+    "Right_Hip_Roll", "Right_Hip_Yaw",
+    "Left_Knee_Pitch", "Right_Knee_Pitch",
+    "Left_Ankle_Pitch", "Right_Ankle_Pitch", "Left_Ankle_Roll", "Right_Ankle_Roll",
+)
 
 
 def goalkeeper_multidisc_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
@@ -65,8 +84,19 @@ def goalkeeper_multidisc_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
     # match G1 exactly; MotionDatasetCfg's amp_obs_terms is overridden to
     # match below (goalkeeper_multidisc_amp_runner_cfg), keeping expert/policy
     # obs dimensions in sync. See docs/BugFixes.md.
+    #
+    # FIX 2026-07-15: additionally restricted to NON_ARM_JOINT_NAMES (13 of
+    # 21 joints) -- was the full 21-DOF vector (joint_pos_abs ignored
+    # asset_cfg's joint filtering entirely, now fixed). See module-level
+    # comment on NON_ARM_JOINT_NAMES above.
     cfg.observations["amp"] = ObservationGroupCfg(
-        terms={"joint_pos": cfg.observations["amp"].terms["joint_pos"]},
+        terms={
+            "joint_pos": ObservationTermCfg(
+                func=gk_obs.joint_pos_abs,
+                noise=None,
+                params={"asset_cfg": SceneEntityCfg("robot", joint_names=NON_ARM_JOINT_NAMES)},
+            ),
+        },
         concatenate_terms=True,
         enable_corruption=False,
     )
@@ -239,6 +269,10 @@ def goalkeeper_multidisc_amp_runner_cfg() -> dict:
             body_names=GOALKEEPER_KEY_BODY_NAMES,
             amp_obs_terms=_MULTIDISC_AMP_OBS_TERMS,
             anchor_name=GOALKEEPER_ANCHOR_NAME,
+            # FIX 2026-07-15: matches the "amp" observation group's arm
+            # exclusion above -- expert (reference clip) and policy sides
+            # must stay in the same joint subset for the discriminator.
+            joint_names=list(NON_ARM_JOINT_NAMES),
         )
         for name, paths in REGION_MOTION_FILES.items()
     }

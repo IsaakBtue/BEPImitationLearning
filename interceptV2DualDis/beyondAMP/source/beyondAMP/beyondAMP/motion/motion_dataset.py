@@ -53,6 +53,16 @@ class MotionDataset:
             self.robot.find_bodies(body_names, preserve_order=True)[0], dtype=torch.long, device=device
         )
 
+        # FIX 2026-07-15: optional joint subset for joint_pos/joint_vel (see
+        # MotionDatasetCfg.joint_names). None -> all joints, matching prior
+        # (only) behavior exactly.
+        if cfg.joint_names is not None:
+            self.joint_indexes = torch.tensor(
+                self.robot.find_joints(cfg.joint_names, preserve_order=True)[0], dtype=torch.long, device=device
+            )
+        else:
+            self.joint_indexes = None
+
         anchor_name = cfg.anchor_name
         self.anchor_index = torch.tensor(
             self.robot.find_bodies(anchor_name, preserve_order=True)[0], dtype=torch.long, device=device
@@ -89,8 +99,8 @@ class MotionDataset:
             body_ang_vel_w_list.append(torch.tensor(data["body_ang_vel_w"], dtype=torch.float32))
 
         # Concatenate all trajectories into single big tensors
-        self.joint_pos      = torch.cat(joint_pos_list, dim=0).to(self.device)
-        self.joint_vel      = torch.cat(joint_vel_list, dim=0).to(self.device)
+        self.joint_pos_all  = torch.cat(joint_pos_list, dim=0).to(self.device)
+        self.joint_vel_all  = torch.cat(joint_vel_list, dim=0).to(self.device)
         self.body_pos_w_all      = torch.cat(body_pos_w_list, dim=0).to(self.device)
         self.body_quat_w_all     = torch.cat(body_quat_w_list, dim=0).to(self.device)
         self.body_lin_vel_w_all  = torch.cat(body_lin_vel_w_list, dim=0).to(self.device)
@@ -106,11 +116,23 @@ class MotionDataset:
         self.index_t, self.index_tp1 = self._build_transition_indices(traj_lengths, self.device)
 
     # ----------------------- Property API -----------------------
-    
+
     def subtract_flaten(self, target: torch.Tensor):
         target = target[:, self.body_indexes]
         return target.reshape(self.total_dataset_size, -1)
-    
+
+    @property
+    def joint_pos(self):
+        if self.joint_indexes is None:
+            return self.joint_pos_all
+        return self.joint_pos_all[:, self.joint_indexes]
+
+    @property
+    def joint_vel(self):
+        if self.joint_indexes is None:
+            return self.joint_vel_all
+        return self.joint_vel_all[:, self.joint_indexes]
+
     @property
     def body_pos_w(self):
         return self.body_pos_w_all[:, self.body_indexes].reshape(self.total_dataset_size, -1)
@@ -316,3 +338,8 @@ class MotionDatasetCfg:
     amp_obs_terms       : List[str] = MISSING
     anchor_name         : str = MISSING
     motion_weights      : Union[List[float], None] = None
+    # FIX 2026-07-15: optional joint subset for the "joint_pos"/"joint_vel"
+    # observation terms (e.g. excluding arm joints from an AMP discriminator
+    # that has no task-grounding reward for them). None = all joints
+    # (previous, only) behavior.
+    joint_names         : Union[List[str], None] = None

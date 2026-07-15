@@ -234,12 +234,20 @@ def joint_pos_abs(
 
     Before softstop: real joint positions (save motion — reference covers this).
     After softstop:  default joint positions (neutral — excluded from training).
+
+    FIX 2026-07-15: now respects asset_cfg.joint_ids (was always the full
+    21-DOF vector regardless of asset_cfg) so callers can restrict this to a
+    joint subset -- e.g. excluding arms from the AMP discriminator entirely,
+    since arms have no task-grounding reward and AMP-only imitation of them
+    was suspected of producing a "fake gradient" (weird, ungrounded arm
+    motion). See goalkeeper_multidisc_amp_cfg.py's "amp" group override.
     """
     robot: Entity = env.scene[asset_cfg.name]
-    joint_pos = robot.data.joint_pos.clone()
+    joint_pos = robot.data.joint_pos[:, asset_cfg.joint_ids].clone()
+    default_joint_pos = robot.data.default_joint_pos[:, asset_cfg.joint_ids]
     softstop_fired = getattr(env, "_softstop_flag", None)
     if softstop_fired is not None and softstop_fired.any():
-        joint_pos[softstop_fired] = robot.data.default_joint_pos[softstop_fired]
+        joint_pos[softstop_fired] = default_joint_pos[softstop_fired]
     return joint_pos
 
 
@@ -250,9 +258,11 @@ def joint_vel_abs(
     """Absolute joint velocities for AMP discriminator — gated by softstop.
 
     Returns zero velocities after softstop fires. Mirrors joint_pos_abs gating.
+
+    FIX 2026-07-15: now respects asset_cfg.joint_ids -- see joint_pos_abs.
     """
     robot: Entity = env.scene[asset_cfg.name]
-    joint_vel = robot.data.joint_vel.clone()
+    joint_vel = robot.data.joint_vel[:, asset_cfg.joint_ids].clone()
     softstop_fired = getattr(env, "_softstop_flag", None)
     if softstop_fired is not None and softstop_fired.any():
         joint_vel[softstop_fired] = 0.0

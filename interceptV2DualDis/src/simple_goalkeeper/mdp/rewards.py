@@ -224,17 +224,32 @@ def footreach(
     # project used the SAME flat 3.0 multiplier for every region regardless of
     # near/far, unlike G1 -- no extra incentive was ever given for the
     # additional travel/step-count a far (double/triple-step) crossing needs
-    # in the same time budget as a near, single-step one. Confirmed empirically:
-    # far regions don't reliably learn double-stepping. Mirrors G1's mechanism
-    # exactly (same formula, same curriculum variable), adapted to lateral
-    # (not vertical/dive) velocity since this is a feet-only stepping task,
-    # not a hand-dive task. Falls back to the flat 3.0 when region_id doesn't
-    # exist (e.g. a future non-multi-disc caller).
+    # in the same time budget as a near, single-step one. Mirrors G1's
+    # mechanism (same formula shape, same curriculum variable), adapted to
+    # lateral (not vertical/dive) velocity since this is a feet-only stepping
+    # task, not a hand-dive task. Falls back to the flat 3.0 when region_id
+    # doesn't exist (e.g. a future non-multi-disc caller).
+    #
+    # FIX 2026-07-15 (slope halved): G1's jump_scale is never used standalone
+    # -- it's paired with two jump-region-specific safety rewards
+    # (_reward_airfeetorientation, _reward_successland) that manage foot
+    # orientation while airborne and landing quality, because G1's far
+    # regions are a literal dive (torso leaves the ground). This project's
+    # far regions are a GROUNDED double/triple-step -- continuously
+    # balance-critical, with no equivalent safety net. Porting G1's full
+    # escalation (up to 1+12*3=37x by cu=3) onto a task with no landing-
+    # safety mechanism plausibly caused the overshoot-and-fall behavior
+    # observed (short episodes). Halved the slope (1.5 instead of 3.0) so
+    # far regions still get meaningfully more incentive than near (up to
+    # 1+7.5*3=23.5x at cu=3, vs near's flat 10x) without reaching the
+    # original's most extreme, least-controllable multiplier. Not a G1-
+    # derived number -- G1 has no equivalent for a grounded task, this is a
+    # judgment call pending validation against a training run.
     region_id = getattr(env, "_region_id", None)
     if region_id is not None:
         is_far_region = (region_id == 1) | (region_id == 3)
         cu = float(getattr(env, "_curriculumupdate", 0))
-        far_scale = 3.0 + 3.0 * cu
+        far_scale = 3.0 + 1.5 * cu
         vel_scale = torch.where(
             is_far_region,
             torch.full_like(vel_toward, far_scale),
@@ -242,7 +257,7 @@ def footreach(
         )
     else:
         vel_scale = torch.full_like(vel_toward, 3.0)
-    vel_sigma = 1.0 + vel_scale * vel_toward.clamp(0.0, 3.0)  # near: 1-10x; far: 1-10x at cu=0 up to 1-37x at cu=3
+    vel_sigma = 1.0 + vel_scale * vel_toward.clamp(0.0, 3.0)  # near: 1-10x; far: 1-10x at cu=0 up to 1-23.5x at cu=3
 
     # Combine: phase1 when ball is far, phase2 sigmoid when close.
     phase1_mask = ball_x_local > 1.5
@@ -332,6 +347,14 @@ def stopball(
     (_get_correct_foot_idx) to actually be in contact, matching softstop's
     own correct-foot gate (which already existed but only fed downstream
     quality bonuses, never gated softstop itself either -- see that fix).
+
+    FIX 2026-07-15: that check used "feet_contact", a GROUND-contact sensor
+    (secondary=None -- fires whenever a foot touches anything, mostly the
+    ground) -- not ball-specific. A foot standing normally on the ground
+    already satisfies it, so the assigned foot could be reported "in
+    contact" even if the ball was actually deflected off the OTHER foot and
+    rolled to a stop near the assigned one. Switched to "ball_contact", a
+    dedicated foot-vs-ball ContactSensorCfg (goalkeeper_env_cfg.py).
     """
     ball: Entity = env.scene[ball_name]
     ball_x_vel = ball.data.root_link_lin_vel_w[:, 0]
@@ -349,7 +372,7 @@ def stopball(
     in_front = ball_x_local > -0.3  # allow 0.3 m past goal line: deflection accumulates gradually
 
     foot_idx = _get_correct_foot_idx(env, ball_name)
-    sensor: ContactSensor = env.scene["feet_contact"]
+    sensor: ContactSensor = env.scene["ball_contact"]
     found = sensor.data.found  # [B, 8]: 0-3=left, 4-7=right
     left_in_contact = (found[:, :4] > 0).any(dim=-1)   # (B,)
     right_in_contact = (found[:, 4:] > 0).any(dim=-1)  # (B,)
@@ -387,6 +410,12 @@ def softstop(
     is consequently always True whenever _softstop_flag is True -- downstream
     gates on it become no-ops, which is fine (correct-foot is now guaranteed
     at this point rather than merely tracked).
+
+    FIX 2026-07-15: that check used "feet_contact", a GROUND-contact sensor
+    (secondary=None) -- not ball-specific, so a foot merely standing on the
+    ground satisfied it regardless of which foot actually deflected the
+    ball. Switched to "ball_contact", a dedicated foot-vs-ball
+    ContactSensorCfg (goalkeeper_env_cfg.py). See stopball's matching fix.
     """
     ball: Entity = env.scene[ball_name]
     ball_x_vel = ball.data.root_link_lin_vel_w[:, 0]
@@ -403,7 +432,7 @@ def softstop(
     in_front = ball_x_local > -0.3
 
     foot_idx = _get_correct_foot_idx(env, ball_name)
-    sensor: ContactSensor = env.scene["feet_contact"]
+    sensor: ContactSensor = env.scene["ball_contact"]
     found = sensor.data.found  # [B, 8]: 0-3=left, 4-7=right
     left_in_contact = (found[:, :4] > 0).any(dim=-1)   # (B,)
     right_in_contact = (found[:, 4:] > 0).any(dim=-1)  # (B,)

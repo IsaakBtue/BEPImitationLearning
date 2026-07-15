@@ -96,6 +96,26 @@ def goalkeeper_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
             reduce="netforce",
             history_length=0,
         ),
+        # FIX 2026-07-15: "feet_contact" above has secondary=None -- it fires
+        # whenever a foot touches ANYTHING (in practice, mostly the ground),
+        # not specifically the ball. stopball/softstop's "correct foot"
+        # gate used it to check whether the assigned foot caused the
+        # deflection, but a foot standing normally on the ground already
+        # satisfies it -- the gate was nearly vacuous. This sensor is
+        # ball-specific: primary=foot geoms, secondary=ball_geom, so
+        # "found" only fires on genuine foot-ball contact.
+        ContactSensorCfg(
+            name="ball_contact",
+            primary=ContactMatch(
+                mode="geom",
+                pattern=r"^(left|right)_foot[1-4]_collision$",
+                entity="robot",
+            ),
+            secondary=ContactMatch(mode="geom", pattern="ball_geom", entity=BALL_NAME),
+            fields=("found", "force"),
+            reduce="netforce",
+            history_length=0,
+        ),
         ContactSensorCfg(
             name="self_collision",
             primary=ContactMatch(mode="subtree", pattern="Trunk", entity="robot"),
