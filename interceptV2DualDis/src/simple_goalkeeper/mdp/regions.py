@@ -34,13 +34,13 @@ _REGION_Y_START_RANGE: dict[int, tuple[float, float]] = {
 }
 _REGION_Y_END_RANGE: dict[int, tuple[float, float]] = {
     0: (0.15, 0.5),    # left_near: crosses on the left, under 0.5 m
-    1: (0.5, 0.9),     # left_far: crosses on the left, at/above 0.5 m
+    1: (0.5, 1.3),     # left_far: crosses on the left, at/above 0.5 m
     2: (-0.5, -0.15),  # right_near
-    3: (-0.9, -0.5),   # right_far
+    3: (-1.3, -0.5),   # right_far
 }
-# REVERTED 2026-07-15: back to 0.9 (was briefly 1.3, see git history) --
-# user wants to test the region-conditional footreach vel_sigma boost in
-# isolation, without also confounding it with a farther target range.
+# RE-WIDENED 2026-07-15: back to 1.3 (matching the single-disc track, see
+# the 2026-07-15 BugFixes.md entry) now that the vel_sigma-alone test is
+# done and the overshoot/arms/contact-sensor fixes are in place.
 
 
 def assign_static_regions(env: "ManagerBasedRlEnv", env_ids: torch.Tensor | None) -> None:
