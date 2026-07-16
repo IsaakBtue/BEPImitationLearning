@@ -63,11 +63,27 @@ class MotionDataset:
         else:
             self.joint_indexes = None
 
+        # FIX 2026-07-16: optional joint MASK (as opposed to joint_names'
+        # SLICE) -- freezes the given joints' columns to the robot's default
+        # pose/zero-velocity across the whole dataset, keeping the tensor's
+        # full joint-count shape (needed when different regions' datasets
+        # must stay the same dimension, e.g. this project's multi-disc AMP
+        # routing one shared amp_obs tensor to per-region discriminators).
+        # Applied in load_motions() below, once robot.data.default_joint_pos
+        # is available.
+        if cfg.freeze_joint_names is not None:
+            self.freeze_joint_indexes = torch.tensor(
+                self.robot.find_joints(cfg.freeze_joint_names, preserve_order=True)[0],
+                dtype=torch.long, device=device,
+            )
+        else:
+            self.freeze_joint_indexes = None
+
         anchor_name = cfg.anchor_name
         self.anchor_index = torch.tensor(
             self.robot.find_bodies(anchor_name, preserve_order=True)[0], dtype=torch.long, device=device
         )
-        
+
         self.load_motions()
         self.init_observation_dims()
 
@@ -101,6 +117,17 @@ class MotionDataset:
         # Concatenate all trajectories into single big tensors
         self.joint_pos_all  = torch.cat(joint_pos_list, dim=0).to(self.device)
         self.joint_vel_all  = torch.cat(joint_vel_list, dim=0).to(self.device)
+
+        # FIX 2026-07-16: freeze masked joints (see MotionDatasetCfg.
+        # freeze_joint_names) to the robot's default pose / zero velocity
+        # across every frame of this dataset -- makes those columns
+        # uninformative to a discriminator trained on this data, without
+        # changing the tensor's joint-count shape.
+        if self.freeze_joint_indexes is not None:
+            default_pos = self.robot.data.default_joint_pos[0, self.freeze_joint_indexes].to(self.device)
+            self.joint_pos_all[:, self.freeze_joint_indexes] = default_pos
+            self.joint_vel_all[:, self.freeze_joint_indexes] = 0.0
+
         self.body_pos_w_all      = torch.cat(body_pos_w_list, dim=0).to(self.device)
         self.body_quat_w_all     = torch.cat(body_quat_w_list, dim=0).to(self.device)
         self.body_lin_vel_w_all  = torch.cat(body_lin_vel_w_list, dim=0).to(self.device)
@@ -343,3 +370,11 @@ class MotionDatasetCfg:
     # that has no task-grounding reward for them). None = all joints
     # (previous, only) behavior.
     joint_names         : Union[List[str], None] = None
+    # FIX 2026-07-16: optional joint MASK (as opposed to joint_names' SLICE)
+    # -- freezes the given joints to the robot's default pose/zero velocity
+    # across the whole dataset instead of removing them from the tensor
+    # shape. Use when different regions/discriminators must keep the same
+    # observation dimension but only some of them should see real motion
+    # for these joints (e.g. arms kept live for "near" regions, frozen/
+    # uninformative for "far" regions in the same multi-disc setup).
+    freeze_joint_names  : Union[List[str], None] = None

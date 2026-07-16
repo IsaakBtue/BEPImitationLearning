@@ -13,7 +13,6 @@ import dataclasses
 from mjlab.envs import ManagerBasedRlEnvCfg
 from mjlab.managers.event_manager import EventTermCfg
 from mjlab.managers.observation_manager import ObservationGroupCfg, ObservationTermCfg
-from mjlab.managers.scene_entity_config import SceneEntityCfg
 
 from simple_goalkeeper.mdp import observations as gk_obs
 from simple_goalkeeper.mdp import regions as gk_regions
@@ -22,18 +21,20 @@ from simple_goalkeeper.tasks.goalkeeper_env_cfg import BALL_NAME, goalkeeper_env
 # FIX 2026-07-15: the 13 non-arm T1 joints (Waist + 6 hip + 2 knee + 4 ankle),
 # excluding the 8 arm joints (4 per side: Shoulder_Pitch/Roll, Elbow_Pitch/Yaw).
 # Arms have no task-grounding reward (no equivalent of G1's hand-reach eereach
-# for this feet-only design -- see docs/BugFixes.md, 2026-07-10 entry). AMP-only
-# imitation of arm motion with nothing else constraining it was suspected of
-# producing a "fake gradient" -- weird, ungrounded arm swinging the user
-# observed watching play. Excluding arms from the AMP discriminator entirely
-# removes that incentive; see goalkeeper_multidisc_amp_runner_cfg for the
-# matching exclusion on the motion-dataset (expert) side.
+# for this feet-only design -- see docs/BugFixes.md, 2026-07-10 entry).
+# NOT currently used for the "amp" observation group override (see FIX
+# 2026-07-16 there) -- kept available since it's still a generically useful
+# joint subset.
 NON_ARM_JOINT_NAMES: tuple[str, ...] = (
     "Waist",
     "Left_Hip_Pitch", "Right_Hip_Pitch", "Left_Hip_Roll", "Left_Hip_Yaw",
     "Right_Hip_Roll", "Right_Hip_Yaw",
     "Left_Knee_Pitch", "Right_Knee_Pitch",
     "Left_Ankle_Pitch", "Right_Ankle_Pitch", "Left_Ankle_Roll", "Right_Ankle_Roll",
+)
+ARM_JOINT_NAMES: tuple[str, ...] = (
+    "Left_Shoulder_Pitch", "Left_Shoulder_Roll", "Left_Elbow_Pitch", "Left_Elbow_Yaw",
+    "Right_Shoulder_Pitch", "Right_Shoulder_Roll", "Right_Elbow_Pitch", "Right_Elbow_Yaw",
 )
 
 
@@ -86,15 +87,23 @@ def goalkeeper_multidisc_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
     # obs dimensions in sync. See docs/BugFixes.md.
     #
     # FIX 2026-07-15: additionally restricted to NON_ARM_JOINT_NAMES (13 of
-    # 21 joints) -- was the full 21-DOF vector (joint_pos_abs ignored
-    # asset_cfg's joint filtering entirely, now fixed). See module-level
-    # comment on NON_ARM_JOINT_NAMES above.
+    # 21 joints) for ALL regions -- made arm swinging WORSE per user report
+    # (zero AMP constraint on arms at all gave them even less reason to
+    # behave). REVERTED 2026-07-16: back to the full 21-DOF vector, but now
+    # region-conditionally masked (joint_pos_abs_arms_masked_by_region) --
+    # near regions keep real arm motion in AMP, far regions get arm columns
+    # frozen to default pose (uninformative to the discriminator) instead
+    # of sliced out entirely, keeping the tensor shape uniform at 21 (the
+    # multi-disc architecture routes one shared amp_obs tensor to whichever
+    # per-region discriminator matches each env). See that function's
+    # docstring (observations.py) and goalkeeper_multidisc_amp_runner_cfg's
+    # matching mask on the motion-dataset (expert) side.
     cfg.observations["amp"] = ObservationGroupCfg(
         terms={
             "joint_pos": ObservationTermCfg(
-                func=gk_obs.joint_pos_abs,
+                func=gk_obs.joint_pos_abs_arms_masked_by_region,
                 noise=None,
-                params={"asset_cfg": SceneEntityCfg("robot", joint_names=NON_ARM_JOINT_NAMES)},
+                params={},
             ),
         },
         concatenate_terms=True,
@@ -263,16 +272,18 @@ def goalkeeper_multidisc_env_cfg_withoverlay(
 
 
 def goalkeeper_multidisc_amp_runner_cfg() -> dict:
+    # FIX 2026-07-16: only far regions get their reference clip's arm
+    # columns frozen (matches the "amp" observation group's region-
+    # conditional masking above) -- near regions keep real arm motion
+    # capture data, both sides (expert and policy) must agree per region.
+    _FAR_REGION_NAMES = {"left_far", "right_far"}
     amp_data = {
         name: MotionDatasetCfg(
             motion_files=paths,
             body_names=GOALKEEPER_KEY_BODY_NAMES,
             amp_obs_terms=_MULTIDISC_AMP_OBS_TERMS,
             anchor_name=GOALKEEPER_ANCHOR_NAME,
-            # FIX 2026-07-15: matches the "amp" observation group's arm
-            # exclusion above -- expert (reference clip) and policy sides
-            # must stay in the same joint subset for the discriminator.
-            joint_names=list(NON_ARM_JOINT_NAMES),
+            freeze_joint_names=list(ARM_JOINT_NAMES) if name in _FAR_REGION_NAMES else None,
         )
         for name, paths in REGION_MOTION_FILES.items()
     }

@@ -267,3 +267,54 @@ def joint_vel_abs(
     if softstop_fired is not None and softstop_fired.any():
         joint_vel[softstop_fired] = 0.0
     return joint_vel
+
+
+_ARM_JOINT_NAMES: tuple[str, ...] = (
+    "Left_Shoulder_Pitch", "Left_Shoulder_Roll", "Left_Elbow_Pitch", "Left_Elbow_Yaw",
+    "Right_Shoulder_Pitch", "Right_Shoulder_Roll", "Right_Elbow_Pitch", "Right_Elbow_Yaw",
+)
+
+
+def joint_pos_abs_arms_masked_by_region(
+    env: "ManagerBasedRlEnv",
+    far_region_ids: tuple[int, ...] = (1, 3),
+) -> torch.Tensor:
+    """Like joint_pos_abs (full 21-DOF, softstop-gated), but additionally
+    freezes arm joints to their default pose for envs whose env._region_id
+    is in far_region_ids -- keeping the tensor a uniform 21-dim shape (the
+    multi-disc architecture routes ONE shared amp_obs tensor to whichever
+    per-region discriminator matches each env, so all regions must produce
+    the same shape) while making arm columns uninformative (constant, so
+    the discriminator can't learn anything from them) specifically for far
+    regions. Near regions keep real, live arm motion in their AMP input.
+
+    FIX 2026-07-16: replaces a prior attempt (2026-07-15) that excluded arms
+    from ALL 4 regions' AMP input uniformly (via joint slicing, not
+    masking) -- that made arm swinging WORSE, not better, per user report
+    (with zero AMP constraint of any kind on arms, they had even less
+    incentive to move sensibly). This targets only the far/double-step
+    regions the original "weird arm swinging" complaints were about,
+    leaving near regions unaffected.
+    """
+    robot: Entity = env.scene["robot"]
+    joint_pos = robot.data.joint_pos.clone()
+    default_joint_pos = robot.data.default_joint_pos
+    softstop_fired = getattr(env, "_softstop_flag", None)
+    if softstop_fired is not None and softstop_fired.any():
+        joint_pos[softstop_fired] = default_joint_pos[softstop_fired]
+
+    if not hasattr(env, "_arm_joint_col_mask"):
+        arm_ids, _ = robot.find_joints(_ARM_JOINT_NAMES, preserve_order=True)
+        col_mask = torch.zeros(joint_pos.shape[-1], dtype=torch.bool, device=env.device)
+        col_mask[torch.tensor(arm_ids, dtype=torch.long, device=env.device)] = True
+        env._arm_joint_col_mask = col_mask
+
+    region_id = getattr(env, "_region_id", None)
+    if region_id is not None:
+        is_far = torch.zeros(env.num_envs, dtype=torch.bool, device=env.device)
+        for r in far_region_ids:
+            is_far |= region_id == r
+        full_mask = is_far.unsqueeze(-1) & env._arm_joint_col_mask.unsqueeze(0)
+        joint_pos = torch.where(full_mask, default_joint_pos, joint_pos)
+
+    return joint_pos

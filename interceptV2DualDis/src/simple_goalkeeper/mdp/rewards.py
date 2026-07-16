@@ -350,11 +350,20 @@ def stopball(
 
     FIX 2026-07-15: that check used "feet_contact", a GROUND-contact sensor
     (secondary=None -- fires whenever a foot touches anything, mostly the
-    ground) -- not ball-specific. A foot standing normally on the ground
-    already satisfies it, so the assigned foot could be reported "in
-    contact" even if the ball was actually deflected off the OTHER foot and
-    rolled to a stop near the assigned one. Switched to "ball_contact", a
-    dedicated foot-vs-ball ContactSensorCfg (goalkeeper_env_cfg.py).
+    ground) -- not ball-specific. Tried switching to a dedicated
+    "ball_contact" foot-vs-ball ContactSensorCfg instead, but that made
+    stopball/softstop stop firing almost entirely in practice (MuJoCo
+    contact detection for a small rolling ball vs. foot geoms is
+    apparently too narrow a window to reliably catch at the exact step
+    the velocity threshold trips). REVERTED to "feet_contact".
+
+    FIX 2026-07-15 (second pass): instead, requires stopball's own raw
+    deflection condition to also be true the SAME step softstop's condition
+    fires (env._sb_deflection_now, set below, read by softstop) -- a
+    genuine single-contact event should trip both stopball's delta-vx
+    check and softstop's absolute-reversal check at essentially the same
+    physical instant; a coincidental "wrong foot happens to be standing
+    near the ball as it settles" scenario should not.
     """
     ball: Entity = env.scene[ball_name]
     ball_x_vel = ball.data.root_link_lin_vel_w[:, 0]
@@ -372,14 +381,21 @@ def stopball(
     in_front = ball_x_local > -0.3  # allow 0.3 m past goal line: deflection accumulates gradually
 
     foot_idx = _get_correct_foot_idx(env, ball_name)
-    sensor: ContactSensor = env.scene["ball_contact"]
+    sensor: ContactSensor = env.scene["feet_contact"]
     found = sensor.data.found  # [B, 8]: 0-3=left, 4-7=right
     left_in_contact = (found[:, :4] > 0).any(dim=-1)   # (B,)
     right_in_contact = (found[:, 4:] > 0).any(dim=-1)  # (B,)
     foot_in_contact = torch.stack([left_in_contact, right_in_contact], dim=-1)  # (B, 2)
     correct_foot_contact = foot_in_contact[torch.arange(env.num_envs, device=env.device), foot_idx]
 
-    fired = (delta_vx > delta_vel_threshold) & in_front & correct_foot_contact & ~env._sb_flag
+    # Raw condition (not gated by the one-shot ~env._sb_flag latch) -- this
+    # is "is a deflection happening right now", read by softstop below.
+    # Registered before "softstop" in goalkeeper_env_cfg.py's rewards dict,
+    # so this is fresh (this step, not stale) by the time softstop runs.
+    deflection_now = (delta_vx > delta_vel_threshold) & in_front & correct_foot_contact
+    env._sb_deflection_now = deflection_now
+
+    fired = deflection_now & ~env._sb_flag
     env._sb_flag |= fired
     return fired.float()
 
@@ -414,8 +430,18 @@ def softstop(
     FIX 2026-07-15: that check used "feet_contact", a GROUND-contact sensor
     (secondary=None) -- not ball-specific, so a foot merely standing on the
     ground satisfied it regardless of which foot actually deflected the
-    ball. Switched to "ball_contact", a dedicated foot-vs-ball
-    ContactSensorCfg (goalkeeper_env_cfg.py). See stopball's matching fix.
+    ball. Tried a dedicated "ball_contact" foot-vs-ball sensor instead, but
+    that made stopball/softstop stop firing almost entirely in practice.
+    REVERTED to "feet_contact".
+
+    FIX 2026-07-15 (second pass): instead, now additionally requires
+    env._sb_deflection_now (stopball's own raw deflection condition, set
+    THIS SAME step -- stopball is registered before softstop in
+    goalkeeper_env_cfg.py's rewards dict) to also be true. A genuine
+    single-contact event should trip both stopball's delta-vx check and
+    softstop's absolute-reversal check at essentially the same physical
+    instant; requiring both prevents a wrong-foot-standing-nearby
+    coincidence from firing this on its own. See stopball's docstring.
     """
     ball: Entity = env.scene[ball_name]
     ball_x_vel = ball.data.root_link_lin_vel_w[:, 0]
@@ -432,14 +458,21 @@ def softstop(
     in_front = ball_x_local > -0.3
 
     foot_idx = _get_correct_foot_idx(env, ball_name)
-    sensor: ContactSensor = env.scene["ball_contact"]
+    sensor: ContactSensor = env.scene["feet_contact"]
     found = sensor.data.found  # [B, 8]: 0-3=left, 4-7=right
     left_in_contact = (found[:, :4] > 0).any(dim=-1)   # (B,)
     right_in_contact = (found[:, 4:] > 0).any(dim=-1)  # (B,)
     foot_in_contact = torch.stack([left_in_contact, right_in_contact], dim=-1)  # (B, 2)
     correct_foot_contact = foot_in_contact[torch.arange(env.num_envs, device=env.device), foot_idx]
 
-    fired = (ball_x_vel > velocity_threshold) & in_front & correct_foot_contact & ~env._softstop_flag
+    same_step_as_stopball = getattr(
+        env, "_sb_deflection_now", torch.zeros(env.num_envs, dtype=torch.bool, device=env.device)
+    )
+
+    fired = (
+        (ball_x_vel > velocity_threshold) & in_front & correct_foot_contact
+        & same_step_as_stopball & ~env._softstop_flag
+    )
     env._softstop_correct_foot[fired] = correct_foot_contact[fired]
 
     env._softstop_flag |= fired
