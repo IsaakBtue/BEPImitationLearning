@@ -678,3 +678,30 @@ Under the running (unfixed) code, 100% of far-labeled training examples produced
 **Action:** killed the run that had been training under the biased default (10 minutes in, `model_0.pt` only, no real progress -- no checkpoint push needed per the standing `<250 iterations` exception) and deleted its log directory. Relaunching fresh under the corrected code.
 
 **Not yet resolved:** not yet validated against a real training run -- this is the second restart of the same launch attempt, now with three bundled changes (far-region real-mocap AMP clips, far_travel_curriculum decoupling, and the 0.65 initial-frac correction). `Loss/est_region` should be watched specifically on the next check as direct confirmation the fix holds under real training, not just the offline Monte Carlo check.
+
+## 2026-07-18 (same day, ~15 minutes into the run above) -- far_travel_curriculum and footreach's far_scale were both modeled on the wrong G1 region (jump, not step); redesigned to move both range edges
+
+**Context:** user pushed back a third time on the same-day far-region redesign, pointing out G1 has a region literally named "step" (`ranges_4`/`ranges_5`) -- a far more obvious analog for a foot-only project than "jump" (`ranges_2`/`ranges_3`), which both `far_travel_curriculum`'s frozen-inner-bound design and `footreach`'s escalating `far_scale` had been justified against. Dispatched two independent subagents (no shared context, identical framing) to read G1's actual reward and curriculum code from scratch and determine the correct analog. Both converged unanimously.
+
+**Finding -- "step" is the correct analog, "jump" is not:**
+
+| | hand (`ranges_0/1`) | jump (`ranges_2/3`) | **step (`ranges_4/5`)** |
+|---|---|---|---|
+| `_reward_eereach` axis | lateral (`rigid_body_states[...,8]`) | **vertical** (`[...,9]`) | lateral (`[...,8]`) |
+| Scale | flat `1+3.0·v` | **escalating**, `jump_scale=3.0+3.0·cu` | flat `1+3.0·v` |
+| `_reward_airfeetorientation`/`_reward_successland` | not gated in | **gated in** (`root_states[:,2]>1.0` -- literal dive) | not gated in |
+| height curriculum | grows | grows | **frozen** `[0.1,0.3]` init=max (no height axis) |
+| width curriculum | both edges move: `[0.2,1.2]→[0,1.8]` | inner already at its own floor (coincidence) -- only outer moves | both edges move: `[0.2,1.2]→[0,1.8]` (identical to hand) |
+
+Step is grounded, lateral-axis, flat-scale, no airborne/landing mechanic, and its height axis is permanently frozen at ground level -- a mechanical match to this project's foot-only, always-grounded problem on every axis. Jump's escalating scale exists specifically *because* it's paired with a literal dive; it doesn't transfer to a task that can never leave the ground. Jump's frozen inner bound (which the same-day `_DEFAULT_INITIAL_FRAC` fix above was modeled on) turned out to be a coincidence specific to that region -- its width floor (0) happens to already equal its init value (0) -- not a general "freeze the inner edge" principle. Step's actual curriculum moves both edges.
+
+**What changed:**
+1. `mdp/events.py::far_travel_curriculum`: redesigned to move BOTH `env._far_inner` and `env._far_outer` (previously only `env._far_travel_frac` drove a single outer-bound lerp with `inner` permanently fixed at `lo`). Seeded using G1 step's own init-fraction-of-span (`inner_frac=0.2/1.8=0.111`, `outer_frac=1.2/1.8=0.667`) applied to this task's own floor/ceiling (`lo=0.5`, the near/far boundary -- a structural constraint G1 doesn't have, since G1 separates regions by height rather than width, so its width curricula are free to shrink toward a true geometric floor of 0; this project's far region can't go below 0.5 without re-colliding with near). Both edges update via the same shared `cu`/EMA signal and step_size each check, mirroring G1's identical `±0.3*cu` for both edges (`legged_robot.py:333-334`). New seeds: `far_inner` starts at `~0.589` (shrinks to `0.5`), `far_outer` starts at `~1.033` (grows to `1.3`) -- coincidentally an even *larger* initial near/far separation than the previous `[0.5,1.02]` single-edge design, since inner no longer starts pinned at the boundary.
+2. `mdp/events.py::reset_ball_rolling`: `use_far_travel_curriculum=True` now reads `env._far_inner`/`env._far_outer` directly for both bounds, replacing the single `d_y_end`-based outer-only lerp.
+3. `mdp/rewards.py::footreach`: removed the region-conditional `far_scale = 3.0 + 1.5*cu` escalation entirely (added 2026-07-15, itself already a halved version of an original `3.0+3.0*cu` literal jump-scale port). Far regions now use the same flat `3.0` multiplier as every other region, matching step's actual formula. The "far crossings need more incentive than near" premise this multiplier was built on has no support in the correct G1 analog -- step's own difficulty ramp comes entirely from its width curriculum, not an escalating reward multiplier.
+
+**Verification:** 57/57 tests pass (`test_far_travel_curriculum.py` rewritten for the two-edge interface: seeds match G1 step's proportions, both edges move together and clip correctly at `lo`/`hi`, `reset_ball_rolling` reads `_far_inner`/`_far_outer` directly and defaults to the full span when the curriculum hasn't run -- matching `_ball_difficulty`'s own play/eval default). Live smoke test (`--num-envs 64 --agent.max-iterations 5`, throwaway run dir deleted after): logs `Curriculum/far_travel/far_inner: 0.5889` and `Curriculum/far_travel/far_outer: 1.0333`, exact match to the hand-computed values, no errors.
+
+**Action:** killed the run launched under the jump-modeled design (~15 minutes in, negligible progress, no checkpoint push needed) and relaunched fresh under this redesign.
+
+**Not yet resolved:** not yet validated against a real training run -- third restart of the same launch attempt today. This is the first version of the far-region mechanism actually derived from the correct G1 region; prior restarts today were course corrections on an initially-wrong analog. `Loss/est_region` and per-region save rate are the key things to watch on the next check.

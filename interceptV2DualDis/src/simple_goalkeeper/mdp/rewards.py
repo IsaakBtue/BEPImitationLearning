@@ -217,47 +217,31 @@ def footreach(
     lateral_vel_y = robot.data.root_link_lin_vel_w[:, 1]
     vel_toward = torch.where(lateral_error > 0, lateral_vel_y, -lateral_vel_y)
 
-    # FIX 2026-07-15: G1's _reward_eereach uses a REGION-CONDITIONAL multiplier
-    # here -- its two most extreme regions (which require a dive, not a simple
-    # reach) get an escalating jump_scale = 3.0 + 3.0*curriculumupdate instead
-    # of the flat 3.0 every other region uses (legged_robot.py:1379-1388). This
-    # project used the SAME flat 3.0 multiplier for every region regardless of
-    # near/far, unlike G1 -- no extra incentive was ever given for the
-    # additional travel/step-count a far (double/triple-step) crossing needs
-    # in the same time budget as a near, single-step one. Mirrors G1's
-    # mechanism (same formula shape, same curriculum variable), adapted to
-    # lateral (not vertical/dive) velocity since this is a feet-only stepping
-    # task, not a hand-dive task. Falls back to the flat 3.0 when region_id
-    # doesn't exist (e.g. a future non-multi-disc caller).
+    # FIX 2026-07-15 (REVERTED 2026-07-18): this used to apply a region-
+    # conditional multiplier here, escalating for far regions with
+    # far_scale = 3.0 + 1.5*curriculumupdate, modeled on G1's jump-region
+    # jump_scale = 3.0 + 3.0*curriculumupdate (legged_robot.py:1379-1388,
+    # end_regions 2/3). Two independent subagent audits (2026-07-18, no
+    # shared context, unanimous) found this was the wrong G1 region: jump's
+    # escalating scale keys off VERTICAL velocity and is paired with two
+    # jump-region-specific safety rewards (_reward_airfeetorientation,
+    # _reward_successland, both gated on root_states[:,2]>1.0 -- a literal
+    # dive) that manage foot orientation while airborne and landing quality.
+    # None of that exists for a foot-only, always-grounded task -- which is
+    # plausibly why the escalation caused the overshoot-and-fall behavior
+    # this fix's slope-halving (07-15) only partially addressed.
     #
-    # FIX 2026-07-15 (slope halved): G1's jump_scale is never used standalone
-    # -- it's paired with two jump-region-specific safety rewards
-    # (_reward_airfeetorientation, _reward_successland) that manage foot
-    # orientation while airborne and landing quality, because G1's far
-    # regions are a literal dive (torso leaves the ground). This project's
-    # far regions are a GROUNDED double/triple-step -- continuously
-    # balance-critical, with no equivalent safety net. Porting G1's full
-    # escalation (up to 1+12*3=37x by cu=3) onto a task with no landing-
-    # safety mechanism plausibly caused the overshoot-and-fall behavior
-    # observed (short episodes). Halved the slope (1.5 instead of 3.0) so
-    # far regions still get meaningfully more incentive than near (up to
-    # 1+7.5*3=23.5x at cu=3, vs near's flat 10x) without reaching the
-    # original's most extreme, least-controllable multiplier. Not a G1-
-    # derived number -- G1 has no equivalent for a grounded task, this is a
-    # judgment call pending validation against a training run.
-    region_id = getattr(env, "_region_id", None)
-    if region_id is not None:
-        is_far_region = (region_id == 1) | (region_id == 3)
-        cu = float(getattr(env, "_curriculumupdate", 0))
-        far_scale = 3.0 + 1.5 * cu
-        vel_scale = torch.where(
-            is_far_region,
-            torch.full_like(vel_toward, far_scale),
-            torch.full_like(vel_toward, 3.0),
-        )
-    else:
-        vel_scale = torch.full_like(vel_toward, 3.0)
-    vel_sigma = 1.0 + vel_scale * vel_toward.clamp(0.0, 3.0)  # near: 1-10x; far: 1-10x at cu=0 up to 1-23.5x at cu=3
+    # G1's STEP region (ranges_4/ranges_5, end_regions 4/5) is the actual
+    # mechanical match: grounded, lateral velocity, and uses the exact SAME
+    # FLAT scale (1 + 3.0*v) as every non-jump region -- no curriculumupdate
+    # term at all (legged_robot.py:1382,1384-1385). The "far crossings need
+    # more incentive than near" premise this multiplier was built on has no
+    # support in the correct G1 analog; step's own difficulty ramp comes
+    # entirely from its width curriculum (see far_travel_curriculum,
+    # events.py), not from an escalating reward multiplier. Reverted to the
+    # flat 3.0 for every region -- see docs/BugFixes.md 2026-07-18.
+    vel_scale = torch.full_like(vel_toward, 3.0)
+    vel_sigma = 1.0 + vel_scale * vel_toward.clamp(0.0, 3.0)  # flat 1-10x for every region, matching G1's hand/step formula
 
     # Combine: phase1 when ball is far, phase2 sigmoid when close.
     phase1_mask = ball_x_local > 1.5

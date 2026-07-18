@@ -748,7 +748,8 @@ class ball_difficulty_curriculum:
 
 class far_travel_curriculum:
     """Curriculum over required LATERAL TRAVEL DISTANCE for far-region crossings,
-    decoupled from ball_difficulty.
+    decoupled from ball_difficulty, mirroring G1's STEP region (ranges_4/
+    ranges_5) -- not its jump region.
 
     Context (docs/superpowers/specs/2026-07-18-doublestep-research-and-plan.md,
     recommendation B): reset_ball_rolling's one-sided-range branch (used by
@@ -759,61 +760,72 @@ class far_travel_curriculum:
     (observed), the far region's full 1.3m lateral travel requirement was live
     from essentially the start of training, stacked on top of max ball speed
     and minimum reaction time -- with no separate ramp for the one dimension
-    that actually requires a genuine multi-step gait (reference-clip
-    measurement: single-step lateral reach tops out ~0.3m, well below the far
-    region's 0.5m inner edge, so *every* far episode already demanded
-    multi-step travel with no easy end).
+    that actually requires a genuine multi-step gait.
 
-    This mirrors ball_difficulty_curriculum's exact accumulator pattern (same
-    shared EMA-smoothed episode-length signal via _update_smoothed_ep_len, same
-    monotonic step-size-per-check formula, matching G1's command_ranges
-    mechanism rather than its reward-weight mechanism -- see that class's
-    docstring for why this pattern, not the fresh-recompute one, is correct
-    for a task-difficulty range) but as an INDEPENDENT accumulator,
-    env._far_travel_frac, with its own (deliberately smaller) step_size so it
-    structurally lags ball_difficulty rather than racing it -- the policy gets
-    time to handle harder/faster balls at a modest, near-single-step-reach
-    travel distance before the task also demands the full 1.3m span.
+    FIX 2026-07-18 (same day, two independent subagent audits, no shared
+    context, unanimous): the first two versions of this class (single-edge
+    growth with a fixed 0.5m inner bound; then a 0.65 initial-fraction seed)
+    were both justified by citing G1's JUMP region (ranges_2/ranges_3) --
+    "the only regions requiring extra reach." That's the wrong region. Jump's
+    reward (_reward_eereach, legged_robot.py:1379-1388) keys off VERTICAL
+    velocity with an ESCALATING scale (jump_scale=3.0+3.0*cu) and is paired
+    with dedicated airborne/landing rewards (_reward_airfeetorientation,
+    _reward_successland, both gated on root_states[:,2]>1.0 -- a literal
+    dive). None of that exists for a foot-only, always-grounded task. G1's
+    STEP region (ranges_4/ranges_5) is the actual mechanical match: reward
+    keys off LATERAL velocity with a FLAT scale (1+3.0*v, same formula as the
+    hand region, no curriculumupdate term at all), height is permanently
+    frozen ([0.1,0.3] both init and max -- no height axis, exactly like this
+    project), and it never touches the jump-gated airborne/landing rewards.
+    Jump's frozen-inner-bound pattern (which the first two versions of this
+    class ported) turned out to be a COINCIDENCE specific to jump -- its
+    width floor (0) happens to already equal its init value (0) -- not a
+    general "freeze the inner edge" design. Step's actual width curriculum
+    moves BOTH edges: g1_29_config.py ranges_4: init [0.2,1.2] -> max
+    [0.0,1.8] (inner shrinks toward the floor, outer grows toward the
+    ceiling), identical in shape to the hand region.
 
-    reset_ball_rolling reads this via use_far_travel_curriculum=True (wired
-    only for far regions in reset_ball_rolling_by_region) and lerps its
-    one-sided range's outer bound on env._far_travel_frac instead of
-    env._ball_difficulty; all other dimensions (spawn distance, ball speed,
-    reaction time, near-region y_end) are untouched and keep using
-    ball_difficulty as before.
+    This class now moves both env._far_inner and env._far_outer, mirroring
+    G1's actual per-edge accumulator (legged_robot.py:333-334:
+    command_ranges[:,0] -= 0.3*cu / command_ranges[:,1] += 0.3*cu, same step
+    for both edges) instead of a single growing fraction. Both are seeded
+    using STEP's own init-fraction-of-span, applied to this task's own
+    floor/ceiling (lo=0.5, the near/far boundary -- a structural constraint
+    G1 doesn't have, since G1 separates regions by height, not width, so its
+    width curricula are free to shrink toward a true geometric floor of 0;
+    ours can't go below 0.5 without re-colliding with the near region):
+        inner_frac = 0.2/1.8 = 0.1111  (G1 step ranges_4 width[0] / maxw[1])
+        outer_frac = 1.2/1.8 = 0.6667  (G1 step ranges_4 width[1] / maxw[1])
+        far_inner starts at lo + inner_frac*(hi-lo) ~= 0.589, shrinks to lo (0.5)
+        far_outer starts at lo + outer_frac*(hi-lo) ~= 1.033, grows to hi (1.3)
+    Both driven by the same shared EMA-smoothed episode-length signal (cu) and
+    the same step_size per update, matching G1's identical 0.3*cu for both
+    edges.
 
-    Default step_size=0.004 (vs. ball_difficulty's 0.01): at sustained cu=3,
-    ball_difficulty reaches 1.0 in ~33 updates; far_travel_frac takes ~83 --
-    roughly 2.5x slower, a starting point to tune empirically, not a derived
-    value.
-
-    FIX 2026-07-18 (same day, caught before this run got past ~20
-    iterations): initial value corrected from 0.0 to 0.65. At frac=0.0,
-    reset_ball_rolling's inner==outer==lo, collapsing the far region to a
-    SINGLE fixed point (exactly 0.5m, zero variance) -- a degenerate start
-    with no G1 precedent. Checked G1's actual jump-region command_ranges
-    (g1_29_config.py ranges_2/ranges_3, the only regions requiring extra
-    reach): width starts at [0,1.0] against a max of [0,1.5], height starts
-    at [1.2,1.6] against a max of [1.2,1.8] -- BOTH dimensions start at
-    exactly 66.7% of their final span, never at a degenerate point. G1's
-    curriculum only ever stretches the last third of the range, not the
-    whole thing from nothing. _DEFAULT_INITIAL_FRAC=0.65 mirrors that
-    proportion: far region now starts at [0.5, 1.02] (a real 0.52m-wide
-    band) instead of a single point, and the curriculum only has to close
-    the remaining gap to 1.3m.
+    reset_ball_rolling reads env._far_inner/env._far_outer directly (via
+    use_far_travel_curriculum=True, wired only for far regions in
+    reset_ball_rolling_by_region), replacing the generic lo/hi/d-based lerp
+    for that branch entirely. footreach's far_scale escalation (rewards.py),
+    also ported from jump's jump_scale, is a separate fix -- see BugFixes.md.
     """
 
-    _DEFAULT_INITIAL_FRAC = 0.65
+    # G1 ranges_4 (step, left side) width: init=[0.2,1.2], max=[0.0,1.8].
+    _G1_STEP_INNER_FRAC = 0.2 / 1.8
+    _G1_STEP_OUTER_FRAC = 1.2 / 1.8
 
     def __init__(self, cfg: "CurriculumTermCfg", env: "ManagerBasedRlEnv") -> None:
         p = cfg.params
         self._step_size       = p.get("step_size",       0.004)
         self._update_interval = p.get("update_interval", 500)
         self._ep_len_divisor  = p.get("ep_len_divisor",   50)
+        self._lo              = p.get("lo", 0.5)
+        self._hi              = p.get("hi", 1.3)
         self._last_update     = -(self._update_interval)
-        self._initial_frac    = p.get("initial_frac", self._DEFAULT_INITIAL_FRAC)
-        if not hasattr(env, "_far_travel_frac"):
-            env._far_travel_frac = self._initial_frac
+        span = self._hi - self._lo
+        if not hasattr(env, "_far_inner"):
+            env._far_inner = self._lo + self._G1_STEP_INNER_FRAC * span
+        if not hasattr(env, "_far_outer"):
+            env._far_outer = self._lo + self._G1_STEP_OUTER_FRAC * span
 
     def __call__(
         self,
@@ -822,7 +834,7 @@ class far_travel_curriculum:
         **kwargs,
     ) -> dict:
         if env.common_step_counter - self._last_update < self._update_interval:
-            return {"far_travel_frac": torch.tensor(env._far_travel_frac)}
+            return {"far_inner": torch.tensor(env._far_inner), "far_outer": torch.tensor(env._far_outer)}
 
         self._last_update = env.common_step_counter
 
@@ -838,8 +850,11 @@ class far_travel_curriculum:
         smoothed_ep_len = _update_smoothed_ep_len(env, mean_ep_len)
         curriculumupdate = int(smoothed_ep_len / self._ep_len_divisor)
 
-        env._far_travel_frac = min(1.0, env._far_travel_frac + self._step_size * curriculumupdate)
-        return {"far_travel_frac": torch.tensor(env._far_travel_frac)}
+        span = self._hi - self._lo
+        step = self._step_size * span * curriculumupdate
+        env._far_inner = max(self._lo, env._far_inner - step)
+        env._far_outer = min(self._hi, env._far_outer + step)
+        return {"far_inner": torch.tensor(env._far_inner), "far_outer": torch.tensor(env._far_outer)}
 
 
 def sharpforce_termination(
@@ -901,14 +916,15 @@ def reset_ball_rolling(
     vz=0: ball drops to ground in <0.05 s then rolls at foot/ankle height.
     Curriculum lerps from easy to hard via env._ball_difficulty.
 
-    use_far_travel_curriculum: 2026-07-18 (research-doc recommendation B).
-    When True, the ONE-SIDED range branch's outer y_end bound lerps on
-    env._far_travel_frac (far_travel_curriculum, a slower/decoupled
-    accumulator) instead of env._ball_difficulty -- see that class's
-    docstring. Wired True only for far regions by
+    use_far_travel_curriculum: 2026-07-18 (research-doc recommendation B; G1
+    step-region redesign same day). When True, the ONE-SIDED range branch's
+    inner AND outer y_end bounds are read directly from
+    env._far_inner/env._far_outer (far_travel_curriculum, decoupled from
+    env._ball_difficulty) instead of the generic lo/lo+(hi-lo)*d lerp -- see
+    that class's docstring. Wired True only for far regions by
     regions.reset_ball_rolling_by_region; every other dimension (dist_r,
-    y_start_r, t_flight_r) and the two-sided branch are unaffected and keep
-    using env._ball_difficulty as before.
+    y_start_r, t_flight_r), near-region y_end, and the two-sided branch are
+    unaffected and keep using env._ball_difficulty as before.
     """
     if env_ids is None:
         env_ids = torch.arange(env.num_envs, device=env.device, dtype=torch.int)
@@ -916,11 +932,6 @@ def reset_ball_rolling(
 
     d = float(getattr(env, "_ball_difficulty", 1.0))
     d = max(0.0, min(1.0, d))
-    if use_far_travel_curriculum:
-        d_y_end = float(getattr(env, "_far_travel_frac", 1.0))
-        d_y_end = max(0.0, min(1.0, d_y_end))
-    else:
-        d_y_end = d
 
     _EASY_DIST_R      = (1.5, 2.0)
     _EASY_Y_ROLL      = (-0.05, 0.05)
@@ -963,12 +974,18 @@ def reset_ball_rolling(
         if y_end_outer_frac is not None:
             inner = lo + (hi - lo) * max(0.0, min(1.0, y_end_outer_frac))
             outer = hi
+        elif use_far_travel_curriculum:
+            # FIX 2026-07-18 (G1 step-region redesign): both edges move,
+            # driven by far_travel_curriculum's env._far_inner/_far_outer.
+            # Defaults to the full [lo,hi] span if the curriculum hasn't run
+            # yet (play/eval with no CurriculumManager), matching how
+            # env._ball_difficulty itself defaults to full difficulty (1.0)
+            # in that same situation.
+            inner = float(getattr(env, "_far_inner", lo))
+            outer = float(getattr(env, "_far_outer", hi))
         else:
             inner = lo
-            # FIX 2026-07-18 (recommendation B): use d_y_end (far_travel_frac
-            # for far regions, plain d everywhere else) instead of d directly
-            # -- see use_far_travel_curriculum docstring above.
-            outer = lo + (hi - lo) * d_y_end
+            outer = lo + (hi - lo) * d
         mag = sample_uniform(inner, outer, (n,), env.device)
         y_end = sign_val * mag
     else:
