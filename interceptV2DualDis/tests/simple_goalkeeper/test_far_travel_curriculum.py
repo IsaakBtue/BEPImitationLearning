@@ -20,12 +20,23 @@ class _FakeEnv:
         self.episode_length_buf = torch.zeros(num_envs)
 
 
-def test_far_travel_curriculum_starts_at_zero_and_is_independent_of_ball_difficulty():
+def test_far_travel_curriculum_starts_at_g1_proportion_and_is_independent_of_ball_difficulty():
+    # FIX 2026-07-18: was 0.0 (a degenerate single-point start with no G1
+    # precedent) -- corrected to match G1's own jump-region command_ranges,
+    # which start at 66.7% of their final span (g1_29_config.py ranges_2/3),
+    # never at zero.
     env = _FakeEnv()
     env._ball_difficulty = 1.0  # ball_difficulty already saturated
     cfg = _FakeCfg({})
     far_travel_curriculum(cfg, env)
-    assert env._far_travel_frac == 0.0
+    assert env._far_travel_frac == 0.65
+
+
+def test_far_travel_curriculum_initial_frac_is_configurable():
+    env = _FakeEnv()
+    cfg = _FakeCfg({"initial_frac": 0.4})
+    far_travel_curriculum(cfg, env)
+    assert env._far_travel_frac == 0.4
 
 
 def test_far_travel_curriculum_only_updates_every_update_interval():
@@ -63,11 +74,12 @@ def test_far_travel_curriculum_ramps_slower_than_ball_difficulty_default():
         env.common_step_counter = i * 500
         term(env, env_ids=torch.arange(8))
 
-    # 5 updates * step_size(0.004) * cu(3) = 0.06
-    assert abs(env._far_travel_frac - 0.06) < 1e-9
+    # starts at 0.65 (_DEFAULT_INITIAL_FRAC), + 5 updates * step_size(0.004) * cu(3) = 0.06
+    assert abs(env._far_travel_frac - 0.71) < 1e-9
     # Same cu history under ball_difficulty's own default step_size (0.01)
-    # would reach 5*0.01*3 = 0.15 -- far_travel_frac must stay below that.
-    assert env._far_travel_frac < 0.15
+    # would grow by 5*0.01*3 = 0.15 -- far_travel_frac's growth (0.06) must
+    # stay below that, whatever its starting point.
+    assert env._far_travel_frac - 0.65 < 0.15
 
 
 def test_far_travel_curriculum_clips_at_one():

@@ -786,7 +786,24 @@ class far_travel_curriculum:
     ball_difficulty reaches 1.0 in ~33 updates; far_travel_frac takes ~83 --
     roughly 2.5x slower, a starting point to tune empirically, not a derived
     value.
+
+    FIX 2026-07-18 (same day, caught before this run got past ~20
+    iterations): initial value corrected from 0.0 to 0.65. At frac=0.0,
+    reset_ball_rolling's inner==outer==lo, collapsing the far region to a
+    SINGLE fixed point (exactly 0.5m, zero variance) -- a degenerate start
+    with no G1 precedent. Checked G1's actual jump-region command_ranges
+    (g1_29_config.py ranges_2/ranges_3, the only regions requiring extra
+    reach): width starts at [0,1.0] against a max of [0,1.5], height starts
+    at [1.2,1.6] against a max of [1.2,1.8] -- BOTH dimensions start at
+    exactly 66.7% of their final span, never at a degenerate point. G1's
+    curriculum only ever stretches the last third of the range, not the
+    whole thing from nothing. _DEFAULT_INITIAL_FRAC=0.65 mirrors that
+    proportion: far region now starts at [0.5, 1.02] (a real 0.52m-wide
+    band) instead of a single point, and the curriculum only has to close
+    the remaining gap to 1.3m.
     """
+
+    _DEFAULT_INITIAL_FRAC = 0.65
 
     def __init__(self, cfg: "CurriculumTermCfg", env: "ManagerBasedRlEnv") -> None:
         p = cfg.params
@@ -794,8 +811,9 @@ class far_travel_curriculum:
         self._update_interval = p.get("update_interval", 500)
         self._ep_len_divisor  = p.get("ep_len_divisor",   50)
         self._last_update     = -(self._update_interval)
+        self._initial_frac    = p.get("initial_frac", self._DEFAULT_INITIAL_FRAC)
         if not hasattr(env, "_far_travel_frac"):
-            env._far_travel_frac = 0.0
+            env._far_travel_frac = self._initial_frac
 
     def __call__(
         self,

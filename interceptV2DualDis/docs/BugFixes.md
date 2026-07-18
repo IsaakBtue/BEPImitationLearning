@@ -656,3 +656,25 @@ At `far_travel_frac=0`, the far region's outer bound collapses to its own inner 
 **Verification:** 55/55 tests pass (new `tests/simple_goalkeeper/test_far_travel_curriculum.py`: curriculum starts at 0, only updates once per window, ramps slower than `ball_difficulty`'s default step_size under identical `cu` history, clips at 1.0, and `reset_ball_rolling` genuinely uses `_far_travel_frac` instead of `_ball_difficulty` for the flagged branch; `test_regions.py` gained a test asserting `use_far_travel_curriculum` is `True` only for `left_far`/`right_far`). Live smoke test (`--num-envs 64 --agent.max-iterations 5`, throwaway run dir deleted after): `far_travel` appears in the active curriculum term table and logs `Curriculum/far_travel/far_travel_frac`, no errors.
 
 **Not yet resolved:** not yet validated against a real training run -- launching fresh, bundled with the far-region AMP dataset fix above (same restart, since both were pending on the same currently-running process). `step_size=0.004` is an unvalidated starting guess; if the far region ramps too slowly (policy never sees the harder end of the range within a reasonable iteration budget) or too fast (races `ball_difficulty` again in practice despite the smaller constant), this is the first parameter to revisit.
+
+## 2026-07-18 (same day, caught ~10 minutes into the run above) -- far_travel_frac's 0.0 default was a degenerate single point, and it exactly coincided with near-region's own maximum -- a direct region_estimator label collision, not just a curriculum-cliff concern
+
+**Context:** user pushed back directly on the just-launched run's design ("far regions start at 0.5 or 0?" then "isn't that bad? look how g1 did it") and separately flagged a second, sharper concern once shown the mechanics ("doesn't this completely destroy the region estimator, do a unbias check").
+
+**Finding 1 -- degenerate start, no G1 precedent:** checked G1's actual jump-region `command_ranges` (`g1_29_config.py` `ranges_2`/`ranges_3`, the only regions requiring extra reach) directly rather than assuming the lerp-from-zero shape was reasonable. Both width and height start at **exactly 66.7%** of their eventual max span (width: `[0,1.0]` init vs `[0,1.5]` max; height: `[1.2,1.6]` init vs `[1.2,1.8]` max) -- G1's curriculum only ever stretches the last third of the range, never starts from nothing. `far_travel_curriculum`'s `env._far_travel_frac` default of `0.0` collapsed `reset_ball_rolling`'s one-sided branch to `inner == outer == lo` -- every far-region episode spawned at the *exact same point* (0.5m), zero variance, a much harsher degenerate start than G1 ever used anywhere.
+
+**Finding 2 -- that degenerate point exactly coincides with near-region's own maximum, confirmed via direct Monte Carlo (20,000 samples) of the real `reset_ball_rolling` code:**
+
+| region | cross_y range (20k samples) | std |
+|---|---|---|
+| near (`left_near`, ball_difficulty=1) | `[0.130, 0.435]` | 0.088 |
+| far, OLD default (`far_travel_frac=0.0`) | `0.435` exactly, every sample | **0.0000** |
+| far, NEW default (`far_travel_frac=0.65`) | `[0.435, 0.887]` | 0.130 |
+
+Under the running (unfixed) code, 100% of far-labeled training examples produced a ball trajectory ending at the *exact same value* as near-region's rarest, most extreme edge case (`~3.4%` of near's own density sits within 0.01 of that point) -- not merely a hard classification boundary but a literal label collision: the `region_estimator` (trained on `env._region_id` ground truth, inferring purely from observed ball trajectory history) had zero geometric signal anywhere in its input to separate "near episode landing at the far edge of its own range" from "far episode" during this entire curriculum phase. Same failure class as the 2026-07-06 region_id/y_end decorrelation bug (`docs/BugFixes.md`), caught this time before any real training happened rather than after thousands of iterations of confused `Loss/est_region`.
+
+**Fix:** already applied as part of the same-day `_DEFAULT_INITIAL_FRAC=0.65` correction above -- verified by the same Monte Carlo check: far now spans `[0.435, 0.887]`, cleanly separated from near's `[0.130, 0.435]` with only the single unavoidable touching boundary point (same adjacency every partition of a continuous range has, not a bias source) instead of far's entire mass sitting on it.
+
+**Action:** killed the run that had been training under the biased default (10 minutes in, `model_0.pt` only, no real progress -- no checkpoint push needed per the standing `<250 iterations` exception) and deleted its log directory. Relaunching fresh under the corrected code.
+
+**Not yet resolved:** not yet validated against a real training run -- this is the second restart of the same launch attempt, now with three bundled changes (far-region real-mocap AMP clips, far_travel_curriculum decoupling, and the 0.65 initial-frac correction). `Loss/est_region` should be watched specifically on the next check as direct confirmation the fix holds under real training, not just the offline Monte Carlo check.
