@@ -515,6 +515,14 @@ def tick_catchstep(
 
 _CURRICULUM_EMA_ALPHA = 0.3
 
+# G1 ranges_4 (step, left side) width curriculum: init=[0.2,1.2], max=[0.0,1.8].
+# Shared by far_travel_curriculum (both edges) and reset_ball_rolling's near-
+# region default branch (outer edge only -- near's inner is a deliberate
+# leg-clearance dead-zone minimum, not a partition artifact, so it doesn't
+# move -- see reset_ball_rolling's one-sided branch, 2026-07-18 entry).
+_G1_STEP_INNER_FRAC = 0.2 / 1.8
+_G1_STEP_OUTER_FRAC = 1.2 / 1.8
+
 
 def _update_smoothed_ep_len(env: "ManagerBasedRlEnv", mean_ep_len: float) -> float:
     """Exponentially smooth the raw per-window mean_ep_len reading before any
@@ -809,10 +817,6 @@ class far_travel_curriculum:
     also ported from jump's jump_scale, is a separate fix -- see BugFixes.md.
     """
 
-    # G1 ranges_4 (step, left side) width: init=[0.2,1.2], max=[0.0,1.8].
-    _G1_STEP_INNER_FRAC = 0.2 / 1.8
-    _G1_STEP_OUTER_FRAC = 1.2 / 1.8
-
     def __init__(self, cfg: "CurriculumTermCfg", env: "ManagerBasedRlEnv") -> None:
         p = cfg.params
         self._step_size       = p.get("step_size",       0.004)
@@ -823,9 +827,9 @@ class far_travel_curriculum:
         self._last_update     = -(self._update_interval)
         span = self._hi - self._lo
         if not hasattr(env, "_far_inner"):
-            env._far_inner = self._lo + self._G1_STEP_INNER_FRAC * span
+            env._far_inner = self._lo + _G1_STEP_INNER_FRAC * span
         if not hasattr(env, "_far_outer"):
-            env._far_outer = self._lo + self._G1_STEP_OUTER_FRAC * span
+            env._far_outer = self._lo + _G1_STEP_OUTER_FRAC * span
 
     def __call__(
         self,
@@ -984,8 +988,25 @@ def reset_ball_rolling(
             inner = float(getattr(env, "_far_inner", lo))
             outer = float(getattr(env, "_far_outer", hi))
         else:
+            # FIX 2026-07-18: outer used to start exactly at lo (outer=lo+
+            # (hi-lo)*0 when d=0), collapsing near regions to a single
+            # degenerate point at the start of training -- same bug class as
+            # far_travel_curriculum's original bug, same finding: no G1
+            # region ever starts at a degenerate point. Only near hits this
+            # branch in practice (far uses use_far_travel_curriculum; the
+            # plain single-disc task always uses the two-sided branch
+            # above). Seeds outer at G1 step's own outer-fraction-of-span
+            # instead of lo, then lerps toward hi as ball_difficulty (no
+            # separate decoupled signal needed here -- near doesn't require
+            # a genuine multi-step skill, so there's no "races ball_difficulty"
+            # concern the way there was for far) advances from 0 to 1.
+            # inner stays fixed at lo (0.15 for near): unlike far's inner,
+            # this is a deliberate leg-clearance dead-zone minimum inherited
+            # from the two-sided branch's own _Y_INNER constant below, not a
+            # partition artifact -- it should never shrink toward 0.
             inner = lo
-            outer = lo + (hi - lo) * d
+            outer_seed = lo + _G1_STEP_OUTER_FRAC * (hi - lo)
+            outer = outer_seed + (hi - outer_seed) * d
         mag = sample_uniform(inner, outer, (n,), env.device)
         y_end = sign_val * mag
     else:
