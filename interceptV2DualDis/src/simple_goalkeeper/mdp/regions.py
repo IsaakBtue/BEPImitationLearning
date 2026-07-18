@@ -114,6 +114,12 @@ def reset_ball_rolling_by_region(
     if env_ids is None:
         env_ids = torch.arange(env.num_envs, device=env.device, dtype=torch.long)
     region_id = env._region_id[env_ids]
+    # r=1 (left_far), r=3 (right_far): use the decoupled far_travel_frac
+    # curriculum instead of the global ball_difficulty for the outer y_end
+    # bound (2026-07-18, research-doc recommendation B) -- see
+    # events.far_travel_curriculum / reset_ball_rolling's
+    # use_far_travel_curriculum docstrings.
+    _FAR_REGION_IDS = (1, 3)
     for r in range(4):
         mask = region_id == r
         if not mask.any():
@@ -128,6 +134,7 @@ def reset_ball_rolling_by_region(
             t_flight_range=t_flight_range,
             spawn_z=spawn_z,
             y_end_outer_frac=y_end_outer_frac,
+            use_far_travel_curriculum=r in _FAR_REGION_IDS,
         )
 
 

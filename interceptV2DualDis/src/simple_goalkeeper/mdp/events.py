@@ -746,6 +746,84 @@ class ball_difficulty_curriculum:
         return {"ball_difficulty": torch.tensor(env._ball_difficulty)}
 
 
+class far_travel_curriculum:
+    """Curriculum over required LATERAL TRAVEL DISTANCE for far-region crossings,
+    decoupled from ball_difficulty.
+
+    Context (docs/superpowers/specs/2026-07-18-doublestep-research-and-plan.md,
+    recommendation B): reset_ball_rolling's one-sided-range branch (used by
+    reset_ball_rolling_by_region for left_far/right_far) previously lerped its
+    outer y_end bound directly on env._ball_difficulty -- the SAME signal that
+    also governs spawn distance, ball speed, and reaction time. Since
+    ball_difficulty saturates to 1.0 within the first few thousand iterations
+    (observed), the far region's full 1.3m lateral travel requirement was live
+    from essentially the start of training, stacked on top of max ball speed
+    and minimum reaction time -- with no separate ramp for the one dimension
+    that actually requires a genuine multi-step gait (reference-clip
+    measurement: single-step lateral reach tops out ~0.3m, well below the far
+    region's 0.5m inner edge, so *every* far episode already demanded
+    multi-step travel with no easy end).
+
+    This mirrors ball_difficulty_curriculum's exact accumulator pattern (same
+    shared EMA-smoothed episode-length signal via _update_smoothed_ep_len, same
+    monotonic step-size-per-check formula, matching G1's command_ranges
+    mechanism rather than its reward-weight mechanism -- see that class's
+    docstring for why this pattern, not the fresh-recompute one, is correct
+    for a task-difficulty range) but as an INDEPENDENT accumulator,
+    env._far_travel_frac, with its own (deliberately smaller) step_size so it
+    structurally lags ball_difficulty rather than racing it -- the policy gets
+    time to handle harder/faster balls at a modest, near-single-step-reach
+    travel distance before the task also demands the full 1.3m span.
+
+    reset_ball_rolling reads this via use_far_travel_curriculum=True (wired
+    only for far regions in reset_ball_rolling_by_region) and lerps its
+    one-sided range's outer bound on env._far_travel_frac instead of
+    env._ball_difficulty; all other dimensions (spawn distance, ball speed,
+    reaction time, near-region y_end) are untouched and keep using
+    ball_difficulty as before.
+
+    Default step_size=0.004 (vs. ball_difficulty's 0.01): at sustained cu=3,
+    ball_difficulty reaches 1.0 in ~33 updates; far_travel_frac takes ~83 --
+    roughly 2.5x slower, a starting point to tune empirically, not a derived
+    value.
+    """
+
+    def __init__(self, cfg: "CurriculumTermCfg", env: "ManagerBasedRlEnv") -> None:
+        p = cfg.params
+        self._step_size       = p.get("step_size",       0.004)
+        self._update_interval = p.get("update_interval", 500)
+        self._ep_len_divisor  = p.get("ep_len_divisor",   50)
+        self._last_update     = -(self._update_interval)
+        if not hasattr(env, "_far_travel_frac"):
+            env._far_travel_frac = 0.0
+
+    def __call__(
+        self,
+        env: "ManagerBasedRlEnv",
+        env_ids: torch.Tensor,
+        **kwargs,
+    ) -> dict:
+        if env.common_step_counter - self._last_update < self._update_interval:
+            return {"far_travel_frac": torch.tensor(env._far_travel_frac)}
+
+        self._last_update = env.common_step_counter
+
+        if len(env_ids) > 0:
+            mean_ep_len = env.episode_length_buf[env_ids].float().mean().item()
+        else:
+            mean_ep_len = 0.0
+        # Reuses the SAME shared EMA state as ball_difficulty_curriculum /
+        # reward_curriculum_ep_len (_update_smoothed_ep_len is idempotent per
+        # call within a window and all three curricula read the same smoothed
+        # signal) so this doesn't introduce a second, independently-noisy
+        # episode-length estimate.
+        smoothed_ep_len = _update_smoothed_ep_len(env, mean_ep_len)
+        curriculumupdate = int(smoothed_ep_len / self._ep_len_divisor)
+
+        env._far_travel_frac = min(1.0, env._far_travel_frac + self._step_size * curriculumupdate)
+        return {"far_travel_frac": torch.tensor(env._far_travel_frac)}
+
+
 def sharpforce_termination(
     env: "ManagerBasedRlEnv",
     max_contact_force: float = 1500.0,
@@ -792,6 +870,7 @@ def reset_ball_rolling(
     t_flight_range: tuple[float, float] = (0.7, 1.1),
     spawn_z: float = 0.10,
     y_end_outer_frac: float | None = None,
+    use_far_travel_curriculum: bool = False,
 ) -> None:
     """Spawn ball at ground level in world (global) frame — rolling ground pass.
 
@@ -803,6 +882,15 @@ def reset_ball_rolling(
 
     vz=0: ball drops to ground in <0.05 s then rolls at foot/ankle height.
     Curriculum lerps from easy to hard via env._ball_difficulty.
+
+    use_far_travel_curriculum: 2026-07-18 (research-doc recommendation B).
+    When True, the ONE-SIDED range branch's outer y_end bound lerps on
+    env._far_travel_frac (far_travel_curriculum, a slower/decoupled
+    accumulator) instead of env._ball_difficulty -- see that class's
+    docstring. Wired True only for far regions by
+    regions.reset_ball_rolling_by_region; every other dimension (dist_r,
+    y_start_r, t_flight_r) and the two-sided branch are unaffected and keep
+    using env._ball_difficulty as before.
     """
     if env_ids is None:
         env_ids = torch.arange(env.num_envs, device=env.device, dtype=torch.int)
@@ -810,6 +898,11 @@ def reset_ball_rolling(
 
     d = float(getattr(env, "_ball_difficulty", 1.0))
     d = max(0.0, min(1.0, d))
+    if use_far_travel_curriculum:
+        d_y_end = float(getattr(env, "_far_travel_frac", 1.0))
+        d_y_end = max(0.0, min(1.0, d_y_end))
+    else:
+        d_y_end = d
 
     _EASY_DIST_R      = (1.5, 2.0)
     _EASY_Y_ROLL      = (-0.05, 0.05)
@@ -854,7 +947,10 @@ def reset_ball_rolling(
             outer = hi
         else:
             inner = lo
-            outer = lo + (hi - lo) * d
+            # FIX 2026-07-18 (recommendation B): use d_y_end (far_travel_frac
+            # for far regions, plain d everywhere else) instead of d directly
+            # -- see use_far_travel_curriculum docstring above.
+            outer = lo + (hi - lo) * d_y_end
         mag = sample_uniform(inner, outer, (n,), env.device)
         y_end = sign_val * mag
     else:

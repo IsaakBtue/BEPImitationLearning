@@ -60,6 +60,27 @@ def test_reset_ball_rolling_by_region_calls_reset_ball_rolling_per_region(monkey
     assert called_env_ids == {(0, 1), (2, 3), (4, 5), (6, 7)}
 
 
+def test_reset_ball_rolling_by_region_only_flags_far_regions_for_far_travel_curriculum(monkeypatch):
+    calls = {}
+
+    def fake_reset_ball_rolling(env, env_ids, ball_name, **kwargs):
+        calls[kwargs["y_end_range"]] = kwargs["use_far_travel_curriculum"]
+
+    import simple_goalkeeper.mdp.regions as regions_mod
+    monkeypatch.setattr(regions_mod, "reset_ball_rolling", fake_reset_ball_rolling)
+
+    env = _FakeEnv(num_envs=8)
+    assign_static_regions(env, env_ids=None)
+    reset_ball_rolling_by_region(env, env_ids=None, ball_name="ball")
+
+    from simple_goalkeeper.mdp.regions import _REGION_Y_END_RANGE
+
+    assert calls[_REGION_Y_END_RANGE[0]] is False   # left_near
+    assert calls[_REGION_Y_END_RANGE[1]] is True    # left_far
+    assert calls[_REGION_Y_END_RANGE[2]] is False   # right_near
+    assert calls[_REGION_Y_END_RANGE[3]] is True    # right_far
+
+
 def test_region_id_gt_returns_float_column_vector():
     from simple_goalkeeper.mdp.regions import region_id_gt
 

@@ -11,9 +11,11 @@ from __future__ import annotations
 import dataclasses
 
 from mjlab.envs import ManagerBasedRlEnvCfg
+from mjlab.managers.curriculum_manager import CurriculumTermCfg
 from mjlab.managers.event_manager import EventTermCfg
 from mjlab.managers.observation_manager import ObservationGroupCfg, ObservationTermCfg
 
+from simple_goalkeeper.mdp import events as gk_mdp
 from simple_goalkeeper.mdp import observations as gk_obs
 from simple_goalkeeper.mdp import regions as gk_regions
 from simple_goalkeeper.tasks.goalkeeper_env_cfg import BALL_NAME, goalkeeper_env_cfg
@@ -169,6 +171,26 @@ def goalkeeper_multidisc_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
     if tick_catchstep_cfg is not None:
         cfg.events["tick_catchstep"] = tick_catchstep_cfg
 
+    # (e) Far-region required-travel-distance curriculum (2026-07-18,
+    # research-doc recommendation B) -- only meaningful for this
+    # region-conditioned task (reset_ball_rolling_by_region is the only
+    # caller that ever sets use_far_travel_curriculum=True), so registered
+    # here rather than in the shared goalkeeper_env_cfg(). Play mode has no
+    # active CurriculumManager (base goalkeeper_env_cfg() only populates
+    # cfg.curriculum when not play), so this mirrors that gating: without it,
+    # reset_ball_rolling's use_far_travel_curriculum branch falls back to its
+    # own getattr(..., 1.0) default (full far-travel range), matching how
+    # env._ball_difficulty already behaves in play.
+    if not play:
+        cfg.curriculum["far_travel"] = CurriculumTermCfg(
+            func=gk_mdp.far_travel_curriculum,
+            params={
+                "update_interval": 500,
+                "ep_len_divisor":  50,
+                "step_size":       0.004,
+            },
+        )
+
     return cfg
 
 
@@ -191,34 +213,36 @@ _MOTIONS_DIR = Path(__file__).parents[1] / "motions" / "data"
 REGION_MOTION_FILES: dict[str, list[str]] = {
     "left_near": [str(_MOTIONS_DIR / "LeftStep_own_booster_t1.npz")],
     "left_far": [
-        # 2026-07-12 (revised, same day): dropped the original 1.0x and 1.5x
-        # paces -- two dispatched research passes found that a single AMP
-        # discriminator trained on BLENDED paces exhibits exactly the "mixes
-        # incompatible motion statistics" failure mode documented in very
-        # recent (2026) state-dependent-AMP literature (arXiv:2605.18611,
-        # arXiv:2606.08922): the policy converges on an ambiguous blended
-        # motion that satisfies the discriminator without genuinely
-        # representing any one pace -- plausibly why genuine landing rate got
-        # WORSE, not better, after the 2x variant was added on top of 1.5x
-        # (see docs/BugFixes.md, 2026-07-12 escalation entry). Testing a
-        # single, physically-closest-to-required pace instead of a blended
-        # multi-pace set -- user's explicit choice, "most physically possible
-        # one."
-        #
-        # 2026-07-12 (later same day): upgraded 2x -> 2.5x. The 2x clip
-        # (0.72s) was still slower than the fastest observed wide-crossing
-        # ball-flight window (0.58s at full difficulty, per
-        # scripts/retime_motion.py's own timing-gap docstring) -- user
-        # reported the 2x pace still looked too slow watching play. 2.5x
-        # compresses the clip to 0.576s, matching that tightest window
-        # almost exactly instead of only the 0.80s median.
-        str(_MOTIONS_DIR / "LeftDoubleStep_own_booster_t1_2p5x.npz"),
+        # 2026-07-18: replaced the single synthetic 2.5x-retimed clip with
+        # three real-mocap clips (raw pkl -> npz, cropped/leveled/hip-
+        # straightened -- see commit 36fc902) spanning short/base/wide
+        # distances (~0.7m/1.0m/1.3m, ~0.7s/1.0s/1.2s) that line up with the
+        # far region's own y_end range (0.5-1.3m, regions.py). Addresses the
+        # dataset concern flagged in docs/superpowers/specs/
+        # 2026-07-18-doublestep-research-and-plan.md (finding #2): the prior
+        # reference motion had no raw mocap source and its pace was reverse-
+        # engineered from the ball-flight budget via a flat playback-speed
+        # multiplier rather than being a genuinely-paced capture.
+        str(_MOTIONS_DIR / "new_doublestepleft_short_booster_t1.npz"),
+        str(_MOTIONS_DIR / "new_doublestepleft_booster_t1.npz"),
+        str(_MOTIONS_DIR / "new_doublestepleft_wide_booster_t1.npz"),
     ],
     "right_near": [str(_MOTIONS_DIR / "Rightstep_own_booster_t1.npz")],
     "right_far": [
-        str(_MOTIONS_DIR / "RightDoubleStep_own_booster_t1_2p5x.npz"),
+        str(_MOTIONS_DIR / "new_doublestepright_short_booster_t1.npz"),
+        str(_MOTIONS_DIR / "new_doublestepright_booster_t1.npz"),
+        str(_MOTIONS_DIR / "new_doublestepright_wide_booster_t1.npz"),
     ],
 }
+
+# 2026-07-18: the three far-region clips differ in duration/frame count
+# (short ~0.7s < base ~1.0s < wide ~1.2s at the same fps) -- without an
+# explicit weight, MotionDataset's per-transition-by-frame-count sampling
+# would over-represent "wide" and under-represent "short" purely because of
+# clip length, not because either distance matters more. Weighting equally
+# per-file (not per-frame) so the far discriminator treats all three
+# distances as equally valid style targets.
+_FAR_REGION_MOTION_WEIGHTS: list[float] = [1.0, 1.0, 1.0]
 
 
 def goalkeeper_multidisc_env_cfg_withoverlay(
@@ -284,6 +308,7 @@ def goalkeeper_multidisc_amp_runner_cfg() -> dict:
             amp_obs_terms=_MULTIDISC_AMP_OBS_TERMS,
             anchor_name=GOALKEEPER_ANCHOR_NAME,
             freeze_joint_names=list(ARM_JOINT_NAMES) if name in _FAR_REGION_NAMES else None,
+            motion_weights=list(_FAR_REGION_MOTION_WEIGHTS) if name in _FAR_REGION_NAMES else None,
         )
         for name, paths in REGION_MOTION_FILES.items()
     }
