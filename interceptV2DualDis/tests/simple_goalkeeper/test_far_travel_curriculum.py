@@ -26,6 +26,35 @@ _G1_STEP_INNER_FRAC = 0.2 / 1.8
 _G1_STEP_OUTER_FRAC = 1.2 / 1.8
 
 
+def test_far_travel_default_step_size_genuinely_lags_ball_difficulty_default():
+    """FIX 2026-07-18: far_inner/far_outer share the exact same cu signal as
+    ball_difficulty_curriculum, so relative speed is (distance to cover) /
+    (step per cu-unit), not step_size alone. The 0.004 default (carried over
+    from the pre-step-region single-edge design) emptied far_outer's much
+    shorter post-seed distance in only 83 cu-units vs ball_difficulty's 100 --
+    finishing FIRST, the opposite of the intended lag (confirmed live:
+    far_inner 47% done at iteration ~296 while ball_difficulty was only 12%
+    done). Regression guard: far_outer's default must need MORE cu-units to
+    saturate than ball_difficulty's default, not fewer."""
+    lo, hi = 0.5, 1.3
+    span = hi - lo
+    outer_start = lo + _G1_STEP_OUTER_FRAC * span
+    outer_gap = hi - outer_start
+
+    env = _FakeEnv()
+    cfg = _FakeCfg({})
+    term = far_travel_curriculum(cfg, env)
+    far_outer_cu_units = outer_gap / (term._step_size * span)
+
+    ball_difficulty_default_step_size = 0.01  # ball_difficulty_curriculum's own documented default
+    ball_difficulty_cu_units = 1.0 / ball_difficulty_default_step_size
+
+    assert far_outer_cu_units > ball_difficulty_cu_units, (
+        f"far_outer needs {far_outer_cu_units:.1f} cu-units, "
+        f"ball_difficulty needs {ball_difficulty_cu_units:.1f} -- far must lag, not lead"
+    )
+
+
 def test_far_travel_curriculum_starts_at_g1_step_proportions():
     env = _FakeEnv()
     env._ball_difficulty = 1.0  # ball_difficulty already saturated, independent

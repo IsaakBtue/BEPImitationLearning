@@ -187,7 +187,17 @@ def goalkeeper_multidisc_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
             params={
                 "update_interval": 500,
                 "ep_len_divisor":  50,
-                "step_size":       0.004,
+                # FIX 2026-07-18: was 0.004, sized for the old design where
+                # far_travel_frac traveled the full [0,1] range. After the
+                # G1-step redesign seeds far_inner/far_outer 65-67% of the
+                # way to their bounds already, that step_size emptied the
+                # much shorter remaining distance far faster than
+                # ball_difficulty (confirmed live: far_inner 47% done at
+                # iter ~296 while ball_difficulty was only 12% done) -- the
+                # opposite of the intended lag. 0.0013 targets far_outer (the
+                # binding constraint) needing ~2.5x ball_difficulty's
+                # cu-units to saturate. See far_travel_curriculum's docstring.
+                "step_size":       0.0013,
             },
         )
 

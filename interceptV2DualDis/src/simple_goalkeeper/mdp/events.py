@@ -810,6 +810,26 @@ class far_travel_curriculum:
     the same step_size per update, matching G1's identical 0.3*cu for both
     edges.
 
+    FIX 2026-07-18 (same day, caught ~300 iterations into the run): because
+    far_inner/far_outer share the exact same cu signal as ball_difficulty_
+    curriculum (same _update_smoothed_ep_len, same ep_len_divisor=50, same
+    update_interval=500), the two curricula's relative speed is set entirely
+    by (distance to cover) / (step per cu-unit) -- NOT by step_size alone.
+    The previous default (0.004, carried over unchanged from the pre-step-
+    region single-edge design) was sized for a far_travel_frac that had to
+    travel the FULL [0,1] range; after this seeded far_inner/far_outer 65-67%
+    of the way to their bounds already, the remaining distance is much
+    smaller (0.267m for outer, 0.089m for inner, vs ball_difficulty's full
+    1.0), so the SAME step_size emptied it far faster: outer needed only 83
+    cu-units to fully saturate (vs ball_difficulty's 100), inner only 28 --
+    confirmed live (iteration ~296: far_inner already 47% of the way to its
+    floor while ball_difficulty was only 12% of the way to 1.0) -- the exact
+    opposite of the intended lag. New default 0.0013 targets far_outer (the
+    binding constraint, larger gap) needing ~250 cu-units (~2.5x
+    ball_difficulty's 100, matching this class's original slower-than-
+    ball_difficulty intent); far_inner needs ~83 cu-units under the same
+    step (close to, not wildly ahead of, ball_difficulty's own pace).
+
     reset_ball_rolling reads env._far_inner/env._far_outer directly (via
     use_far_travel_curriculum=True, wired only for far regions in
     reset_ball_rolling_by_region), replacing the generic lo/hi/d-based lerp
@@ -819,7 +839,7 @@ class far_travel_curriculum:
 
     def __init__(self, cfg: "CurriculumTermCfg", env: "ManagerBasedRlEnv") -> None:
         p = cfg.params
-        self._step_size       = p.get("step_size",       0.004)
+        self._step_size       = p.get("step_size",       0.0013)
         self._update_interval = p.get("update_interval", 500)
         self._ep_len_divisor  = p.get("ep_len_divisor",   50)
         self._lo              = p.get("lo", 0.5)

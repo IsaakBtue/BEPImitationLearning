@@ -717,3 +717,15 @@ Step is grounded, lateral-axis, flat-scale, no airborne/landing mechanic, and it
 **Verification:** Monte Carlo re-check (20k samples, mirroring the far-region check earlier today): near at `ball_difficulty=0` now has `std=0.058` (was `0.0000` under the old formula) with real spread `[0.118,0.337]` (crossing-Y scaled) instead of a single point. 60/60 tests pass (3 new tests: outer is no longer degenerate at `d=0`, inner stays fixed across `d`, outer reaches `hi` at `d=1`). Live smoke test clean, no errors.
 
 **Not yet resolved:** not yet validated against a real training run -- bundled into the same restart as the step-region redesign above, since that run was still in its first ~15-20 iterations when this was caught.
+
+## 2026-07-18 (same day, ~300 iterations into the run above) -- far_travel_curriculum's step_size made it finish BEFORE ball_difficulty, not after
+
+**Context:** user asked directly whether far_travel was reaching full extent around the same time as ball_difficulty. It was worse than that -- checked live: at iteration ~296, `far_inner` had covered 47% of its journey (0.589→0.547) while `ball_difficulty` had covered only 12% (0→0.12).
+
+**Root cause:** `far_inner`/`far_outer` share the exact same `cu` signal as `ball_difficulty_curriculum` (same `_update_smoothed_ep_len`, `ep_len_divisor=50`, `update_interval=500`), so their relative speed is set by `(distance to cover) / (step per cu-unit)`, not `step_size` in isolation. The `0.004` default was carried over unchanged from the pre-step-region single-edge design, where `far_travel_frac` had to cover the full `[0,1]` range. After today's step-region redesign seeded `far_inner`/`far_outer` 65-67% of the way to their bounds already, the *remaining* distance is much smaller (0.267m for outer, 0.089m for inner vs. `ball_difficulty`'s full 1.0), so the same step emptied it far faster: outer needed only 83 cu-units to saturate (vs. `ball_difficulty`'s 100), inner only 28 -- finishing first, the opposite of the intended lag.
+
+**Fix:** `step_size` default (both the class default and the explicit registration in `goalkeeper_multidisc_amp_cfg.py`) changed `0.004 -> 0.0013`, solved so `far_outer` (the binding constraint, larger gap) needs ~250 cu-units (~2.5x `ball_difficulty`'s 100, matching this class's original "roughly 2.5x slower" intent); `far_inner` now needs ~83 cu-units under the same step (close to `ball_difficulty`'s own pace, not wildly ahead of it).
+
+**Verification:** 61/61 tests pass -- new `test_far_travel_default_step_size_genuinely_lags_ball_difficulty_default` directly asserts `far_outer`'s default-config cu-units exceed `ball_difficulty`'s default-config cu-units, a regression guard against this exact class of bug recurring silently on a future edit. Live smoke test clean.
+
+**Not yet resolved:** not yet validated against a real training run -- fifth restart of the same launch attempt today, ~300 iterations of negligible progress lost. `0.0013` targets a 2.5x ratio by direct calculation, not empirical tuning -- flagged as the first parameter to revisit if far-region difficulty still ramps too fast or too slow in practice.
