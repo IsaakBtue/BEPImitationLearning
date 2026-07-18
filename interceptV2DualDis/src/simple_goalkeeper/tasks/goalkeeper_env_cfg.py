@@ -421,7 +421,21 @@ def goalkeeper_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
         "penalize_kneeheight": RewardTermCfg(
             func=gk_mdp.penalize_kneeheight,
             weight=-100.0,
-            params={"min_height": 0.29, "asset_cfg": _KNEE_BODY_CFG},
+            # FIX 2026-07-18: min_height was 0.29, only 1.5cm above the
+            # shank_height hard-termination threshold (0.275, below). Even
+            # though the penalty is graded (proportional to violation depth,
+            # not a step function), 1.5cm of shank travel happens almost
+            # instantly during a dynamic step/lunge -- the policy had almost
+            # no runway to feel the ramping penalty and correct course before
+            # the episode just ended. Raised to 0.32 (3x the gap, 1.5cm ->
+            # 4.5cm) so the graded penalty has real distance to teach the
+            # avoidance behavior before the hard cutoff. Termination
+            # threshold (0.275) unchanged -- this widens the WARNING zone,
+            # not how deep a crouch is ultimately allowed. Not empirically
+            # tuned -- a starting point pending validation against a
+            # training run, per this project's usual practice for thresholds
+            # without a direct G1 equivalent.
+            params={"min_height": 0.32, "asset_cfg": _KNEE_BODY_CFG},
         ),
         "penalize_sharpcontact": RewardTermCfg(
             func=gk_mdp.penalize_sharpcontact,

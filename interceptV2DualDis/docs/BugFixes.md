@@ -729,3 +729,15 @@ Step is grounded, lateral-axis, flat-scale, no airborne/landing mechanic, and it
 **Verification:** 61/61 tests pass -- new `test_far_travel_default_step_size_genuinely_lags_ball_difficulty_default` directly asserts `far_outer`'s default-config cu-units exceed `ball_difficulty`'s default-config cu-units, a regression guard against this exact class of bug recurring silently on a future edit. Live smoke test clean.
 
 **Not yet resolved:** not yet validated against a real training run -- fifth restart of the same launch attempt today, ~300 iterations of negligible progress lost. `0.0013` targets a 2.5x ratio by direct calculation, not empirical tuning -- flagged as the first parameter to revisit if far-region difficulty still ramps too fast or too slow in practice.
+
+## 2026-07-18 (same day, ~2 minutes into the run above) -- widened the pre-termination warning zone for penalize_kneeheight
+
+**Context:** user asked whether `penalize_kneeheight`'s threshold (not weight) should be raised, reasoning the policy doesn't seem to be learning to avoid the `shank_height` hard termination.
+
+**Finding:** `penalize_kneeheight`'s `min_height` (`goalkeeper_env_cfg.py:424`) was `0.29` -- only 1.5cm above `shank_height_termination`'s hard-termination threshold (`0.275`). The penalty itself is graded (`clamp(min_height - shank_z, 0)`, proportional to violation depth, not a step function), but with only 1.5cm of shank travel between "penalty starts" and "episode ends" -- a distance a foot covers almost instantly during a dynamic step or lunge -- the policy had very little runway to feel the ramping penalty and pull back before the episode just terminated.
+
+**Fix:** `penalize_kneeheight`'s `min_height`: `0.29 -> 0.32`, widening the warning zone from 1.5cm to 4.5cm (3x). `shank_height_termination`'s own threshold (`0.275`) is unchanged -- this widens how much advance warning the policy gets, not how deep a crouch is ultimately allowed before the episode ends.
+
+**Verification:** 61/61 tests pass (none hardcoded the old value). Live smoke test (`--num-envs 64 --agent.max-iterations 5`) clean, term registers and fires, no errors.
+
+**Not yet resolved:** not yet validated against a training run -- `0.32` is a starting point (this project has no G1 equivalent for this exact grounded-crouch failure mode, same category as the far-region `vel_sigma`/reward-shape judgment calls elsewhere in this log), not an empirically-derived value. Bundled into the same restart as the `far_travel_curriculum` step_size fix above (that run was only ~2 minutes old).
