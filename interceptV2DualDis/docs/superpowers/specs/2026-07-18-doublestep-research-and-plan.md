@@ -209,6 +209,58 @@ beyond what `CLAUDE.md`'s divergence table and finding #1 already cover — the 
 machinery is in good, G1-matching shape. The gap is not a hidden bug; it's that this specific
 behavior has no G1 precedent to audit against in the first place.
 
+**H. Region estimator near/far plateau (2026-07-19/20 follow-up investigation) — root cause
+identified, one candidate fix blocked, one still viable.**
+
+`Loss/est_region` has plateaued at ~0.65-0.70 (chance for 4-way = `ln(4)≈1.386`) for 15,000+
+iterations. Two independent, no-shared-context subagent audits both confirmed **no implementation
+bug** — architecture, loss weighting, and optimizer/schedule (`schedule="adaptive"`, shared param
+group) all verified to match G1 exactly, including the surprising detail that the 2026-07-05
+optimizer-split "fix" was itself reverted on 2026-07-06 after its premise (G1 uses `"fixed"`) was
+found factually wrong.
+
+Root cause, traced to the actual observation code: G1's 6 regions are distinguished by target
+**height** — a raw position feature, instantly readable from `ball_pos_b`'s Z-component, which is
+why G1's own literal design (`torch.argmax(estimate_region, dim=-1, keepdim=True)` fed straight
+into the actor, `Humanoid-Goalkeeper/rsl_rl/rsl_rl/modules/actor_critic.py:232`) works fine for it.
+Our 4 regions' near/far split shares an **identical spawn range** for near and far
+(`regions.py::_REGION_Y_START_RANGE`), so the only distinguishing signal is the ball's velocity
+*direction* (where it will cross) — and the actor deliberately has no ball-velocity channel at all
+("`base_lin_vel, ball_vel_b, foot_pos_b` removed — not measurable at deployment",
+`goalkeeper_env_cfg.py`), a real, deliberate hardware-deployability decision, not an oversight.
+Same mechanism as G1, genuinely harder underlying inference problem for a reason baked into the
+deployment-realism design.
+
+*Candidate fix 1 — BLOCKED, do not pursue unless the constraint below changes.* Add an explicit
+finite-difference ball-velocity-**estimate** observation term (`ball_vel_xy_estimated_b`),
+computed purely from consecutive `ball_pos_xy_b` readings (never the true simulator velocity, so
+still deployment-realistic in principle — a real camera could equally finite-difference its own
+consecutive position reads). Implemented and reverted the same day: this changes the actor's raw
+observation vector (adds a term to the 87-dims/step input documented in the top-level `CLAUDE.md`
+deployment section), which means the real Booster T1 controller
+(`goalkeeper_deploy/tasks/goalkeeper/controller.py`) would need a matching code update to compute
+the same derived feature from real camera data before an exported policy trained with this feature
+could run on hardware. **User constraint: cannot modify the deployment script.** Blocked unless
+that constraint changes, or a way is found to derive an equivalent signal without touching the
+actor's raw input vector at all.
+
+*Candidate fix 2 — not blocked by the same constraint, not yet tried.* Soften the
+region_estimator's output from a hard `argmax` to the full softmax probability vector before
+concatenating into `actor_input`. Unlike candidate fix 1, this does not add anything to the
+actor's raw observation vector — the estimator already runs inside the exported model's own
+forward pass (`act_inference`), so this is purely an internal network-architecture change; grepped
+`goalkeeper_deploy/tasks/goalkeeper/{task,controller}.py` and found no reference to
+`region_estimator`/`argmax`/`act_inference` at all, consistent with (though not fully confirmed --
+the currently-configured deploy target may be an older, non-multi-disc policy, so this specific
+claim should be re-checked at the time this is actually attempted) the hypothesis that the
+deployment controller wouldn't need any code changes, only a normal re-export of a newly-trained
+model via the already-in-scope `goalkeeper_deploy/export_model.py`. Still a genuine, explicit
+divergence from G1's literal design (justification: G1's regions are far more separable than ours,
+so its hard argmax is usually correct; ours isn't, so a hard argmax propagates more
+false-confidence noise specifically on the axis this whole investigation is about) and still an
+actor input-dimension change at the network level (not checkpoint-compatible, needs a fresh run)
+— just not one that touches `goalkeeper_deploy/`.
+
 ## Next steps
 
 Implementing any of A-E is a separate, explicitly-approved follow-up per this project's Change
