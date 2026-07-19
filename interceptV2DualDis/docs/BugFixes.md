@@ -741,3 +741,13 @@ Step is grounded, lateral-axis, flat-scale, no airborne/landing mechanic, and it
 **Verification:** 61/61 tests pass (none hardcoded the old value). Live smoke test (`--num-envs 64 --agent.max-iterations 5`) clean, term registers and fires, no errors.
 
 **Not yet resolved:** not yet validated against a training run -- `0.32` is a starting point (this project has no G1 equivalent for this exact grounded-crouch failure mode, same category as the far-region `vel_sigma`/reward-shape judgment calls elsewhere in this log), not an empirically-derived value. Bundled into the same restart as the `far_travel_curriculum` step_size fix above (that run was only ~2 minutes old).
+
+## 2026-07-19 -- revised the kneeheight thresholds down: 0.32 pulled the warning zone in too far for the deep crouches the far-region task actually needs
+
+**Context:** user judgment call (not a training-run result) -- `0.32` was assessed as too aggressive for the athletic depth genuinely required by the far-region multi-step task (the same day's G1-step-region redesign). Explicit instruction: adjust the thresholds, do not restart the currently-running `green_kneeheightfix_2026-07-18` (still healthy at full curriculum maturity per the same-day health check) -- this is a source change for the *next* run, not applied retroactively to the live one.
+
+**What changed:** `penalize_kneeheight`'s `min_height`: `0.32 -> 0.295`. `shank_height_termination`'s own threshold (previously untouched): `0.275 -> 0.27`. Net effect: both thresholds sit lower overall (more legitimate crouch depth allowed before either fires), while the graded warning gap between them widens slightly from the original 1.5cm to 2.5cm (0.295 vs 0.27) -- smaller than the previous 4.5cm gap (0.32 vs 0.275), but still a real improvement over the original near-zero runway.
+
+**Verification:** 61/61 tests pass. Live smoke test (`--num-envs 64 --agent.max-iterations 5`) clean, both terms register and fire, no errors.
+
+**Not yet resolved:** not applied to the live run per explicit instruction -- takes effect on the next restart. Neither `0.295`/`0.27` nor the earlier `0.32` have been validated against an actual training run; this remains a judgment call pending evidence either way.
