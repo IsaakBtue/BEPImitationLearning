@@ -169,7 +169,18 @@ def goalkeeper_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
             func=gk_mdp.reward_curriculum_ep_len,
             params={
                 "reward_name": "softstop",
-                "base_weight": 105.0,    # G1 stop_init=100 + 5 shifted from stopball → max 262.5 at cu=3
+                # FIX 2026-07-20 (reward-weight audit): was 105.0 (max 262.5 at
+                # cu=3). Combined with stopball below (30 at cu=3 pre-fix),
+                # stopball+softstop totaled up to 300 -- 3x G1's single
+                # stopball=100 for the same underlying "did you stop it"
+                # signal. Live-measured raw task-reward magnitude was ~3x
+                # raw AMP-reward magnitude (empirical: ~35/episode vs
+                # ~11.4/episode), meaning AMP's real share of the blended
+                # PPO objective was ~18% despite the nominal 40% blend ratio
+                # (lerp=0.6) being unchanged and untouched -- AMP itself is
+                # not being retuned, only the task-reward magnitude that was
+                # diluting its real influence. Halved to restore proportion.
+                "base_weight": 52.5,    # was 105.0 -- halved, max 131.25 at cu=3 (was 262.5)
                 "update_interval": 500,
                 "ep_len_divisor":  50,
             },
@@ -195,7 +206,10 @@ def goalkeeper_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
             func=gk_mdp.reward_curriculum_ep_len,
             params={
                 "reward_name": "stopball",
-                "base_weight": 15.0,     # was 20; 5 shifted to softstop; max 37.5 at cu=3
+                # FIX 2026-07-20 (reward-weight audit, paired with softstop
+                # above): was 15.0 (max 37.5 at cu=3). Halved for the same
+                # reason -- see softstop_curriculum's comment.
+                "base_weight": 7.5,      # was 15.0 -- halved, max 18.75 at cu=3 (was 37.5)
                 "update_interval": 500,
                 "ep_len_divisor":  50,
             },
@@ -388,7 +402,12 @@ def goalkeeper_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
         ),
         "foot_ang_vel_xy": RewardTermCfg(
             func=gk_mdp.foot_ang_vel_xy,
-            weight=-0.5,
+            # FIX 2026-07-20 (reward-weight audit): was -0.5. No G1
+            # equivalent; live-measured real per-step magnitude (-1.80) was
+            # meaningfully inflating raw task-reward scale and diluting
+            # AMP's real proportional influence on the blended objective.
+            # Halved rather than removed -- likely still doing real work.
+            weight=-0.25,
             params={"asset_cfg": _FEET_CFG},
         ),
         # --- post-save recovery (active only when ball is behind) ---
@@ -453,7 +472,12 @@ def goalkeeper_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
         ),
         "feet_slippage": RewardTermCfg(
             func=gk_mdp.feet_slippage,
-            weight=5.0,
+            # FIX 2026-07-20 (reward-weight audit): was 5.0 -- reverted to
+            # G1's literal matched weight (feet_slippage=3.0,
+            # g1_29_config.py). Real per-step magnitude (+2.38) was one of
+            # the larger positive contributors, part of the raw task-reward
+            # inflation diluting AMP's real share of the blended objective.
+            weight=3.0,
             params={"ball_name": BALL_NAME, "asset_cfg": _FEET_CFG},
         ),
         # --- joint limits ---
@@ -496,11 +520,21 @@ def goalkeeper_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
         ),
         "action_rate_l2": RewardTermCfg(
             func=mjlab_mdp.action_rate_l2,
-            weight=-0.3,
+            # FIX 2026-07-20 (reward-weight audit): was -0.3 -- reverted to
+            # G1's literal matched weight (smoothness=-0.1, g1_29_config.py).
+            # This was the single largest negative real-magnitude
+            # contributor (-3.79/step), 3x G1's own weight for the
+            # equivalent term -- a direct, simple divergence fix.
+            weight=-0.1,
         ),
         "action_acc_l2": RewardTermCfg(
             func=mjlab_mdp.action_acc_l2,
-            weight=-0.1,
+            # FIX 2026-07-20 (reward-weight audit): was -0.1. No G1
+            # equivalent; live-measured real magnitude (-3.43/step) was the
+            # 3rd-largest contributor in the whole reward table despite the
+            # small nominal weight. Halved rather than removed -- jerk
+            # penalty likely still useful for hardware realism.
+            weight=-0.05,
         ),
         "dof_vel": RewardTermCfg(
             func=mjlab_mdp.joint_vel_l2,

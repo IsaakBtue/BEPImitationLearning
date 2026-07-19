@@ -751,3 +751,22 @@ Step is grounded, lateral-axis, flat-scale, no airborne/landing mechanic, and it
 **Verification:** 61/61 tests pass. Live smoke test (`--num-envs 64 --agent.max-iterations 5`) clean, both terms register and fire, no errors.
 
 **Not yet resolved:** not applied to the live run per explicit instruction -- takes effect on the next restart. Neither `0.295`/`0.27` nor the earlier `0.32` have been validated against an actual training run; this remains a judgment call pending evidence either way.
+
+## 2026-07-20 -- reward-weight audit: task reward's raw magnitude had grown to ~3x AMP's, diluting AMP's real influence on the blended objective despite an unchanged nominal blend ratio
+
+**Context:** user asked for a full audit of total reward weights, ours vs G1's, on the theory that the many task rewards added over the project's history (individually necessary, but never re-audited in aggregate) might now be outweighing AMP in practice even though the AMP blend coefficients themselves were never touched.
+
+**Finding, empirically measured (not just weight-counted):** the AMP blend is `reward = (1-lerp)*amp_reward + lerp*task_reward`, `lerp=0.6` (matches G1's `amp_coef=0.4`, confirmed unchanged). Pulled the live run's actual `Train/mean_reward` (~25.5/episode, blended total) and `Train/mean_amp_reward` (~11.4/episode, raw pre-blend AMP signal) and cross-validated against summing every `Episode_Reward/*` term's logged average (already per-second-normalized per this project's own documented TensorBoard convention) -- both paths independently converge on raw task-reward magnitude ≈ 35/episode. So: raw task reward (~35) is ~3x raw AMP reward (~11.4), meaning AMP's REAL share of the blended objective PPO actually optimizes is `0.4×11.4 / (0.4×11.4 + 0.6×35) ≈ 18%`, not the nominal 40% the blend ratio implies. The blend ratio itself was never wrong -- one of its two inputs had grown in scale.
+
+**What changed** (task-reward side only -- AMP coefficients/weights explicitly left untouched per user instruction):
+1. `stopball_curriculum`/`softstop_curriculum` base weights halved: `15.0→7.5` / `105.0→52.5` (`goalkeeper_env_cfg.py`). Combined, these two terms (a historical split of G1's single `stopball=100`, made to give softstop "the clear end goal" -- 2026-06-24 entry) totaled up to 240 at cu=3, 2.4x G1's original single-term budget for the same "did you stop it" signal -- the single largest driver of the magnitude gap.
+2. `action_rate_l2`: `-0.3 -> -0.1`, reverted to G1's literal matched weight (`smoothness=-0.1`). Was the largest negative real-magnitude contributor (-3.79/step), a direct 3x divergence from the G1-matched term.
+3. `feet_slippage`: `5.0 -> 3.0`, reverted to G1's literal matched weight.
+4. `action_acc_l2`: `-0.1 -> -0.05` (halved). No G1 equivalent; real magnitude (-3.43/step) was the 3rd-largest contributor in the whole table despite the small nominal weight -- halved rather than removed since the jerk penalty likely still does real work.
+5. `foot_ang_vel_xy`: `-0.5 -> -0.25` (halved). No G1 equivalent; real magnitude (-1.80/step) was meaningful.
+
+**Explicitly NOT changed, with reasoning:** `footreach`/`postorientation`/`feetorientation`/`postangvel` all show elevated real magnitude despite matching G1's nominal weight exactly -- flagged as a likely formula/scale difference under MuJoCo vs PhysX dynamics, not a weight problem; touching their weights would break the literal-G1-match these terms were built to preserve, so left alone pending a separate investigation. The "quality bonus" terms added on top of G1 (`single_foot_save`/`cleanstop`/`inner_face_orientation_save`/`foot_inner_face_continuous`/`foot_proximity`/`foot_clearance`) have large nominal weights but tiny real per-step contribution (~+1.94/step combined, rare one-shot bonuses) -- not touched, already correctly small in practice. `penalize_self_collision` (-50, no G1 equivalent) similarly negligible in practice (-0.02/step) -- left alone.
+
+**Verification:** 63/63 tests pass. Live smoke test (`--num-envs 64 --agent.max-iterations 5`) clean -- confirmed all six new values active (`stopball_curriculum`/`softstop_curriculum` weights 7.5/52.5, `foot_ang_vel_xy=-0.25`, `feet_slippage=3.0`, `action_rate_l2=-0.1`, `action_acc_l2=-0.05`), no errors.
+
+**Not yet resolved:** not yet validated against a training run -- this reduces raw task-reward magnitude by roughly a third; whether it meaningfully changes the `Loss/est_region` plateau, the far-region footwork behavior, or anything else observable requires a fresh run to see.
