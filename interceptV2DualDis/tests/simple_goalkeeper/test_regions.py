@@ -90,3 +90,22 @@ def test_region_id_gt_returns_float_column_vector():
     assert out.shape == (8, 1)
     assert out.dtype == torch.float32
     assert torch.equal(out.squeeze(-1), env._region_id.float())
+
+
+def test_pin_region_on_reset_pins_every_env_to_the_given_region():
+    from simple_goalkeeper.mdp.regions import pin_region_on_reset
+
+    env = _FakeEnv(num_envs=8)
+    pin_region_on_reset(env, env_ids=None, region_id=3)
+    assert torch.equal(env._region_id, torch.full((8,), 3, dtype=torch.int64))
+
+
+def test_pin_region_on_reset_only_touches_the_given_env_ids():
+    from simple_goalkeeper.mdp.regions import pin_region_on_reset
+
+    env = _FakeEnv(num_envs=8)
+    assign_static_regions(env, env_ids=None)  # env 0,1 -> region 0; env 2,3 -> region 1; ...
+    pin_region_on_reset(env, env_ids=torch.tensor([0, 1]), region_id=2)
+    assert env._region_id[0].item() == 2
+    assert env._region_id[1].item() == 2
+    assert env._region_id[2].item() == 1  # untouched, still assign_static_regions' original value

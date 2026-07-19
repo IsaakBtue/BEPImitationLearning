@@ -72,6 +72,11 @@ class PlayConfig:
     Only affects the region-conditioned reset (Mjlab-BeyondAMP-Goalkeeper-T1-MultiDisc*)."""
     rsi: bool = False
     """Enable Random State Initialization in play (default: off — starts from standing keyframe)."""
+    force_region: Literal["left_near", "left_far", "right_near", "right_far"] | None = None
+    """Pin every episode to a single region instead of the default random 0-3 cycling
+    (--num-envs 1's randomize_region_on_reset). Lets you watch only e.g. right_far
+    episodes back to back instead of getting 3/4 episodes from other regions.
+    Only affects the region-conditioned reset (Mjlab-BeyondAMP-Goalkeeper-T1-MultiDisc*)."""
     analytics: bool = True
     """Print ball velocity, delta_vx, foot heights, and stopball/softstop state to stdout each step.
     Also toggleable at runtime with the V key."""
@@ -322,6 +327,20 @@ def run_play(task_id: str, cfg: PlayConfig) -> None:
             f"pinned to the top {100 * (1 - cfg.difficulty_outer_only_frac):.0f}% "
             f"of each region's range"
         )
+
+    if cfg.force_region is not None:
+        if "assign_static_regions" not in env_cfg.events:
+            raise RuntimeError(
+                "--force-region requires an 'assign_static_regions' event "
+                f"(task '{task_id}' has none — not a region-conditioned task)."
+            )
+        from simple_goalkeeper.mdp.regions import REGION_NAMES, pin_region_on_reset
+        from mjlab.managers.event_manager import EventTermCfg as _EvtCfg
+        region_id = REGION_NAMES.index(cfg.force_region)
+        env_cfg.events["assign_static_regions"] = _EvtCfg(
+            func=pin_region_on_reset, mode="reset", params={"region_id": region_id},
+        )
+        print(f"[INFO]: Region pinned to '{cfg.force_region}' — every episode will be this region only")
 
     # Override motion file for WithOverlay task if specified on CLI.
     if cfg.motion_file is not None and "motion_ghost" in env_cfg.commands:

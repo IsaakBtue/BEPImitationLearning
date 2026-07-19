@@ -93,6 +93,26 @@ def randomize_region_on_reset(env: "ManagerBasedRlEnv", env_ids: torch.Tensor | 
     env._region_id[env_ids] = torch.randint(0, 4, (len(env_ids),), device=env.device)
 
 
+def pin_region_on_reset(env: "ManagerBasedRlEnv", env_ids: torch.Tensor | None, region_id: int) -> None:
+    """Play-only diagnostic event (mode="reset"): pins EVERY resetting env to a
+    single fixed region_id, every episode, instead of randomize_region_on_reset's
+    uniform 0-3 sampling.
+
+    2026-07-20: added so `sgk_play --force-region left_far` etc. can show only
+    one region's episodes back to back for direct visual inspection (e.g.
+    checking by eye whether the hip-roll bimodal double-step signature shows
+    up in the live policy) instead of getting a random mix where 3 of 4
+    episodes are the "boring" other regions. Wired in play.py's run_play by
+    replacing the "assign_static_regions" event, same slot
+    randomize_region_on_reset occupies -- mutually exclusive with it.
+    """
+    if env_ids is None:
+        env_ids = torch.arange(env.num_envs, device=env.device, dtype=torch.long)
+    if not hasattr(env, "_region_id"):
+        env._region_id = torch.zeros(env.num_envs, dtype=torch.int64, device=env.device)
+    env._region_id[env_ids] = region_id
+
+
 def reset_ball_rolling_by_region(
     env: "ManagerBasedRlEnv",
     env_ids: torch.Tensor | None,
