@@ -1,2 +1,1 @@
-cd /home/ibouwmeest/BEPImitationLearning/SimpleGoalKeeper
-uv run sgk_train Mjlab-BeyondAMP-Goalkeeper-T1 --num-envs 6144
+uv run sgk_train Mjlab-BeyondAMP-Goalkeeper-T1-MultiDisc --num-envs 6144 --agent.run-name green_numenvs6144_2026-07-20
