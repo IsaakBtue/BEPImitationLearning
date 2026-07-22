@@ -100,10 +100,40 @@ def goalkeeper_multidisc_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
     # per-region discriminator matches each env). See that function's
     # docstring (observations.py) and goalkeeper_multidisc_amp_runner_cfg's
     # matching mask on the motion-dataset (expert) side.
+    # FIX 2026-07-22 (AMP fix, task-complexity-mismatch hypothesis): re-added
+    # joint_vel, deliberately reverting the 2026-07-08 G1-parity decision
+    # above. That fix was correct AS A PARITY STATEMENT (G1 really is
+    # joint_pos-only) but the discriminator-input ground-truth comparison
+    # done this same day (see docs/BugFixes.md, 2026-07-21) found no missing
+    # feature relative to G1 -- meaning the absence of joint_vel was never a
+    # bug, just a choice inherited from a task that doesn't need it. G1's
+    # regions are single atomic motions; this project's far regions need a
+    # genuine multi-step gait, and by iteration ~10000 of
+    # green_gradpen10_2026-07-21 (Curriculum/far_travel/far_inner and
+    # far_outer already fully saturated to the full (0.5, 1.3) range for
+    # thousands of iterations, per that run's own logged values) double-step
+    # behavior still had not reliably emerged -- consistent with
+    # foot_clearance's own docstring concern ("the robot sometimes shuffles
+    # without lifting feet... producing a slide rather than a committed
+    # step") and with docs/superpowers/specs/2026-07-18-doublestep-research-
+    # and-plan.md's finding #1 (G1 never had to teach this, so its
+    # joint_pos-only recipe was never proven sufficient for it either).
+    # joint_pos alone cannot distinguish a committed step (foot moving with
+    # real velocity) from a passive weight-shift that happens to pass
+    # through the same joint-position waypoints; joint_vel gives the
+    # discriminator the one signal that directly separates those two. The
+    # motion-dataset (expert) side already supported this generically --
+    # MotionDatasetCfg.freeze_joint_names zeroes whichever amp_obs_terms are
+    # configured, joint_vel included, with no code changes needed there.
     cfg.observations["amp"] = ObservationGroupCfg(
         terms={
             "joint_pos": ObservationTermCfg(
                 func=gk_obs.joint_pos_abs_arms_masked_by_region,
+                noise=None,
+                params={},
+            ),
+            "joint_vel": ObservationTermCfg(
+                func=gk_obs.joint_vel_abs_arms_masked_by_region,
                 noise=None,
                 params={},
             ),
@@ -216,7 +246,15 @@ from simple_goalkeeper.tasks.goalkeeper_amp_cfg import (
 # a change to the shared AMPObsBaiscTerms constant (["joint_pos","joint_vel"]),
 # which SimpleGoalKeeper's single-disc AMP track (goalkeeper_amp_cfg.py) and
 # several other beyondAMP example tasks still use unmodified.
-_MULTIDISC_AMP_OBS_TERMS: list[str] = ["joint_pos"]
+#
+# FIX 2026-07-22: joint_vel added back -- see the matching FIX comment on
+# the "amp" observation group override above for the full rationale
+# (deliberate divergence from the 2026-07-08 G1-parity decision, not a
+# reversal of that decision's correctness as a parity statement). Must stay
+# in sync with the "amp" group's terms= dict above -- both sides feed the
+# same discriminator and must produce identically-shaped, identically-
+# ordered concatenated vectors.
+_MULTIDISC_AMP_OBS_TERMS: list[str] = ["joint_pos", "joint_vel"]
 
 _MOTIONS_DIR = Path(__file__).parents[1] / "motions" / "data"
 

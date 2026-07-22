@@ -552,6 +552,19 @@ def goalkeeper_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
             func=gk_mdp.penalize_self_collision,
             weight=-50.0,
         ),
+        # FIX 2026-07-22: new penalty, ball touching the non-assigned
+        # ("non-leading") foot. See penalize_wrong_foot_ball_contact's
+        # docstring (rewards.py) -- the existing correct-foot gates on
+        # stopball/softstop/cleanstop use a ground-contact sensor that can't
+        # tell "assigned foot happens to be on the ground" from "assigned
+        # foot actually touched the ball", so a wrong-foot save could still
+        # farm those rewards. This uses the ball-specific "ball_contact"
+        # sensor directly, independent of those gates, to discourage it.
+        "penalize_wrong_foot_ball_contact": RewardTermCfg(
+            func=gk_mdp.penalize_wrong_foot_ball_contact,
+            weight=-30.0,
+            params={"ball_name": BALL_NAME},
+        ),
         "feet_slippage": RewardTermCfg(
             func=gk_mdp.feet_slippage,
             # FIX 2026-07-20 (reward-weight audit): was 5.0 -- reverted to

@@ -12,5 +12,6 @@ from .rewards import (
     torques_normalized_l2, torque_limits,
     postupperdofpos, postwaistdofpos,
     penalize_sharpcontact, penalize_self_collision, feet_slippage,
+    penalize_wrong_foot_ball_contact,
 )
 from .commands import GhostMotionCommand, GhostMotionCommandCfg

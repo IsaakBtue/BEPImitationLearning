@@ -318,3 +318,45 @@ def joint_pos_abs_arms_masked_by_region(
         joint_pos = torch.where(full_mask, default_joint_pos, joint_pos)
 
     return joint_pos
+
+
+def joint_vel_abs_arms_masked_by_region(
+    env: "ManagerBasedRlEnv",
+    far_region_ids: tuple[int, ...] = (1, 3),
+) -> torch.Tensor:
+    """Like joint_vel_abs (full 21-DOF, softstop-gated), but additionally
+    zeroes arm joint velocity columns for envs whose env._region_id is in
+    far_region_ids -- same rationale and column-masking mechanism as
+    joint_pos_abs_arms_masked_by_region (uniform 21-dim shape across all
+    4 regions' shared amp_obs tensor; arm columns made uninformative only
+    for far/double-step regions). Zero is the natural "frozen" velocity
+    (unlike joint_pos, there's no "default" velocity to substitute).
+
+    FIX 2026-07-22: added alongside joint_pos to give the AMP discriminator
+    joint-velocity information -- see docs/BugFixes.md, "AMP fix: joint_vel
+    added to multi-disc AMP observation". The motion-dataset side already
+    supported this generically (MotionDatasetCfg.freeze_joint_names zeroes
+    whichever amp_obs_terms are configured, including joint_vel) with no
+    code changes needed there -- only this policy-side term was missing.
+    """
+    robot: Entity = env.scene["robot"]
+    joint_vel = robot.data.joint_vel.clone()
+    softstop_fired = getattr(env, "_softstop_flag", None)
+    if softstop_fired is not None and softstop_fired.any():
+        joint_vel[softstop_fired] = 0.0
+
+    if not hasattr(env, "_arm_joint_col_mask"):
+        arm_ids, _ = robot.find_joints(_ARM_JOINT_NAMES, preserve_order=True)
+        col_mask = torch.zeros(joint_vel.shape[-1], dtype=torch.bool, device=env.device)
+        col_mask[torch.tensor(arm_ids, dtype=torch.long, device=env.device)] = True
+        env._arm_joint_col_mask = col_mask
+
+    region_id = getattr(env, "_region_id", None)
+    if region_id is not None:
+        is_far = torch.zeros(env.num_envs, dtype=torch.bool, device=env.device)
+        for r in far_region_ids:
+            is_far |= region_id == r
+        full_mask = is_far.unsqueeze(-1) & env._arm_joint_col_mask.unsqueeze(0)
+        joint_vel = torch.where(full_mask, torch.zeros_like(joint_vel), joint_vel)
+
+    return joint_vel

@@ -985,6 +985,47 @@ def penalize_self_collision(env: "ManagerBasedRlEnv") -> torch.Tensor:
     return (sensor.data.found > 0).any(dim=-1).float()
 
 
+def penalize_wrong_foot_ball_contact(
+    env: "ManagerBasedRlEnv",
+    ball_name: str,
+) -> torch.Tensor:
+    """Binary penalty when the ball touches the WRONG (non-assigned) foot.
+
+    FIX 2026-07-22: user reported (from reviewing checkpoints around
+    iteration ~10000 of green_gradpen10_2026-07-21) that the policy learned
+    to catch/stop the ball with its non-leading foot -- i.e. whichever foot
+    happens to be nearby, not the task-assigned one (_get_correct_foot_idx,
+    based on which side the ball is crossing on) -- and still farm cleanstop/
+    softstop/single_foot_save because their existing "correct foot" gate
+    uses "feet_contact", a GROUND-contact sensor (see softstop's FIX
+    2026-07-15 docstring): the assigned foot merely standing on the ground
+    at the same instant satisfies that gate even when a DIFFERENT foot is
+    the one actually touching the ball. That gate is intentionally left as
+    is (a prior attempt to tighten it via a ball-specific sensor made those
+    rewards stop firing almost entirely -- same docstring), so this adds an
+    independent, direct penalty instead: uses "ball_contact", the dedicated
+    foot-vs-ball ContactSensorCfg (primary=foot geoms, secondary=ball_geom,
+    goalkeeper_env_cfg.py) that only fires on genuine foot-ball contact, and
+    fires whenever the foot NOT matching _get_correct_foot_idx is in that
+    contact set -- independent of whatever the existing correct-foot gates
+    believe. Not gated by _ball_is_behind: any wrong-foot ball touch, before
+    or after a save, is the behavior being discouraged.
+
+    Geom layout in ball_contact sensor (sorted by name, matches feet_contact):
+        0-3: left_foot1-4 -> left foot, 4-7: right_foot1-4 -> right foot.
+    Weight: -30.0.
+    """
+    foot_idx = _get_correct_foot_idx(env, ball_name)  # (N,) 0=left, 1=right
+    sensor: ContactSensor = env.scene["ball_contact"]
+    found = sensor.data.found  # [B, 8]: 0-3=left, 4-7=right
+    left_touch = (found[:, :4] > 0).any(dim=-1)   # (B,)
+    right_touch = (found[:, 4:] > 0).any(dim=-1)  # (B,)
+    foot_touch = torch.stack([left_touch, right_touch], dim=-1)  # (B, 2)
+    wrong_foot_idx = 1 - foot_idx
+    wrong_foot_touch = foot_touch[torch.arange(env.num_envs, device=env.device), wrong_foot_idx]
+    return wrong_foot_touch.float()
+
+
 def airborne_at_save(
     env: "ManagerBasedRlEnv",
     ball_name: str,
