@@ -71,10 +71,10 @@ class _FakeEnv:
         self.scene = _Scene(robot)
 
 
-def _make_env(num_envs, num_dof, joint_values, hard_bound=10.0):
+def _make_env(num_envs, num_dof, joint_values, hard_bound=10.0, soft_bound=3.0):
     """joint_values: (num_envs, num_dof) tensor of each env's CURRENT live dof_pos."""
     default_joint_pos = torch.zeros(num_envs, num_dof)
-    soft_limits = torch.tensor([[-3.0, 3.0]] * num_dof).unsqueeze(0).repeat(num_envs, 1, 1)
+    soft_limits = torch.tensor([[-soft_bound, soft_bound]] * num_dof).unsqueeze(0).repeat(num_envs, 1, 1)
     hard_limits = torch.tensor([[-hard_bound, hard_bound]] * num_dof).unsqueeze(0).repeat(num_envs, 1, 1)
     data = _FakeRobotData(joint_values, default_joint_pos, soft_limits, hard_limits)
     robot = _FakeRobot(data)
@@ -87,6 +87,48 @@ def _make_env_poisoned_soft_limits(num_envs, num_dof, joint_values, hard_bound=1
     default_joint_pos = torch.zeros(num_envs, num_dof)
     hard_limits = torch.tensor([[-hard_bound, hard_bound]] * num_dof).unsqueeze(0).repeat(num_envs, 1, 1)
     data = _PoisonedSoftLimitsData(joint_values, default_joint_pos, hard_limits)
+    robot = _FakeRobot(data)
+    env = _FakeEnv(num_envs=num_envs, robot=robot)
+    return env, robot
+
+
+class _PoisonedHardLimitsData(_FakeRobotData):
+    """joint_pos_limits (hard) raises if ever read.
+
+    FIX 2026-07-20 (curriculum/RSI audit item 13): the default-pose branch's
+    clip target was corrected from the hard `joint_pos_limits` field to the
+    soft `soft_joint_pos_limits` field -- G1's own `self.dof_pos_limits` (the
+    variable the pseudocode in reset()'s docstring quotes) is overwritten to
+    SOFT limits (mean +/- 0.5*range*soft_dof_pos_limit=0.9) in
+    `_process_dof_props` before `_reset_dofs` ever runs; the separate
+    `hard_dof_pos_limits` field is never read by `_reset_dofs`. This poisons
+    the hard field to confirm the default-pose branch genuinely never reads
+    it (mirrors _PoisonedSoftLimitsData, flipped)."""
+
+    def __init__(self, joint_pos, default_joint_pos, soft_limits):
+        self.joint_pos = joint_pos
+        self.default_joint_pos = default_joint_pos
+        self.soft_joint_pos_limits = soft_limits
+        self._hard = None
+
+    @property
+    def joint_pos_limits(self):
+        raise AssertionError(
+            "reset() read joint_pos_limits (hard) — the default-pose branch "
+            "must clip to soft_joint_pos_limits only, matching G1's "
+            "self.dof_pos_limits (overwritten to soft before _reset_dofs runs)."
+        )
+
+    @joint_pos_limits.setter
+    def joint_pos_limits(self, value):
+        self._hard = value
+
+
+def _make_env_poisoned_hard_limits(num_envs, num_dof, joint_values, soft_bound=3.0):
+    """Same as _make_env, but reading joint_pos_limits (hard) raises immediately."""
+    default_joint_pos = torch.zeros(num_envs, num_dof)
+    soft_limits = torch.tensor([[-soft_bound, soft_bound]] * num_dof).unsqueeze(0).repeat(num_envs, 1, 1)
+    data = _PoisonedHardLimitsData(joint_values, default_joint_pos, soft_limits)
     robot = _FakeRobot(data)
     env = _FakeEnv(num_envs=num_envs, robot=robot)
     return env, robot
@@ -153,21 +195,32 @@ def test_reset_rsi_fraction_1_copies_dof_pos_from_another_live_env_without_clamp
     assert torch.allclose(robot.written_pos, torch.tensor([[5.0, 5.0, 5.0]]))
 
 
-def test_reset_rsi_fraction_0_randomizes_around_default_pose_and_clips_to_hard_limits(monkeypatch):
+def test_reset_rsi_fraction_0_randomizes_around_default_pose_and_clips_to_soft_limits(monkeypatch):
     """G1's active config (g1_29_config.py: randomize_initial_joint_pos=True,
     initial_joint_pos_scale=[0.5, 1.5], initial_joint_pos_offset=[-0.1, 0.1])
-    scales+offsets the default pose per-joint, then clips to the HARD dof
-    limits — not a flat copy of default_joint_pos, and not the soft limits."""
+    scales+offsets the default pose per-joint, then clips to `self.dof_pos_limits`.
+
+    FIX 2026-07-20 (curriculum/RSI audit item 13): `self.dof_pos_limits` is
+    NOT G1's hard URDF limit -- `_process_dof_props` (legged_robot.py:
+    545-563) overwrites it in place to the SOFT limit (mean +/-
+    0.5*range*soft_dof_pos_limit, cfg.rewards.soft_dof_pos_limit=0.9,
+    g1_29_config.py:348) before `_reset_dofs` ever runs; the untouched hard
+    values survive separately as `self.hard_dof_pos_limits`, which
+    `_reset_dofs` never reads. So the correct clip target here is
+    `robot.data.soft_joint_pos_limits` (mjlab's equivalent split field,
+    t1_constants.py:112 sets the matching 0.9 factor), not
+    `robot.data.joint_pos_limits` (hard). Not a flat copy of
+    default_joint_pos, and not the hard limits."""
     from simple_goalkeeper.mdp.events import MotionResetManager
 
     num_envs, num_dof = 4, 2
     joint_values = torch.ones(num_envs, num_dof) * 99.0  # would be obviously wrong if ever copied
-    env, robot = _make_env(num_envs, num_dof, joint_values, hard_bound=1.0)
+    env, robot = _make_env(num_envs, num_dof, joint_values, soft_bound=1.0)
     robot.data.default_joint_pos = torch.ones(num_envs, num_dof) * 2.0
     mgr = MotionResetManager()
     env_ids = torch.tensor([0], dtype=torch.int32)
 
-    # scale=1.5, offset=0.1 -> 2.0*1.5+0.1 = 3.1, clipped to hard bound [-1, 1] -> 1.0
+    # scale=1.5, offset=0.1 -> 2.0*1.5+0.1 = 3.1, clipped to soft bound [-1, 1] -> 1.0
     monkeypatch.setattr(
         "simple_goalkeeper.mdp.events.sample_uniform",
         lambda lo, hi, shape, device: torch.full(shape, hi),
@@ -446,14 +499,16 @@ def test_reset_donor_branch_never_reads_soft_joint_pos_limits():
     assert robot.written_ids.tolist() == [0]
 
 
-def test_reset_default_pose_branch_never_reads_soft_joint_pos_limits():
-    """G1's randomize_initial_joint_pos branch clips to the HARD dof limits,
-    never the soft ones — confirm the else branch doesn't read them either."""
+def test_reset_default_pose_branch_never_reads_hard_joint_pos_limits():
+    """FIX 2026-07-20 (curriculum/RSI audit item 13): the default-pose branch
+    clips to the SOFT dof limits (matching G1's self.dof_pos_limits, which is
+    overwritten to soft before _reset_dofs runs — see reset()'s docstring),
+    never the hard ones — confirm the else branch doesn't read the hard field."""
     from simple_goalkeeper.mdp.events import MotionResetManager
 
     num_envs, num_dof = 3, 1
     joint_values = torch.ones(num_envs, num_dof) * 5.0
-    env, robot = _make_env_poisoned_soft_limits(num_envs, num_dof, joint_values)
+    env, robot = _make_env_poisoned_hard_limits(num_envs, num_dof, joint_values)
     mgr = MotionResetManager()
     env_ids = torch.tensor([0], dtype=torch.int32)
 

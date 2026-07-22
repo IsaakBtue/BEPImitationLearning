@@ -325,8 +325,41 @@ def goalkeeper_multidisc_amp_runner_cfg() -> dict:
     return {
         "policy": {
             "init_noise_std": 1.0,
-            "actor_hidden_dims": [512, 256, 128],
-            "critic_hidden_dims": [512, 256, 128],
+            # FIX 2026-07-20 (item 23, obs/PPO audit): was [512, 256, 128].
+            # Reverted to G1's actual, exercised value [512, 256, 256]
+            # (Humanoid-Goalkeeper/legged_gym/legged_gym/envs/base/
+            # legged_robot_config.py:309-310, LeggedRobotCfgPPO.policy --
+            # G129CfgPPO(LeggedRobotCfgPPO) in g1_29_config.py:367 inherits
+            # this unmodified, so it's what actually trained the reference
+            # G1 policy). [512, 256, 128] is coincidentally G1's *library*
+            # default (rsl_rl/rsl_rl/modules/actor_critic.py:100-101,
+            # ActorCritic.__init__'s unused kwarg default) AND beyondAMP's
+            # own framework default (beyondAMP/source/beyondAMP/beyondAMP/
+            # mjlab/rsl_rl/configs/rl_cfg.py:28-29) -- but neither of those
+            # defaults is what G1 was actually trained with; both are dead
+            # once a config explicitly supplies hidden dims, exactly as this
+            # value was here. `git log -p --follow --all` and
+            # `git log -S "[512, 256, 256]"` across this file's and
+            # goalkeeper_amp_cfg.py's/him_actor_critic.py's entire history
+            # confirm [512, 256, 128] was introduced verbatim at this file's
+            # creation (commit 3ec24b8, 2026-07-02, "feat(multidisc): register
+            # 4-region motion config and new task id") with no comment or
+            # commit-message rationale, and was never [512, 256, 256] at any
+            # point before now -- i.e. no "we changed it, believing 128 was
+            # correct" event exists in the record. No design doc
+            # (docs/superpowers/plans/2026-07-02-multi-discriminator-amp.md,
+            # docs/superpowers/specs/2026-07-02-multi-discriminator-amp-
+            # design.md) or docs/BugFixes.md entry states a reason for 128
+            # over 256 either -- contrast with amp_discr_hidden_dims just
+            # below, which DID get an explicit, dated, reasoned fix
+            # (2026-07-08) to match G1's discriminator width exactly. Likely
+            # explanation for the user's recollection: that 2026-07-08
+            # discriminator fix is the "we already fixed a hidden-dims value
+            # to match G1" event being remembered, misapplied here to a
+            # different network (actor/critic trunk, not the AMP
+            # discriminator) that was never actually touched.
+            "actor_hidden_dims": [512, 256, 256],
+            "critic_hidden_dims": [512, 256, 256],
             "activation": "elu",
         },
         "algorithm": {
@@ -350,8 +383,67 @@ def goalkeeper_multidisc_amp_runner_cfg() -> dict:
             "desired_kl": 0.01,
             "max_grad_norm": 1.0,
             "amp_replay_buffer_size": 250_000,
+            # FIX 2026-07-20 (item 24, obs/PPO audit): policy/value
+            # smoothness regularizer, previously deferred (MultiDiscAMPPPO's
+            # storage couldn't support it -- see _mini_batch_generator_with_
+            # next in multi_disc_amp_ppo.py, added to close this gap).
+            # Explicit here even though these match MultiDiscAMPPPO.__init__'s
+            # own defaults, for parity with G1's actual, exercised values
+            # (neither g1_29_config.py nor legged_robot_config.py override
+            # HIMPPO's class defaults for these three).
+            "value_smoothness_coef": 0.1,
+            "smoothness_upper_bound": 1.0,
+            "smoothness_lower_bound": 0.1,
         },
         "amp_data": amp_data,
+        # FIX 2026-07-21 (item 25, obs/PPO audit, deliberately done last):
+        # was 24 vs G1's proven 100 (Humanoid-Goalkeeper/legged_gym/legged_gym/
+        # envs/g1/g1_29_config.py:373, G129CfgPPO.runner.num_steps_per_env,
+        # never overridden -- G1's actual PPO batch is num_envs(6144) x
+        # num_steps_per_env(100) = 614,400, split across 6 discriminators
+        # (~102k/discriminator)). SGK's batch was 6144x24=147,456, split
+        # across 4 discriminators (~37k/discriminator) -- 2.8x smaller per
+        # discriminator even before accounting for the num_envs gap this was
+        # layered on top of. Evidence: run green_g1auditfixes_2026-07-20
+        # (which already had every other AMP/reward/curriculum/obs fix from
+        # the 2026-07-20 G1-comparison audit applied) showed AMP mean
+        # policy/expert predictions saturated at the LSGAN targets (~-0.999/
+        # +0.999) by iteration 27 and never meaningfully moved through
+        # iteration 3054 (-0.9567/+0.9585) -- the discriminator separates a
+        # still-poor early policy from expert motion almost instantly and
+        # stays saturated, starving predict_amp_reward's clamp(1-0.25*err,0)
+        # formula near its floor for the rest of training. This was flagged
+        # as the #1 suspected root cause in the original audit and
+        # deliberately saved for last. Verified GPU memory headroom before
+        # raising: RolloutStorage's own tensors scale with num_steps_per_env
+        # (combined_obs_shape=781 + critic_obs=92 + action/aux terms per
+        # env-step, ~3.77KB/(env,step)) -- at num_envs=6144 this is ~0.52GiB
+        # at 24 steps vs ~2.15GiB at 100 steps, a ~1.6GiB delta against
+        # ~14.3GiB of headroom measured on green_g1auditfixes_2026-07-20
+        # (8.67GB/23.03GB used at num_steps_per_env=24). This estimate was
+        # WRONG in practice: 100 CUDA-OOM'd on this A10 (23GB) after exactly
+        # one full iteration -- `wp_cuda_graph_launch` failed at the start of
+        # iteration 2's env.step(), i.e. real peak memory occurs with the PPO
+        # update's minibatch/smoothness-regularizer forward-backward passes
+        # and AMP expert-batch draws all sized up together, which also scale
+        # with num_steps_per_env and were not accounted for above (only
+        # RolloutStorage's own tensors were). Backed off to 64 (2.67x the
+        # original 24 -- a meaningful batch-size increase, well short of G1's
+        # 100 but empirically safe) after this crash. See docs/BugFixes.md.
+        #
+        # UPDATE 2026-07-21 (same day, AMP-saturation investigation):
+        # reverted back to 24. green_numsteps64_2026-07-21 ran ~2600
+        # iterations at the larger per-discriminator batch (~98k, close to
+        # G1's own ~102k/discriminator) and showed no meaningfully different
+        # saturation trajectory from the original 37k-batch run once
+        # compared on a per-environment-step (not per-iteration) basis --
+        # batch size alone does not appear to be the/a sufficient root
+        # cause. Meanwhile 64 vs 24 measurably slowed wall-clock iteration
+        # throughput for no observed AMP-quality benefit. Reverting to 24 to
+        # regain iteration speed while the actual suspected root cause (the
+        # discriminator policy-sample generator's with-replacement
+        # oversampling, see replay_buffer.py's feed_forward_generator fix,
+        # same commit) is tested instead. See docs/BugFixes.md.
         "num_steps_per_env": 24,
         "max_iterations": 50_000,
         "save_interval": 250,
@@ -362,7 +454,26 @@ def goalkeeper_multidisc_amp_runner_cfg() -> dict:
         # (wandb_project below), rather than a separate "-MultiDisc" project.
         "experiment_name": "intercept_simple_goalkeeper_multidisc",
         "run_name": "intercept_phase1",
-        "empirical_normalization": True,
+        # FIX 2026-07-20 (item 21, obs-scaling audit): was True, but dead --
+        # HimAMPOnPolicyRunner.__init__ (rsl_rl_multi/him_amp_on_policy_runner.py)
+        # never reads train_cfg["empirical_normalization"] and never
+        # constructs self.obs_normalizer/self.critic_obs_normalizer; this
+        # runner doesn't even define train_mode()/eval_mode() (G1's
+        # HIMOnPolicyRunner does, but those methods reference
+        # self.empirical_normalization/self.obs_normalizer, which its own
+        # __init__ also never assigns -- confirmed dead there too, never
+        # called from train.py/play.py). G1's actual, exercised mechanism is
+        # the fixed per-term obs_scales applied in compute_observations()
+        # (now ported -- see goalkeeper_env_cfg.py's actor/critic term
+        # scale= additions), not a learned running-mean/std normalizer.
+        # Set False to stop this flag from misleadingly implying a
+        # normalizer is active; wiring one up for real would need new
+        # normalizer state for both the single-step and 10-step-history obs
+        # paths, threaded through act()/evaluate()/save()/load() -- a real
+        # feature addition, not "a small amount of missing plumbing", so
+        # left unimplemented per this item's stated preference for matching
+        # G1's actual (fixed-scale-only) approach.
+        "empirical_normalization": False,
         "use_wandb": True,
         "wandb_project": "SimpleGoalKeeper",
         # FIX 2026-07-08: match G1's discriminator width exactly

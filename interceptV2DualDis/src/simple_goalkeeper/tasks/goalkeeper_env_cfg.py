@@ -165,22 +165,37 @@ def goalkeeper_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
         #   weight = base * (1 + 0.5 * curriculumupdate)  where cu = int(mean_ep_len / 50)
         # All three terms share env._curriculumupdate (set by whichever runs first each window).
         # G1 max (cu=3, ep_len=150): softstop 105→262.5, footreach 10→25.
+        #
+        # FIX 2026-07-20 (reward audit item 8, peak-magnitude cap): the six
+        # terms that can all fire around a single save event -- stopball,
+        # softstop, single_foot_save, cleanstop, inner_face_orientation_save,
+        # foot_inner_face_continuous -- summed to a combined max-curriculum
+        # peak of 18.75+131.25+100+50+50+10 = 360 even after the same-day
+        # halving pass above, still 1.44x G1's own ceiling for the equivalent
+        # single "did you stop it" event (_reward_stopball, curriculum-scaled
+        # 100->250, no per-foot/orientation/cleanliness sub-bonuses). Scaled
+        # this whole group down by a further 25/36 (0.69444) so the combined
+        # peak lands at exactly 250, preserving each term's relative share of
+        # the group (SGK's feet-specific quality bonuses stay individually
+        # reasoned, just resized to fit under G1's ceiling as a group):
+        #   stopball                    7.5   -> 5.21   (max 18.75 -> 13.02)
+        #   softstop                   52.5   -> 36.46  (max 131.25 -> 91.15)
+        #   single_foot_save           50.0   -> 34.72  (max 100 -> 69.44)
+        #   cleanstop                  25.0   -> 17.36  (max 50 -> 34.72)
+        #   inner_face_orientation_save 25.0  -> 17.36  (max 50 -> 34.72)
+        #   foot_inner_face_continuous  5.0   -> 3.47   (max 10 -> 6.94)
+        # New combined peak: 13.02+91.15+69.44+34.72+34.72+6.94 = 250.0 (exact,
+        # 25/36 chosen precisely so the sum lands on G1's ceiling). See
+        # docs/BugFixes.md for the full derivation. Static `weight=` values in
+        # cfg.rewards below (stopball/softstop) are also updated to match
+        # these new base weights -- they were previously stale pre-halving
+        # values only used in play mode (no curriculum there); this also
+        # fixes that pre-existing static/curriculum mismatch as a side effect.
         cfg.curriculum["softstop_curriculum"] = CurriculumTermCfg(
             func=gk_mdp.reward_curriculum_ep_len,
             params={
                 "reward_name": "softstop",
-                # FIX 2026-07-20 (reward-weight audit): was 105.0 (max 262.5 at
-                # cu=3). Combined with stopball below (30 at cu=3 pre-fix),
-                # stopball+softstop totaled up to 300 -- 3x G1's single
-                # stopball=100 for the same underlying "did you stop it"
-                # signal. Live-measured raw task-reward magnitude was ~3x
-                # raw AMP-reward magnitude (empirical: ~35/episode vs
-                # ~11.4/episode), meaning AMP's real share of the blended
-                # PPO objective was ~18% despite the nominal 40% blend ratio
-                # (lerp=0.6) being unchanged and untouched -- AMP itself is
-                # not being retuned, only the task-reward magnitude that was
-                # diluting its real influence. Halved to restore proportion.
-                "base_weight": 52.5,    # was 105.0 -- halved, max 131.25 at cu=3 (was 262.5)
+                "base_weight": 36.46,   # 52.5 * 25/36 -- see item-8 cap comment above
                 "update_interval": 500,
                 "ep_len_divisor":  50,
             },
@@ -200,16 +215,11 @@ def goalkeeper_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
             },
         )
         # G1 lines 363-364: stopball weight also grows with curriculum (same formula as eereach).
-        # Keep base 15 (max 37.5 at cu=3) well below softstop base 105 (max 262.5) so softstop
-        # remains the dominant primary signal. 5 shifted to softstop to make it the clear end goal.
         cfg.curriculum["stopball_curriculum"] = CurriculumTermCfg(
             func=gk_mdp.reward_curriculum_ep_len,
             params={
                 "reward_name": "stopball",
-                # FIX 2026-07-20 (reward-weight audit, paired with softstop
-                # above): was 15.0 (max 37.5 at cu=3). Halved for the same
-                # reason -- see softstop_curriculum's comment.
-                "base_weight": 7.5,      # was 15.0 -- halved, max 18.75 at cu=3 (was 37.5)
+                "base_weight": 5.21,    # 7.5 * 25/36 -- see item-8 cap comment above
                 "update_interval": 500,
                 "ep_len_divisor":  50,
             },
@@ -217,16 +227,32 @@ def goalkeeper_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
         # Correct-foot-save quality bonuses: weights double at cu >= 3 (ep_len ≈ 144 steps).
         # Only makes sense once the robot already saves reliably (cu=3 = footreach fully ramped).
         # One entry per reward, same pattern as reward_curriculum_ep_len.
+        # Base weights scaled by 25/36 (item-8 peak-magnitude cap, see comment above).
         for _name, _base in (
-            ("single_foot_save",             50.0),
-            ("cleanstop",                    25.0),
-            ("inner_face_orientation_save",  25.0),
-            ("foot_inner_face_continuous",    5.0),
+            ("single_foot_save",             34.72),
+            ("cleanstop",                    17.36),
+            ("inner_face_orientation_save",  17.36),
+            ("foot_inner_face_continuous",    3.47),
         ):
             cfg.curriculum[f"{_name}_curriculum"] = CurriculumTermCfg(
                 func=gk_mdp.correct_foot_save_curriculum,
                 params={"reward_name": _name, "base_weight": _base, "activate_at_cu": 3},
             )
+        # G1's own `success` reward (legged_robot.py:1402-1403): continuing,
+        # doubled-after-save, close-to-target signal -- NOT part of the item-8
+        # group above (G1 itself keeps it outside _reward_stopball's own
+        # weight ceiling). base=5.0 -> max 12.5 at cu=3, matching G1's
+        # success_init=5.0 (g1_29_config.py:300) exactly under the same
+        # weight=base*(1+0.5*cu) formula. See rewards.py:success docstring.
+        cfg.curriculum["success_curriculum"] = CurriculumTermCfg(
+            func=gk_mdp.reward_curriculum_ep_len,
+            params={
+                "reward_name": "success",
+                "base_weight": 5.0,
+                "update_interval": 500,
+                "ep_len_divisor":  50,
+            },
+        )
 
     # ------------------------------------------------------------------
     # Observations
@@ -242,10 +268,30 @@ def goalkeeper_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
     # Actor: only terms available at deployment on real hardware.
     # base_lin_vel, ball_vel_b, foot_pos_b removed — not measurable at deployment.
     # ball_pos_b kept as 3D (XY from camera + Z height for ball height awareness).
+    # FIX 2026-07-20 (item 21, obs-scaling audit): G1's compute_observations()
+    # (legged_robot.py:405-419) bakes fixed per-term scales directly into the
+    # obs vector before it ever reaches the network: obs_scales.ang_vel=0.25,
+    # dof_pos=1.0 (no-op), dof_vel=0.05, lin_vel=2.0, ball_vel=0.2
+    # (g1_29_config.py:191-201). SGK set no scale= on any term, leaving raw
+    # magnitudes (e.g. dof_vel in rad/s, O(1-10)) unscaled going into the
+    # network — a real divergence from G1's proven recipe. Added scale= to
+    # every term with a direct G1 analog, term-for-term.
+    #
+    # NOT scaled, by design, matching G1's ACTUAL (not merely configured)
+    # behavior: G1's obs_scales.ball_pos=0.3 is defined in config
+    # (g1_29_config.py:198) but is dead — grep of legged_robot.py confirms it
+    # is never applied to end_target_local or any other position term; G1's
+    # ball position, hand position, and dist terms are all left as raw
+    # meters. So ball_pos_b (position-type) and the SGK-only foot-position
+    # terms below correctly stay unscaled to match G1's real mechanism, not
+    # its aspirational-but-unused config value. projected_gravity and
+    # actions are likewise left raw in G1 (no obs_scales entry touches them
+    # at all).
     actor_terms = {
         "base_ang_vel": ObservationTermCfg(
             func=mjlab_mdp.base_ang_vel,
             noise=Unoise(n_min=-0.2, n_max=0.2),
+            scale=0.25,  # matches G1 obs_scales.ang_vel
         ),
         "projected_gravity": ObservationTermCfg(
             func=mjlab_mdp.projected_gravity,
@@ -254,10 +300,12 @@ def goalkeeper_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
         "joint_pos_rel": ObservationTermCfg(
             func=mjlab_mdp.joint_pos_rel,
             noise=Unoise(n_min=-0.01, n_max=0.01),
+            scale=1.0,  # matches G1 obs_scales.dof_pos (no-op, kept explicit)
         ),
         "joint_vel": ObservationTermCfg(
             func=mjlab_mdp.joint_vel_rel,
             noise=Unoise(n_min=-1.5, n_max=1.5),
+            scale=0.05,  # matches G1 obs_scales.dof_vel
         ),
         "actions": ObservationTermCfg(func=mjlab_mdp.last_action),
         # XY only — matches BoosterT1mjlab kick task for deployment compatibility.
@@ -265,6 +313,7 @@ def goalkeeper_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
         # applies manager noise after the term returns, which would re-noise the
         # gated zeros into a phantom ball. G1 noises first, then masks
         # (legged_robot.py:425-426) — noise_scale reproduces that ordering.
+        # Unscaled — see item-21 note above (G1's ball_pos scale is dead code).
         "ball_pos_b": ObservationTermCfg(
             func=gk_mdp.ball_pos_xy_b,
             params={
@@ -280,8 +329,12 @@ def goalkeeper_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
     # base_lin_vel, ball_vel_b, foot_pos_b help the value function during training
     # but are thrown away at deployment — only the actor network is used.
     # Critic also uses full 3D ball_pos_b for richer value estimation.
+    # `scale=v.scale` propagated so shared terms (ang_vel/dof_pos/dof_vel) get
+    # the same scaling on the critic path as the actor path — matches G1,
+    # whose compute_termination_observations() applies the identical
+    # obs_scales to the privileged/critic obs vector (legged_robot.py:447-455).
     critic_terms = {
-        k: ObservationTermCfg(func=v.func, params=v.params)
+        k: ObservationTermCfg(func=v.func, params=v.params, scale=v.scale)
         for k, v in actor_terms.items()
     }
     critic_terms["ball_pos_b"] = ObservationTermCfg(
@@ -289,11 +342,20 @@ def goalkeeper_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
         params={"ball_name": BALL_NAME, "always_visible": True},
     )
     critic_terms.update({
-        "base_lin_vel": ObservationTermCfg(func=gk_mdp.base_lin_vel),
+        "base_lin_vel": ObservationTermCfg(
+            func=gk_mdp.base_lin_vel,
+            scale=2.0,  # matches G1 obs_scales.lin_vel
+        ),
         "ball_vel_b": ObservationTermCfg(
             func=gk_mdp.ball_vel_b,
             params={"ball_name": BALL_NAME, "always_visible": True},
+            scale=0.2,  # matches G1 obs_scales.ball_vel (applied at legged_robot.py:415)
         ),
+        # No G1 analog (feet-only design). Natural magnitude relative to root
+        # is already O(0.1-0.8) m (leg length), i.e. within G1's design intent
+        # of O(0.1-1) scaled inputs — left unscaled rather than inventing an
+        # arbitrary factor, consistent with G1 leaving its own unscaled
+        # position-type terms (hand_pos, end_target_local, dist) raw.
         "left_foot_pos_b": ObservationTermCfg(
             func=gk_mdp.left_foot_pos_b,
             params={"asset_cfg": _FEET_CFG},
@@ -322,12 +384,16 @@ def goalkeeper_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
     cfg.observations["actor"].history_length = 10
     cfg.observations["critic"].history_length = 1
 
-    # Observation delay (training only): 0–2 steps = 0–40 ms at 50 Hz.
-    if not play:
-        for term_cfg in cfg.observations["actor"].terms.values():
-            term_cfg.delay_min_lag = 0
-            term_cfg.delay_max_lag = 2
-            term_cfg.delay_per_env = True
+    # FIX 2026-07-20 (item 22, obs-scaling audit): removed. G1 only delays
+    # actions (domain_rand.delay=True, g1_29_config.py:292; applied in
+    # step()'s action-interpolation loop, legged_robot.py:130-134) -- there is
+    # no per-observation delay mechanism anywhere in G1's proven recipe. This
+    # per-term delay_min_lag/delay_max_lag/delay_per_env block was a second,
+    # compounding source of temporal staleness on top of G1's action delay
+    # with no G1 analog. SGK's action-delay equivalent (BuiltinPositionActuatorCfg's
+    # own delay_min_lag/delay_max_lag=1-3, t1_constants.py:47,53 etc.) is a
+    # separate mechanism (per-actuator PD-target delay) and is untouched by
+    # this removal.
 
     # ------------------------------------------------------------------
     # Rewards — aligned with Imitationlearningbooster proven structure.
@@ -335,38 +401,54 @@ def goalkeeper_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
     # ------------------------------------------------------------------
     cfg.rewards = {
         # --- primary task signal ---
+        # FIX 2026-07-20 (reward audit item 8): static weight= values below
+        # for stopball/softstop/single_foot_save/cleanstop/
+        # inner_face_orientation_save/foot_inner_face_continuous now match
+        # their curriculum's (cu=0) base_weight -- see the item-8 comment
+        # above cfg.curriculum["softstop_curriculum"] for the full peak-
+        # magnitude-cap derivation. These static values are what play mode
+        # actually uses (curriculum is only registered `if not play`); before
+        # this fix, stopball/softstop's static values were stale pre-halving
+        # leftovers (15.0/105.0) that no longer matched their own curriculum's
+        # base_weight (7.5/52.5 pre-cap) at all.
         "stopball": RewardTermCfg(
             func=gk_mdp.stopball,
-            weight=15.0,
+            weight=5.21,
             params={"ball_name": BALL_NAME, "delta_vel_threshold": 0.6},
         ),
         # --- partial deflection signal (fires before stopball; gates _ball_is_behind) ---
         "softstop": RewardTermCfg(
             func=gk_mdp.softstop,
-            weight=105.0,
+            weight=36.46,
             params={"ball_name": BALL_NAME, "velocity_threshold": 0.05},
+        ),
+        # --- continuing close-to-target signal, doubled after first save (ports G1 _reward_success) ---
+        "success": RewardTermCfg(
+            func=gk_mdp.success,
+            weight=5.0,
+            params={"ball_name": BALL_NAME, "asset_cfg": _FEET_CFG, "strict_th": 0.15},
         ),
         # --- single-foot save bonus: same foot first contacted AND caused the reversal ---
         "single_foot_save": RewardTermCfg(
             func=gk_mdp.single_foot_save,
-            weight=50.0,
+            weight=34.72,
             params={"ball_name": BALL_NAME},
         ),
         # --- clean-trap bonus: ball nearly dead after deflection ---
         "cleanstop": RewardTermCfg(
             func=gk_mdp.cleanstop,
-            weight=25.0,
+            weight=17.36,
             params={"ball_name": BALL_NAME, "speed_threshold": 0.10},
         ),
         # --- save quality bonuses (fire on top of softstop, not as a gate) ---
         "inner_face_orientation_save": RewardTermCfg(
             func=gk_mdp.inner_face_orientation_save,
-            weight=25.0,
+            weight=17.36,
             params={"ball_name": BALL_NAME, "alignment_threshold": 0.7, "asset_cfg": _FEET_CFG},
         ),
         "foot_inner_face_continuous": RewardTermCfg(
             func=gk_mdp.foot_inner_face_continuous,
-            weight=5.0,
+            weight=3.47,
             params={"ball_name": BALL_NAME, "asset_cfg": _FEET_CFG},
         ),
         # --- ball interception (feet-only) ---
@@ -489,7 +571,20 @@ def goalkeeper_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
         "dof_vel_limits": RewardTermCfg(
             func=gk_mdp.dof_vel_limits,
             weight=-2.0,
-            params={"vel_threshold": 10.0, "asset_cfg": _ALL_JOINTS_CFG},
+            # FIX 2026-07-20 (reward audit item 7): was a single flat 10 rad/s
+            # cap for every joint (`vel_threshold=10.0`) -- T1's real per-joint
+            # motor velocity limits (t1_constants.py ElectricActuator specs)
+            # span ~7.3-16.4 rad/s, so the flat 10 silently never fired for
+            # the slower joints (arms ~9.3, waist/hip-roll/hip-yaw ~7.3).
+            # T1's MJCF defines no joint velocity limit at all (only a
+            # position `range`), so there is no XML value to source instead --
+            # confirmed by grepping xmls/t1_headless.xml and t1.xml for
+            # <actuator>/<general>/velocity attributes (none exist). Switched
+            # to per-joint limits x0.9 (soft_factor, matching G1's
+            # soft_dof_vel_limit=0.9, g1_29_config.py:349) sourced from the
+            # same real motor specs already used for action_scale/kp/kd --
+            # see _T1_VEL_LIMIT_MAP in rewards.py and docs/BugFixes.md.
+            params={"asset_cfg": _ALL_JOINTS_CFG},
         ),
         "torque_limits": RewardTermCfg(
             func=gk_mdp.torque_limits,
@@ -499,7 +594,16 @@ def goalkeeper_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
         # --- stability ---
         "ang_vel_xy": RewardTermCfg(
             func=gk_mdp.ang_vel_xy_l2,
-            weight=-0.5,
+            # FIX 2026-07-20 (reward audit item 5): was -0.5, drifted 5x from
+            # G1's -0.1 (g1_29_config.py:323). Commit ee7eb04 ("stronger body
+            # roll/pitch penalty") changed -0.1 -> -0.5 as an ad hoc training
+            # tweak with no G1-based justification (not "read G1 and found a
+            # reason to diverge" -- just "stronger penalty felt needed" at
+            # the time) -- CLAUDE.md's own Reward Design table kept -0.1 the
+            # whole time, confirming this was accidental drift the doc never
+            # caught up with, not a documented decision. Reverted to G1's
+            # literal value.
+            weight=-0.1,
             params={"asset_cfg": _ROBOT_CFG},
         ),
         "ang_vel_z": RewardTermCfg(
@@ -520,21 +624,35 @@ def goalkeeper_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
         ),
         "action_rate_l2": RewardTermCfg(
             func=mjlab_mdp.action_rate_l2,
-            # FIX 2026-07-20 (reward-weight audit): was -0.3 -- reverted to
-            # G1's literal matched weight (smoothness=-0.1, g1_29_config.py).
-            # This was the single largest negative real-magnitude
-            # contributor (-3.79/step), 3x G1's own weight for the
-            # equivalent term -- a direct, simple divergence fix.
-            weight=-0.1,
+            # FIX 2026-07-20 (reward audit item 4): was -0.1, mistakenly
+            # carrying G1's smoothness=-0.1 match (g1_29_config.py:325) here.
+            # mjlab's action_rate_l2 is `action - prev_action` -- FIRST order
+            # (mjlab/envs/mdp/rewards.py) -- so it is NOT the structural
+            # analog of G1's `_reward_smoothness`, which is SECOND order
+            # (`actions - 2*last_actions + last_last_actions`,
+            # legged_robot.py:1532-1534). That match belongs to action_acc_l2
+            # (below), which mjlab implements as
+            # `action - 2*prev_action + prev_prev_action` -- the identical
+            # formula. Swapped: action_acc_l2 now takes G1's -0.1; this term
+            # (genuinely no G1 equivalent) gets a reasoned, halved value
+            # following the same day's halving treatment of other
+            # no-G1-equivalent terms found to be inflating raw task-reward
+            # magnitude (foot_ang_vel_xy -0.5->-0.25, and the old,
+            # mislabeled action_acc_l2 -0.1->-0.05).
+            weight=-0.05,
         ),
         "action_acc_l2": RewardTermCfg(
             func=mjlab_mdp.action_acc_l2,
-            # FIX 2026-07-20 (reward-weight audit): was -0.1. No G1
-            # equivalent; live-measured real magnitude (-3.43/step) was the
-            # 3rd-largest contributor in the whole reward table despite the
-            # small nominal weight. Halved rather than removed -- jerk
-            # penalty likely still useful for hardware realism.
-            weight=-0.05,
+            # FIX 2026-07-20 (reward audit item 4): was -0.05, mislabeled "no
+            # G1 equivalent". mjlab's action_acc_l2
+            # (`action - 2*prev_action + prev_prev_action`) IS the exact
+            # structural match for G1's `_reward_smoothness`
+            # (legged_robot.py:1532-1534: `actions - last_actions -
+            # last_actions + last_last_actions`, algebraically identical) --
+            # weight=-0.1 in g1_29_config.py:325. Reverted to G1's literal
+            # matched weight; see action_rate_l2's comment for the full swap
+            # rationale.
+            weight=-0.1,
         ),
         "dof_vel": RewardTermCfg(
             func=mjlab_mdp.joint_vel_l2,

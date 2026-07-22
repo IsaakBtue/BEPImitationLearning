@@ -47,6 +47,17 @@ class MultiDiscAMPPPO:
         device: str = "cpu",
         amp_replay_buffer_size: int = 100_000,
         min_std=None,
+        # FIX 2026-07-20 (item 24, obs/PPO audit): policy/value smoothness
+        # regularizer, ported from Humanoid-Goalkeeper/rsl_rl/rsl_rl/
+        # algorithms/him_ppo.py:55-57. Defaults match G1's actual, exercised
+        # values -- g1_29_config.py's G129CfgPPO(LeggedRobotCfgPPO) never
+        # overrides any of the three (legged_robot_config.py's
+        # LeggedRobotCfgPPO.algorithm has no smoothness fields either), so
+        # G1's reference training run used HIMPPO.__init__'s class defaults
+        # verbatim.
+        value_smoothness_coef: float = 0.1,
+        smoothness_upper_bound: float = 1.0,
+        smoothness_lower_bound: float = 0.1,
         **kwargs,
     ):
         self.device = device
@@ -54,6 +65,9 @@ class MultiDiscAMPPPO:
         self.schedule = schedule
         self.learning_rate = learning_rate
         self.min_std = min_std
+        self.value_smoothness_coef = value_smoothness_coef
+        self.smoothness_upper_bound = smoothness_upper_bound
+        self.smoothness_lower_bound = smoothness_lower_bound
         self.region_id_critic_obs_index = region_id_critic_obs_index
         self.ball_gt_critic_obs_slice = ball_gt_critic_obs_slice
 
@@ -181,6 +195,81 @@ class MultiDiscAMPPPO:
         last_values = self.actor_critic.evaluate(last_critic_obs.detach()).detach()
         self.storage.compute_returns(last_values, self.gamma, self.lam)
 
+    def _mini_batch_generator_with_next(self, num_mini_batches, num_epochs=1):
+        """PPO minibatch generator that additionally yields each sample's
+        "next" (t+1) observation and a not-done continuation mask.
+
+        FIX 2026-07-20 (item 24, obs/PPO audit): needed for the policy/value
+        smoothness regularizer (see update()), ported from G1's HIMPPO. G1's
+        own storage class (rsl_rl/rsl_rl/storage/him_rollout_storage.py)
+        carries a dedicated next_obs/cont mechanism that this fork's plain
+        RolloutStorage (rsl_rl_amp/storage/rollout_storage.py, shared by
+        other beyondAMP tasks) does not -- the smooth-loss port was
+        previously deferred for exactly this reason (see the removed comment
+        this replaces, in update() below).
+
+        Rather than modifying the shared RolloutStorage class (used by other
+        tasks) to add next-obs tracking, this reads RolloutStorage's already-
+        public raw [T, N, *] buffers directly and derives "next" data the
+        same way G1's HIMRolloutStorage.mini_batch_generator does: reserve
+        the last per-env timestep (index T-1) as having no defined "next"
+        (batch_size uses N*(T-1), not N*T), then pair every sampled step t
+        with the SAME buffer's step t+1 via a index-shifted slice
+        (buffer[1:] vs buffer[:-1]) -- no new storage tensors, just a second
+        read of data already recorded for the standard PPO loss terms.
+
+        cont_batch (not-done mask, 1.0 unless the transition at t ended the
+        episode) mirrors G1's `not_dones`: the smoothness loss multiplies its
+        random mix weight by this mask, so whenever t+1 is actually a
+        post-reset observation from a *different* episode, the mix weight is
+        forced to 0 and no cross-episode mixing occurs (see update()).
+        """
+        storage = self.storage
+        num_envs = storage.num_envs
+        num_transitions = storage.num_transitions_per_env
+        batch_size = num_envs * (num_transitions - 1)
+        mini_batch_size = batch_size // num_mini_batches
+        indices = torch.randperm(
+            num_mini_batches * mini_batch_size, requires_grad=False, device=self.device
+        )
+
+        observations = storage.observations[:-1].flatten(0, 1)
+        next_observations = storage.observations[1:].flatten(0, 1)
+        if storage.privileged_observations is not None:
+            critic_observations = storage.privileged_observations[:-1].flatten(0, 1)
+            next_critic_observations = storage.privileged_observations[1:].flatten(0, 1)
+        else:
+            critic_observations = observations
+            next_critic_observations = next_observations
+        actions = storage.actions[:-1].flatten(0, 1)
+        values = storage.values[:-1].flatten(0, 1)
+        returns = storage.returns[:-1].flatten(0, 1)
+        old_actions_log_prob = storage.actions_log_prob[:-1].flatten(0, 1)
+        advantages = storage.advantages[:-1].flatten(0, 1)
+        old_mu = storage.mu[:-1].flatten(0, 1)
+        old_sigma = storage.sigma[:-1].flatten(0, 1)
+        not_dones = 1.0 - storage.dones[:-1].float().flatten(0, 1)
+
+        for _ in range(num_epochs):
+            for i in range(num_mini_batches):
+                start = i * mini_batch_size
+                end = (i + 1) * mini_batch_size
+                batch_idx = indices[start:end]
+                yield (
+                    observations[batch_idx],
+                    next_observations[batch_idx],
+                    critic_observations[batch_idx],
+                    next_critic_observations[batch_idx],
+                    not_dones[batch_idx],
+                    actions[batch_idx],
+                    values[batch_idx],
+                    returns[batch_idx],
+                    old_actions_log_prob[batch_idx],
+                    advantages[batch_idx],
+                    old_mu[batch_idx],
+                    old_sigma[batch_idx],
+                )
+
     def predict_region_routed_amp_reward(self, amp_obs, next_amp_obs, region_id, task_reward):
         """Rollout-time style reward, routed per-sample by region id. Mirrors
         him_on_policy_runner.py:161-178's masked predict_reward loop.
@@ -208,7 +297,15 @@ class MultiDiscAMPPPO:
         mean_value_loss = mean_surrogate_loss = mean_amp_loss = mean_grad_pen_loss = 0.0
         mean_est_loss = mean_region_loss = mean_policy_pred = mean_expert_pred = 0.0
 
-        generator = self.storage.mini_batch_generator(self.num_mini_batches, self.num_learning_epochs)
+        # FIX 2026-07-20 (item 24, obs/PPO audit): was self.storage.
+        # mini_batch_generator(...), which doesn't expose next-step obs/cont
+        # data. Swapped for _mini_batch_generator_with_next (defined above),
+        # which reads the same underlying RolloutStorage buffers plus the
+        # t+1 shift needed for the smoothness regularizer below -- see that
+        # method's docstring. This does NOT modify RolloutStorage itself
+        # (still used unmodified by other beyondAMP tasks); only this class
+        # reads its raw buffers a second way.
+        generator = self._mini_batch_generator_with_next(self.num_mini_batches, self.num_learning_epochs)
         minibatch_size = self.storage.num_envs * self.storage.num_transitions_per_env // self.num_mini_batches
         amp_expert_generators = {
             name: ds.feed_forward_generator(
@@ -216,17 +313,23 @@ class MultiDiscAMPPPO:
             )
             for name, ds in self.amp_datasets.items()
         }
+        # FIX 2026-07-21 (AMP-saturation investigation): ReplayBuffer.
+        # feed_forward_generator's signature changed from a flattened
+        # (draw_count, draw_size) pair to (num_mini_batches,
+        # num_learning_epochs) -- it now derives each region's own draw size
+        # internally and reuses one permutation across epochs, matching G1's
+        # deterministic reuse cadence instead of independent with-
+        # replacement resampling every draw. See replay_buffer.py's
+        # docstring and docs/BugFixes.md for the full account.
         amp_policy_generators = {
-            name: rb.feed_forward_generator(
-                self.num_learning_epochs * self.num_mini_batches, minibatch_size,
-            )
+            name: rb.feed_forward_generator(self.num_mini_batches, self.num_learning_epochs)
             for name, rb in self.amp_storages.items()
         }
 
         for sample in generator:
-            (obs_batch, critic_obs_batch, actions_batch, target_values_batch, advantages_batch,
-             returns_batch, old_actions_log_prob_batch, old_mu_batch, old_sigma_batch,
-             hid_states_batch, masks_batch) = sample
+            (obs_batch, next_obs_batch, critic_obs_batch, next_critic_obs_batch, cont_batch,
+             actions_batch, target_values_batch, returns_batch, old_actions_log_prob_batch,
+             advantages_batch, old_mu_batch, old_sigma_batch) = sample
 
             # 2026-07-06: run 2026-07-06_01-14-09_intercept_phase1 showed
             # action_rate_l2/action_acc_l2 (unbounded quadratic penalties on
@@ -235,14 +338,13 @@ class MultiDiscAMPPPO:
             # produced value_function loss up to 1e26 and never recovered.
             # G1 (Humanoid-Goalkeeper/rsl_rl/algorithms/him_ppo.py) has no
             # equivalent clamp, but it also has no unbounded-magnitude reward
-            # source like this and additionally runs a value/policy
-            # smooth_loss regularizer this fork's plain RolloutStorage can't
-            # support (no next_obs/cont tracking) -- porting that is a larger
-            # storage change, deferred. This clamp is the minimal targeted
-            # fix: bound the value regression target so one anomalous step
-            # can never blow up value_loss's gradient magnitude by 20 orders
-            # of magnitude. 1000 is >> any plausible genuine return here
+            # source like this. This clamp is the minimal targeted fix: bound
+            # the value regression target so one anomalous step can never
+            # blow up value_loss's gradient magnitude by 20 orders of
+            # magnitude. 1000 is >> any plausible genuine return here
             # (softstop alone maxes out at curriculum weight 250 one-shot).
+            # Kept even after porting the smoothness regularizer (item 24,
+            # below) -- unrelated failure mode, still worth guarding.
             returns_batch = returns_batch.clamp(-1000.0, 1000.0)
             target_values_batch = target_values_batch.clamp(-1000.0, 1000.0)
 
@@ -296,6 +398,43 @@ class MultiDiscAMPPPO:
             loss = (surrogate_loss + self.value_loss_coef * value_loss
                     - self.entropy_coef * entropy_batch.mean() + est_loss + region_loss)
 
+            # Policy/value smoothness regularizer (item 24, obs/PPO audit,
+            # 2026-07-20). Ported from G1's HIMPPO.update (him_ppo.py:231-
+            # 242): penalizes the actor/critic for jumping when the input is
+            # perturbed toward/past the next real (same-episode) observation
+            # -- a cheap local-Lipschitz regularizer using only data already
+            # in this minibatch (see _mini_batch_generator_with_next above),
+            # no additional storage needed beyond the raw rollout buffers
+            # RolloutStorage already keeps for the ordinary PPO losses.
+            #
+            # MUST run after est_loss/region_loss are computed, not before:
+            # self.actor_critic.act_inference(...) below internally recomputes
+            # self.actor_critic.estimate_ball/estimate_region as a side effect
+            # (HimActorCritic._build_actor_input, him_actor_critic.py), which
+            # would silently corrupt est_loss/region_loss above if this block
+            # ran first. mu_batch/value_batch are already-materialized tensors
+            # by this point, so they're unaffected by that side effect either
+            # way -- only the not-yet-read estimator properties are at risk.
+            epsilon = self.smoothness_lower_bound / (self.smoothness_upper_bound - self.smoothness_lower_bound)
+            policy_smooth_coef = self.smoothness_upper_bound * epsilon
+            value_smooth_coef = self.value_smoothness_coef * policy_smooth_coef
+
+            mix_weights = cont_batch * (torch.rand_like(cont_batch) - 0.5) * 2.0
+            mix_obs_batch = obs_batch + mix_weights * (next_obs_batch - obs_batch)
+            mix_critic_obs_batch = critic_obs_batch + mix_weights * (next_critic_obs_batch - critic_obs_batch)
+            mix_obs_current_batch = mix_obs_batch[:, : self._obs_current_dim]
+            mix_obs_history_batch = mix_obs_batch[:, self._obs_current_dim :]
+
+            policy_smooth_loss = torch.square(torch.norm(
+                mu_batch - self.actor_critic.act_inference(mix_obs_current_batch, mix_obs_history_batch),
+                dim=-1,
+            )).mean()
+            value_smooth_loss = torch.square(torch.norm(
+                value_batch - self.actor_critic.evaluate(mix_critic_obs_batch), dim=-1,
+            )).mean()
+            smooth_loss = policy_smooth_coef * policy_smooth_loss + value_smooth_coef * value_smooth_loss
+            loss = loss + smooth_loss
+
             # Region-routed AMP loss (ported from him_ppo.py:244-305).
             amp_loss = torch.tensor(0.0, device=self.device)
             grad_pen_loss = torch.tensor(0.0, device=self.device)
@@ -321,24 +460,59 @@ class MultiDiscAMPPPO:
                 policy_d = discr(torch.cat([policy_state_n, policy_next_state_n], dim=-1))
                 expert_loss = torch.nn.MSELoss()(expert_d, torch.ones(expert_d.size(), device=self.device))
                 policy_loss = torch.nn.MSELoss()(policy_d, -1 * torch.ones(policy_d.size(), device=self.device))
-                # FIX 2026-07-08: match G1 exactly (Humanoid-Goalkeeper/rsl_rl/
-                # rsl_rl/modules/amp.py:124-173). G1's compute_grad_pen defaults
+                # FIX 2026-07-08: matched G1 exactly (Humanoid-Goalkeeper/rsl_rl/
+                # rsl_rl/modules/amp.py:124-173) -- G1's compute_grad_pen defaults
                 # to lambda_=5, then compute_loss applies an additional *0.1
-                # scaling on top (grad_pen = self.compute_grad_pen(...) * 0.1),
-                # net effective coefficient 0.5. This port previously called
-                # lambda_=10 with no further scaling -- effective coefficient
-                # 10, ~20x stronger regularization than G1, which over-flattens
-                # the discriminator's logit landscape. Also: G1's gail_loss is
-                # the unweighted sum (expert_loss + policy_loss); this port
-                # previously averaged (0.5 * each), halving amp_loss's relative
-                # magnitude against the rest of the total loss. Both now match
-                # G1's actual formula, not just its outcome. See docs/BugFixes.md.
-                grad_pen = discr.compute_grad_pen(expert_state_n, expert_next_state_n, lambda_=5) * 0.1
+                # scaling on top, net effective coefficient 0.5. Also matched
+                # G1's gail_loss = unweighted sum (expert_loss + policy_loss),
+                # not the previous 0.5-averaged version. See docs/BugFixes.md.
+                #
+                # UPDATE 2026-07-21 (AMP-saturation investigation, deliberate
+                # divergence from G1 -- not a parity fix): effective 0.5 was
+                # G1-matched but a live G1 baseline run today (Isaac Gym,
+                # Python 3.8 env, `g1_amp_longrun_2026-07-21`) showed a
+                # healthy, rising `Train/mean_amp_reward` (7.6 -> ~17 over 17
+                # iterations) under this same effective 0.5 -- while SGK's
+                # equivalent signal has been independently confirmed (direct
+                # per-sample discriminator probing, docs/BugFixes.md's
+                # 2026-07-20 "discriminator-probe finding") to collapse to its
+                # floor by iteration ~2000 and stay there through iteration
+                # 12000 in a full-length run, and again through 2600+
+                # iterations today after two other fixes (per-discriminator
+                # batch size, discriminator-sampling scheme) neither changed
+                # this. That entry's own root-cause read: G1's regions are
+                # single atomic motions needing only coarse discrimination,
+                # while SGK's compositional double/triple-step target needs a
+                # much longer-lived, finer-grained discriminator signal than
+                # the same recipe naturally provides -- pointing at the
+                # discriminator's own regularization strength, not batch size,
+                # as the more likely lever. Raising the effective R1 penalty
+                # toward the *original AMP paper's own default* (Peng et al.
+                # 2021, "AMP: Adversarial Motion Priors", =10, not G1's 0.5 --
+                # G1 itself already diverges from the paper's own recommended
+                # default) is the next candidate from that investigation:
+                # stronger gradient penalty keeps the discriminator's decision
+                # boundary smoother near real data, directly opposing the
+                # "discriminator races ahead and gives no graded signal"
+                # dynamic this project's own probe diagnosed. This is a
+                # genuine, undocumented-until-now departure from G1's proven
+                # value, not a bug fix -- explicit user decision after
+                # reviewing the tradeoff (G1-parity vs. addressing a
+                # documented, G1-baseline-contradicted collapse). Note: this
+                # exact effective value (10) was the port's ORIGINAL value
+                # before the 2026-07-08 fix above reduced it to match G1 --
+                # this change consciously reverts that G1-parity fix in light
+                # of today's new evidence that G1-parity alone doesn't
+                # reproduce G1's non-collapsing behavior. If this doesn't
+                # help, revert and pursue the task-complexity-mismatch
+                # hypothesis instead (richer discriminator input features,
+                # discriminator capacity, or per-motion-type granularity).
+                grad_pen = discr.compute_grad_pen(expert_state_n, expert_next_state_n, lambda_=100) * 0.1
                 amp_loss = amp_loss + expert_loss + policy_loss
                 grad_pen_loss = grad_pen_loss + grad_pen
                 expert_preds.append(expert_d.mean().item())
                 policy_preds.append(policy_d.mean().item())
-                normalizer_states.append((policy_state, expert_state))
+                normalizer_states.append((policy_state, policy_next_state, expert_state, expert_next_state))
 
             loss = loss + amp_loss + grad_pen_loss
 
@@ -358,10 +532,29 @@ class MultiDiscAMPPPO:
             # of data. Here each region draws its own policy/expert pair, so
             # each pair feeds the update, keeping the normalizer's statistics
             # from staying frozen at init.
+            #
+            # FIX 2026-07-20 (item 3): previously only fed policy_state/
+            # expert_state (the "t" half of each transition) into update(),
+            # never policy_next_state/expert_next_state (the "t+1" half) --
+            # even though both halves are normalized and consumed by the
+            # discriminator (see expert_state_n/expert_next_state_n/
+            # policy_state_n/policy_next_state_n above). G1's normalizer
+            # update (Humanoid-Goalkeeper/rsl_rl/rsl_rl/algorithms/him_ppo.py:
+            # 304-305) feeds the FULL concatenated [state, next_state] vector
+            # every step, since G1's amp_obs_batch IS already that
+            # concatenated pair. This codebase's normalizer instead operates
+            # in single-frame-width space (called separately on each half),
+            # so the correct analog of "feed the full transition" is to
+            # update with BOTH halves rather than doubling the vector width.
+            # Previously this meant the running stats used to normalize
+            # every next_state sample were themselves computed only from
+            # state samples. See docs/BugFixes.md.
             if self.amp_normalizer is not None:
-                for policy_state, expert_state in normalizer_states:
+                for policy_state, policy_next_state, expert_state, expert_next_state in normalizer_states:
                     self.amp_normalizer.update(policy_state.cpu().numpy())
+                    self.amp_normalizer.update(policy_next_state.cpu().numpy())
                     self.amp_normalizer.update(expert_state.cpu().numpy())
+                    self.amp_normalizer.update(expert_next_state.cpu().numpy())
 
             mean_value_loss += value_loss.item()
             mean_surrogate_loss += surrogate_loss.item()

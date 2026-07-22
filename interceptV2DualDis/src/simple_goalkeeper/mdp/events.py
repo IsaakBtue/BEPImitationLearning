@@ -249,6 +249,26 @@ class MotionResetManager:
         _reset_root_states also randomizes root velocity ±0.3 unconditionally
         on every reset, which this project's reset_base does not — a known,
         separate divergence outside reset_from_motion_data's scope).
+
+        FIX 2026-07-20: the else-branch clip below previously used
+        `robot.data.joint_pos_limits` (mjlab's HARD limit field, straight from
+        `mj_model.jnt_range`). That does NOT match G1: the pseudocode quoted
+        above clips to `self.dof_pos_limits`, but G1's `_process_dof_props`
+        (legged_robot.py:545-563) OVERWRITES `self.dof_pos_limits` in place to
+        `mean +/- 0.5*range*soft_dof_pos_limit` (`cfg.rewards.soft_dof_pos_limit
+        = 0.9`, g1_29_config.py:348) before `_reset_dofs` ever runs -- the hard
+        limits survive separately as `self.hard_dof_pos_limits`, which
+        `_reset_dofs` never touches. So G1's reset clip is SOFT (90% of URDF
+        range), not hard, despite the variable name. mjlab keeps the same two
+        fields split out explicitly: `joint_pos_limits` (hard, from
+        `mj_model.jnt_range`) vs `soft_joint_pos_limits` (mean +/-
+        0.5*range*soft_joint_pos_limit_factor, computed in
+        `entity.py:_initialize_data`). `t1_constants.py:112` already sets
+        `soft_joint_pos_limit_factor=0.9`, the same 0.9 G1 uses, so
+        `robot.data.soft_joint_pos_limits` is the exact equivalent of G1's
+        `self.dof_pos_limits` at reset time. `_write_rsi_state` above already
+        used the correct soft field; only this branch had the hard/soft mixup.
+        See docs/BugFixes.md.
         """
         if env_ids is None:
             env_ids = torch.arange(env.num_envs, device=env.device, dtype=torch.int32)
@@ -267,7 +287,10 @@ class MotionResetManager:
             scale = sample_uniform(0.5, 1.5, (n, num_dof), env.device)
             offset = sample_uniform(-0.1, 0.1, (n, num_dof), env.device)
             joint_pos = default_pos * scale + offset
-            limits = robot.data.joint_pos_limits[env_ids.long()]
+            # FIX 2026-07-20: was robot.data.joint_pos_limits (HARD limits) --
+            # G1's self.dof_pos_limits is overwritten to SOFT limits before
+            # _reset_dofs runs. See this method's docstring.
+            limits = robot.data.soft_joint_pos_limits[env_ids.long()]
             joint_pos = joint_pos.clamp(limits[..., 0], limits[..., 1])
 
         joint_vel = torch.zeros_like(joint_pos)
@@ -551,13 +574,39 @@ def _update_smoothed_ep_len(env: "ManagerBasedRlEnv", mean_ep_len: float) -> flo
     of that idea -- a genuine, sustained shift still moves cu within a few
     updates, but a single noisy window can no longer flip it outright.
     See docs/BugFixes.md.
+
+    FIX 2026-07-20: this function is the single point every curriculum term
+    calls into, but it used to actually re-apply the EMA update on every call
+    -- and up to 5 curriculum term instances (ball_difficulty_curriculum,
+    3x reward_curriculum_ep_len [softstop/footreach/stopball], plus
+    far_travel_curriculum on the multi-disc task) share the same
+    update_interval=500 and the same env_ids each window, so all of them
+    become eligible in the SAME CurriculumManager.compute() call and each
+    independently called this function with the identical mean_ep_len
+    reading. Applying the EMA update k times in a row with the same input m
+    gives effective weight 1-(1-alpha)^k on the newest reading instead of the
+    intended alpha=0.3 -- k=4 (single-disc task): 76%; k=5 (multi-disc task,
+    +far_travel): 83%. That defeats the whole point of this function (damping
+    single-window noise). Fixed by guarding the update itself with a shared
+    env._last_ema_update_step: the first curriculum term to call this
+    function in a given common_step_counter actually applies the EMA step;
+    every other term calling in during that same step just reads back the
+    already-updated cached value. Chosen over gating in each term class
+    because this function is already the single shared choke point every
+    caller goes through -- no changes needed to the term classes themselves.
+    See docs/BugFixes.md.
     """
+    current_step = env.common_step_counter
     if not hasattr(env, "_smoothed_ep_len"):
         env._smoothed_ep_len = mean_ep_len
-    else:
+        env._last_ema_update_step = current_step
+    elif getattr(env, "_last_ema_update_step", None) != current_step:
         env._smoothed_ep_len = (
             _CURRICULUM_EMA_ALPHA * mean_ep_len + (1.0 - _CURRICULUM_EMA_ALPHA) * env._smoothed_ep_len
         )
+        env._last_ema_update_step = current_step
+    # else: already updated this window by an earlier curriculum term in the
+    # same compute() call -- no-op, just return the cached value below.
     return env._smoothed_ep_len
 
 
@@ -586,7 +635,18 @@ class reward_curriculum_ep_len:
         self._base_weight     = p["base_weight"]
         self._update_interval = p.get("update_interval", 500)
         self._ep_len_divisor  = p.get("ep_len_divisor",   50)
-        self._last_update     = -(self._update_interval)  # fire immediately on first call
+        # FIX 2026-07-20: was -(update_interval), which makes
+        # `common_step_counter - self._last_update >= update_interval` true
+        # immediately at common_step_counter=0 -- fires on the very first
+        # eligible call (potentially iteration 1) using whatever noisy/near-
+        # zero episode-length reading exists that early. G1 requires
+        # `common_step_counter > 500` before its first curriculum update
+        # (legged_robot.py:325, with `last_step_counter=0` at init,
+        # legged_robot.py:881) -- i.e. a full window must elapse first.
+        # Initializing to 0 (matching G1's last_step_counter=0) reproduces
+        # that: first eligible fire is common_step_counter >= update_interval.
+        # See docs/BugFixes.md.
+        self._last_update     = 0
         self._term_cfg        = env.reward_manager.get_term_cfg(self._reward_name)
         if not hasattr(env, "_curriculumupdate"):
             env._curriculumupdate = 0
@@ -710,7 +770,10 @@ class ball_difficulty_curriculum:
         self._step_size      = p.get("step_size",      0.01)
         self._update_interval = p.get("update_interval", 500)
         self._ep_len_divisor  = p.get("ep_len_divisor",   50)
-        self._last_update     = -(self._update_interval)
+        # FIX 2026-07-20: was -(update_interval) -- see reward_curriculum_ep_len's
+        # __init__ comment for the full explanation. 0 matches G1's
+        # last_step_counter=0 init, requiring a full window before first fire.
+        self._last_update     = 0
         if not hasattr(env, "_ball_difficulty"):
             env._ball_difficulty = 0.0
 
@@ -844,7 +907,10 @@ class far_travel_curriculum:
         self._ep_len_divisor  = p.get("ep_len_divisor",   50)
         self._lo              = p.get("lo", 0.5)
         self._hi              = p.get("hi", 1.3)
-        self._last_update     = -(self._update_interval)
+        # FIX 2026-07-20: was -(update_interval) -- see reward_curriculum_ep_len's
+        # __init__ comment for the full explanation. 0 matches G1's
+        # last_step_counter=0 init, requiring a full window before first fire.
+        self._last_update     = 0
         span = self._hi - self._lo
         if not hasattr(env, "_far_inner"):
             env._far_inner = self._lo + _G1_STEP_INNER_FRAC * span
@@ -938,7 +1004,9 @@ def reset_ball_rolling(
     the ball trajectory.
 
     vz=0: ball drops to ground in <0.05 s then rolls at foot/ankle height.
-    Curriculum lerps from easy to hard via env._ball_difficulty.
+    Only the target y_end window (below) is curriculum-scaled via
+    env._ball_difficulty / far_travel_curriculum, matching G1's actual
+    mechanism -- see the FIX 2026-07-20 note below.
 
     use_far_travel_curriculum: 2026-07-18 (research-doc recommendation B; G1
     step-region redesign same day). When True, the ONE-SIDED range branch's
@@ -946,9 +1014,36 @@ def reset_ball_rolling(
     env._far_inner/env._far_outer (far_travel_curriculum, decoupled from
     env._ball_difficulty) instead of the generic lo/lo+(hi-lo)*d lerp -- see
     that class's docstring. Wired True only for far regions by
-    regions.reset_ball_rolling_by_region; every other dimension (dist_r,
-    y_start_r, t_flight_r), near-region y_end, and the two-sided branch are
-    unaffected and keep using env._ball_difficulty as before.
+    regions.reset_ball_rolling_by_region; near-region y_end and the two-sided
+    branch keep using env._ball_difficulty directly.
+
+    FIX 2026-07-20 (curriculum/RSI audit item 14, re-derived from scratch):
+    dist_range, y_start_range, and t_flight_range used to ALSO be lerped from
+    an "easy" sub-range up to the configured range via env._ball_difficulty,
+    the same signal driving y_end below. G1's actual mechanism
+    (legged_robot.py:771-815 assign_ball_states) does NOT do this: spawn
+    distance is a hardcoded constant (`2.0*rand()+3.0`, line 779, no config
+    field, no curriculum), spawn Y is sampled from `self.init_ranges`
+    (line 780), which is assigned once at init from config maxw/maxh bounds
+    (lines 960-963) and never reassigned by the curriculum update
+    (lines 325-336 only ever writes `self.command_ranges`), and t_flight is
+    another hardcoded constant (`0.4+0.6*rand()`, line 803, play override at
+    line 806 also hardcoded). Only the END target -- `ball_end_local`'s Y
+    (line 786, `self.command_ranges[:,0:2]`) and Z (line 787,
+    `self.command_ranges[:,2:4]`) -- reads the curriculum-updated
+    `command_ranges` accumulator (lines 333-336). So G1 curriculum-scales the
+    catch WINDOW only; spawn distance, spawn lateral offset, and reaction
+    time are sampled from their full fixed range from iteration 0. The
+    dist_r/y_start_r/t_flight_r lerps here were an SGK-only addition with no
+    G1 equivalent -- removed; these three are now always sampled from the
+    full configured range, matching G1. The y_end curriculum below is
+    UNCHANGED: it is the one dimension G1's own command_ranges mechanism
+    really does scale, confirmed by the line citations above. See
+    docs/BugFixes.md for the full reasoning table (dead code note:
+    reset_ball_local_frame/reset_ball_global_frame in this module still lerp
+    all of dist/y_start/z_start/z_end/speed via the same pattern, but neither
+    is wired into any task cfg -- verified unreferenced outside their own
+    definitions -- so they were left as-is, out of scope for this fix).
     """
     if env_ids is None:
         env_ids = torch.arange(env.num_envs, device=env.device, dtype=torch.int)
@@ -957,21 +1052,17 @@ def reset_ball_rolling(
     d = float(getattr(env, "_ball_difficulty", 1.0))
     d = max(0.0, min(1.0, d))
 
-    _EASY_DIST_R      = (1.5, 2.0)
-    _EASY_Y_ROLL      = (-0.05, 0.05)
-    _EASY_T_FLIGHT_R  = (0.9, 1.3)   # easy: long flight → slow balls; hard: 0.7–1.1 s
-
-    dist_r      = _lerp_range(_EASY_DIST_R,     dist_range,     d)
-    y_start_r   = _lerp_range(_EASY_Y_ROLL,     y_start_range,  d)
-    t_flight_r  = _lerp_range(_EASY_T_FLIGHT_R, t_flight_range, d)
-
     ball: Entity = env.scene[ball_name]
     origins = env.scene.env_origins[env_ids]   # world goal-line origin per env
     floor_z = origins[:, 2]
 
-    x_start  = sample_uniform(*dist_r,     (n,), env.device)
-    y_start  = sample_uniform(*y_start_r,  (n,), env.device)
-    t_flight = sample_uniform(*t_flight_r, (n,), env.device)
+    # FIX 2026-07-20: dist_range/y_start_range/t_flight_range are sampled
+    # directly, NOT lerped by d -- G1 never curriculum-scales spawn distance,
+    # spawn lateral offset, or reaction time (see docstring above). `d` is
+    # still used below for the target y_end window, which G1 DOES scale.
+    x_start  = sample_uniform(*dist_range,     (n,), env.device)
+    y_start  = sample_uniform(*y_start_range,  (n,), env.device)
+    t_flight = sample_uniform(*t_flight_range, (n,), env.device)
 
     if y_end_range[0] * y_end_range[1] > 0:
         # One-sided range (region-conditioned calls via reset_ball_rolling_by_region,

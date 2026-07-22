@@ -142,6 +142,24 @@ class MotionDataset:
         # Build transition index list: (global_index_t, global_index_t+1)
         self.index_t, self.index_tp1 = self._build_transition_indices(traj_lengths, self.device)
 
+        # FIX 2026-07-20: per-FRAME (not per-transition) trajectory metadata,
+        # used by build_transition() to reproduce G1's randomized-playback-
+        # speed transition sampling (Humanoid-Goalkeeper/legged_gym/legged_gym/
+        # envs/g1/g1_utils.py:158-190 get_expert_obs). Indexed by the same
+        # global frame id as joint_pos_all/body_pos_w_all/etc, so any `t`
+        # tensor (however it was chosen -- uniform or per-motion-weighted)
+        # can look up "what trajectory does this frame belong to" without
+        # threading extra state through sample_batch()'s (t, tp1) contract.
+        frame_fps_list = []
+        frame_traj_max_idx_list = []
+        offset = 0
+        for L, f in zip(traj_lengths, fps_list):
+            frame_fps_list.append(torch.full((L,), float(f), dtype=torch.float32))
+            frame_traj_max_idx_list.append(torch.full((L,), float(offset + L - 1), dtype=torch.float32))
+            offset += L
+        self._frame_fps = torch.cat(frame_fps_list).to(self.device)
+        self._frame_traj_max_idx = torch.cat(frame_traj_max_idx_list).to(self.device)
+
     # ----------------------- Property API -----------------------
 
     def subtract_flaten(self, target: torch.Tensor):
@@ -277,6 +295,26 @@ class MotionDataset:
         w_b = quat_apply_inverse(q_w, w_w)                # world → base
         return w_b
 
+    @property
+    def env_fps(self) -> float:
+        """
+        Control-loop rate of the RL env this dataset's transitions are scored
+        against. FIX 2026-07-20 (item 2): G1 hardcodes ``self.env_fps = 50``
+        (Humanoid-Goalkeeper/legged_gym/legged_gym/envs/g1/g1_utils.py:82)
+        rather than reading it off the env, since G1's env is fixed at 50 Hz
+        control. This project's env is also 50 Hz (dt=0.02s, see
+        interceptV2DualDis/CLAUDE.md's TensorBoard-scaling note), but we
+        derive it from ``self.env.step_dt`` when available instead of
+        hardcoding, so this stays correct if the control rate ever changes.
+        Falls back to 50.0 (matching G1's literal constant) for envs/test
+        doubles that don't expose ``step_dt`` (e.g. the fake envs used in
+        tests/simple_goalkeeper/test_weighted_motion_dataset.py).
+        """
+        step_dt = getattr(self.env, "step_dt", None)
+        if step_dt is not None and step_dt > 0:
+            return 1.0 / step_dt
+        return 50.0
+
 
     # ----------------------- Transition index builder -----------------------
 
@@ -348,9 +386,57 @@ class MotionDataset:
             yield res_t, res_tp1
             
     def build_transition(self, t, tp1):
+        """
+        Build (state_t, state_next) pairs for a batch of sampled base frames
+        ``t``.
+
+        FIX 2026-07-20 (item 2): previously returned the literal adjacent
+        NPZ frame (index ``tp1 == t + 1``) as the "next" state -- a fixed,
+        deterministic playback speed with zero diversity. G1's equivalent
+        (Humanoid-Goalkeeper/legged_gym/legged_gym/envs/g1/g1_utils.py:
+        158-190 ``get_expert_obs``) instead samples the next frame at a
+        randomized playback ratio ``fps/env_fps * U(0.25, 1.25)`` and
+        linearly interpolates between the two nearest integer frames, giving
+        real transitions velocity-magnitude diversity so the policy isn't
+        scored against a single fixed motion-clip speed. Ported here: ``t``
+        (chosen by sample_batch -- uniform in the base class, per-motion-
+        weighted in WeightedMotionDataset; unchanged either way) stays an
+        exact integer frame lookup, matching G1's un-interpolated i=0 frame;
+        only the "next" frame is now interpolated at a randomized position
+        instead of read at the literal ``tp1`` index. ``tp1`` is accepted
+        for backward-compatible call signatures (callers still do
+        ``t, tp1 = sample_batch(...)``) but is no longer used to index
+        directly -- superseded by the randomized interpolation below.
+
+        Adaptation vs. G1: G1 clamps floor/ceil to the whole concatenated
+        dataset's global bound (g1_utils.py:182-184), which can blend frames
+        across two unrelated motion files near a trajectory's tail. Here we
+        clamp to the sampled frame's OWN trajectory bound
+        (``self._frame_traj_max_idx``) instead, since that information is
+        cheaply available per-frame and avoids that cross-motion bleed
+        without changing the sampled distribution anywhere in a trajectory's
+        interior.
+        """
+        del tp1  # retained for signature compatibility; see docstring
+
+        fps = self._frame_fps[t]
+        ratio = (fps / self.env_fps) * (torch.rand_like(fps) * 1.0 + 0.25)  # U(0.25, 1.25)
+        next_pos = t.to(fps.dtype) + ratio
+
+        max_idx = self._frame_traj_max_idx[t]
+        floor_idx = torch.floor(next_pos)
+        floor_idx = torch.minimum(floor_idx, max_idx)
+        ceil_idx = torch.minimum(floor_idx + 1, max_idx)
+        linear_ratio = (next_pos - floor_idx).clamp(min=0.0, max=1.0).unsqueeze(-1)
+
+        floor_idx = floor_idx.long()
+        ceil_idx = ceil_idx.long()
+
         res_t, res_tp1 = [], []
         for term in self.observation_terms:
-            _t, _tp1 = getattr(self, term)[t], getattr(self, term)[tp1]
+            values = getattr(self, term)
+            _t = values[t]
+            _tp1 = values[floor_idx] * (1 - linear_ratio) + values[ceil_idx] * linear_ratio
             res_t.append(_t); res_tp1.append(_tp1)
         res_t, res_tp1 = torch.cat(res_t, dim=-1), torch.cat(res_tp1, dim=-1)
         return res_t, res_tp1

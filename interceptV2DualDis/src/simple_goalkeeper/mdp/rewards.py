@@ -10,6 +10,14 @@ from mjlab.managers.scene_entity_config import SceneEntityCfg
 from mjlab.sensor import ContactSensor
 from mjlab.utils.lab_api.math import quat_apply, quat_inv
 
+from simple_goalkeeper.robots.t1_constants import (
+    ANKLE_ACTUATOR,
+    ARM_ACTUATOR,
+    HIP_PITCH_ACTUATOR,
+    KNEE_ACTUATOR,
+    WAIST_HIP_ROLL_YAW_ACTUATOR,
+)
+
 if TYPE_CHECKING:
     from mjlab.envs import ManagerBasedRlEnv
 
@@ -56,6 +64,31 @@ _T1_EFFORT_MAP: dict[str, float] = {
     "Left_Knee_Pitch":     65.0, "Right_Knee_Pitch":    65.0,
     "Left_Ankle_Pitch":    50.0, "Right_Ankle_Pitch":   50.0,
     "Left_Ankle_Roll":     50.0, "Right_Ankle_Roll":    50.0,
+}
+
+# Per-joint velocity limits (rad/s), from real T1 motor specs already defined
+# in t1_constants.py (ElectricActuator.velocity_limit, rated RPM converted to
+# rad/s -- t1_constants._rpm()). The T1 MJCF (xmls/t1_headless.xml) defines no
+# <actuator>/<general> block and no per-joint velocity attribute at all --
+# joints only carry a position `range` -- so there is no XML-sourced velocity
+# limit to read; MuJoCo does not require or enforce one on its own. These
+# values are the correct, confidently-sourced alternative: real hardware motor
+# ratings already used elsewhere in this codebase (ARM/WAIST_HIP_ROLL_YAW/
+# HIP_PITCH/KNEE/ANKLE actuators feed action_scale and kp/kd), just never
+# wired into a joint-velocity limit before now. Source of item 7's 2026-07-20
+# reward audit fix -- see docs/BugFixes.md.
+_T1_VEL_LIMIT_MAP: dict[str, float] = {
+    "Left_Shoulder_Pitch": ARM_ACTUATOR.velocity_limit, "Left_Shoulder_Roll": ARM_ACTUATOR.velocity_limit,
+    "Left_Elbow_Pitch":    ARM_ACTUATOR.velocity_limit, "Left_Elbow_Yaw":     ARM_ACTUATOR.velocity_limit,
+    "Right_Shoulder_Pitch": ARM_ACTUATOR.velocity_limit, "Right_Shoulder_Roll": ARM_ACTUATOR.velocity_limit,
+    "Right_Elbow_Pitch":   ARM_ACTUATOR.velocity_limit, "Right_Elbow_Yaw":    ARM_ACTUATOR.velocity_limit,
+    "Waist":               WAIST_HIP_ROLL_YAW_ACTUATOR.velocity_limit,
+    "Left_Hip_Pitch":      HIP_PITCH_ACTUATOR.velocity_limit, "Right_Hip_Pitch": HIP_PITCH_ACTUATOR.velocity_limit,
+    "Left_Hip_Roll":       WAIST_HIP_ROLL_YAW_ACTUATOR.velocity_limit, "Left_Hip_Yaw": WAIST_HIP_ROLL_YAW_ACTUATOR.velocity_limit,
+    "Right_Hip_Roll":      WAIST_HIP_ROLL_YAW_ACTUATOR.velocity_limit, "Right_Hip_Yaw": WAIST_HIP_ROLL_YAW_ACTUATOR.velocity_limit,
+    "Left_Knee_Pitch":     KNEE_ACTUATOR.velocity_limit, "Right_Knee_Pitch": KNEE_ACTUATOR.velocity_limit,
+    "Left_Ankle_Pitch":    ANKLE_ACTUATOR.velocity_limit, "Right_Ankle_Pitch": ANKLE_ACTUATOR.velocity_limit,
+    "Left_Ankle_Roll":     ANKLE_ACTUATOR.velocity_limit, "Right_Ankle_Roll":  ANKLE_ACTUATOR.velocity_limit,
 }
 
 
@@ -463,6 +496,79 @@ def softstop(
     return fired.float()
 
 
+def success(
+    env: "ManagerBasedRlEnv",
+    ball_name: str,
+    asset_cfg: SceneEntityCfg = _DEFAULT_FEET_CFG,
+    strict_th: float = 0.15,
+) -> torch.Tensor:
+    """Continuing, doubled-after-save, close-to-target reward. Ports G1 _reward_success.
+
+    G1 (legged_robot.py:1402-1403): `(success_flag + 1.0) * (dist < strict_th)`.
+    success_flag is set once inside _reward_stopball, on the exact same
+    delta-vx deflection event that fires stopball itself (legged_robot.py:
+    1411-1413: `success_ids = (stop_flag==0) & changevel; success_flag[success_ids]
+    = 1.0`), and persists for the rest of the episode (only cleared on reset,
+    legged_robot.py:721). `dist` is a continuously-updated hand-to-end_target
+    distance recomputed every physics step for every env regardless of phase
+    (post_physics_step lines 203-223) -- crucially NOT gated by "ball behind":
+    the reward keeps firing at 2x (once success_flag is set) for as long as the
+    hand stays within strict_th of the target, including after the save.
+    strict_th=0.15 (g1_29_config.py:342), tighter than eereach's own reach_th=0.2
+    -- success requires closer proximity than the reach reward's own threshold.
+
+    SGK port:
+      - success_flag -> env._sb_flag. stopball() (this module) sets _sb_flag on
+        the identical triggering event (its own delta_vx > threshold deflection,
+        `fired = deflection_now & ~env._sb_flag; env._sb_flag |= fired`) and
+        clears it only at reset -- the same one-shot-then-persistent semantics
+        as G1's success_flag, on the same underlying event (a qualifying
+        deflection). stopball is registered before this term in
+        goalkeeper_env_cfg.py's rewards dict, so _sb_flag is fresh (this step)
+        by the time this runs.
+      - dist -> distance from the task-assigned foot (_get_correct_foot_idx) to
+        the same frozen-far/live-close crossing_point used by footreach and
+        foot_proximity (see those docstrings: frozen crossing_y when the ball
+        is >= 0.5 m from the goal line, live ball Y/Z when closer -- mirrors
+        G1's own end_target update, post_physics_step lines 203-206). Not
+        gated by _ball_is_behind, matching G1 exactly: the foot is rewarded for
+        staying planted at the save spot through the rest of the episode, not
+        only during the approach.
+
+    Weight/curriculum: G1 uses 5 -> 12.5 (success_init=5.0, g1_29_config.py:300,
+    scaled by the same weight = base*(1+0.5*curriculumupdate) formula as every
+    other curriculum-scaled reward here, max at curriculumupdate=3). Ported
+    verbatim as `success_curriculum` in goalkeeper_env_cfg.py. Not folded into
+    the item-8 stopball/softstop/quality-bonus peak-magnitude cap: G1 itself
+    keeps `success` as its own separate-scale term, outside `_reward_stopball`'s
+    own weight ceiling -- this port preserves that same separation.
+    """
+    robot: Entity = env.scene[asset_cfg.name]
+    ball: Entity = env.scene[ball_name]
+
+    ball_pos_w = ball.data.root_link_pos_w                                # (N, 3)
+    ball_x_local = ball_pos_w[:, 0] - env.scene.env_origins[:, 0]        # (N,)
+    crossing_y = _get_ball_crossing_y(env, ball_name)                     # (N,)
+
+    goal_x_w = env.scene.env_origins[:, 0]
+    env_z    = env.scene.env_origins[:, 2]
+    ball_close = ball_x_local < 0.5
+    target_y = torch.where(ball_close, ball_pos_w[:, 1], crossing_y)
+    target_z = torch.where(ball_close, ball_pos_w[:, 2], env_z + 0.10)
+    crossing_point = torch.stack([goal_x_w, target_y, target_z], dim=-1)  # (N, 3)
+
+    foot_pos_w = robot.data.body_link_pos_w[:, asset_cfg.body_ids, :]     # (N, 2, 3)
+    foot_idx = _get_correct_foot_idx(env, ball_name)                       # (N,)
+    arange = torch.arange(env.num_envs, device=env.device)
+    foot_pos_active = foot_pos_w[arange, foot_idx]
+    dist = torch.norm(foot_pos_active - crossing_point, dim=-1)            # (N,)
+
+    success_flag = getattr(
+        env, "_sb_flag", torch.zeros(env.num_envs, dtype=torch.bool, device=env.device)
+    )
+    return (success_flag.float() + 1.0) * (dist < strict_th).float()
+
+
 def single_foot_save(
     env: "ManagerBasedRlEnv",
     ball_name: str,
@@ -716,18 +822,46 @@ def penalize_kneeheight(
 
 def dof_vel_limits(
     env: "ManagerBasedRlEnv",
-    vel_threshold: float = 10.0,
     asset_cfg: SceneEntityCfg = _DEFAULT_ROBOT_CFG,
+    soft_factor: float = 0.9,
 ) -> torch.Tensor:
-    """Penalise joint velocities above vel_threshold (rad/s).
+    """Penalise joint velocities above per-joint T1 motor velocity limits.
 
-    10 rad/s is below all T1 actuator velocity limits.
-    Returns sum of squared excess across all joints.
+    Mirrors G1 _reward_dof_vel_limits exactly (legged_robot.py:1550-1553):
+        sum(clip(|dof_vel| - dof_vel_limits * soft_dof_vel_limit, min=0))
+    with soft_dof_vel_limit=0.9 (g1_29_config.py:349) -- both the per-joint
+    sourcing and the 0.9 safety margin, and the LINEAR (not squared) excess.
+
+    FIX 2026-07-20 (reward audit item 7): previously a single flat 10 rad/s
+    cap for every joint regardless of actual per-joint limit, with a squared
+    excess kernel -- both diverged from G1. The flat 10 rad/s cap silently
+    never fired for T1's slower joints (e.g. arms at ~9.3 rad/s, waist/hip-
+    roll/hip-yaw at ~7.3 rad/s -- see _T1_VEL_LIMIT_MAP): a joint already
+    past ITS real limit could sit under the flat 10 and be judged compliant
+    by this reward. Real per-joint limits sourced from t1_constants.py motor
+    specs (ElectricActuator.velocity_limit); the T1 MJCF itself defines no
+    joint velocity limit at all (only a position `range`), so there is no
+    XML value to use instead -- see docs/BugFixes.md for the full check.
     """
     robot: Entity = env.scene[asset_cfg.name]
     vel = robot.data.joint_vel[:, asset_cfg.joint_ids]                  # (N, J)
-    excess = torch.clamp(vel.abs() - vel_threshold, min=0.0)            # (N, J)
-    return excess.pow(2).sum(dim=-1)
+
+    if not hasattr(env, "_t1_vel_limits"):
+        all_names = robot.joint_names
+        # Fallback for any unmapped joint (should not occur -- all 21 headless
+        # T1 DOF are covered by _T1_VEL_LIMIT_MAP): use the slowest-rated
+        # group (waist/hip-roll/hip-yaw) as a conservative default.
+        vel_all = torch.full(
+            (len(all_names),), WAIST_HIP_ROLL_YAW_ACTUATOR.velocity_limit, device=env.device
+        )
+        for i, name in enumerate(all_names):
+            if name in _T1_VEL_LIMIT_MAP:
+                vel_all[i] = _T1_VEL_LIMIT_MAP[name]
+        env._t1_vel_limits = vel_all
+
+    vel_limits = env._t1_vel_limits[asset_cfg.joint_ids] * soft_factor   # (J,)
+    excess = torch.clamp(vel.abs() - vel_limits, min=0.0)                # (N, J)
+    return excess.sum(dim=-1)
 
 
 def torques_normalized_l2(
@@ -1184,4 +1318,11 @@ def feet_slippage(
     contactvel_per_foot = foot_speed * in_contact                           # [B, 2]
     contactvel_per_foot = contactvel_per_foot.masked_fill(suppress, 0.0)
     contactvel = contactvel_per_foot.sum(dim=-1)
-    return torch.exp(-50.0 * contactvel)
+    # FIX 2026-07-20 (reward audit item 6): was -50.0, 5x steeper than G1's
+    # exp(-10*contactvel) (legged_robot.py:1473) -- the docstring above already
+    # claimed to mirror G1's -10 kernel, so this was a straightforward
+    # coefficient bug (doc/code mismatch), not a documented divergence. No
+    # comment or commit anywhere justified -50 -- it has been -50.0 since this
+    # function's first commit (c2b8b69), i.e. a porting error, not later drift.
+    # Reverted to G1's literal -10.
+    return torch.exp(-10.0 * contactvel)

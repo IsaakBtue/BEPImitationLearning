@@ -5,7 +5,7 @@ from .regions import REGION_NAMES, assign_static_regions, randomize_region_on_re
 from .rewards import (
     ball_vx_reduction, posture, ang_vel_xy_l2, ang_vel_z_l2,
     stayonline, noretreat, feetorientation, foot_ang_vel_xy, deviation_waist_joint,
-    footreach, foot_proximity, stopball, softstop, single_foot_save, cleanstop, foot_clearance,
+    footreach, foot_proximity, stopball, softstop, success, single_foot_save, cleanstop, foot_clearance,
     airborne_at_save, inner_face_orientation_save, foot_inner_face_continuous,
     penalize_kneeheight, dof_vel_limits,
     postorientation, postangvel, postlinvel,
