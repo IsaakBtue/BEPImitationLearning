@@ -824,6 +824,13 @@ def penalize_kneeheight(
 
     Detects kneeling/falling states that would damage real hardware.
     Returns sum of excess below threshold across both shanks.
+
+    FIX 2026-07-22: unregistered from goalkeeper_env_cfg.py (along with the
+    shank_height termination) -- user found shank height false-positives on
+    legitimate deep lunges (research via play.py's new per-episode min-height
+    + terminated_by reporting, docs/BugFixes.md same date). Replaced by
+    penalize_baseheight + the retuned base_height termination below.
+    Function kept (not deleted) in case shank-based gating is revisited.
     """
     robot: Entity = env.scene[asset_cfg.name]
     shank_pos_w = robot.data.body_link_pos_w[:, asset_cfg.body_ids, :]  # (N, 2, 3)
@@ -831,6 +838,36 @@ def penalize_kneeheight(
     shank_z_local = shank_pos_w[:, :, 2] - floor_z[:, None]             # (N, 2)
     violation = torch.clamp(min_height - shank_z_local, min=0.0)        # (N, 2)
     return violation.sum(dim=-1)
+
+
+def penalize_baseheight(
+    env: "ManagerBasedRlEnv",
+    min_height: float = 0.59,
+    asset_cfg: SceneEntityCfg = _DEFAULT_ROBOT_CFG,
+) -> torch.Tensor:
+    """Penalise root (Trunk) height dropping below min_height above floor.
+
+    FIX 2026-07-22: replaces penalize_kneeheight as the graded warning half
+    of this project's fall-prevention pair (paired with the base_height
+    termination, goalkeeper_env_cfg.py, both user-tuned from real play
+    session data via the min_base/min_Lsh/min_Rsh + terminated_by reporting
+    added to play.py this same date). Shank height fired on legitimate deep
+    lunges (a real athletic motion for a foot-only save) because a lunge
+    inherently brings one knee close to the floor even while balanced;
+    root/torso height stays much higher during an intentional lunge and
+    only drops when the robot is actually falling, matching the user's own
+    read of the play-session data. 0.59 / termination's 0.57 mirrors the
+    existing kneeheight(0.295)/shank_height(0.27) pair's ~2.5cm graded-
+    warning-before-hard-cutoff gap.
+
+    Mirrors penalize_kneeheight's shape exactly (clamp(min_height - z, 0)),
+    just on the single root body instead of two shank bodies.
+    """
+    robot: Entity = env.scene[asset_cfg.name]
+    base_z_w = robot.data.root_link_pos_w[:, 2]           # (N,)
+    floor_z = env.scene.env_origins[:, 2]                  # (N,)
+    base_z_local = base_z_w - floor_z                       # (N,)
+    return torch.clamp(min_height - base_z_local, min=0.0)  # (N,)
 
 
 def dof_vel_limits(

@@ -542,29 +542,24 @@ def goalkeeper_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
             params={"ball_name": BALL_NAME, "asset_cfg": _RECOVERY_LEG_CFG},
         ),
         # --- hardware safety ---
-        "penalize_kneeheight": RewardTermCfg(
-            func=gk_mdp.penalize_kneeheight,
+        # FIX 2026-07-22: penalize_kneeheight (shank-based) unregistered,
+        # replaced by penalize_baseheight (root/torso-based) -- user found
+        # via play.py's new per-episode min-height + terminated_by
+        # reporting (docs/BugFixes.md, same date) that shank height reads
+        # low on legitimate deep lunges (a real athletic motion for this
+        # foot-only task), producing false-positive gating; root height
+        # stays reliably higher during an intentional lunge and only drops
+        # on a genuine fall. Thresholds (0.59 here, 0.57 on the
+        # base_height termination below) are the user's own values from
+        # watching real play-session data, mirroring the prior
+        # kneeheight(0.295)/shank_height(0.27) pair's ~2.5cm graded-
+        # warning-before-hard-cutoff gap. penalize_kneeheight/
+        # shank_height_termination functions kept (not deleted) in case
+        # shank-based gating is revisited.
+        "penalize_baseheight": RewardTermCfg(
+            func=gk_mdp.penalize_baseheight,
             weight=-100.0,
-            # FIX 2026-07-18: min_height was 0.29, only 1.5cm above the
-            # shank_height hard-termination threshold (0.275, below). Even
-            # though the penalty is graded (proportional to violation depth,
-            # not a step function), 1.5cm of shank travel happens almost
-            # instantly during a dynamic step/lunge -- the policy had almost
-            # no runway to feel the ramping penalty and correct course before
-            # the episode just ended. First raised to 0.32 (4.5cm gap) --
-            # REVISED 2026-07-19 (user judgment call, not a training-run
-            # result): 0.32 pulled the warning zone in too aggressively for
-            # the deep, athletic crouches the far-region multi-step task
-            # actually needs (per the same day's G1-step-region redesign).
-            # Settled on 0.295 paired with shank_height's own threshold
-            # loosened 0.275 -> 0.27 (below) -- still a real 2.5cm graded
-            # warning gap (up from the original 1.5cm), but both thresholds
-            # sit lower overall, giving more legitimate crouch depth before
-            # either the penalty or the hard termination fires. Not
-            # empirically tuned -- a starting point pending validation
-            # against a training run, per this project's usual practice for
-            # thresholds without a direct G1 equivalent.
-            params={"min_height": 0.295, "asset_cfg": _KNEE_BODY_CFG},
+            params={"min_height": 0.59},
         ),
         "penalize_sharpcontact": RewardTermCfg(
             func=gk_mdp.penalize_sharpcontact,
@@ -789,9 +784,17 @@ def goalkeeper_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
             func=mjlab_mdp.bad_orientation,
             params={"limit_angle": 1.0, "asset_cfg": _ROBOT_CFG},
         ),
+        # FIX 2026-07-22 (user judgment call from real play-session data,
+        # via play.py's new min-height/terminated_by reporting): was 0.4,
+        # an untuned starting value. Retuned to 0.57, paired with
+        # penalize_baseheight's 0.59 above (~2.5cm graded-warning gap,
+        # matching the prior kneeheight/shank_height pair's design). The
+        # shank_height termination below is REMOVED (not just loosened) --
+        # user found it false-positives on legitimate deep lunges; root
+        # height is the more reliable fall-vs-lunge signal for this task.
         "base_height": TerminationTermCfg(
             func=mjlab_mdp.root_height_below_minimum,
-            params={"minimum_height": 0.4, "asset_cfg": _ROBOT_CFG},
+            params={"minimum_height": 0.57, "asset_cfg": _ROBOT_CFG},
         ),
         "ball_exit": TerminationTermCfg(
             func=gk_mdp.ball_exit_termination,
@@ -803,17 +806,9 @@ def goalkeeper_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
             params={"max_contact_force": 2500.0},
             time_out=False,
         ),
-        "shank_height": TerminationTermCfg(
-            func=gk_mdp.shank_height_termination,
-            # FIX 2026-07-19 (user judgment call, paired with penalize_kneeheight's
-            # 0.295 above): was 0.275. Loosened to 0.27 -- allows slightly deeper
-            # legitimate crouch depth before the episode hard-ends, matched with
-            # penalize_kneeheight's own threshold so a real 2.5cm graded warning
-            # gap still exists between the two (0.295 -> 0.27) rather than the
-            # original 1.5cm.
-            params={"min_height": 0.27, "asset_cfg": _KNEE_BODY_CFG},
-            time_out=False,
-        ),
+        # shank_height REMOVED 2026-07-22 -- see base_height's FIX comment
+        # above and docs/BugFixes.md. gk_mdp.shank_height_termination kept
+        # defined (events.py) in case shank-based gating is revisited.
     }
 
     # ------------------------------------------------------------------
