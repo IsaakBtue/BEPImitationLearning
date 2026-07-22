@@ -96,6 +96,13 @@ class AnalyticsPolicy:
         self._step = 0
         self._ep = 0
         self._prev_ep_buf: "torch.Tensor | None" = None
+        # FIX 2026-07-22 (research: shank_height vs base_height termination
+        # tuning): per-episode running minimums, so a deep-lunge episode's
+        # worst height is captured even though the live status line
+        # (below) scrolls past it. Reset at each episode boundary.
+        self._min_base_h = float("inf")
+        self._min_lsh_h = float("inf")
+        self._min_rsh_h = float("inf")
 
     def toggle(self) -> None:
         self.enabled = not self.enabled
@@ -113,8 +120,31 @@ class AnalyticsPolicy:
         # Detect episode reset (any env reset → print separator for env 0).
         if self._prev_ep_buf is not None and (ep_buf[0] < self._prev_ep_buf[0]).item():
             if self.enabled:
-                print(file=stderr)  # newline after overwriting line
+                # FIX 2026-07-22 (research: shank_height vs base_height
+                # termination tuning). env.termination_manager's per-term
+                # `_term_dones` buffer is only overwritten by compute()
+                # (called once per env.step()) and NOT cleared by reset() --
+                # see termination_manager.py -- so it still reflects the
+                # step that just caused THIS reset, even though we're now
+                # one policy call past it. Read it here, before anything
+                # else this call does, to report which termination(s)
+                # fired for env 0's episode that just ended.
+                term_mgr = getattr(env, "termination_manager", None)
+                fired = []
+                if term_mgr is not None:
+                    for name in term_mgr.active_terms:
+                        if bool(term_mgr.get_term(name)[0].item()):
+                            fired.append(name)
+                print(
+                    f"\n[EpEnd] terminated_by={','.join(fired) or 'none'} | "
+                    f"min_base={self._min_base_h:.3f} "
+                    f"min_Lsh={self._min_lsh_h:.3f} min_Rsh={self._min_rsh_h:.3f}",
+                    file=stderr,
+                )
             self._ep += 1
+            self._min_base_h = float("inf")
+            self._min_lsh_h = float("inf")
+            self._min_rsh_h = float("inf")
         self._prev_ep_buf = ep_buf.clone()
 
         if not self.enabled:
@@ -157,6 +187,9 @@ class AnalyticsPolicy:
         shank_pos_w = robot.data.body_link_pos_w[0, shank_ids, :]  # [2, 3]
         lsh_h = (shank_pos_w[0, 2] - floor_z).item()
         rsh_h = (shank_pos_w[1, 2] - floor_z).item()
+        self._min_base_h = min(self._min_base_h, base_h)
+        self._min_lsh_h = min(self._min_lsh_h, lsh_h)
+        self._min_rsh_h = min(self._min_rsh_h, rsh_h)
 
         ball_speed = bv.norm().item()
 
