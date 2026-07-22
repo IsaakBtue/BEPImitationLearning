@@ -46,6 +46,19 @@ _RECOVERY_ARM_CFG = SceneEntityCfg(
     ),
 )
 _RECOVERY_WAIST_CFG = SceneEntityCfg("robot", joint_names=("Waist",))
+# FIX 2026-07-22: see postlegdofpos's docstring (rewards.py) -- G1 has no
+# leg-recovery reward to port because its legs aren't the catching limb;
+# SGK's legs are, so this fills the gap that left them with no post-save
+# return-to-default incentive.
+_RECOVERY_LEG_CFG = SceneEntityCfg(
+    "robot",
+    joint_names=(
+        "Left_Hip_Roll", "Left_Hip_Yaw", "Left_Hip_Pitch", "Left_Knee_Pitch",
+        "Left_Ankle_Pitch", "Left_Ankle_Roll",
+        "Right_Hip_Roll", "Right_Hip_Yaw", "Right_Hip_Pitch", "Right_Knee_Pitch",
+        "Right_Ankle_Pitch", "Right_Ankle_Roll",
+    ),
+)
 
 
 def _make_ball_entity_cfg() -> EntityCfg:
@@ -517,6 +530,16 @@ def goalkeeper_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
             func=gk_mdp.postwaistdofpos,
             weight=1.0,
             params={"ball_name": BALL_NAME, "asset_cfg": _RECOVERY_WAIST_CFG},
+        ),
+        # FIX 2026-07-22: new leg-recovery term, no G1 equivalent to copy a
+        # weight from -- matched to postupperdofpos's weight/shape since
+        # both use the same exp(-1*err) exponent and play the analogous
+        # role for this task's catching limb. See postlegdofpos's docstring
+        # (rewards.py) and docs/BugFixes.md.
+        "postlegdofpos": RewardTermCfg(
+            func=gk_mdp.postlegdofpos,
+            weight=1.0,
+            params={"ball_name": BALL_NAME, "asset_cfg": _RECOVERY_LEG_CFG},
         ),
         # --- hardware safety ---
         "penalize_kneeheight": RewardTermCfg(

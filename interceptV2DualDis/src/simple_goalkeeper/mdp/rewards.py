@@ -32,6 +32,19 @@ _ARM_JOINT_CFG = SceneEntityCfg(
     ),
 )
 _WAIST_JOINT_CFG_RECOVERY = SceneEntityCfg("robot", joint_names=("Waist",))
+# FIX 2026-07-22: added alongside postupperdofpos/postwaistdofpos -- see
+# postlegdofpos's docstring below for why G1 has no equivalent reward to
+# port for these joints, and why that's a task-structure fact, not a gap
+# in the existing G1-parity port.
+_LEG_JOINT_CFG_RECOVERY = SceneEntityCfg(
+    "robot",
+    joint_names=(
+        "Left_Hip_Roll", "Left_Hip_Yaw", "Left_Hip_Pitch", "Left_Knee_Pitch",
+        "Left_Ankle_Pitch", "Left_Ankle_Roll",
+        "Right_Hip_Roll", "Right_Hip_Yaw", "Right_Hip_Pitch", "Right_Knee_Pitch",
+        "Right_Ankle_Pitch", "Right_Ankle_Roll",
+    ),
+)
 _ALL_JOINTS_CFG = SceneEntityCfg("robot")
 
 # Per-joint stiffness (kp) for torque normalisation. Source: ILB _T1_KP_MAP,
@@ -951,6 +964,49 @@ def postwaistdofpos(
     )
     err = torch.sum(torch.square(delta), dim=-1)
     return torch.exp(-3.0 * err) * behind.float()
+
+
+def postlegdofpos(
+    env: "ManagerBasedRlEnv",
+    ball_name: str,
+    asset_cfg: SceneEntityCfg = _LEG_JOINT_CFG_RECOVERY,
+) -> torch.Tensor:
+    """Reward leg joints returning to default (standing) pose after ball is behind.
+
+    FIX 2026-07-22: user reported the policy settles into a "weird pose" after
+    a save rather than a sensible standing pose. G1's post-save pose recovery
+    (postupperdofpos/postwaistdofpos, both above) only covers elbow+wrist
+    ("upper_body_joint_indices", legged_robot.py:1315) and waist
+    (legged_robot.py:1306) -- G1's own leg_joint_indices (all 12 hip/knee/
+    ankle joints, legged_robot.py:1276-1284) have NO post-save reward at
+    all. That's not a gap in this port -- it's correct for G1's own task:
+    G1 catches with its HANDS, so the catching limb (arms, via elbow+wrist)
+    needs an explicit pull back to neutral after use, while the legs are
+    mostly just standing/braced throughout and don't drift far from default
+    on their own.
+
+    This project's task structurally inverts which limb does the catching:
+    SGK saves with its FEET, so the legs are the limb that gets thrown into
+    an extreme, off-default configuration during a dive/step/reach -- and
+    until this fix, nothing pulled them back afterward, matching the
+    reported "weird pose" symptom exactly (only arms/waist had a return-to-
+    default incentive; legs, wherever the save left them, had none). This
+    mirrors postupperdofpos's exact shape (exp(-1*sum_sq_err), same gentle
+    exponent, same _ball_is_behind gate) applied to the role-equivalent
+    limb group for this task rather than G1's literal joint list --
+    consistent with the top-level CLAUDE.md instruction to check whether a
+    G1 decision "was designed for hands and needs adaptation for feet."
+
+    exp(-1 * sum_sq_err) x behind -- bounded [0, 1], reward peaks at default pose.
+    """
+    behind = _ball_is_behind(env, ball_name)
+    robot: Entity = env.scene[asset_cfg.name]
+    delta = (
+        robot.data.joint_pos[:, asset_cfg.joint_ids]
+        - robot.data.default_joint_pos[:, asset_cfg.joint_ids]
+    )
+    err = torch.sum(torch.square(delta), dim=-1)
+    return torch.exp(-1.0 * err) * behind.float()
 
 
 
