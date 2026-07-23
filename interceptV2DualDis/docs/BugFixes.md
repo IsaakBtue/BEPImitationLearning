@@ -1083,3 +1083,15 @@ This directly gives the data needed to decide the actual question: for episodes 
 **Verification:** `uv run pytest tests/simple_goalkeeper/ -v` -- 63/63 pass. Live smoke test: built the real multi-disc env (4 envs, `cuda:0`), confirmed `blue_ball_landed`/`blue_overshoot_penalty`/`blue_stick_landing` all present in `reward_manager.active_terms`, stepped 30 zero-action steps with no errors.
 
 **Not yet resolved:** not yet validated against a live training run -- this is the point of launching one next. Given the original branch's own headline lesson (measurement methodology itself was a repeated source of false signal -- deterministic vs. stochastic policy evaluation, diagnostics that structurally couldn't observe the step they were measuring, metrics mutated multiple times per step with no memoization, at least four separate instances across the branch's history), any new "genuine landing rate" measurement built for this run should get an equivalent audit before being trusted, not assumed correct by analogy to the old branch's (also eventually found to be partly unreliable) diagnostics.
+
+## 2026-07-23 -- both-feet catching and weird post-save arm pose, ported from master: strengthened wrong-foot penalty and arm-recovery reward
+
+**Context:** while `blue_v2_2026-07-23` was running, user reviewed checkpoints from both this run and master's last run (`green_baseheight_postleg_2026-07-22`) and reported post-save orientation/arm pose still "looks really weird" and the policy still catches with both feet. Checked master's own training log data directly: both symptoms were essentially identical between the two branches (`penalize_wrong_foot_ball_contact` logged value -0.0197 to -0.0222 on master vs. -0.0199 to -0.0206 on v2; `postupperdofpos` 0.016-0.066 on master vs. 0.066-0.066 on v2, both near floor) -- confirmed pre-existing on master, not something the v2 reimplementation introduced or worsened. Full diagnosis and rationale in master's own `docs/BugFixes.md`, same date -- this entry documents the identical fix applied here.
+
+**Fix (ported from master, same commit content):**
+- `penalize_wrong_foot_ball_contact` weight -30.0 -> -100.0 (`rewards.py`, `goalkeeper_env_cfg.py`). No logic bug found (re-verified); -30 wasn't outweighing the save-quality benefit of planting both feet. No G1 equivalent, plain tuning call. Same severity tier as `penalize_self_collision`/`penalize_sharpcontact`/`penalize_baseheight`.
+- `postupperdofpos` weight 1.0 -> 5.0 (`rewards.py`, `goalkeeper_env_cfg.py`). Deliberate G1 divergence (G1 also uses 1.0, confirmed `g1_29_config.py:317`) -- user explicitly confirmed proceeding with this divergence after being asked, since it's not a parity fix. G1's arms are the active/catching limb with task structure pulling them toward rest after use; SGK's arms have no equivalent pull in a foot-only task.
+
+**Verification:** `uv run pytest tests/simple_goalkeeper/ -v` -- 63/63 pass.
+
+**Not yet resolved:** not yet validated against a live training run -- `blue_v2_2026-07-23` needs to be stopped (checkpoint pushed first) and restarted with this change included.

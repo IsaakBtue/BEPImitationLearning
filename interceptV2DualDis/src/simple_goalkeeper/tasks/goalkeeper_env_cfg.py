@@ -582,9 +582,13 @@ def goalkeeper_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
             weight=1.0,
             params={"ball_name": BALL_NAME},
         ),
+        # FIX 2026-07-23: 1.0 -> 5.0, deliberate G1 divergence (G1 uses 1.0).
+        # See postupperdofpos's docstring (rewards.py) -- stuck near its
+        # floor on both master's last run and the v2 branch, unlike
+        # postlegdofpos/postwaistdofpos at the same weight tier.
         "postupperdofpos": RewardTermCfg(
             func=gk_mdp.postupperdofpos,
-            weight=1.0,
+            weight=5.0,
             params={"ball_name": BALL_NAME, "asset_cfg": _RECOVERY_ARM_CFG},
         ),
         "postwaistdofpos": RewardTermCfg(
@@ -639,9 +643,13 @@ def goalkeeper_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
         # foot actually touched the ball", so a wrong-foot save could still
         # farm those rewards. This uses the ball-specific "ball_contact"
         # sensor directly, independent of those gates, to discourage it.
+        # FIX 2026-07-23: -30 -> -100. Confirmed via training logs on both
+        # master's last run and the v2 branch that both-feet catching is
+        # still happening at essentially the same rate on both -- -30 wasn't
+        # outweighing the save-quality benefit. See rewards.py docstring.
         "penalize_wrong_foot_ball_contact": RewardTermCfg(
             func=gk_mdp.penalize_wrong_foot_ball_contact,
-            weight=-30.0,
+            weight=-100.0,
             params={"ball_name": BALL_NAME},
         ),
         "feet_slippage": RewardTermCfg(
