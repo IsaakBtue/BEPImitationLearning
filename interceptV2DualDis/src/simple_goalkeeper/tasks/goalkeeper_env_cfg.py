@@ -237,6 +237,42 @@ def goalkeeper_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
                 "ep_len_divisor":  50,
             },
         )
+        # v2 reimplementation (2026-07-23) of the blue-ball-waypoint branch's
+        # curriculum for its own 3 reward terms -- same reward_curriculum_ep_len
+        # mechanism already used above, base weights taken from the branch's own
+        # tuning (unretuned for this reimplementation). Without these, the "must
+        # land at blue first" incentive would stay fixed while footreach/stopball/
+        # softstop all grow via curriculum -- an asymmetry the branch's own
+        # 2026-07-09 fix found caused genuine landing rate to collapse as the
+        # cheap, immediate overshoot penalty and growing downstream save payoff
+        # both outpaced it.
+        cfg.curriculum["blue_ball_landed_curriculum"] = CurriculumTermCfg(
+            func=gk_mdp.reward_curriculum_ep_len,
+            params={
+                "reward_name": "blue_ball_landed",
+                "base_weight": 10.0,
+                "update_interval": 500,
+                "ep_len_divisor":  50,
+            },
+        )
+        cfg.curriculum["blue_overshoot_penalty_curriculum"] = CurriculumTermCfg(
+            func=gk_mdp.reward_curriculum_ep_len,
+            params={
+                "reward_name": "blue_overshoot_penalty",
+                "base_weight": -30.0,
+                "update_interval": 500,
+                "ep_len_divisor":  50,
+            },
+        )
+        cfg.curriculum["blue_stick_landing_curriculum"] = CurriculumTermCfg(
+            func=gk_mdp.reward_curriculum_ep_len,
+            params={
+                "reward_name": "blue_stick_landing",
+                "base_weight": 8.0,
+                "update_interval": 500,
+                "ep_len_divisor":  50,
+            },
+        )
         # Correct-foot-save quality bonuses: weights double at cu >= 3 (ep_len ≈ 144 steps).
         # Only makes sense once the robot already saves reliably (cu=3 = footreach fully ramped).
         # One entry per reward, same pattern as reward_curriculum_ep_len.
@@ -474,6 +510,31 @@ def goalkeeper_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
             func=gk_mdp.foot_proximity,
             weight=5.0,
             params={"ball_name": BALL_NAME, "sigma": 5.0, "asset_cfg": _FEET_CFG},
+        ),
+        # --- two-stage blue->green waypoint bonus, v2 reimplementation
+        # (2026-07-23) of the blue-ball-waypoint branch mechanism, removed
+        # from this project's lineage 2026-07-10. See rewards.py's
+        # _get_reach_target_y/blue_ball_landed/blue_overshoot_penalty/
+        # blue_stick_landing docstrings and docs/BugFixes.md. ---
+        "blue_ball_landed": RewardTermCfg(
+            func=gk_mdp.blue_ball_landed,
+            weight=10.0,
+            params={"ball_name": BALL_NAME, "asset_cfg": _FEET_CFG},
+        ),
+        # Without this, ignoring the blue waypoint entirely on a wide crossing
+        # earns the same reward (zero, from the landing-gated terms above) as
+        # attempting and failing -- no gradient discourages skipping it.
+        "blue_overshoot_penalty": RewardTermCfg(
+            func=gk_mdp.blue_overshoot_penalty,
+            weight=-30.0,
+            params={"ball_name": BALL_NAME, "asset_cfg": _FEET_CFG},
+        ),
+        # Dense reward for "close AND slow" near blue -- the exact joint
+        # condition the settle-window landing check requires.
+        "blue_stick_landing": RewardTermCfg(
+            func=gk_mdp.blue_stick_landing,
+            weight=8.0,
+            params={"ball_name": BALL_NAME, "asset_cfg": _FEET_CFG},
         ),
         # --- active stepping: reward lifting feet during approach ---
         "foot_clearance": RewardTermCfg(

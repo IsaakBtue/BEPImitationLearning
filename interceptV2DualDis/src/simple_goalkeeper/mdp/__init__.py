@@ -13,5 +13,6 @@ from .rewards import (
     postupperdofpos, postwaistdofpos, postlegdofpos,
     penalize_sharpcontact, penalize_self_collision, feet_slippage,
     penalize_wrong_foot_ball_contact,
+    blue_ball_landed, blue_overshoot_penalty, blue_stick_landing,
 )
 from .commands import GhostMotionCommand, GhostMotionCommandCfg

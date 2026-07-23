@@ -186,6 +186,194 @@ def _get_ball_crossing_y(env: "ManagerBasedRlEnv", ball_name: str) -> torch.Tens
     return env._ball_crossing_y
 
 
+def _get_reach_target_y(
+    env: "ManagerBasedRlEnv",
+    ball_name: str,
+    asset_cfg: SceneEntityCfg = _DEFAULT_FEET_CFG,
+    wide_threshold: float = 0.5,
+    landing_radius: float = 0.08,
+    landing_speed_threshold: float = 1.0,
+) -> torch.Tensor:
+    """Two-stage reach target for wide crossings: v2 reimplementation of the
+    "blue-ball-waypoint" branch mechanism (removed from this project's
+    lineage 2026-07-10, "green-ball-baseline"), reimplemented 2026-07-23 on
+    top of current master rather than merged/cherry-picked (master had
+    diverged 74+ commits since the branch split -- AMP fixes, reward
+    audits, region routing, wrong-foot gating -- none of which the old
+    branch has).
+
+    For crossings where |crossing_y - start_y| > wide_threshold OR the env's
+    permanent region assignment (env._region_id) is a far region (1 or 3 --
+    the authoritative label for THIS region-conditioned task, which the
+    original branch predates), the target is the MIDPOINT between the
+    robot's stance and the true crossing point until the assigned foot
+    (_get_correct_foot_idx) physically lands there (airborne then in ground
+    contact via the feet_contact sensor, within landing_radius of the
+    midpoint AND slower than landing_speed_threshold), then switches to the
+    full crossing point. Narrow crossings always target the full point.
+    Hard gate, no elapsed-time fallback -- a crossing that never lands stays
+    targeting the midpoint for the whole episode.
+
+    Ported mechanisms from the original branch's investigation (see
+    docs/BugFixes.md and the research-mapping subagent report in
+    conversation for the full history this condenses):
+
+    - Settle window (not instantaneous): requires the assigned foot to stay
+      in contact AND within landing_radius for _BLUE_SETTLE_STEPS(3)
+      consecutive REAL steps (memoized via env._blue_last_settle_step since
+      this function is called up to 7x/step by different reward terms
+      sharing one post-physics snapshot) before checking speed -- a genuine
+      footstrike carries residual swing velocity for a few steps after
+      first contact, decaying as weight transfers.
+    - LEAKY decrement (branch mechanism #9, the single best-evidenced fix
+      in the whole prior investigation -- 44.8% genuine landing rate at
+      iter 2000 of blue_leaky_settle_count_2026-07-13, vs. near-0% under
+      the original hard reset-to-zero): a single dropped frame decrements
+      the settle counter by 1 (floored at 0) instead of zeroing it outright,
+      so an isolated contact-sensor glitch or brief overshoot doesn't erase
+      an otherwise-genuine plant in progress. Root cause this addresses:
+      the natural "plant" phase between two swings in the DoubleStep/
+      TripleStep reference clips is only ~11 frames wide even at 1.0x
+      pace -- a stochastic policy has almost no margin for a single missed
+      frame under a hard-reset counter.
+    - Curriculum-eased landing thresholds (branch mechanism #1): lerps
+      landing_radius/landing_speed_threshold from loose (0.20m / 2.0 m/s at
+      ball_difficulty=0, i.e. an easy target even a rough approach can hit)
+      to the caller's strict default (0.08m / 1.0 m/s at difficulty=1),
+      tied to the existing env._ball_difficulty curriculum scalar -- a
+      policy that has never landed once has no gradient trace of what
+      success feels like; this gives it an easy version to discover first.
+    - _blue_landed_was_free classification: a landing achieved suspiciously
+      early (episode_length_buf < 10) can't reflect genuine approach work
+      (RSI donor poses are mid-motion by construction) -- flagged so
+      downstream consumers (stopball/softstop's landing_ok gate) don't pay
+      out for a landing the policy didn't actually earn this episode.
+
+    NOT ported from the original branch (see docs/BugFixes.md for the full
+    per-mechanism assessment): RSI practice-fraction curriculum and
+    RSI teleport-seeding (both unvalidated, superseded within the branch
+    itself), landing-payoff scaling (entangled with a reward leak for part
+    of its life), AMP clip retiming (a confirmed NEGATIVE result -- genuine
+    landing rate got worse as retiming pace increased), self-imitation
+    learning (produced a headline 96.6% number but the branch's own final
+    finding cast real doubt on whether that reflected genuinely learning
+    the task, via a separate unrelated wrong-foot-credit bug).
+
+    Root XY is pinned to env.scene.env_origins at reset (reset_base event),
+    so "robot start Y" can be read live with no new cache.
+    """
+    full_y = _get_ball_crossing_y(env, ball_name)                 # (N,) world Y
+    start_y = env.scene.env_origins[:, 1]                         # (N,) world Y
+
+    rel = getattr(env, "_rsi_cross_y", None)
+    lateral = rel if rel is not None else (full_y - start_y)
+    wide = lateral.abs() > wide_threshold
+
+    # This region-conditioned task's own far/near label (env._region_id) is
+    # authoritative over the threshold check above, same rationale as the
+    # original branch's _REGION_IS_FAR (predates the region system here --
+    # reimplemented against env._region_id directly, matching the far-region
+    # convention already used throughout this codebase, e.g. regions.py's
+    # _FAR_REGION_IDS = (1, 3)).
+    region_id = getattr(env, "_region_id", None)
+    if region_id is not None:
+        wide = wide | (region_id == 1) | (region_id == 3)
+
+    # Cached so footreach/foot_proximity/stopball/softstop can gate on
+    # "wide AND not yet landed" without recomputing the crossing geometry.
+    env._blue_wide = wide
+
+    half_y = start_y + (full_y - start_y) / 2.0
+
+    n = env.num_envs
+    if not hasattr(env, "_blue_was_airborne"):
+        env._blue_was_airborne = torch.zeros(n, dtype=torch.bool, device=env.device)
+        env._blue_landed = torch.zeros(n, dtype=torch.bool, device=env.device)
+        env._blue_settle_count = torch.zeros(n, dtype=torch.int64, device=env.device)
+        env._blue_landed_was_free = torch.zeros(n, dtype=torch.bool, device=env.device)
+        env._blue_last_settle_step = torch.full((n,), -1, dtype=torch.int64, device=env.device)
+    just_reset = env.episode_length_buf <= 1
+    env._blue_was_airborne[just_reset] = False
+    env._blue_landed[just_reset] = False
+    env._blue_settle_count[just_reset] = 0
+    env._blue_landed_was_free[just_reset] = False
+
+    # Curriculum-eased landing thresholds (branch mechanism #1).
+    d = float(min(max(getattr(env, "_ball_difficulty", 1.0), 0.0), 1.0))
+    landing_radius = 0.20 + (landing_radius - 0.20) * d
+    landing_speed_threshold = 2.0 + (landing_speed_threshold - 2.0) * d
+    env._blue_landing_radius_current = landing_radius
+
+    try:
+        robot: Entity = env.scene[asset_cfg.name]
+        feet_contact: ContactSensor = env.scene["feet_contact"]
+    except KeyError:
+        robot = None
+        feet_contact = None
+
+    if robot is not None and feet_contact is not None:
+        foot_pos_w = robot.data.body_link_pos_w[:, asset_cfg.body_ids, :]   # (N, 2, 3)
+        foot_vel_w = robot.data.body_link_lin_vel_w[:, asset_cfg.body_ids, :]  # (N, 2, 3)
+        foot_idx = _get_correct_foot_idx(env, ball_name)                    # (N,)
+        arange_n = torch.arange(n, device=env.device)
+        assigned_foot_pos = foot_pos_w[arange_n, foot_idx]                  # (N, 3)
+        assigned_foot_vel = foot_vel_w[arange_n, foot_idx]                  # (N, 3)
+
+        found = feet_contact.data.found                                    # (N, 8)
+        left_in_contact = (found[:, :4] > 0).any(dim=-1)
+        right_in_contact = (found[:, 4:] > 0).any(dim=-1)
+        foot_in_contact = torch.where(foot_idx == 0, left_in_contact, right_in_contact)  # (N,)
+
+        currently_airborne = ~foot_in_contact
+        env._blue_was_airborne |= currently_airborne
+
+        goal_x_w = env.scene.env_origins[:, 0]
+        target_point_xy = torch.stack([goal_x_w, half_y], dim=-1)  # (N, 2)
+        # Horizontal-only distance -- foot_in_contact already guarantees ground
+        # height whenever this fires, so a Z term would be redundant.
+        dist_to_blue = torch.norm(assigned_foot_pos[:, :2] - target_point_xy, dim=-1)
+        # Horizontal speed gate -- a foot merely sweeping through blue's
+        # coordinate at speed (mid-swing toward green) must not count as
+        # landing there. Only a foot that has actually decelerated (genuine
+        # plant) satisfies this alongside the position check.
+        foot_speed = torch.norm(assigned_foot_vel[:, :2], dim=-1)
+
+        candidate = wide & env._blue_was_airborne & foot_in_contact & (dist_to_blue < landing_radius)
+        # Memoization guard: this function is called up to 7x/step by
+        # different reward terms sharing one unchanged post-physics
+        # snapshot -- without this, the settle count would increment/decay
+        # once PER CALL instead of once per real physics tick.
+        is_first_call_this_tick = env.episode_length_buf != env._blue_last_settle_step
+        env._blue_last_settle_step = env.episode_length_buf.clone()
+        # FIX (branch mechanism #9, "leaky" decrement): on a miss, decrement
+        # by 1 (floored at 0) instead of hard-reset to 0 -- see docstring.
+        env._blue_settle_count = torch.where(
+            candidate,
+            torch.where(is_first_call_this_tick, env._blue_settle_count + 1, env._blue_settle_count),
+            torch.where(is_first_call_this_tick, (env._blue_settle_count - 1).clamp(min=0), env._blue_settle_count),
+        )
+        _BLUE_SETTLE_STEPS = 3
+        newly_landed = (
+            (env._blue_settle_count >= _BLUE_SETTLE_STEPS)
+            & (foot_speed < landing_speed_threshold)
+            & ~env._blue_landed
+        )
+        env._blue_landed |= newly_landed
+
+        # Per-landing-event free classification: a landing achieved
+        # suspiciously early (few steps since reset) can't reflect real
+        # approach work; RSI donor poses are mid-motion by construction.
+        _BLUE_LANDING_FREE_STEP_THRESHOLD = 10
+        env._blue_landed_was_free = torch.where(
+            newly_landed,
+            env.episode_length_buf < _BLUE_LANDING_FREE_STEP_THRESHOLD,
+            env._blue_landed_was_free,
+        )
+
+    phase1_active = wide & ~env._blue_landed
+    return torch.where(phase1_active, half_y, full_y)
+
+
 def footreach(
     env: "ManagerBasedRlEnv",
     ball_name: str,
@@ -206,88 +394,100 @@ def footreach(
 
     Upright gate suppresses reward when falling (mirrors eereach upright gate).
 
-    green-ball-baseline (2026-07-10): the two-stage blue-waypoint mechanism
-    (SimpleGoalKeeper port) has been removed on this branch to isolate and
-    verify the core AMP+PPO+save-reward mechanism without it -- see
-    docs/BugFixes.md. The reach target is always the direct crossing point,
-    matching G1's own eereach (no intermediate waypoint concept upstream).
+    v2 reimplementation (2026-07-23) of the blue-ball-waypoint branch's
+    two-stage mechanism, removed from this project's lineage 2026-07-10
+    ("green-ball-baseline"). See _get_reach_target_y's docstring for the
+    full mechanism history and what was/wasn't ported.
+
+    Assigned-foot targeting (ported from the branch's 2026-07-11 fix):
+    phase1_rew's lateral_error and vel_sigma's vel_toward are keyed off the
+    task-ASSIGNED foot's (_get_correct_foot_idx) own Y position/velocity,
+    not root -- for a foot (unlike G1's hand-reach, which is root-relative
+    since a hand can reach independently of torso position), the root can
+    sit near the target purely from stance width/weight-shift while the
+    assigned foot itself overshoots or lags, implicitly crediting the wrong
+    foot on wide two-stage crossings.
+
+    Blue decel-zone (ported from the branch's 2026-07-11/07-12 fix): decays
+    vel_sigma's speed bonus toward neutral (1.0x) as the assigned foot
+    closes within 0.30m of blue on a wide, unlanded crossing, reaching full
+    neutral at the SAME curriculum-eased landing_radius _get_reach_target_y
+    used this call (env._blue_landing_radius_current) -- without this nothing
+    disincentivizes carrying speed through the exact zone the foot should be
+    decelerating into for a genuine plant.
     """
     robot: Entity = env.scene[asset_cfg.name]
     ball: Entity = env.scene[ball_name]
 
     ball_pos_w = ball.data.root_link_pos_w                              # (N, 3)
     foot_pos_w = robot.data.body_link_pos_w[:, asset_cfg.body_ids, :]  # (N, 2, 3)
+    foot_vel_w = robot.data.body_link_lin_vel_w[:, asset_cfg.body_ids, :]  # (N, 2, 3)
 
     ball_x_local = ball_pos_w[:, 0] - env.scene.env_origins[:, 0]     # (N,)
-    robot_y_w = robot.data.root_link_pos_w[:, 1]                       # (N,)
 
-    # Frozen crossing Y (where the ball will cross the goal line) — used both as
-    # the reach target and for foot-side selection below.
-    crossing_y = _get_ball_crossing_y(env, ball_name)                  # (N,)
-    reach_target_y = crossing_y                                         # (N,)
+    # Fixed, task-assigned foot (not the geometrically-closest foot) --
+    # computed once up front so phase1/vel_sigma/phase2 all credit the same foot.
+    foot_idx = _get_correct_foot_idx(env, ball_name)                   # (N,)
+    arange_n = torch.arange(env.num_envs, device=env.device)
+    assigned_foot_y = foot_pos_w[arange_n, foot_idx, 1]                # (N,)
+    assigned_foot_vel_y = foot_vel_w[arange_n, foot_idx, 1]            # (N,)
+
+    # Reach target: full crossing point, or the two-stage midpoint-then-full
+    # schedule on wide crossings. See _get_reach_target_y.
+    reach_target_y = _get_reach_target_y(env, ball_name, asset_cfg=asset_cfg)  # (N,)
 
     # Phase 1: pre-position laterally when ball is far (> 1.5 m in front).
-    lateral_error = reach_target_y - robot_y_w                          # positive → target right
+    # Uses the ASSIGNED FOOT's Y, not root -- see docstring above.
+    lateral_error = reach_target_y - assigned_foot_y                    # positive → target right
     asidegoal = lateral_error.clamp(-1.0, 1.0)
     asidegoal = torch.where(asidegoal.abs() < 0.3, torch.zeros_like(asidegoal), asidegoal)
     phase1_rew = 1.0 - asidegoal.abs()                                  # 1=aligned, 0=1 m off
 
-    # Phase 2 crossing point: frozen when far, live ball when close (mirrors G1
-    # end_target update). G1 post_physics_step lines 203-206: end_target switches
-    # to ball_states[:, :3] when balllocal < 0.5 — robot converges on the actual
-    # ball in the final 0.5 m. The X coordinate stays at goal_x_w (stayonline
-    # constraint keeps the foot at the goal line).
+    # Phase 2 crossing point: frozen (two-stage) when far, live ball when close (mirrors
+    # G1 end_target update). G1 post_physics_step lines 203-206: end_target switches to
+    # ball_states[:, :3] when balllocal < 0.5 — robot converges on the actual ball in the
+    # final 0.5 m. The X coordinate stays at goal_x_w (stayonline constraint keeps the
+    # foot at the goal line).
     goal_x_w  = env.scene.env_origins[:, 0]       # (N,)
     floor_z_w = env.scene.env_origins[:, 2]       # (N,)
     live_y = ball_pos_w[:, 1]
     live_z = ball_pos_w[:, 2]
-    ball_close = ball_x_local < 0.5                                     # (N,) bool — mirrors G1 balllocal < 0.5
+    # On wide crossings this switch is ALSO gated on having genuinely landed
+    # at the blue midpoint: otherwise the policy can skip the landing gate
+    # entirely and still converge on the live ball once it closes to 0.5 m.
+    ball_close = (ball_x_local < 0.5) & (~env._blue_wide | env._blue_landed)
 
-    # Switch from frozen crossing point to live ball Y/Z when ball is within 0.5 m.
+    # Switch from frozen (two-stage) target to live ball Y/Z when ball is within 0.5 m.
     target_y = torch.where(ball_close, live_y, reach_target_y)
     target_z = torch.where(ball_close, live_z, floor_z_w + 0.10)
 
     crossing_point = torch.stack(
         [goal_x_w, target_y, target_z], dim=-1
     )                                                                     # (N, 3)
-    # Side-specific foot: left foot (idx 0) for +Y crossing, right (idx 1) for -Y.
-    is_left_ball = crossing_y > env.scene.env_origins[:, 1]
-    foot_idx = torch.where(is_left_ball,
-                           torch.zeros(env.num_envs, dtype=torch.long, device=env.device),
-                           torch.ones(env.num_envs, dtype=torch.long, device=env.device))
-    foot_pos_active = foot_pos_w[torch.arange(env.num_envs, device=env.device), foot_idx]
+    foot_pos_active = foot_pos_w[arange_n, foot_idx]
     dist_to_crossing = torch.norm(foot_pos_active - crossing_point, dim=-1)  # (N,)
     reach_rew = 1.0 - 1.0 / (1.0 + torch.exp(-sigma * (dist_to_crossing - reach_th)))
 
     # Lateral velocity toward crossing side amplifies the reach reward.
-    lateral_vel_y = robot.data.root_link_lin_vel_w[:, 1]
-    vel_toward = torch.where(lateral_error > 0, lateral_vel_y, -lateral_vel_y)
+    # Uses the ASSIGNED FOOT's Y velocity, not root -- see docstring above.
+    vel_toward = torch.where(lateral_error > 0, assigned_foot_vel_y, -assigned_foot_vel_y)
+    # Flat 1-10x for every region, matching G1's hand/step formula -- see
+    # docs/BugFixes.md 2026-07-18 for why a region-conditional escalation
+    # was tried and reverted (wrong G1 analog: that's jump's mechanism, not
+    # step's, and jump pairs it with airborne-specific safety rewards this
+    # always-grounded task has no equivalent of).
+    vel_sigma = 1.0 + 3.0 * vel_toward.clamp(0.0, 3.0)
 
-    # FIX 2026-07-15 (REVERTED 2026-07-18): this used to apply a region-
-    # conditional multiplier here, escalating for far regions with
-    # far_scale = 3.0 + 1.5*curriculumupdate, modeled on G1's jump-region
-    # jump_scale = 3.0 + 3.0*curriculumupdate (legged_robot.py:1379-1388,
-    # end_regions 2/3). Two independent subagent audits (2026-07-18, no
-    # shared context, unanimous) found this was the wrong G1 region: jump's
-    # escalating scale keys off VERTICAL velocity and is paired with two
-    # jump-region-specific safety rewards (_reward_airfeetorientation,
-    # _reward_successland, both gated on root_states[:,2]>1.0 -- a literal
-    # dive) that manage foot orientation while airborne and landing quality.
-    # None of that exists for a foot-only, always-grounded task -- which is
-    # plausibly why the escalation caused the overshoot-and-fall behavior
-    # this fix's slope-halving (07-15) only partially addressed.
-    #
-    # G1's STEP region (ranges_4/ranges_5, end_regions 4/5) is the actual
-    # mechanical match: grounded, lateral velocity, and uses the exact SAME
-    # FLAT scale (1 + 3.0*v) as every non-jump region -- no curriculumupdate
-    # term at all (legged_robot.py:1382,1384-1385). The "far crossings need
-    # more incentive than near" premise this multiplier was built on has no
-    # support in the correct G1 analog; step's own difficulty ramp comes
-    # entirely from its width curriculum (see far_travel_curriculum,
-    # events.py), not from an escalating reward multiplier. Reverted to the
-    # flat 3.0 for every region -- see docs/BugFixes.md 2026-07-18.
-    vel_scale = torch.full_like(vel_toward, 3.0)
-    vel_sigma = 1.0 + vel_scale * vel_toward.clamp(0.0, 3.0)  # flat 1-10x for every region, matching G1's hand/step formula
+    # Blue decel-zone: decay the speed bonus toward neutral as the assigned
+    # foot closes on blue specifically (wide, unlanded crossing) -- without
+    # this, vel_sigma keeps rewarding carrying speed straight through the
+    # zone the foot should be planting in. Reaches full neutral at the SAME
+    # curriculum-eased landing_radius _get_reach_target_y computed this call.
+    blue_approach = env._blue_wide & ~env._blue_landed
+    _BLUE_DECEL_ZONE = 0.30
+    _BLUE_DECEL_FLOOR = float(getattr(env, "_blue_landing_radius_current", 0.08))
+    decay_frac = ((dist_to_crossing - _BLUE_DECEL_FLOOR) / (_BLUE_DECEL_ZONE - _BLUE_DECEL_FLOOR)).clamp(0.0, 1.0)
+    vel_sigma = torch.where(blue_approach, 1.0 + (vel_sigma - 1.0) * decay_frac, vel_sigma)
 
     # Combine: phase1 when ball is far, phase2 sigmoid when close.
     phase1_mask = ball_x_local > 1.5
@@ -316,8 +516,10 @@ def foot_proximity(
     one-shot stopball. Deactivates once the ball is behind (same gate as footreach).
     Weight: +5.0.
 
-    green-ball-baseline (2026-07-10): two-stage blue-waypoint mechanism removed,
-    see footreach's docstring.
+    v2 reimplementation (2026-07-23) of the blue-ball-waypoint branch's
+    two-stage mechanism, removed from this project's lineage 2026-07-10
+    ("green-ball-baseline"). See footreach's/_get_reach_target_y's
+    docstrings for the full mechanism history.
     """
     robot: Entity = env.scene[asset_cfg.name]
     ball: Entity = env.scene[ball_name]
@@ -325,15 +527,19 @@ def foot_proximity(
     ball_pos_w = ball.data.root_link_pos_w                              # (N, 3)
     ball_x_local = ball_pos_w[:, 0] - env.scene.env_origins[:, 0]     # (N,)
 
-    # Frozen crossing Y — used both as the reach target and for foot-side selection.
+    # Frozen crossing Y — used for foot-side selection.
     crossing_y = _get_ball_crossing_y(env, ball_name)                  # (N,)
-    reach_target_y = crossing_y                                         # (N,)
+    # Reach target: full crossing point, or the two-stage midpoint-then-full
+    # schedule on wide crossings. See _get_reach_target_y.
+    reach_target_y = _get_reach_target_y(env, ball_name, asset_cfg=asset_cfg)  # (N,)
     goal_x_w = env.scene.env_origins[:, 0]
     env_z    = env.scene.env_origins[:, 2]
 
     # Live ball switch: when ball is within 0.5 m of goal line, track live position.
     # Mirrors G1 post_physics_step: end_target = ball_states[:, :3] when balllocal < 0.5.
-    ball_close = ball_x_local < 0.5
+    # On wide crossings this switch is ALSO gated on having genuinely landed
+    # at the blue midpoint (mirrors footreach) — see _get_reach_target_y.
+    ball_close = (ball_x_local < 0.5) & (~env._blue_wide | env._blue_landed)
     live_y = ball_pos_w[:, 1]
     live_z = ball_pos_w[:, 2]
     target_y = torch.where(ball_close, live_y, reach_target_y)
@@ -355,6 +561,143 @@ def foot_proximity(
     return torch.exp(-sigma * min_dist) * (~behind).float()
 
 
+def blue_ball_landed(
+    env: "ManagerBasedRlEnv",
+    ball_name: str,
+    asset_cfg: SceneEntityCfg = _DEFAULT_FEET_CFG,
+) -> torch.Tensor:
+    """One-shot bonus when the assigned foot lands at the blue (midpoint) target.
+
+    v2 reimplementation (2026-07-23) of the blue-ball-waypoint branch
+    mechanism. Fires the first step the two-stage gate (env._blue_landed)
+    becomes true -- the assigned foot was airborne at some point after
+    reset, then came into ground contact within landing_radius of the
+    midpoint target (settle-window + speed-gated, see _get_reach_target_y).
+    Narrow crossings never fire this (env._blue_wide is always false for
+    them).
+    """
+    _get_reach_target_y(env, ball_name, asset_cfg=asset_cfg)  # ensure _blue_landed is fresh this step
+
+    if not hasattr(env, "_blue_landed_bonus_flag"):
+        env._blue_landed_bonus_flag = torch.zeros(env.num_envs, dtype=torch.bool, device=env.device)
+
+    just_reset = env.episode_length_buf <= 1
+    env._blue_landed_bonus_flag[just_reset] = False
+
+    fired = env._blue_landed & ~env._blue_landed_bonus_flag
+    env._blue_landed_bonus_flag |= fired
+    return fired.float()
+
+
+def blue_overshoot_penalty(
+    env: "ManagerBasedRlEnv",
+    ball_name: str,
+    asset_cfg: SceneEntityCfg = _DEFAULT_FEET_CFG,
+    landing_radius: float = 0.08,
+    max_overshoot: float = 0.5,
+) -> torch.Tensor:
+    """Penalize the assigned foot for advancing past the blue midpoint,
+    toward green, on a wide crossing that hasn't been genuinely landed yet.
+
+    v2 reimplementation (2026-07-23) of the blue-ball-waypoint branch
+    mechanism. Without this term, a wide episode where the policy ignores
+    the blue waypoint entirely earns exactly the same reward (zero, from
+    the landing-gated stopball/softstop/blue_ball_landed) as one where it
+    tried and failed -- with no cost differential, nothing pushes the
+    policy away from ignoring wide episodes altogether. This makes
+    overshooting past blue while unlanded worse than stopping short of it
+    or reaching it, on every step.
+
+    Deliberately does NOT touch footreach's vel_sigma (which already
+    amplifies reward for velocity toward whichever point is the CURRENT
+    reach target, and separately decays that bonus in the blue decel-zone
+    -- see footreach). The combination is intentional: vel_sigma still
+    rewards approaching blue fast, while this term makes carrying that
+    speed past blue without stopping costly.
+
+    landing_radius matches _get_reach_target_y's own arrival radius (0.08)
+    as a deadband -- being within it counts as "at blue", not overshooting.
+    max_overshoot bounds the per-step penalty so a single step can't
+    dominate the return.
+
+    Zero on narrow crossings and once genuinely landed.
+    """
+    _get_reach_target_y(env, ball_name, asset_cfg=asset_cfg)  # ensure _blue_wide/_blue_landed fresh
+
+    full_y = _get_ball_crossing_y(env, ball_name)                 # (N,) world Y
+    start_y = env.scene.env_origins[:, 1]                         # (N,) world Y
+    half_y = start_y + (full_y - start_y) / 2.0
+    direction = torch.sign(full_y - start_y)
+
+    robot: Entity = env.scene[asset_cfg.name]
+    foot_pos_w = robot.data.body_link_pos_w[:, asset_cfg.body_ids, :]  # (N, 2, 3)
+    foot_idx = _get_correct_foot_idx(env, ball_name)                   # (N,)
+    arange_n = torch.arange(env.num_envs, device=env.device)
+    assigned_foot_y = foot_pos_w[arange_n, foot_idx, 1]                # (N,)
+
+    signed_progress = direction * (assigned_foot_y - half_y)
+    overshoot = torch.clamp(signed_progress - landing_radius, min=0.0, max=max_overshoot)
+
+    phase1_active = env._blue_wide & ~env._blue_landed
+    return overshoot * phase1_active.float()
+
+
+def blue_stick_landing(
+    env: "ManagerBasedRlEnv",
+    ball_name: str,
+    asset_cfg: SceneEntityCfg = _DEFAULT_FEET_CFG,
+    dist_sigma: float = 8.0,
+    speed_sigma: float = 1.5,
+) -> torch.Tensor:
+    """Dense reward for the assigned foot being simultaneously CLOSE to and
+    SLOW near the blue midpoint on a wide, unlanded crossing --
+    exp(-dist_sigma * dist_to_blue) * exp(-speed_sigma * foot_speed), peaking
+    exactly at "close AND stopped" (a genuine plant), zero elsewhere.
+
+    v2 reimplementation (2026-07-23) of the blue-ball-waypoint branch
+    mechanism. Rationale: nothing else in the reward stack gives dense
+    credit for the EXACT joint condition (close + slow) the settle-window
+    check requires -- footreach/foot_proximity reward proximity to blue,
+    and footreach's vel_sigma rewards speed toward blue, but nothing
+    rewards decelerating once close. Without a dense basin peaking at the
+    target joint condition, a policy has to discover that exact
+    combination by chance before any gradient reinforces it. Mirrors this
+    project's own `cleanstop` (rewards low BALL speed near a target after
+    softstop) -- same "reward stillness near a point" pattern, applied to
+    the FOOT approaching blue instead of the ball after a save.
+
+    dist_sigma=8/speed_sigma=1.5 (not the original branch's initial
+    dist_sigma=15/speed_sigma=3, widened after those made this a near-cliff
+    basin that vanished as soon as stochastic exploration pushed the policy
+    just past it): decays to ~0.5 by ~9cm / ~0.46 m/s, ~0.1 by ~29cm /
+    ~1.5 m/s. Neither independently retuned for this reimplementation.
+
+    Zero on narrow crossings and once genuinely landed -- mirrors
+    blue_overshoot_penalty's phase1_active gate exactly.
+    """
+    _get_reach_target_y(env, ball_name, asset_cfg=asset_cfg)  # ensure _blue_wide/_blue_landed fresh
+
+    full_y = _get_ball_crossing_y(env, ball_name)                 # (N,) world Y
+    start_y = env.scene.env_origins[:, 1]                         # (N,) world Y
+    half_y = start_y + (full_y - start_y) / 2.0
+    goal_x_w = env.scene.env_origins[:, 0]
+    target_xy = torch.stack([goal_x_w, half_y], dim=-1)           # (N, 2)
+
+    robot: Entity = env.scene[asset_cfg.name]
+    foot_pos_w = robot.data.body_link_pos_w[:, asset_cfg.body_ids, :]  # (N, 2, 3)
+    foot_vel_w = robot.data.body_link_lin_vel_w[:, asset_cfg.body_ids, :]  # (N, 2, 3)
+    foot_idx = _get_correct_foot_idx(env, ball_name)                   # (N,)
+    arange_n = torch.arange(env.num_envs, device=env.device)
+    assigned_foot_pos = foot_pos_w[arange_n, foot_idx]                 # (N, 3)
+    assigned_foot_vel = foot_vel_w[arange_n, foot_idx]                 # (N, 3)
+
+    dist = torch.norm(assigned_foot_pos[:, :2] - target_xy, dim=-1)
+    speed = torch.norm(assigned_foot_vel[:, :2], dim=-1)
+
+    phase1_active = env._blue_wide & ~env._blue_landed
+    return torch.exp(-dist_sigma * dist) * torch.exp(-speed_sigma * speed) * phase1_active.float()
+
+
 def stopball(
     env: "ManagerBasedRlEnv",
     ball_name: str,
@@ -366,10 +709,17 @@ def stopball(
     Fires exactly once per episode when delta_vx > threshold, providing the primary
     training signal for a successful save. Mirrors Imitationlearningbooster stopball.
 
-    green-ball-baseline (2026-07-10): the two-stage blue-waypoint landing gate
-    has been removed on this branch -- fires unconditionally on any qualifying
-    deflection, no longer requires a prior blue-midpoint landing. See
-    docs/BugFixes.md.
+    v2 landing gate (2026-07-23, reimplemented from the blue-ball-waypoint
+    branch, removed 2026-07-10): on wide crossings (env._blue_wide), this
+    can only fire once the assigned foot has genuinely landed at the blue
+    midpoint (env._blue_landed & ~env._blue_landed_was_free -- excludes
+    landings achieved suspiciously early, which can't reflect real approach
+    work) -- otherwise the policy can skip the two-stage waypoint entirely
+    with one continuous reach and still collect the full save reward. Layered
+    ON TOP OF the correct-foot-contact gating below (added independently,
+    2026-07-14/07-15, after this landing gate had already been removed) --
+    both must hold, not either/or. Narrow crossings are unaffected
+    (env._blue_wide always false for them).
 
     FIX 2026-07-14: was missing any check on WHICH foot deflected the ball --
     a deflection off the wrong (non-assigned) foot fired full reward exactly
@@ -395,6 +745,8 @@ def stopball(
     physical instant; a coincidental "wrong foot happens to be standing
     near the ball as it settles" scenario should not.
     """
+    _get_reach_target_y(env, ball_name)  # ensure _blue_wide/_blue_landed are fresh this step
+
     ball: Entity = env.scene[ball_name]
     ball_x_vel = ball.data.root_link_lin_vel_w[:, 0]
     ball_x_local = ball.data.root_link_pos_w[:, 0] - env.scene.env_origins[:, 0]
@@ -418,11 +770,13 @@ def stopball(
     foot_in_contact = torch.stack([left_in_contact, right_in_contact], dim=-1)  # (B, 2)
     correct_foot_contact = foot_in_contact[torch.arange(env.num_envs, device=env.device), foot_idx]
 
+    landing_ok = ~env._blue_wide | (env._blue_landed & ~env._blue_landed_was_free)
+
     # Raw condition (not gated by the one-shot ~env._sb_flag latch) -- this
     # is "is a deflection happening right now", read by softstop below.
     # Registered before "softstop" in goalkeeper_env_cfg.py's rewards dict,
     # so this is fresh (this step, not stale) by the time softstop runs.
-    deflection_now = (delta_vx > delta_vel_threshold) & in_front & correct_foot_contact
+    deflection_now = (delta_vx > delta_vel_threshold) & in_front & correct_foot_contact & landing_ok
     env._sb_deflection_now = deflection_now
 
     fired = deflection_now & ~env._sb_flag
@@ -444,8 +798,9 @@ def softstop(
     Also gates _ball_is_behind and tracks which foot was in contact when softstop fires
     (used by single_foot_save, inner_face_orientation_save, cleanstop, airborne_at_save).
 
-    green-ball-baseline (2026-07-10): the two-stage blue-waypoint landing gate
-    has been removed on this branch, see stopball's docstring.
+    v2 landing gate (2026-07-23, reimplemented from the blue-ball-waypoint
+    branch, removed 2026-07-10): same wide-crossing landing gate as
+    stopball -- see that function's docstring.
 
     FIX 2026-07-14: correct-foot contact was computed AFTER `fired`, only to
     record env._softstop_correct_foot for downstream quality bonuses -- it
@@ -473,6 +828,8 @@ def softstop(
     instant; requiring both prevents a wrong-foot-standing-nearby
     coincidence from firing this on its own. See stopball's docstring.
     """
+    _get_reach_target_y(env, ball_name)  # ensure _blue_wide/_blue_landed are fresh this step
+
     ball: Entity = env.scene[ball_name]
     ball_x_vel = ball.data.root_link_lin_vel_w[:, 0]
     ball_x_local = ball.data.root_link_pos_w[:, 0] - env.scene.env_origins[:, 0]
@@ -498,10 +855,11 @@ def softstop(
     same_step_as_stopball = getattr(
         env, "_sb_deflection_now", torch.zeros(env.num_envs, dtype=torch.bool, device=env.device)
     )
+    landing_ok = ~env._blue_wide | (env._blue_landed & ~env._blue_landed_was_free)
 
     fired = (
         (ball_x_vel > velocity_threshold) & in_front & correct_foot_contact
-        & same_step_as_stopball & ~env._softstop_flag
+        & same_step_as_stopball & landing_ok & ~env._softstop_flag
     )
     env._softstop_correct_foot[fired] = correct_foot_contact[fired]
 
