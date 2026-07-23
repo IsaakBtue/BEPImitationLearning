@@ -346,8 +346,11 @@ def _patch_viewer_intercept_vis(native_viewer: "NativeMujocoViewer", env) -> Non
 
     Two-stage wide-crossing visualization (v2 reimplementation, 2026-07-23, of
     the blue-ball-waypoint branch's mechanism -- see rewards.py's
-    _get_reach_target_y). When |crossing_y - start_y| > 0.5 (or the region is
-    a far region) and the assigned foot has not yet landed at the midpoint,
+    _get_reach_target_y). When |crossing_y - start_y| > wide_threshold (0.65
+    as of the 2026-07-23 widening -- kept symbolic here rather than
+    hardcoded so this comment can't drift out of sync with rewards.py's
+    actual default again) or the region is a far region, and the assigned
+    foot has not yet landed at the midpoint,
     draws a BLUE sphere there instead of the usual green one. Once landing has
     occurred (or the crossing is narrow), draws the usual GREEN sphere at the
     full crossing point. Lets a human watching sgk_play confirm landing
