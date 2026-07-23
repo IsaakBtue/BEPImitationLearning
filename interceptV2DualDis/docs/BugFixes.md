@@ -1062,3 +1062,19 @@ This directly gives the data needed to decide the actual question: for episodes 
 **Verification:** `uv run pytest tests/simple_goalkeeper/ -v` -- 63/63 pass. Live smoke test on the real multi-disc env (4 envs, `cuda:0`, 20 zero-action steps): confirmed `penalize_baseheight` present and `penalize_kneeheight` absent from `reward_manager.active_terms`; `base_height` present and `shank_height` absent from `termination_manager.active_terms`.
 
 **Not yet resolved:** not yet validated against a live training run -- the currently-running `green_jointvel_wrongfootpen_2026-07-22` still has the OLD shank-based gating (this change wasn't hot-applied to a running process); whether/when to stop and restart with this change included is a separate call from the user, not made unilaterally here.
+
+## 2026-07-23 -- both-feet catching and weird post-save arm pose: confirmed pre-existing on master (not a v2 regression), two weight fixes
+
+**Context:** user reviewed checkpoints from both master's last run (`green_baseheight_postleg_2026-07-22`) and the v2 blue-ball-waypoint branch's active run, and reported two symptoms: post-save orientation and arm pose still "look really weird," and the policy still catches the ball with both feet. Asked specifically to check master (not just v2) and to reconsider `penalize_wrong_foot_ball_contact`.
+
+**Diagnosis:** pulled the relevant reward-term logged values from both runs' training logs directly and compared:
+- `penalize_wrong_foot_ball_contact`: -0.0197 to -0.0222 on master, -0.0199 to -0.0206 on v2 -- statistically identical between the two branches. Re-read the function line-by-line (`rewards.py:1081-1119`) and found no bug -- it correctly uses the ball-specific `ball_contact` sensor and fires whenever the non-assigned foot is in genuine contact with the ball. Conclusion: not a v2 regression, and not a logic bug -- at weight -30 the penalty simply isn't strong enough to outweigh whatever save-quality benefit the policy gets from planting both feet.
+- `postupperdofpos`: 0.016-0.066 on master, 0.066-0.066 on v2 -- both essentially at floor (max possible is 1.0), while `postlegdofpos`/`postwaistdofpos` (same weight tier, same `exp(-err)` shape) were noticeably higher on both runs. Checked G1's own value (`g1_29_config.py:317`): also 1.0 -- so this was already an exact G1-parity weight, not an oversight. Per this project's own rule 0 ("always check G1 first"), raising it needed explicit justification beyond "looks weird," since it's a deliberate divergence, not a parity fix -- asked the user, who confirmed proceeding.
+
+**Fix:**
+- `penalize_wrong_foot_ball_contact` weight -30.0 -> -100.0 (`rewards.py`, `goalkeeper_env_cfg.py`) -- no G1 equivalent exists to check parity against (already SGK-only), so this is a plain magnitude tuning call. Puts it in the same severity tier as the other "bad technique" penalties (`penalize_self_collision` -50, `penalize_sharpcontact`/`penalize_baseheight` -100).
+- `postupperdofpos` weight 1.0 -> 5.0 (`rewards.py`, `goalkeeper_env_cfg.py`) -- **deliberate G1 divergence**, not a parity fix. Rationale: G1's arms are the active, catching limb, with the whole task structured around them settling into a natural rest pose after use; SGK's arms have no equivalent structural pull in a foot-only task, so the same G1-matched weight plausibly needs to work harder here than it did for G1's own task.
+
+**Verification:** `uv run pytest tests/simple_goalkeeper/ -v` -- 63/63 pass.
+
+**Not yet resolved:** neither fix has live training evidence yet. Master is currently stopped (no live run to restart); the v2 branch's active run (`blue_v2_2026-07-23`) needs the same two changes ported and a restart to actually test them -- see the v2 branch's own `docs/BugFixes.md` entry for that half of this fix.

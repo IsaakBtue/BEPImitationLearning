@@ -973,6 +973,19 @@ def postupperdofpos(
     """Reward arm joints returning to default pose after ball is behind. Mirrors ILB.
 
     exp(-1 * sum_sq_err) × behind — bounded [0, 1], reward peaks at default pose.
+
+    FIX 2026-07-23: weight raised 1.0 -> 5.0 (deliberate G1 divergence, not
+    a parity fix -- G1 also uses 1.0, g1_29_config.py:317). User reported
+    arm pose still looking "really weird" post-save on both master's last
+    checkpoint and the v2 branch; confirmed via training logs this reward
+    was stuck near its floor on both (~0.016-0.066 out of a possible max of
+    1.0), while postlegdofpos and postwaistdofpos (same weight tier, same
+    exp(-err) shape) were noticeably higher. G1's arms are the active,
+    catching limb with the whole task structured around them settling into
+    a natural rest pose; SGK's arms have no such structural pull in this
+    foot-only task, so the same G1-matched weight plausibly isn't enough
+    relative pressure here even though it was sufficient for G1's own task.
+    Not yet validated against a live run.
     """
     behind = _ball_is_behind(env, ball_name)
     robot: Entity = env.scene[asset_cfg.name]
@@ -1106,7 +1119,23 @@ def penalize_wrong_foot_ball_contact(
 
     Geom layout in ball_contact sensor (sorted by name, matches feet_contact):
         0-3: left_foot1-4 -> left foot, 4-7: right_foot1-4 -> right foot.
-    Weight: -30.0.
+    Weight: -100.0 (was -30.0).
+
+    FIX 2026-07-23: user reviewed checkpoints from both master's last run
+    (green_baseheight_postleg_2026-07-22) and the v2 blue-ball-waypoint run
+    and reported the policy still catches the ball with both feet in
+    practice. Confirmed via training logs: this reward's logged value is
+    essentially identical between the two runs (~-0.020 to -0.022 on
+    master, ~-0.020 to -0.021 on v2) -- a persistent, non-trivial firing
+    rate on both, not something introduced by the v2 reimplementation.
+    The mechanism itself has no bug (re-verified line by line) -- at -30
+    the penalty simply isn't outweighing whatever save-quality benefit the
+    policy gets from planting both feet. No G1 equivalent exists to check
+    parity against (already documented as SGK-only), so raising the
+    magnitude is a plain tuning call: -100 puts it in the same severity
+    tier as the other "bad technique" penalties (penalize_self_collision
+    -50, penalize_sharpcontact/penalize_baseheight -100) rather than the
+    much weaker tier it was in before. Not yet validated against a live run.
     """
     foot_idx = _get_correct_foot_idx(env, ball_name)  # (N,) 0=left, 1=right
     sensor: ContactSensor = env.scene["ball_contact"]
