@@ -250,9 +250,17 @@ def _patch_viewer_intercept_vis(native_viewer: "NativeMujocoViewer", env) -> Non
     each render frame — it moves when a new episode starts and the crossing_y
     changes.
 
-    green-ball-baseline (2026-07-10): always draws a GREEN sphere at the
-    direct crossing point -- the two-stage blue-waypoint mechanism has been
-    removed on this branch, see docs/BugFixes.md.
+    Two-stage wide-crossing visualization (v2 reimplementation, 2026-07-23, of
+    the blue-ball-waypoint branch's mechanism -- see rewards.py's
+    _get_reach_target_y). When |crossing_y - start_y| > 0.5 (or the region is
+    a far region) and the assigned foot has not yet landed at the midpoint,
+    draws a BLUE sphere there instead of the usual green one. Once landing has
+    occurred (or the crossing is narrow), draws the usual GREEN sphere at the
+    full crossing point. Lets a human watching sgk_play confirm landing
+    timing visually. Reads env._blue_wide/_blue_landed directly -- cached
+    every step by _get_reach_target_y -- rather than recomputing the
+    wide/region check here, so the marker can't drift out of sync with what
+    footreach/foot_proximity/stopball/softstop are actually gating on.
     """
     orig_update = native_viewer._update_debug_visualizers
 
@@ -308,14 +316,32 @@ def _patch_viewer_intercept_vis(native_viewer: "NativeMujocoViewer", env) -> Non
                 to=to,
             )
 
-        # green-ball-baseline (2026-07-10): two-stage blue-waypoint mechanism
-        # removed on this branch -- always show the direct crossing point.
-        _add_sphere(goal_x, cross_y, sphere_z, 0.08, [0.1, 1.0, 0.2, 0.75])
-        _add_line(
-            np.array([goal_x, cross_y, floor_z], dtype=np.float64),
-            np.array([goal_x, cross_y, sphere_z], dtype=np.float64),
-            0.008, [0.1, 1.0, 0.2, 0.6],
-        )
+        # Two-stage schedule -- read the cached state _get_reach_target_y
+        # (rewards.py) sets every step, rather than recomputing wide/region
+        # here (see docstring).
+        wide_t = getattr(raw_env, "_blue_wide", None)
+        landed_t = getattr(raw_env, "_blue_landed", None)
+        wide = bool(wide_t[0].item()) if wide_t is not None else False
+        landed = bool(landed_t[0].item()) if landed_t is not None else False
+
+        if wide and not landed:
+            # Phase 1: BLUE sphere at the midpoint — half the distance, half as far.
+            start_y = float(origins[1])
+            mid_y = start_y + (cross_y - start_y) / 2.0
+            _add_sphere(goal_x, mid_y, sphere_z, 0.08, [0.15, 0.4, 1.0, 0.75])
+            _add_line(
+                np.array([goal_x, mid_y, floor_z], dtype=np.float64),
+                np.array([goal_x, mid_y, sphere_z], dtype=np.float64),
+                0.008, [0.15, 0.4, 1.0, 0.6],
+            )
+        else:
+            # Phase 2 (or narrow crossing): GREEN sphere at the full crossing point.
+            _add_sphere(goal_x, cross_y, sphere_z, 0.08, [0.1, 1.0, 0.2, 0.75])
+            _add_line(
+                np.array([goal_x, cross_y, floor_z], dtype=np.float64),
+                np.array([goal_x, cross_y, sphere_z], dtype=np.float64),
+                0.008, [0.1, 1.0, 0.2, 0.6],
+            )
 
     native_viewer._update_debug_visualizers = _patched_update
 
