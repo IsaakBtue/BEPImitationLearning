@@ -24,8 +24,12 @@ REGION_NAMES: tuple[str, ...] = ("left_near", "left_far", "right_near", "right_f
 
 # Per-region ball-spawn y_start_range / y_end_range. Side sign matches the
 # existing convention: positive Y crossing = left, negative Y crossing =
-# right (see rewards.py:_get_correct_foot_idx). |cross_y| < 0.5 = near,
-# >= 0.5 = far, matching the design spec's threshold.
+# right (see rewards.py:_get_correct_foot_idx). |cross_y| < 0.65 = near,
+# >= 0.65 = far.
+# FIX 2026-07-23: near/far boundary widened 0.5 -> 0.65 (user request) --
+# keep in sync with rewards.py's wide_threshold and
+# far_travel_curriculum's `lo` default (events.py), both of which encode
+# this same boundary.
 _REGION_Y_START_RANGE: dict[int, tuple[float, float]] = {
     0: (0.0, 0.3),     # left_near
     1: (0.0, 0.3),     # left_far
@@ -33,10 +37,10 @@ _REGION_Y_START_RANGE: dict[int, tuple[float, float]] = {
     3: (-0.3, 0.0),    # right_far
 }
 _REGION_Y_END_RANGE: dict[int, tuple[float, float]] = {
-    0: (0.15, 0.5),    # left_near: crosses on the left, under 0.5 m
-    1: (0.5, 1.3),     # left_far: crosses on the left, at/above 0.5 m
-    2: (-0.5, -0.15),  # right_near
-    3: (-1.3, -0.5),   # right_far
+    0: (0.15, 0.65),   # left_near: crosses on the left, under 0.65 m
+    1: (0.65, 1.3),    # left_far: crosses on the left, at/above 0.65 m
+    2: (-0.65, -0.15), # right_near
+    3: (-1.3, -0.65),  # right_far
 }
 # RE-WIDENED 2026-07-15: back to 1.3 (matching the single-disc track, see
 # the 2026-07-15 BugFixes.md entry) now that the vel_sigma-alone test is

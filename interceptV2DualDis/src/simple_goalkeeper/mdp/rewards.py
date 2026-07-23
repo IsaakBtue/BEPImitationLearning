@@ -190,9 +190,9 @@ def _get_reach_target_y(
     env: "ManagerBasedRlEnv",
     ball_name: str,
     asset_cfg: SceneEntityCfg = _DEFAULT_FEET_CFG,
-    wide_threshold: float = 0.5,
+    wide_threshold: float = 0.65,  # FIX 2026-07-23: was 0.5, kept in sync with regions.py's near/far boundary
     landing_radius: float = 0.08,
-    landing_speed_threshold: float = 1.0,
+    landing_speed_threshold: float = 0.15,  # FIX 2026-07-23: was stale 1.0 (pre-flat-hardcode value); this is now the strict/hard-difficulty end of the re-curriculum'd lerp below
 ) -> torch.Tensor:
     """Two-stage reach target for wide crossings: v2 reimplementation of the
     "blue-ball-waypoint" branch mechanism (removed from this project's
@@ -236,13 +236,21 @@ def _get_reach_target_y(
       TripleStep reference clips is only ~11 frames wide even at 1.0x
       pace -- a stochastic policy has almost no margin for a single missed
       frame under a hard-reset counter.
-    - Curriculum-eased landing thresholds (branch mechanism #1): lerps
-      landing_radius/landing_speed_threshold from loose (0.20m / 2.0 m/s at
-      ball_difficulty=0, i.e. an easy target even a rough approach can hit)
-      to the caller's strict default (0.08m / 1.0 m/s at difficulty=1),
-      tied to the existing env._ball_difficulty curriculum scalar -- a
-      policy that has never landed once has no gradient trace of what
-      success feels like; this gives it an easy version to discover first.
+    - Curriculum-eased landing radius AND speed (branch mechanism #1): lerps
+      landing_radius from loose (0.20m at ball_difficulty=0, i.e. an easy
+      target even a rough approach can hit) to the caller's strict default
+      (0.08m at difficulty=1), tied to the existing env._ball_difficulty
+      curriculum scalar -- a policy that has never landed once has no
+      gradient trace of what success feels like; this gives it an easy
+      version to discover first. landing_speed_threshold eases similarly
+      but over a deliberately narrower band: 0.30 m/s at d=0 down to
+      0.15 m/s at d=1 (FIX 2026-07-23, see docs/BugFixes.md) -- an earlier
+      version of this eased 2.0 m/s at d=0 down to 1.0 m/s at d=1, which let
+      a foot merely striding through the (large, eased) radius zone
+      register as "landed" without ever stopping; genuine plants measured
+      0.002-0.05 m/s, so both the 0.30 and 0.15 ends stay well clear of the
+      1.0-2.0 m/s band confirmed to leak, while still giving an early
+      policy a meaningfully looser bar than the strict end.
     - _blue_landed_was_free classification: a landing achieved suspiciously
       early (episode_length_buf < 10) can't reflect genuine approach work
       (RSI donor poses are mid-motion by construction) -- flagged so
@@ -285,6 +293,15 @@ def _get_reach_target_y(
 
     half_y = start_y + (full_y - start_y) / 2.0
 
+    # DEBUG 2026-07-23 (TEMPORARY, remove after landing-gate investigation):
+    # expose the Y-offsets (relative to robot start) that make up this gate's
+    # target math, plus whether "wide" was forced by the region label despite
+    # a small actual lateral offset, so we can see directly whether a landing
+    # happens near the true midpoint or near the full/green target instead.
+    env._blue_dbg_half_off = half_y - start_y
+    env._blue_dbg_full_off = full_y - start_y
+    env._blue_dbg_wide_by_dist = lateral.abs() > wide_threshold
+
     n = env.num_envs
     if not hasattr(env, "_blue_was_airborne"):
         env._blue_was_airborne = torch.zeros(n, dtype=torch.bool, device=env.device)
@@ -298,11 +315,35 @@ def _get_reach_target_y(
     env._blue_settle_count[just_reset] = 0
     env._blue_landed_was_free[just_reset] = False
 
-    # Curriculum-eased landing thresholds (branch mechanism #1).
+    # Curriculum-eased landing radius (branch mechanism #1) -- still eases
+    # 0.20m -> 0.08m with difficulty, giving an early policy a bigger target.
     d = float(min(max(getattr(env, "_ball_difficulty", 1.0), 0.0), 1.0))
     landing_radius = 0.20 + (landing_radius - 0.20) * d
-    landing_speed_threshold = 2.0 + (landing_speed_threshold - 2.0) * d
     env._blue_landing_radius_current = landing_radius
+
+    # FIX 2026-07-23: landing_speed_threshold was made flat/curriculum-
+    # independent (0.15 m/s at every difficulty) after the settle-count
+    # investigation found the OLD easy end (2.0 m/s at d=0, easing to
+    # 1.0 m/s at d=1) let a foot merely striding *through* the (loose,
+    # eased) radius zone register as "landed" without ever stopping --
+    # genuine plants measured 0.002-0.05 m/s, nowhere near even 1.0 m/s.
+    # RE-CURRICULUM'd 2026-07-23 (later same day, user request): a fully
+    # flat 0.15 m/s from iteration 0 gives an early policy no easier
+    # version of the speed gate to discover, the same problem the radius
+    # curriculum exists to avoid. Restored an eased easy end, but well
+    # below the proven-leaky 1.0/2.0 m/s values: 0.30 m/s at d=0 (a real,
+    # meaningfully looser tier than the strict 0.15 m/s end) down to
+    # 0.15 m/s at d=1 (unchanged, evidence-based). 0.30 was not itself
+    # tested against the pass-through failure mode -- chosen as a
+    # deliberately conservative margin (2x the strict end, ~6-150x above
+    # measured genuine-plant speeds, far below the 1.0-2.0 m/s band
+    # confirmed to leak) rather than re-deriving an exact safe boundary.
+    _EASY_LANDING_SPEED_THRESHOLD = 0.30
+    landing_speed_threshold = _EASY_LANDING_SPEED_THRESHOLD + (landing_speed_threshold - _EASY_LANDING_SPEED_THRESHOLD) * d
+    # Cached unconditionally (mirrors env._blue_landing_radius_current above)
+    # so callers/tests can read the resolved threshold without needing the
+    # full robot/feet_contact scene mocked.
+    env._blue_landing_speed_threshold_current = landing_speed_threshold
 
     try:
         robot: Entity = env.scene[asset_cfg.name]
@@ -324,6 +365,22 @@ def _get_reach_target_y(
         right_in_contact = (found[:, 4:] > 0).any(dim=-1)
         foot_in_contact = torch.where(foot_idx == 0, left_in_contact, right_in_contact)  # (N,)
 
+        # REVERTED 2026-07-23: tried gating foot_in_contact on foot height
+        # above floor_z (env.scene.env_origins[:, 2]) to exclude a foot
+        # suspended by ball-contact alone (see git history same day for the
+        # attempt + rationale). Live-tested: settle_count stopped
+        # accumulating AT ALL afterward, even for cases that previously
+        # accumulated fine (up to 10/3) -- i.e. the height check was false
+        # in the real sim even while the foot was visibly grounded and the
+        # contact sensor read True, for reasons not reproduced by an
+        # isolated mock with idealized (zero-offset) inputs. Reverted to the
+        # plain contact-sensor signal (matches this function's behavior
+        # before today's ball-contact investigation) to restore basic
+        # settle/landing function. The ball-touching-counts-as-landed issue
+        # (feet_contact fires on ball contact too, not just ground -- see
+        # goalkeeper_env_cfg.py's own comment on this sensor) is real and
+        # still open, but needs a cleaner fix than a height gate -- revisit
+        # separately rather than block basic landing detection on it.
         currently_airborne = ~foot_in_contact
         env._blue_was_airborne |= currently_airborne
 
@@ -344,14 +401,46 @@ def _get_reach_target_y(
         # snapshot -- without this, the settle count would increment/decay
         # once PER CALL instead of once per real physics tick.
         is_first_call_this_tick = env.episode_length_buf != env._blue_last_settle_step
+        # DEBUG 2026-07-23 (TEMPORARY): snapshot the PRE-update stored value
+        # so we can see what episode_length_buf was actually compared
+        # against, not just the post-update value (which trivially always
+        # matches episode_length_buf after the line below runs).
+        env._blue_dbg_last_settle_step_before = env._blue_last_settle_step.clone()
         env._blue_last_settle_step = env.episode_length_buf.clone()
         # FIX (branch mechanism #9, "leaky" decrement): on a miss, decrement
         # by 1 (floored at 0) instead of hard-reset to 0 -- see docstring.
+        _settle_before = env._blue_settle_count[0].item()
         env._blue_settle_count = torch.where(
             candidate,
             torch.where(is_first_call_this_tick, env._blue_settle_count + 1, env._blue_settle_count),
             torch.where(is_first_call_this_tick, (env._blue_settle_count - 1).clamp(min=0), env._blue_settle_count),
         )
+        # DEBUG 2026-07-23 (TEMPORARY): raw, unconditional, per-CALL (not
+        # per-tick) print of every single call to this function for env 0 --
+        # settle appears stuck at 0 despite candidate=True for many
+        # consecutive real ticks in play, which the display (only showing
+        # the last of ~7 same-tick calls) can't fully explain. This prints
+        # every call so we can see the actual call-by-call sequence.
+        if bool(wide[0].item()) and dist_to_blue[0].item() < 0.3:
+            import sys as _sys
+            import inspect as _inspect
+            _caller = _inspect.currentframe().f_back.f_code.co_name
+            print(
+                f"[RAWSETTLE] ep_len={env.episode_length_buf[0].item()} "
+                f"caller={_caller} "
+                f"cand={bool(candidate[0].item())} "
+                f"[wide={bool(wide[0].item())} "
+                f"airborne={bool(env._blue_was_airborne[0].item())} "
+                f"contact={bool(foot_in_contact[0].item())} "
+                f"distOk={bool((dist_to_blue[0] < landing_radius).item())} "
+                f"dist={dist_to_blue[0].item():.4f} radius={landing_radius:.4f}] "
+                f"first_call={bool(is_first_call_this_tick[0].item())} "
+                f"settle_before={_settle_before} settle_after={env._blue_settle_count[0].item()} "
+                f"foot_idx={foot_idx[0].item()} body_ids={list(asset_cfg.body_ids)} "
+                f"asset_cfg_id={id(asset_cfg)} "
+                f"foot_pos={assigned_foot_pos[0].tolist()} target_xy={target_point_xy[0].tolist()}",
+                file=_sys.stderr,
+            )
         _BLUE_SETTLE_STEPS = 3
         newly_landed = (
             (env._blue_settle_count >= _BLUE_SETTLE_STEPS)
@@ -369,6 +458,28 @@ def _get_reach_target_y(
             env.episode_length_buf < _BLUE_LANDING_FREE_STEP_THRESHOLD,
             env._blue_landed_was_free,
         )
+
+        # DEBUG 2026-07-23 (TEMPORARY, remove after landing-gate investigation):
+        # expose per-step internals for play.py's analytics printer so the
+        # failing condition can be read directly instead of guessed at.
+        env._blue_dbg_dist = dist_to_blue
+        env._blue_dbg_speed = foot_speed
+        env._blue_dbg_contact = foot_in_contact
+        env._blue_dbg_candidate = candidate
+        env._blue_dbg_first_call = is_first_call_this_tick
+        env._blue_dbg_wide = wide
+        env._blue_dbg_radius = landing_radius
+        env._blue_dbg_speed_th = landing_speed_threshold
+        env._blue_dbg_settle = env._blue_settle_count.clone()
+        env._blue_dbg_foot_idx = foot_idx
+        env._blue_dbg_ep_len = env.episode_length_buf.clone()
+        env._blue_dbg_was_airborne = env._blue_was_airborne.clone()
+        ball_contact: ContactSensor = env.scene["ball_contact"]
+        ball_found = ball_contact.data.found                                # (N, 8)
+        left_touching_ball = (ball_found[:, :4] > 0).any(dim=-1)
+        right_touching_ball = (ball_found[:, 4:] > 0).any(dim=-1)
+        env._blue_dbg_touching_ball = torch.where(foot_idx == 0, left_touching_ball, right_touching_ball)
+        env._blue_dbg_foot_off = assigned_foot_pos[:, 1] - start_y
 
     phase1_active = wide & ~env._blue_landed
     return torch.where(phase1_active, half_y, full_y)
@@ -702,6 +813,7 @@ def stopball(
     env: "ManagerBasedRlEnv",
     ball_name: str,
     delta_vel_threshold: float = 1.0,
+    asset_cfg: SceneEntityCfg = _DEFAULT_FEET_CFG,
 ) -> torch.Tensor:
     """One-time reward when ball X velocity increases by >= delta_vel_threshold (m/s).
 
@@ -745,7 +857,25 @@ def stopball(
     physical instant; a coincidental "wrong foot happens to be standing
     near the ball as it settles" scenario should not.
     """
-    _get_reach_target_y(env, ball_name)  # ensure _blue_wide/_blue_landed are fresh this step
+    # FIX 2026-07-23: must pass asset_cfg through -- calling with the bare
+    # 2-arg form fell back to this function's own default parameter, which
+    # is a *different* SceneEntityCfg object than the one registered in
+    # goalkeeper_env_cfg.py's params for footreach/blue_ball_landed/etc.
+    # mjlab only resolves SceneEntityCfg.body_ids (str names -> int ids) for
+    # objects it finds inside a term's OWN registered params dict
+    # (manager_base.py:_resolve_common_term_cfg) -- an object that's never
+    # in any params dict never gets resolved, so its body_ids silently stays
+    # the un-resolved default `slice(None)` (all bodies) for the entire run.
+    # Since stopball is registered first each tick and is therefore the one
+    # call allowed to update _get_reach_target_y's settle counter, indexing
+    # body_link_pos_w with body_ids=slice(None) then picking index 0/1 read
+    # some arbitrary early body (root/pelvis), not a foot -- garbage
+    # dist_to_blue, permanently keeping candidate False on the only call
+    # that mattered, even though every OTHER (properly asset_cfg-resolved)
+    # term saw candidate=True the same tick. Confirmed live via a raw
+    # per-call print: stopball's call read dist=0.29 while footreach's call
+    # (same tick) read dist=0.08 for what should be the identical foot.
+    _get_reach_target_y(env, ball_name, asset_cfg=asset_cfg)  # ensure _blue_wide/_blue_landed are fresh this step
 
     ball: Entity = env.scene[ball_name]
     ball_x_vel = ball.data.root_link_lin_vel_w[:, 0]
@@ -788,6 +918,7 @@ def softstop(
     env: "ManagerBasedRlEnv",
     ball_name: str,
     velocity_threshold: float = 0.2,
+    asset_cfg: SceneEntityCfg = _DEFAULT_FEET_CFG,
 ) -> torch.Tensor:
     """One-time reward when ball world-X velocity exceeds velocity_threshold (m/s).
 
@@ -828,7 +959,25 @@ def softstop(
     instant; requiring both prevents a wrong-foot-standing-nearby
     coincidence from firing this on its own. See stopball's docstring.
     """
-    _get_reach_target_y(env, ball_name)  # ensure _blue_wide/_blue_landed are fresh this step
+    # FIX 2026-07-23: must pass asset_cfg through -- calling with the bare
+    # 2-arg form fell back to this function's own default parameter, which
+    # is a *different* SceneEntityCfg object than the one registered in
+    # goalkeeper_env_cfg.py's params for footreach/blue_ball_landed/etc.
+    # mjlab only resolves SceneEntityCfg.body_ids (str names -> int ids) for
+    # objects it finds inside a term's OWN registered params dict
+    # (manager_base.py:_resolve_common_term_cfg) -- an object that's never
+    # in any params dict never gets resolved, so its body_ids silently stays
+    # the un-resolved default `slice(None)` (all bodies) for the entire run.
+    # Since stopball is registered first each tick and is therefore the one
+    # call allowed to update _get_reach_target_y's settle counter, indexing
+    # body_link_pos_w with body_ids=slice(None) then picking index 0/1 read
+    # some arbitrary early body (root/pelvis), not a foot -- garbage
+    # dist_to_blue, permanently keeping candidate False on the only call
+    # that mattered, even though every OTHER (properly asset_cfg-resolved)
+    # term saw candidate=True the same tick. Confirmed live via a raw
+    # per-call print: stopball's call read dist=0.29 while footreach's call
+    # (same tick) read dist=0.08 for what should be the identical foot.
+    _get_reach_target_y(env, ball_name, asset_cfg=asset_cfg)  # ensure _blue_wide/_blue_landed are fresh this step
 
     ball: Entity = env.scene[ball_name]
     ball_x_vel = ball.data.root_link_lin_vel_w[:, 0]

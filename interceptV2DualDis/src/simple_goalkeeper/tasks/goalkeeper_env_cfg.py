@@ -259,7 +259,7 @@ def goalkeeper_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
             func=gk_mdp.reward_curriculum_ep_len,
             params={
                 "reward_name": "blue_overshoot_penalty",
-                "base_weight": -30.0,
+                "base_weight": -60.0,  # FIX 2026-07-23: was -30.0, too lenient
                 "update_interval": 500,
                 "ep_len_divisor":  50,
             },
@@ -460,16 +460,31 @@ def goalkeeper_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
         # this fix, stopball/softstop's static values were stale pre-halving
         # leftovers (15.0/105.0) that no longer matched their own curriculum's
         # base_weight (7.5/52.5 pre-cap) at all.
+        # FIX 2026-07-23: added asset_cfg=_FEET_CFG to both stopball's and
+        # softstop's params. Without it, their internal _get_reach_target_y
+        # call fell back to that function's own default SceneEntityCfg --
+        # a *different* object than _FEET_CFG that never appears in any
+        # term's params dict, so mjlab's manager setup (which only resolves
+        # SceneEntityCfg.body_ids for objects it finds inside a term's own
+        # params -- manager_base.py:_resolve_common_term_cfg) never resolved
+        # it. body_ids silently stayed the un-resolved default slice(None)
+        # (all bodies) for the whole run. Since stopball is registered
+        # first each tick -- the one call allowed to update the blue-landing
+        # settle counter -- this made dist_to_blue permanently garbage on
+        # exactly the call that mattered, blocking blue_ball_landed from
+        # ever firing off a genuine plant even though every other
+        # properly-resolved term (footreach etc.) saw the correct distance
+        # the same tick. See rewards.py's stopball/softstop docstrings.
         "stopball": RewardTermCfg(
             func=gk_mdp.stopball,
             weight=5.21,
-            params={"ball_name": BALL_NAME, "delta_vel_threshold": 0.6},
+            params={"ball_name": BALL_NAME, "delta_vel_threshold": 0.6, "asset_cfg": _FEET_CFG},
         ),
         # --- partial deflection signal (fires before stopball; gates _ball_is_behind) ---
         "softstop": RewardTermCfg(
             func=gk_mdp.softstop,
             weight=36.46,
-            params={"ball_name": BALL_NAME, "velocity_threshold": 0.05},
+            params={"ball_name": BALL_NAME, "velocity_threshold": 0.05, "asset_cfg": _FEET_CFG},
         ),
         # --- continuing close-to-target signal, doubled after first save (ports G1 _reward_success) ---
         "success": RewardTermCfg(
@@ -524,9 +539,12 @@ def goalkeeper_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
         # Without this, ignoring the blue waypoint entirely on a wide crossing
         # earns the same reward (zero, from the landing-gated terms above) as
         # attempting and failing -- no gradient discourages skipping it.
+        # FIX 2026-07-23: -30.0 -> -60.0 (user request: "too lenient for the
+        # blue ball"). Doubled to match base_weight below (curriculum-scaled
+        # in step with blue_ball_landed/blue_stick_landing's own 2x growth).
         "blue_overshoot_penalty": RewardTermCfg(
             func=gk_mdp.blue_overshoot_penalty,
-            weight=-30.0,
+            weight=-60.0,
             params={"ball_name": BALL_NAME, "asset_cfg": _FEET_CFG},
         ),
         # Dense reward for "close AND slow" near blue -- the exact joint

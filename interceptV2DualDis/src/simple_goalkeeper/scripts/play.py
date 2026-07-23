@@ -103,6 +103,14 @@ class AnalyticsPolicy:
         self._min_base_h = float("inf")
         self._min_lsh_h = float("inf")
         self._min_rsh_h = float("inf")
+        # DEBUG 2026-07-23 (TEMPORARY, remove after landing-gate investigation):
+        # per-episode closest approach to the blue target + highest settle
+        # count reached + whether landed ever fired, across many episodes at
+        # once, instead of eyeballing single scrolling lines.
+        self._min_blue_dist = float("inf")
+        self._max_settle = 0
+        self._ep_was_wide = False
+        self._ep_landed = False
 
     def toggle(self) -> None:
         self.enabled = not self.enabled
@@ -135,16 +143,26 @@ class AnalyticsPolicy:
                     for name in term_mgr.active_terms:
                         if bool(term_mgr.get_term(name)[0].item()):
                             fired.append(name)
+                blue_summary = (
+                    f" | BLUE min_dist={self._min_blue_dist:.3f} "
+                    f"max_settle={self._max_settle}/3 landed={self._ep_landed}"
+                    if self._ep_was_wide else " | BLUE narrow-crossing"
+                )
                 print(
                     f"\n[EpEnd] terminated_by={','.join(fired) or 'none'} | "
                     f"min_base={self._min_base_h:.3f} "
-                    f"min_Lsh={self._min_lsh_h:.3f} min_Rsh={self._min_rsh_h:.3f}",
+                    f"min_Lsh={self._min_lsh_h:.3f} min_Rsh={self._min_rsh_h:.3f}"
+                    f"{blue_summary}",
                     file=stderr,
                 )
             self._ep += 1
             self._min_base_h = float("inf")
             self._min_lsh_h = float("inf")
             self._min_rsh_h = float("inf")
+            self._min_blue_dist = float("inf")
+            self._max_settle = 0
+            self._ep_was_wide = False
+            self._ep_landed = False
         self._prev_ep_buf = ep_buf.clone()
 
         if not self.enabled:
@@ -191,6 +209,21 @@ class AnalyticsPolicy:
         self._min_lsh_h = min(self._min_lsh_h, lsh_h)
         self._min_rsh_h = min(self._min_rsh_h, rsh_h)
 
+        # DEBUG 2026-07-23 (TEMPORARY, remove after landing-gate investigation):
+        # per-episode blue-landing accumulators (see __init__ + [EpEnd] print).
+        wide_t = getattr(env, "_blue_wide", None)
+        if wide_t is not None and bool(wide_t[0].item()):
+            self._ep_was_wide = True
+            dist_t = getattr(env, "_blue_dbg_dist", None)
+            settle_t = getattr(env, "_blue_dbg_settle", None)
+            if dist_t is not None:
+                self._min_blue_dist = min(self._min_blue_dist, dist_t[0].item())
+            if settle_t is not None:
+                self._max_settle = max(self._max_settle, int(settle_t[0].item()))
+        landed_t = getattr(env, "_blue_landed", None)
+        if landed_t is not None and bool(landed_t[0].item()):
+            self._ep_landed = True
+
         ball_speed = bv.norm().item()
 
         # Interception point in robot's local frame.
@@ -220,15 +253,76 @@ class AnalyticsPolicy:
         )
         lf_tag = f"{'G' if lf_contact else 'A'}{lf_slip:.2f}"
         rf_tag = f"{'G' if rf_contact else 'A'}{rf_slip:.2f}"
+
+        # DEBUG 2026-07-23 (TEMPORARY, remove after landing-gate investigation):
+        # blue-ball landing-gate internals, cached onto env by rewards.py's
+        # _get_reach_target_y (env._blue_dbg_*). Only meaningful once wide=True.
+        blue_dbg = ""
+        wide_t = getattr(env, "_blue_wide", None)
+        if wide_t is not None and bool(wide_t[0].item()):
+            dist_t = getattr(env, "_blue_dbg_dist", None)
+            speed_t = getattr(env, "_blue_dbg_speed", None)
+            contact_t = getattr(env, "_blue_dbg_contact", None)
+            settle_t = getattr(env, "_blue_dbg_settle", None)
+            foot_idx_t = getattr(env, "_blue_dbg_foot_idx", None)
+            radius = getattr(env, "_blue_dbg_radius", float("nan"))
+            speed_th = getattr(env, "_blue_dbg_speed_th", float("nan"))
+            landed_t = getattr(env, "_blue_landed", None)
+            half_off_t = getattr(env, "_blue_dbg_half_off", None)
+            full_off_t = getattr(env, "_blue_dbg_full_off", None)
+            foot_off_t = getattr(env, "_blue_dbg_foot_off", None)
+            wide_dist_t = getattr(env, "_blue_dbg_wide_by_dist", None)
+            airborne_t = getattr(env, "_blue_dbg_was_airborne", None)
+            touch_ball_t = getattr(env, "_blue_dbg_touching_ball", None)
+            candidate_t = getattr(env, "_blue_dbg_candidate", None)
+            first_call_t = getattr(env, "_blue_dbg_first_call", None)
+            gate_wide_t = getattr(env, "_blue_dbg_wide", None)
+            ep_len_t = getattr(env, "_blue_dbg_ep_len", None)
+            last_settle_before_t = getattr(env, "_blue_dbg_last_settle_step_before", None)
+            blue_dbg = (
+                f" | BLUE dist={dist_t[0].item() if dist_t is not None else float('nan'):.3f}"
+                f"(<{radius:.3f}) "
+                f"spd={speed_t[0].item() if speed_t is not None else float('nan'):.3f}"
+                f"(<{speed_th:.3f}) "
+                f"contact={bool(contact_t[0].item()) if contact_t is not None else None} "
+                f"foot={foot_idx_t[0].item() if foot_idx_t is not None else None} "
+                f"settle={settle_t[0].item() if settle_t is not None else None}/3 "
+                f"landed={bool(landed_t[0].item()) if landed_t is not None else None} || "
+                f"halfOff={half_off_t[0].item() if half_off_t is not None else float('nan'):+.3f} "
+                f"fullOff={full_off_t[0].item() if full_off_t is not None else float('nan'):+.3f} "
+                f"footOff={foot_off_t[0].item() if foot_off_t is not None else float('nan'):+.3f} "
+                f"wideByDist={bool(wide_dist_t[0].item()) if wide_dist_t is not None else None} "
+                f"wasAirborne={bool(airborne_t[0].item()) if airborne_t is not None else None} "
+                f"touchingBall={bool(touch_ball_t[0].item()) if touch_ball_t is not None else None} || "
+                f"candidate={bool(candidate_t[0].item()) if candidate_t is not None else None} "
+                f"firstCallThisTick={bool(first_call_t[0].item()) if first_call_t is not None else None} "
+                f"gateWide={bool(gate_wide_t[0].item()) if gate_wide_t is not None else None} || "
+                f"epLen={ep_len_t[0].item() if ep_len_t is not None else None} "
+                f"lastSettleStepBefore={last_settle_before_t[0].item() if last_settle_before_t is not None else None}"
+            )
+
+        # DEBUG 2026-07-23 (TEMPORARY): epLen/settle/candidate moved to the
+        # FRONT of the line -- terminal column-width truncation of this \r
+        # overwriting line was hiding them on all but the last print of a
+        # burst, making it impossible to see settle's progression tick to
+        # tick across a whole pasted trace.
+        ep_len_front = getattr(env, "_blue_dbg_ep_len", None)
+        settle_front = getattr(env, "_blue_dbg_settle", None)
+        candidate_front = getattr(env, "_blue_dbg_candidate", None)
+        front_dbg = (
+            f"epLen={ep_len_front[0].item() if ep_len_front is not None else None} "
+            f"settle={settle_front[0].item() if settle_front is not None else None} "
+            f"cand={bool(candidate_front[0].item()) if candidate_front is not None else None} | "
+        )
         print(
-            f"\rEp{self._ep:3d} | "
+            f"\rEp{self._ep:3d} | {front_dbg}"
             f"bvx={bv[0].item():+6.2f} bvy={bv[1].item():+5.2f} spd={ball_speed:.2f} "
             f"bx={bx_local:+5.2f} | "
             f"int(x={int_x:+5.2f} y={int_y:+5.2f}) | "
             f"dvx={delta_vx:+5.2f} | "
             f"LF={lf_h:.3f}({lf_tag}) RF={rf_h:.3f}({rf_tag}) | "
             f"base={base_h:.3f} Lsh={lsh_h:.3f} Rsh={rsh_h:.3f} | "
-            f"{flags}",
+            f"{flags}{blue_dbg}",
             end="",
             flush=True,
             file=stderr,

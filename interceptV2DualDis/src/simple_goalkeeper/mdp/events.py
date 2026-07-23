@@ -861,14 +861,17 @@ class far_travel_curriculum:
     command_ranges[:,0] -= 0.3*cu / command_ranges[:,1] += 0.3*cu, same step
     for both edges) instead of a single growing fraction. Both are seeded
     using STEP's own init-fraction-of-span, applied to this task's own
-    floor/ceiling (lo=0.5, the near/far boundary -- a structural constraint
-    G1 doesn't have, since G1 separates regions by height, not width, so its
-    width curricula are free to shrink toward a true geometric floor of 0;
-    ours can't go below 0.5 without re-colliding with the near region):
+    floor/ceiling (lo=0.65, the near/far boundary -- FIX 2026-07-23, widened
+    from 0.5, user request, kept in sync with regions.py's
+    _REGION_Y_END_RANGE and rewards.py's wide_threshold -- a structural
+    constraint G1 doesn't have, since G1 separates regions by height, not
+    width, so its width curricula are free to shrink toward a true
+    geometric floor of 0; ours can't go below 0.65 without re-colliding
+    with the near region):
         inner_frac = 0.2/1.8 = 0.1111  (G1 step ranges_4 width[0] / maxw[1])
         outer_frac = 1.2/1.8 = 0.6667  (G1 step ranges_4 width[1] / maxw[1])
-        far_inner starts at lo + inner_frac*(hi-lo) ~= 0.589, shrinks to lo (0.5)
-        far_outer starts at lo + outer_frac*(hi-lo) ~= 1.033, grows to hi (1.3)
+        far_inner starts at lo + inner_frac*(hi-lo) ~= 0.722, shrinks to lo (0.65)
+        far_outer starts at lo + outer_frac*(hi-lo) ~= 1.083, grows to hi (1.3)
     Both driven by the same shared EMA-smoothed episode-length signal (cu) and
     the same step_size per update, matching G1's identical 0.3*cu for both
     edges.
@@ -905,7 +908,7 @@ class far_travel_curriculum:
         self._step_size       = p.get("step_size",       0.0013)
         self._update_interval = p.get("update_interval", 500)
         self._ep_len_divisor  = p.get("ep_len_divisor",   50)
-        self._lo              = p.get("lo", 0.5)
+        self._lo              = p.get("lo", 0.65)  # FIX 2026-07-23: was 0.5
         self._hi              = p.get("hi", 1.3)
         # FIX 2026-07-20: was -(update_interval) -- see reward_curriculum_ep_len's
         # __init__ comment for the full explanation. 0 matches G1's
