@@ -7,7 +7,17 @@ landing_radius zone register as "landed" without stopping. Later the same
 day, per user request, the curriculum was restored -- but with a narrower,
 deliberately conservative easy end (0.30 m/s, not the old leaky 1.0/2.0 m/s)
 so an early policy still gets a genuinely easier bar without reintroducing
-the pass-through bug. See docs/BugFixes.md.
+the pass-through bug.
+
+FIX 2026-07-24: reverted back to the original eased range (2.0 m/s at d=0 ->
+1.0 m/s at d=1), per user request, after the narrower 0.30->0.15 m/s band
+coincided with blue_ball_landed declining over iterations 0-6700 of
+blue_v2_landinggatefix_2026-07-23 (0.041 peak -> 0.007) with no recovery --
+the strict end looked hard enough to be suppressing the landing gradient
+outright rather than just filtering false-positive "strides through" landings.
+This deliberately reintroduces the documented pass-through leak risk as a
+trade against the widened landing_radius (0.08m -> 0.15m, same date, same
+request). See docs/BugFixes.md.
 """
 import torch
 
@@ -43,15 +53,14 @@ def _resolved_threshold(ball_difficulty: float) -> float:
 
 
 def test_landing_speed_threshold_strict_at_full_difficulty():
-    assert abs(_resolved_threshold(1.0) - 0.15) < 1e-9
+    assert abs(_resolved_threshold(1.0) - 1.0) < 1e-9
 
 
 def test_landing_speed_threshold_eases_at_zero_difficulty():
-    """FIX 2026-07-23 (restored curriculum): easy end is 0.30 m/s, a real
-    curriculum step but deliberately NOT the old 1.0/2.0 m/s that let a
-    foot merely striding through the eased radius zone register as
-    landed."""
-    assert abs(_resolved_threshold(0.0) - 0.30) < 1e-9
+    """FIX 2026-07-24 (reverted): easy end is 2.0 m/s, the original
+    pre-2026-07-23 value -- reinstated after the narrower 0.30 m/s easy end
+    coincided with blue_ball_landed declining rather than recovering."""
+    assert abs(_resolved_threshold(0.0) - 2.0) < 1e-9
 
 
 def test_landing_speed_threshold_lerps_monotonically_between_ends():
@@ -61,9 +70,12 @@ def test_landing_speed_threshold_lerps_monotonically_between_ends():
     assert thresholds[0] > thresholds[-1]  # genuinely eases, not flat
 
 
-def test_landing_speed_threshold_never_reaches_old_leaky_values():
-    """Regression guard for the original bug: at NO difficulty should the
-    resolved threshold reach the old 1.0/2.0 m/s values that were confirmed
-    to let a foot pass through the eased radius zone without stopping."""
+def test_landing_speed_threshold_within_reverted_band():
+    """FIX 2026-07-24: the never-reaches-old-leaky-values regression guard
+    from 2026-07-23 is intentionally gone -- 1.0/2.0 m/s IS the current
+    band again, by deliberate user request. This just pins the resolved
+    range to what's actually configured, so an accidental further change
+    is still caught."""
     for d in (0.0, 0.25, 0.5, 0.75, 1.0):
-        assert _resolved_threshold(d) <= 0.30 + 1e-9
+        threshold = _resolved_threshold(d)
+        assert 1.0 - 1e-9 <= threshold <= 2.0 + 1e-9

@@ -191,8 +191,8 @@ def _get_reach_target_y(
     ball_name: str,
     asset_cfg: SceneEntityCfg = _DEFAULT_FEET_CFG,
     wide_threshold: float = 0.65,  # FIX 2026-07-23: was 0.5, kept in sync with regions.py's near/far boundary
-    landing_radius: float = 0.08,
-    landing_speed_threshold: float = 0.15,  # FIX 2026-07-23: was stale 1.0 (pre-flat-hardcode value); this is now the strict/hard-difficulty end of the re-curriculum'd lerp below
+    landing_radius: float = 0.15,  # FIX 2026-07-24: was 0.08 (user request: too strict at full difficulty)
+    landing_speed_threshold: float = 1.0,  # FIX 2026-07-24: reverted to the pre-2026-07-23 value (was 0.15); see below
 ) -> torch.Tensor:
     """Two-stage reach target for wide crossings: v2 reimplementation of the
     "blue-ball-waypoint" branch mechanism (removed from this project's
@@ -239,18 +239,34 @@ def _get_reach_target_y(
     - Curriculum-eased landing radius AND speed (branch mechanism #1): lerps
       landing_radius from loose (0.20m at ball_difficulty=0, i.e. an easy
       target even a rough approach can hit) to the caller's strict default
-      (0.08m at difficulty=1), tied to the existing env._ball_difficulty
-      curriculum scalar -- a policy that has never landed once has no
-      gradient trace of what success feels like; this gives it an easy
-      version to discover first. landing_speed_threshold eases similarly
-      but over a deliberately narrower band: 0.30 m/s at d=0 down to
-      0.15 m/s at d=1 (FIX 2026-07-23, see docs/BugFixes.md) -- an earlier
-      version of this eased 2.0 m/s at d=0 down to 1.0 m/s at d=1, which let
-      a foot merely striding through the (large, eased) radius zone
-      register as "landed" without ever stopping; genuine plants measured
-      0.002-0.05 m/s, so both the 0.30 and 0.15 ends stay well clear of the
-      1.0-2.0 m/s band confirmed to leak, while still giving an early
-      policy a meaningfully looser bar than the strict end.
+      (0.15m at difficulty=1, FIX 2026-07-24 -- was 0.08m, widened on user
+      report that the strict end was too tight to reliably land in even
+      for an approaching-competent policy), tied to the existing
+      env._ball_difficulty curriculum scalar -- a policy that has never
+      landed once has no gradient trace of what success feels like; this
+      gives it an easy version to discover first. landing_speed_threshold
+      eases from 2.0 m/s at d=0 down to 1.0 m/s at d=1 (FIX 2026-07-24:
+      reverted to this looser band -- see below).
+
+      History: the 2.0/1.0 m/s band was flattened to a hardcoded 0.15 m/s
+      on 2026-07-23 after live evidence that it let a foot merely stride
+      through the (large, eased) radius zone register as "landed" without
+      ever stopping (genuine plants measured 0.002-0.05 m/s, nowhere near
+      even 1.0 m/s). That was then re-curriculum'd the same day to
+      0.30->0.15 m/s to restore an easy-difficulty gradient. REVERTED
+      2026-07-24 (user request) back to 2.0->1.0 m/s: with the 0.30/0.15
+      band, blue_ball_landed kept declining over iterations 0-6700 of
+      blue_v2_landinggatefix_2026-07-23 (0.041 peak -> 0.007) while
+      blue_stick_landing and blue_overshoot_penalty both kept moving the
+      wrong direction, suggesting the strict end was now hard enough to
+      actively suppress the landing gradient rather than just filter
+      false positives. This reintroduces the documented pass-through
+      leak risk as a deliberate trade -- if blue_ball_landed recovers
+      without a corresponding new failure mode, keep it; if the leak
+      reappears (foot striding through without stopping), the fix is to
+      re-tighten with a smoother curriculum shape (e.g. more difficulty
+      steps between the eased and strict ends) rather than snapping
+      straight back to 0.15.
     - _blue_landed_was_free classification: a landing achieved suspiciously
       early (episode_length_buf < 10) can't reflect genuine approach work
       (RSI donor poses are mid-motion by construction) -- flagged so
@@ -315,30 +331,28 @@ def _get_reach_target_y(
     env._blue_settle_count[just_reset] = 0
     env._blue_landed_was_free[just_reset] = False
 
-    # Curriculum-eased landing radius (branch mechanism #1) -- still eases
-    # 0.20m -> 0.08m with difficulty, giving an early policy a bigger target.
+    # Curriculum-eased landing radius (branch mechanism #1) -- eases
+    # 0.20m -> 0.15m with difficulty, giving an early policy a bigger
+    # target. FIX 2026-07-24: strict end was 0.08m; widened to 0.15m
+    # (user request -- too strict to reliably land in at full difficulty).
     d = float(min(max(getattr(env, "_ball_difficulty", 1.0), 0.0), 1.0))
     landing_radius = 0.20 + (landing_radius - 0.20) * d
     env._blue_landing_radius_current = landing_radius
 
-    # FIX 2026-07-23: landing_speed_threshold was made flat/curriculum-
-    # independent (0.15 m/s at every difficulty) after the settle-count
-    # investigation found the OLD easy end (2.0 m/s at d=0, easing to
-    # 1.0 m/s at d=1) let a foot merely striding *through* the (loose,
-    # eased) radius zone register as "landed" without ever stopping --
-    # genuine plants measured 0.002-0.05 m/s, nowhere near even 1.0 m/s.
-    # RE-CURRICULUM'd 2026-07-23 (later same day, user request): a fully
-    # flat 0.15 m/s from iteration 0 gives an early policy no easier
-    # version of the speed gate to discover, the same problem the radius
-    # curriculum exists to avoid. Restored an eased easy end, but well
-    # below the proven-leaky 1.0/2.0 m/s values: 0.30 m/s at d=0 (a real,
-    # meaningfully looser tier than the strict 0.15 m/s end) down to
-    # 0.15 m/s at d=1 (unchanged, evidence-based). 0.30 was not itself
-    # tested against the pass-through failure mode -- chosen as a
-    # deliberately conservative margin (2x the strict end, ~6-150x above
-    # measured genuine-plant speeds, far below the 1.0-2.0 m/s band
-    # confirmed to leak) rather than re-deriving an exact safe boundary.
-    _EASY_LANDING_SPEED_THRESHOLD = 0.30
+    # FIX 2026-07-24: reverted to the pre-2026-07-23 band (2.0 m/s at d=0
+    # -> 1.0 m/s at d=1), per user request, after the narrower 0.30->0.15
+    # m/s band (see git history same day) coincided with blue_ball_landed
+    # declining over iterations 0-6700 of blue_v2_landinggatefix_2026-07-23
+    # (0.041 peak -> 0.007) while blue_stick_landing/blue_overshoot_penalty
+    # both moved the wrong direction -- the strict end looked hard enough
+    # to be suppressing the landing gradient outright, not just filtering
+    # false positives. This reintroduces the documented pass-through leak
+    # (a foot striding through the loose radius zone at up to 1.0 m/s can
+    # register as "landed" without a genuine stop, vs. 0.002-0.05 m/s for
+    # real plants) as a deliberate trade against the widened landing_radius
+    # above -- if the leak reappears, prefer a smoother curriculum shape
+    # over snapping straight back to 0.15.
+    _EASY_LANDING_SPEED_THRESHOLD = 2.0
     landing_speed_threshold = _EASY_LANDING_SPEED_THRESHOLD + (landing_speed_threshold - _EASY_LANDING_SPEED_THRESHOLD) * d
     # Cached unconditionally (mirrors env._blue_landing_radius_current above)
     # so callers/tests can read the resolved threshold without needing the
@@ -1062,7 +1076,29 @@ def success(
     the item-8 stopball/softstop/quality-bonus peak-magnitude cap: G1 itself
     keeps `success` as its own separate-scale term, outside `_reward_stopball`'s
     own weight ceiling -- this port preserves that same separation.
+
+    FIX 2026-07-24 (v2 landing gate, user request): this term was ported
+    from G1 without stopball/softstop's wide-crossing landing_ok gate (see
+    stopball's docstring) -- unlike stopball/softstop, `dist` here targets
+    the true/final crossing_point directly, never the blue midpoint, so the
+    un-gated base term `1.0 * (dist < strict_th)` could fire continuously
+    just from beelining straight to the final target on a wide crossing,
+    completely bypassing the two-stage waypoint the rest of the mechanism
+    exists to enforce. Added the same landing_ok gate stopball/softstop use
+    (wide crossings must have a genuine, non-suspiciously-early blue
+    landing first); narrow crossings are unaffected (landing_ok is always
+    True there). success_flag (_sb_flag) itself is already gated
+    transitively -- stopball only sets it once landing_ok holds -- so this
+    closes the same loophole for the un-doubled base term too.
     """
+    # Ensures _blue_wide/_blue_landed are fresh this step, mirroring
+    # stopball/softstop's own call (see stopball's asset_cfg docstring for
+    # why the asset_cfg must be threaded through explicitly). Memoized
+    # per real physics tick, so calling this again here (stopball/softstop
+    # already called it earlier this tick) is a cheap no-op on the settle
+    # counter, not a double-increment.
+    _get_reach_target_y(env, ball_name, asset_cfg=asset_cfg)
+
     robot: Entity = env.scene[asset_cfg.name]
     ball: Entity = env.scene[ball_name]
 
@@ -1086,7 +1122,8 @@ def success(
     success_flag = getattr(
         env, "_sb_flag", torch.zeros(env.num_envs, dtype=torch.bool, device=env.device)
     )
-    return (success_flag.float() + 1.0) * (dist < strict_th).float()
+    landing_ok = ~env._blue_wide | (env._blue_landed & ~env._blue_landed_was_free)
+    return (success_flag.float() + 1.0) * (dist < strict_th).float() * landing_ok.float()
 
 
 def single_foot_save(
