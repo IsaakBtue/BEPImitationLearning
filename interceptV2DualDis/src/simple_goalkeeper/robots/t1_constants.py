@@ -85,11 +85,21 @@ HOME_KEYFRAME = EntityCfg.InitialStateCfg(
         r"(Left_Hip_Pitch|Right_Hip_Pitch)": -0.3,
         r"(Left_Knee_Pitch|Right_Knee_Pitch)": 0.6,
         r"(Left_Ankle_Pitch|Right_Ankle_Pitch)": -0.3,
-        r"Left_Shoulder_Pitch": -0.21,
+        # FIX 2026-07-24: mirror-symmetric standing pose (was a one-sided
+        # "right arm counterbalance" stance, Right_Shoulder_Roll=1.07 vs
+        # Left=-0.41 -- a leftover from G1's hand-catching reach pose, not
+        # a fit for this feet-only track). Shoulder_Pitch/Elbow_Pitch share
+        # the same axis sign convention L/R (t1_headless.xml: both
+        # axis="0 1 0", same range) so equal values are already symmetric;
+        # Shoulder_Roll/Elbow_Yaw have mirrored axis conventions (axis
+        # "1 0 0"/"0 0 1" but opposite-signed joint ranges L/R) so a
+        # symmetric pose needs equal magnitude, opposite sign. See
+        # docs/BugFixes.md.
+        r"(Left_Shoulder_Pitch|Right_Shoulder_Pitch)": -0.21,
         r"Left_Shoulder_Roll": -0.41,
-        r"Right_Shoulder_Pitch": -0.11,
-        r"Right_Shoulder_Roll": 1.07,
-        r"Right_Elbow_Pitch": -0.13,
+        r"Right_Shoulder_Roll": 0.41,
+        r"(Left_Elbow_Pitch|Right_Elbow_Pitch)": -0.13,
+        r"Left_Elbow_Yaw": -0.21,
         r"Right_Elbow_Yaw": 0.21,
     },
     joint_vel={".*": 0.0},

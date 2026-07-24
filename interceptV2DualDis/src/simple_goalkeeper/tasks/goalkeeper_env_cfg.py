@@ -273,6 +273,22 @@ def goalkeeper_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
                 "ep_len_divisor":  50,
             },
         )
+        # NEW 2026-07-24: same curriculum shape as the other blue_* terms --
+        # without this, the trunk-drive incentive would stay fixed while
+        # footreach/stopball/softstop/blue_ball_landed all grow via
+        # curriculum (see the blue_ball_landed_curriculum comment above for
+        # why an asymmetric curriculum among these terms caused problems
+        # before). base_weight=5.0 is an initial, unvalidated guess --
+        # matches this term's static play-mode weight (cu=0 baseline).
+        cfg.curriculum["blue_trunk_drive_curriculum"] = CurriculumTermCfg(
+            func=gk_mdp.reward_curriculum_ep_len,
+            params={
+                "reward_name": "blue_trunk_drive",
+                "base_weight": 5.0,
+                "update_interval": 500,
+                "ep_len_divisor":  50,
+            },
+        )
         # Correct-foot-save quality bonuses: weights double at cu >= 3 (ep_len ≈ 144 steps).
         # Only makes sense once the robot already saves reliably (cu=3 = footreach fully ramped).
         # One entry per reward, same pattern as reward_curriculum_ep_len.
@@ -552,6 +568,17 @@ def goalkeeper_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
         "blue_stick_landing": RewardTermCfg(
             func=gk_mdp.blue_stick_landing,
             weight=8.0,
+            params={"ball_name": BALL_NAME, "asset_cfg": _FEET_CFG},
+        ),
+        # NEW 2026-07-24 (user request): trunk (whole-body), not foot-specific,
+        # velocity incentive toward the current two-stage target -- fills the
+        # gap where footreach's own vel_sigma (foot velocity) only reactivates
+        # once ball_x_local <= 1.5m, leaving no locomotion incentive for the
+        # (often much longer) window between a genuine blue landing and the
+        # ball finally closing in. See rewards.py:blue_trunk_drive docstring.
+        "blue_trunk_drive": RewardTermCfg(
+            func=gk_mdp.blue_trunk_drive,
+            weight=5.0,
             params={"ball_name": BALL_NAME, "asset_cfg": _FEET_CFG},
         ),
         # --- active stepping: reward lifting feet during approach ---

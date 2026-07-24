@@ -1,1 +1,27 @@
-uv run sgk_train Mjlab-BeyondAMP-Goalkeeper-T1-MultiDisc --num-envs 6144 --agent.run-name green_numenvs6144_2026-07-20
+cd /home/isaak/BEPImitationlearning/interceptV2DualDis
+
+# left_far region (3 motions)
+uv run sgk_play Mjlab-BeyondAMP-Goalkeeper-T1-MultiDisc-WithOverlay \
+    --agent zero --no-terminations True \
+    --motion-file src/simple_goalkeeper/motions/data/new_doublestepleft_short_booster_t1.npz
+
+uv run sgk_play Mjlab-BeyondAMP-Goalkeeper-T1-MultiDisc-WithOverlay \
+    --agent zero --no-terminations True \
+    --motion-file src/simple_goalkeeper/motions/data/new_doublestepleft_booster_t1.npz
+
+uv run sgk_play Mjlab-BeyondAMP-Goalkeeper-T1-MultiDisc-WithOverlay \
+    --agent zero --no-terminations True \
+    --motion-file src/simple_goalkeeper/motions/data/new_doublestepleft_wide_booster_t1.npz
+
+# right_far region (3 motions)
+uv run sgk_play Mjlab-BeyondAMP-Goalkeeper-T1-MultiDisc-WithOverlay \
+    --agent zero --no-terminations True \
+    --motion-file src/simple_goalkeeper/motions/data/new_doublestepright_short_booster_t1.npz
+
+uv run sgk_play Mjlab-BeyondAMP-Goalkeeper-T1-MultiDisc-WithOverlay \
+    --agent zero --no-terminations True \
+    --motion-file src/simple_goalkeeper/motions/data/new_doublestepright_booster_t1.npz
+
+uv run sgk_play Mjlab-BeyondAMP-Goalkeeper-T1-MultiDisc-WithOverlay \
+    --agent zero --no-terminations True \
+    --motion-file src/simple_goalkeeper/motions/data/new_doublestepright_wide_booster_t1.npz

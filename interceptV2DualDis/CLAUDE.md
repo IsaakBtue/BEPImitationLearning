@@ -174,6 +174,7 @@ Phase 1 reward structure (ported from proven Imitationlearningbooster pattern):
 | `blue_ball_landed` | +10→20 (curriculum) | **NEW v2 (2026-07-23).** One-shot bonus when the assigned foot genuinely lands at the blue midpoint on a wide crossing. |
 | `blue_overshoot_penalty` | -30→-60 (curriculum) | **NEW v2 (2026-07-23).** Penalty for the assigned foot advancing past blue before landing there, on unlanded wide crossings. |
 | `blue_stick_landing` | +8→16 (curriculum) | **NEW v2 (2026-07-23).** Dense "close AND slow" reward near blue, peaking at a genuine plant. |
+| `blue_trunk_drive` | +5→10 (curriculum) | **NEW 2026-07-24 (user request).** Trunk (whole-body, not foot-specific) lateral velocity toward the current two-stage target: toward blue (decaying to 0 in the same decel-zone footreach uses) while approaching, toward green (undecayed) once genuinely landed. Fills the gap where footreach's own vel_sigma only reactivates once ball_x_local ≤ 1.5m, leaving no locomotion incentive between a genuine blue landing and the ball finally closing in. |
 | `stayonline` | -2.0 | Penalty for drifting away from goal line (X displacement) |
 | `noretreat` | -2.0 | Penalty for retreating backward (negative body-frame X velocity) |
 | `feetorientation` | +3.0 | Flat feet (gravity aligned with foot Z) |

@@ -144,14 +144,14 @@ class AnalyticsPolicy:
                         if bool(term_mgr.get_term(name)[0].item()):
                             fired.append(name)
                 blue_summary = (
-                    f" | BLUE min_dist={self._min_blue_dist:.3f} "
+                    f" | BLUE min_dist={self._min_blue_dist:.2f} "
                     f"max_settle={self._max_settle}/3 landed={self._ep_landed}"
                     if self._ep_was_wide else " | BLUE narrow-crossing"
                 )
                 print(
                     f"\n[EpEnd] terminated_by={','.join(fired) or 'none'} | "
-                    f"min_base={self._min_base_h:.3f} "
-                    f"min_Lsh={self._min_lsh_h:.3f} min_Rsh={self._min_rsh_h:.3f}"
+                    f"min_base={self._min_base_h:.2f} "
+                    f"min_Lsh={self._min_lsh_h:.2f} min_Rsh={self._min_rsh_h:.2f}"
                     f"{blue_summary}",
                     file=stderr,
                 )
@@ -246,6 +246,20 @@ class AnalyticsPolicy:
             int_x = float("nan")
             int_y = float("nan")
 
+        # Per-step reward breakdown (unscaled rate = raw_value * weight, dt-scaling
+        # divided back out -- see mjlab RewardManager._step_reward docstring), read
+        # the same way termination_manager.get_term() is read above.
+        rew_mgr = getattr(env, "reward_manager", None)
+        if rew_mgr is not None:
+            reward_terms = dict(rew_mgr.get_active_iterable_terms(0))
+            reward_total = sum(v[0] for v in reward_terms.values())
+            rew_dbg = " | REW total={:.2f} [{}]".format(
+                reward_total,
+                " ".join(f"{name}={v[0]:.2f}" for name, v in reward_terms.items()),
+            )
+        else:
+            rew_dbg = ""
+
         flags = (
             f"{'SB✓' if stopball_fired else 'SB·'} "
             f"{'SS✓' if softstop_fired else 'SS·'} "
@@ -280,17 +294,17 @@ class AnalyticsPolicy:
             ep_len_t = getattr(env, "_blue_dbg_ep_len", None)
             last_settle_before_t = getattr(env, "_blue_dbg_last_settle_step_before", None)
             blue_dbg = (
-                f" | BLUE dist={dist_t[0].item() if dist_t is not None else float('nan'):.3f}"
-                f"(<{radius:.3f}) "
-                f"spd={speed_t[0].item() if speed_t is not None else float('nan'):.3f}"
-                f"(<{speed_th:.3f}) "
+                f" | BLUE dist={dist_t[0].item() if dist_t is not None else float('nan'):.2f}"
+                f"(<{radius:.2f}) "
+                f"spd={speed_t[0].item() if speed_t is not None else float('nan'):.2f}"
+                f"(<{speed_th:.2f}) "
                 f"contact={bool(contact_t[0].item()) if contact_t is not None else None} "
                 f"foot={foot_idx_t[0].item() if foot_idx_t is not None else None} "
                 f"settle={settle_t[0].item() if settle_t is not None else None}/3 "
                 f"landed={bool(landed_t[0].item()) if landed_t is not None else None} || "
-                f"halfOff={half_off_t[0].item() if half_off_t is not None else float('nan'):+.3f} "
-                f"fullOff={full_off_t[0].item() if full_off_t is not None else float('nan'):+.3f} "
-                f"footOff={foot_off_t[0].item() if foot_off_t is not None else float('nan'):+.3f} "
+                f"halfOff={half_off_t[0].item() if half_off_t is not None else float('nan'):+.2f} "
+                f"fullOff={full_off_t[0].item() if full_off_t is not None else float('nan'):+.2f} "
+                f"footOff={foot_off_t[0].item() if foot_off_t is not None else float('nan'):+.2f} "
                 f"wideByDist={bool(wide_dist_t[0].item()) if wide_dist_t is not None else None} "
                 f"wasAirborne={bool(airborne_t[0].item()) if airborne_t is not None else None} "
                 f"touchingBall={bool(touch_ball_t[0].item()) if touch_ball_t is not None else None} || "
@@ -320,9 +334,9 @@ class AnalyticsPolicy:
             f"bx={bx_local:+5.2f} | "
             f"int(x={int_x:+5.2f} y={int_y:+5.2f}) | "
             f"dvx={delta_vx:+5.2f} | "
-            f"LF={lf_h:.3f}({lf_tag}) RF={rf_h:.3f}({rf_tag}) | "
-            f"base={base_h:.3f} Lsh={lsh_h:.3f} Rsh={rsh_h:.3f} | "
-            f"{flags}{blue_dbg}",
+            f"LF={lf_h:.2f}({lf_tag}) RF={rf_h:.2f}({rf_tag}) | "
+            f"base={base_h:.2f} Lsh={lsh_h:.2f} Rsh={rsh_h:.2f} | "
+            f"{flags}{blue_dbg}{rew_dbg}",
             end="",
             flush=True,
             file=stderr,
