@@ -686,6 +686,28 @@ def footreach(
     decay_frac = ((dist_to_crossing - _BLUE_DECEL_FLOOR) / (_BLUE_DECEL_ZONE - _BLUE_DECEL_FLOOR)).clamp(0.0, 1.0)
     vel_sigma = torch.where(blue_approach, 1.0 + (vel_sigma - 1.0) * decay_frac, vel_sigma)
 
+    # FIX 2026-07-25: vel_sigma reads assigned_foot_vel_y from body_link_lin_vel_w
+    # -- POST-physics velocity, which unavoidably includes any ball-collision
+    # impulse from this step, not just deliberate policy motion. The
+    # 2026-07-24 overshoot-kill fix above only catches this once the foot has
+    # traveled >0.20m PAST blue (position-based); that entry's own "Not yet
+    # resolved" note flagged the mirror case as unaddressed: a hard touch
+    # while the foot is still short of/near blue (never overshoots, so that
+    # flag never trips) can inflate vel_sigma from the same impulse. User
+    # reproduced exactly this: footreach spiking while the foot was still far
+    # from blue. Direct, position-independent fix: force vel_sigma to neutral
+    # (1.0) whenever the assigned foot is in genuine ball contact this tick,
+    # using the same "ball_contact" foot-vs-ball sensor
+    # penalize_wrong_foot_ball_contact already uses -- catches near, far, and
+    # overshoot cases alike, since it keys off the actual contact event
+    # rather than a distance/position proxy for it.
+    ball_contact_sensor: ContactSensor = env.scene["ball_contact"]
+    ball_found = ball_contact_sensor.data.found                          # (N, 8)
+    left_touching_ball = (ball_found[:, :4] > 0).any(dim=-1)
+    right_touching_ball = (ball_found[:, 4:] > 0).any(dim=-1)
+    assigned_foot_touching_ball = torch.where(foot_idx == 0, left_touching_ball, right_touching_ball)
+    vel_sigma = torch.where(assigned_foot_touching_ball, torch.ones_like(vel_sigma), vel_sigma)
+
     # Combine: phase1 when ball is far, phase2 sigmoid when close.
     phase1_mask = ball_x_local > 1.5
     taskrew = torch.where(phase1_mask, phase1_rew, reach_rew * vel_sigma)
