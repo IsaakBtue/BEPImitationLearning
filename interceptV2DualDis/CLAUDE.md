@@ -139,6 +139,7 @@ Key frame notes:
 | `src/simple_goalkeeper/scripts/train.py` | Training entry point |
 | `src/simple_goalkeeper/scripts/play.py` | Play/evaluation entry point |
 | `src/simple_goalkeeper/scripts/pkl_to_npz.py` | PKL→NPZ motion converter |
+| `src/simple_goalkeeper/scripts/mirror_motion.py` | Left<->right NPZ motion mirror tool (`sgk_mirror`, self-inverse). See `docs/superpowers/specs/2026-07-26-motion-mirror-tool-design.md`. |
 
 ## beyondAMP Location
 
@@ -159,6 +160,14 @@ NPZ format, 21-DOF headless T1 joint order. Expected arrays:
 Convert PKL → NPZ:
 ```bash
 uv run sgk_convert --input-dir /path/to/Motions --output-dir src/simple_goalkeeper/motions/data
+```
+
+Mirror an NPZ clip left<->right (self-inverse transform; negates world Y, mirrors
+root quaternion, swaps+signs the 21 joints via `t1_headless.xml`'s Pitch/Roll/Yaw
+axis convention, recomputes all body kinematics via FK):
+```bash
+uv run sgk_mirror --input-file src/simple_goalkeeper/motions/data/<left_clip>.npz \
+                   --output-file <output>.npz
 ```
 
 ## Reward Design

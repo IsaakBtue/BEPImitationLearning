@@ -43,6 +43,7 @@ sgk_convert  = "simple_goalkeeper.scripts.pkl_to_npz:cli"
 sgk_export          = "simple_goalkeeper.scripts.export_onnx:main"
 sgk_view            = "simple_goalkeeper.scripts.view_motion:main"
 sgk_play_rsi        = "simple_goalkeeper.scripts.play_rsi_doublestep:run"
+sgk_mirror          = "simple_goalkeeper.scripts.mirror_motion:cli"
 
 [build-system]
 requires = ["setuptools>=61"]
