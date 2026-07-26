@@ -696,6 +696,50 @@ def footreach(
     decay_frac = ((dist_to_crossing - _BLUE_DECEL_FLOOR) / (_BLUE_DECEL_ZONE - _BLUE_DECEL_FLOOR)).clamp(0.0, 1.0)
     vel_sigma = torch.where(blue_approach, 1.0 + (vel_sigma - 1.0) * decay_frac, vel_sigma)
 
+    # FIX 2026-07-26: near-region velocity neutralization -- narrow crossings
+    # have no blue-midpoint landing concept, so blue_approach above
+    # (env._blue_wide-gated) never applies to them, leaving near-region
+    # vel_sigma fully live and uncapped for the entire pre-arrival window
+    # (ball_x_local in (0.5, 1.5], reach_rew already ~saturated since the
+    # foot is pre-positioned at the frozen target). vel_toward flips sign
+    # each time the assigned foot crosses the target, so the policy learned
+    # to oscillate back and forth across it to farm repeated
+    # velocity-toward-target bursts before the ball even arrives -- reported
+    # live by the user watching model_13750 (blue_v2_overshootradius_
+    # 2026-07-25). Structurally identical exploit class to the wide-crossing
+    # one blue_approach already guards against, just never extended to the
+    # narrow case. See docs/BugFixes.md.
+    #
+    # SUPERSEDES an earlier version of this fix (same day) that mirrored
+    # blue_approach's distance-gated decay (decaying vel_sigma toward
+    # neutral only within 0.30m of the target). Live evidence from a
+    # sgk_play analytics trace showed footreach still spiking 17-30 while
+    # bx (ball_x_local) sat at 1.14-1.29m -- solidly inside the supposedly-
+    # decayed window -- because the oscillation's swing radius is wider than
+    # the 0.30m decel zone, so most of the velocity burst happens OUTSIDE
+    # the radius the decay even looks at. A distance-gated decay is the
+    # right shape for blue's converge-then-land dynamic (foot approaches
+    # once, should be slow right at the end); it's the wrong shape for an
+    # oscillation with no single approach to slow down into.
+    #
+    # Fix: no distance gating at all -- vel_sigma is held flat at neutral
+    # (1.0x, no boost) for the ENTIRE ~ball_close window on narrow
+    # crossings, regardless of how far the foot is from the target. This is
+    # the same principle G1's own phase1 already uses (zero velocity credit
+    # when there's nothing real to react to yet), extended further than G1
+    # literally goes: G1's own vel_sigma is fully live and uncapped between
+    # 1.5m and arrival too (confirmed by reading _reward_eereach directly,
+    # legged_robot.py:1361-1400 -- a real, unguarded gap in G1 itself, just
+    # never manifesting as a reported problem there). This is a deliberate
+    # divergence beyond G1, justified by the live exploit evidence above,
+    # not a parity port.
+    #
+    # Turns off the instant ball_close triggers (ball_x_local < 0.5m, live-
+    # ball tracking begins), so the genuine last-moment interception dive
+    # keeps full, uncapped vel_sigma credit.
+    near_decel = (~env._blue_wide) & (~ball_close)
+    vel_sigma = torch.where(near_decel, torch.ones_like(vel_sigma), vel_sigma)
+
     # Combine: phase1 when ball is far, phase2 sigmoid when close.
     phase1_mask = ball_x_local > 1.5
     taskrew = torch.where(phase1_mask, phase1_rew, reach_rew * vel_sigma)
@@ -705,6 +749,68 @@ def footreach(
     upright = 1.0 - torch.clamp(torch.sum(projected_grav[:, :2] ** 2, dim=1), 0.0, 1.0)
     behind = _ball_is_behind(env, ball_name)
     return taskrew * upright * (~behind).float() * (~env._footreach_overshot_flag).float()
+
+
+def near_stick_reach(
+    env: "ManagerBasedRlEnv",
+    ball_name: str,
+    asset_cfg: SceneEntityCfg = _DEFAULT_FEET_CFG,
+    dist_sigma: float = 8.0,
+    speed_sigma: float = 1.5,
+) -> torch.Tensor:
+    """Dense reward for the assigned foot being simultaneously CLOSE to and
+    SLOW near the near-region reach target, before the ball has closed in.
+
+    FIX 2026-07-26 (near-region oscillation): ported from `blue_stick_landing`
+    (wide/far crossings' own anti-oscillation mechanism -- see that
+    function's docstring and docs/BugFixes.md). Two footreach-only attempts
+    to fix near-region oscillation (a distance-gated vel_sigma decay, then a
+    flat vel_sigma neutralization gated on ball_close) both left the exploit
+    intact somewhere, because neither ever PENALIZES speed near the target
+    -- they only ever stop AMPLIFYING it. `blue_stick_landing` does something
+    structurally different for wide crossings: it directly rewards the joint
+    condition "close AND slow", so a fast oscillation pass scores near ZERO
+    at the exact moment dist is near zero, because the speed term collapses
+    at high velocity even though the distance term is near its peak. This is
+    what actually opposes oscillation for wide crossings; footreach's own
+    vel_sigma decay (blue_approach) has the identical structural gap this
+    function's docstring describes and would very likely be exploitable
+    the same way on its own -- blue_stick_landing is the real reason the
+    problem doesn't surface there, not the decay.
+
+    exp(-dist_sigma * dist) * exp(-speed_sigma * speed), peaking at "close
+    AND stopped". Same sigma values as blue_stick_landing (unretuned).
+
+    Narrow-region-only by construction (`~env._blue_wide` gate) -- returns
+    exactly 0.0 for every wide/far-region env, so it cannot affect far-region
+    training signal even though it shares the same reward-config file.
+    Active only during the pre-arrival window (`~ball_close`, same formula
+    footreach uses) -- zero once the ball closes to within 0.5m, so the
+    genuine last-moment interception dive is never penalized for being fast.
+    """
+    reach_target_y = _get_reach_target_y(env, ball_name, asset_cfg=asset_cfg)  # (N,) -- full crossing point for narrow
+    goal_x_w = env.scene.env_origins[:, 0]
+    target_xy = torch.stack([goal_x_w, reach_target_y], dim=-1)   # (N, 2)
+
+    robot: Entity = env.scene[asset_cfg.name]
+    ball: Entity = env.scene[ball_name]
+    ball_x_local = ball.data.root_link_pos_w[:, 0] - env.scene.env_origins[:, 0]  # (N,)
+
+    foot_pos_w = robot.data.body_link_pos_w[:, asset_cfg.body_ids, :]      # (N, 2, 3)
+    foot_vel_w = robot.data.body_link_lin_vel_w[:, asset_cfg.body_ids, :]  # (N, 2, 3)
+    foot_idx = _get_correct_foot_idx(env, ball_name)                       # (N,)
+    arange_n = torch.arange(env.num_envs, device=env.device)
+    assigned_foot_pos = foot_pos_w[arange_n, foot_idx]                     # (N, 3)
+    assigned_foot_vel = foot_vel_w[arange_n, foot_idx]                     # (N, 3)
+
+    dist = torch.norm(assigned_foot_pos[:, :2] - target_xy, dim=-1)
+    speed = torch.norm(assigned_foot_vel[:, :2], dim=-1)
+
+    # Same ball_close formula footreach/foot_proximity use.
+    ball_close = (ball_x_local < 0.5) & (~env._blue_wide | env._blue_landed_genuine)
+    near_active = (~env._blue_wide) & (~ball_close)
+
+    return torch.exp(-dist_sigma * dist) * torch.exp(-speed_sigma * speed) * near_active.float()
 
 
 def foot_proximity(

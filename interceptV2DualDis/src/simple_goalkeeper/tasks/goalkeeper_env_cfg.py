@@ -227,6 +227,24 @@ def goalkeeper_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
                 "ep_len_divisor":  50,
             },
         )
+        # FIX 2026-07-26 (near-region oscillation): near-region analog of
+        # blue_stick_landing_curriculum below -- same base_weight (8.0),
+        # ported for the same reason (dense "close AND slow" anti-
+        # oscillation signal near-region footreach has no equivalent of).
+        # Narrow-region-only by construction (rewards.py:near_stick_reach's
+        # own env._blue_wide gate) -- this curriculum entry only ever scales
+        # a reward value that is already zero for wide/far envs, so it
+        # cannot influence far-region training despite living in this same
+        # shared config file.
+        cfg.curriculum["near_stick_reach_curriculum"] = CurriculumTermCfg(
+            func=gk_mdp.reward_curriculum_ep_len,
+            params={
+                "reward_name": "near_stick_reach",
+                "base_weight": 8.0,
+                "update_interval": 500,
+                "ep_len_divisor":  50,
+            },
+        )
         # G1 lines 363-364: stopball weight also grows with curriculum (same formula as eereach).
         cfg.curriculum["stopball_curriculum"] = CurriculumTermCfg(
             func=gk_mdp.reward_curriculum_ep_len,
@@ -541,6 +559,17 @@ def goalkeeper_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
             func=gk_mdp.foot_proximity,
             weight=5.0,
             params={"ball_name": BALL_NAME, "sigma": 5.0, "asset_cfg": _FEET_CFG},
+        ),
+        # FIX 2026-07-26 (near-region oscillation): dense "close AND slow"
+        # reward, ported from blue_stick_landing -- see rewards.py's
+        # near_stick_reach docstring and docs/BugFixes.md. Zero for
+        # wide/far-region envs by construction (near_stick_reach's own
+        # env._blue_wide gate), so this entry cannot influence far-region
+        # behavior despite sharing this config file with the blue_* terms.
+        "near_stick_reach": RewardTermCfg(
+            func=gk_mdp.near_stick_reach,
+            weight=8.0,
+            params={"ball_name": BALL_NAME, "asset_cfg": _FEET_CFG},
         ),
         # --- two-stage blue->green waypoint bonus, v2 reimplementation
         # (2026-07-23) of the blue-ball-waypoint branch mechanism, removed
