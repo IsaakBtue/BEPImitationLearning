@@ -125,15 +125,20 @@ _T1_VEL_LIMIT_MAP: dict[str, float] = {
 # that exact measured problem. Kept straight legs, replaced ONLY the arm
 # values with HOME_KEYFRAME's exact numbers (t1_constants.py:98-103).
 #
-# FIX 2026-07-27 (CORRECTED): three earlier same-day edits moved
-# Shoulder_Roll toward 0.0 (0.41 -> 0.1745 -> 0.05 rad), which -- confirmed
-# via an offscreen render, not just joint_pos numbers -- moves TOWARD a
-# T-pose, not away from it. 0.0 is this joint's horizontal/T-pose
-# reference; ~1.5 rad (near its range limit) is what actually brings the
-# arm down to the side. Corrected to 1.5 rad, mirroring HOME_KEYFRAME's own
-# corrected value (t1_constants.py) -- keep them in sync if either changes
-# again. See docs/BugFixes.md for the full misdiagnosis writeup. Every
-# joint in _RECOVERY_ARM_CFG/
+# FIX 2026-07-27 (CORRECTED, then fine-tuned, THEN matched to Booster's own
+# official T1 walk-policy default pose): earlier same-day edits chased
+# Shoulder_Roll toward 0.0 believing that was "hanging down" -- confirmed
+# via render it was actually this joint's T-POSE reference; corrected
+# toward its range limit, then hand-tuned to 20deg of flare (1.2217 rad).
+# User then asked to check Booster Robotics' own official T1 walking
+# controller's default pose (booster_deploy repo,
+# tasks/locomotion/locomotion.py:205-214, T1WalkControllerCfg) --
+# Shoulder_Pitch=0.2, Shoulder_Roll=∓1.3, Elbow_Pitch=0.0, Elbow_Yaw=∓0.5
+# (same Left-negative/Right-positive sign convention already used here).
+# All four arm values below now match that official pose exactly, mirroring
+# HOME_KEYFRAME's own value (t1_constants.py) -- keep them in sync if
+# either changes again. See docs/BugFixes.md for the misdiagnosis writeup,
+# reference images, and this comparison. Every joint in _RECOVERY_ARM_CFG/
 # _RECOVERY_LEG_CFG/_RECOVERY_WAIST_CFG has an explicit entry below --
 # including ones that don't change from default_joint_pos (Hip_Roll,
 # Hip_Yaw, Ankle_Roll, Waist, all already 0.0) -- so the map is a complete,
@@ -145,10 +150,10 @@ _POST_SAVE_STANCE_MAP: dict[str, float] = {
     "Left_Knee_Pitch": 0.0,        "Right_Knee_Pitch": 0.0,
     "Left_Ankle_Pitch": 0.0,       "Right_Ankle_Pitch": 0.0,
     "Left_Ankle_Roll": 0.0,        "Right_Ankle_Roll": 0.0,
-    "Left_Shoulder_Pitch": -0.21,  "Right_Shoulder_Pitch": -0.21,
-    "Left_Shoulder_Roll": -1.5,    "Right_Shoulder_Roll": 1.5,
-    "Left_Elbow_Pitch": -0.13,     "Right_Elbow_Pitch": -0.13,
-    "Left_Elbow_Yaw": -0.21,       "Right_Elbow_Yaw": 0.21,
+    "Left_Shoulder_Pitch": 0.2,    "Right_Shoulder_Pitch": 0.2,
+    "Left_Shoulder_Roll": -1.3,    "Right_Shoulder_Roll": 1.3,
+    "Left_Elbow_Pitch": 0.0,       "Right_Elbow_Pitch": 0.0,
+    "Left_Elbow_Yaw": -0.5,        "Right_Elbow_Yaw": 0.5,
     "Waist": 0.0,
 }
 

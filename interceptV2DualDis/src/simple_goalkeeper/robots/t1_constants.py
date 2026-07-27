@@ -95,30 +95,29 @@ HOME_KEYFRAME = EntityCfg.InitialStateCfg(
         # "1 0 0"/"0 0 1" but opposite-signed joint ranges L/R) so a
         # symmetric pose needs equal magnitude, opposite sign. See
         # docs/BugFixes.md.
-        r"(Left_Shoulder_Pitch|Right_Shoulder_Pitch)": -0.21,
-        # FIX 2026-07-27 (CORRECTED, user request, "look more soccer-like"):
-        # three earlier same-day edits (0.41 -> 0.1745 -> 0.05 rad, i.e.
-        # toward 0.0) had the axis direction backwards -- confirmed via an
-        # offscreen mujoco.Renderer image (not just robot.data.joint_pos
-        # numbers, which read "correct" the whole time but didn't reveal
-        # the actual rendered pose) that Shoulder_Roll near 0.0 is a full
-        # T-POSE (arms horizontal), not "hanging down" as assumed. Rendered
-        # comparison images confirmed 1.5 rad (~86deg) -- close to this
-        # joint's own range limit (Left: -1.74..1.57, Right: -1.57..1.74,
-        # t1_headless.xml) rather than near its center -- is what actually
-        # produces arms hanging naturally at the sides. Verified within
-        # both the hard range and the 0.9 soft_joint_pos_limit_factor band
-        # used elsewhere in training. Only Shoulder_Roll changed;
-        # Shoulder_Pitch/Elbow_Pitch/Elbow_Yaw are untouched and still look
-        # natural at 1.5 rad per the same renders. _POST_SAVE_STANCE_MAP
+        # FIX 2026-07-27 (CORRECTED, then fine-tuned, THEN matched to
+        # Booster's own official T1 walk-policy default pose, user
+        # request): earlier same-day edits chased Shoulder_Roll toward 0.0
+        # believing that was "hanging down" -- confirmed via render it was
+        # actually this joint's T-POSE reference; corrected toward its
+        # range limit instead, then hand-tuned to 20deg of flare (1.2217
+        # rad). User then asked to check Booster Robotics' own official T1
+        # walking controller's default pose (booster_deploy repo,
+        # tasks/locomotion/locomotion.py:205-214, T1WalkControllerCfg) for
+        # comparison -- it uses Shoulder_Pitch=0.2, Shoulder_Roll=∓1.3,
+        # Elbow_Pitch=0.0, Elbow_Yaw=∓0.5 (same Left-negative/Right-positive
+        # sign convention already used here, confirmed no remapping
+        # needed). All four arm values below now match that official pose
+        # exactly, replacing the hand-tuned ones. _POST_SAVE_STANCE_MAP
         # (rewards.py) mirrors this exact value -- keep them in sync if
-        # either changes again. See docs/BugFixes.md for the full
-        # misdiagnosis writeup and the actual reference images.
-        r"Left_Shoulder_Roll": -1.5,
-        r"Right_Shoulder_Roll": 1.5,
-        r"(Left_Elbow_Pitch|Right_Elbow_Pitch)": -0.13,
-        r"Left_Elbow_Yaw": -0.21,
-        r"Right_Elbow_Yaw": 0.21,
+        # either changes again. See docs/BugFixes.md for the misdiagnosis
+        # writeup, reference images, and this comparison.
+        r"(Left_Shoulder_Pitch|Right_Shoulder_Pitch)": 0.2,
+        r"Left_Shoulder_Roll": -1.3,
+        r"Right_Shoulder_Roll": 1.3,
+        r"(Left_Elbow_Pitch|Right_Elbow_Pitch)": 0.0,
+        r"Left_Elbow_Yaw": -0.5,
+        r"Right_Elbow_Yaw": 0.5,
     },
     joint_vel={".*": 0.0},
 )
