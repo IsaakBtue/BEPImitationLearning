@@ -105,6 +105,34 @@ _T1_VEL_LIMIT_MAP: dict[str, float] = {
 }
 
 
+# Post-save recovery stance: straight legs, arms out to the sides at 45 deg,
+# waist centered. Source: docs/superpowers/specs/2026-07-25-post-save-stance-
+# design.md (arms/legs), extended 2026-07-27 to also cover the waist joint --
+# see FIX 2026-07-27 notes on postupperdofpos/postlegdofpos/postwaistdofpos
+# for the full rationale. Retargets those three functions away from
+# robot.data.default_joint_pos (the crouched HOME_KEYFRAME pose) -- a bent-
+# knee crouch requires continuous active torque to hold and the policy was
+# not reliably settling into it post-save. HOME_KEYFRAME itself is unchanged
+# (reset pose, out of scope). Every joint in _RECOVERY_ARM_CFG/
+# _RECOVERY_LEG_CFG/_RECOVERY_WAIST_CFG has an explicit entry below --
+# including ones that don't change from default_joint_pos (Hip_Roll, Hip_Yaw,
+# Ankle_Roll, Waist, all already 0.0) -- so the map is a complete, explicit
+# stance definition, not a partial override.
+_POST_SAVE_STANCE_MAP: dict[str, float] = {
+    "Left_Hip_Roll": 0.0,          "Right_Hip_Roll": 0.0,
+    "Left_Hip_Yaw": 0.0,           "Right_Hip_Yaw": 0.0,
+    "Left_Hip_Pitch": 0.0,         "Right_Hip_Pitch": 0.0,
+    "Left_Knee_Pitch": 0.0,        "Right_Knee_Pitch": 0.0,
+    "Left_Ankle_Pitch": 0.0,       "Right_Ankle_Pitch": 0.0,
+    "Left_Ankle_Roll": 0.0,        "Right_Ankle_Roll": 0.0,
+    "Left_Shoulder_Pitch": 0.0,    "Right_Shoulder_Pitch": 0.0,
+    "Left_Shoulder_Roll": -0.785,  "Right_Shoulder_Roll": 0.785,
+    "Left_Elbow_Pitch": 0.0,       "Right_Elbow_Pitch": 0.0,
+    "Left_Elbow_Yaw": 0.0,         "Right_Elbow_Yaw": 0.0,
+    "Waist": 0.0,
+}
+
+
 def _get_correct_foot_idx(env: "ManagerBasedRlEnv", ball_name: str) -> torch.Tensor:
     """Determine which foot (left=0, right=1) should contact the ball.
 
@@ -1813,12 +1841,33 @@ def postupperdofpos(
     foot-only task, so the same G1-matched weight plausibly isn't enough
     relative pressure here even though it was sufficient for G1's own task.
     Not yet validated against a live run.
+
+    FIX 2026-07-27: retargeted from robot.data.default_joint_pos (the
+    crouched HOME_KEYFRAME pose) to _POST_SAVE_STANCE_MAP's straight-leg,
+    45-deg-arms-out stance -- a bent-knee crouch requires continuous active
+    torque to hold, and the policy was not reliably settling into it
+    post-save (see docs/superpowers/specs/2026-07-25-post-save-stance-
+    design.md). Cache shared with postlegdofpos/postwaistdofpos (see
+    env._post_save_stance_target below) -- first time a single lazy cache
+    in this file is shared across more than one reward function; the
+    hasattr guard makes this safe regardless of which of the three runs
+    first each tick. Weight/shape/curriculum unchanged -- only the
+    comparison target moved. See docs/BugFixes.md.
     """
     behind = _ball_is_behind(env, ball_name)
     robot: Entity = env.scene[asset_cfg.name]
+
+    if not hasattr(env, "_post_save_stance_target"):
+        all_names = robot.joint_names
+        stance_all = torch.zeros(len(all_names), device=env.device)
+        for i, name in enumerate(all_names):
+            if name in _POST_SAVE_STANCE_MAP:
+                stance_all[i] = _POST_SAVE_STANCE_MAP[name]
+        env._post_save_stance_target = stance_all
+
     delta = (
         robot.data.joint_pos[:, asset_cfg.joint_ids]
-        - robot.data.default_joint_pos[:, asset_cfg.joint_ids]
+        - env._post_save_stance_target[asset_cfg.joint_ids]
     )
     err = torch.sum(torch.square(delta), dim=-1)
     return torch.exp(-1.0 * err) * behind.float()
@@ -1832,12 +1881,45 @@ def postwaistdofpos(
     """Reward waist joint returning to default pose after ball is behind. Mirrors ILB.
 
     exp(-3 * sum_sq_err) × behind — bounded [0, 1], reward peaks at default pose.
+
+    FIX 2026-07-27: retargeted from robot.data.default_joint_pos to
+    _POST_SAVE_STANCE_MAP (see postupperdofpos's docstring for the shared-
+    cache mechanism and full rationale). The Waist joint's target value is
+    unchanged (0.0, matches its existing default_joint_pos) -- this alone
+    changes nothing behaviorally, it's purely the unification move so all
+    three joint-position post-save terms share one stance definition.
+
+    Weight raised 1.0 -> 3.0 in the same commit (goalkeeper_env_cfg.py):
+    user reported the waist visibly rotating post-save; training logs
+    confirmed this reward stuck near its floor (~0.31 mean episode reward,
+    the currently-running 15k-iteration run), the same "stuck near its
+    floor relative to siblings" symptom that motivated postupperdofpos's
+    2026-07-23 bump -- that fix's own docstring named postwaistdofpos as
+    one of the terms postupperdofpos was compared against at the time
+    ("noticeably higher"); that comparison is now stale, postwaistdofpos
+    has since fallen to the same floor. Waist (t1_headless.xml) is a pure
+    yaw joint (axis="0 0 1", range +/-1.57 rad) -- exactly the joint that
+    would visibly present as "the robot rotating" if under-converged. 3.0
+    is a deliberate, evidence-based tuning choice (no G1 equivalent to
+    size against -- G1 has no comparable single-joint post-save waist term
+    at a different weight to port from), below postupperdofpos's 5.0 since
+    that term controls 8 joints across 2 limbs vs. this term's 1. See
+    docs/BugFixes.md.
     """
     behind = _ball_is_behind(env, ball_name)
     robot: Entity = env.scene[asset_cfg.name]
+
+    if not hasattr(env, "_post_save_stance_target"):
+        all_names = robot.joint_names
+        stance_all = torch.zeros(len(all_names), device=env.device)
+        for i, name in enumerate(all_names):
+            if name in _POST_SAVE_STANCE_MAP:
+                stance_all[i] = _POST_SAVE_STANCE_MAP[name]
+        env._post_save_stance_target = stance_all
+
     delta = (
         robot.data.joint_pos[:, asset_cfg.joint_ids]
-        - robot.data.default_joint_pos[:, asset_cfg.joint_ids]
+        - env._post_save_stance_target[asset_cfg.joint_ids]
     )
     err = torch.sum(torch.square(delta), dim=-1)
     return torch.exp(-3.0 * err) * behind.float()
@@ -1875,12 +1957,33 @@ def postlegdofpos(
     G1 decision "was designed for hands and needs adaptation for feet."
 
     exp(-1 * sum_sq_err) x behind -- bounded [0, 1], reward peaks at default pose.
+
+    FIX 2026-07-27: retargeted from robot.data.default_joint_pos (the
+    crouched HOME_KEYFRAME pose) to _POST_SAVE_STANCE_MAP's straight-leg
+    stance -- confirmed via training logs this was the single worst-
+    converging post-save term (~0.07 mean episode reward vs.
+    postupperdofpos's ~2.0 in the currently-running 15k-iteration run),
+    consistent with a bent-knee crouch requiring continuous active torque
+    to hold. Cache shared with postupperdofpos/postwaistdofpos -- see that
+    function's docstring for the shared-cache mechanism. Weight/shape/
+    curriculum unchanged -- only the comparison target moved. See
+    docs/superpowers/specs/2026-07-25-post-save-stance-design.md and
+    docs/BugFixes.md.
     """
     behind = _ball_is_behind(env, ball_name)
     robot: Entity = env.scene[asset_cfg.name]
+
+    if not hasattr(env, "_post_save_stance_target"):
+        all_names = robot.joint_names
+        stance_all = torch.zeros(len(all_names), device=env.device)
+        for i, name in enumerate(all_names):
+            if name in _POST_SAVE_STANCE_MAP:
+                stance_all[i] = _POST_SAVE_STANCE_MAP[name]
+        env._post_save_stance_target = stance_all
+
     delta = (
         robot.data.joint_pos[:, asset_cfg.joint_ids]
-        - robot.data.default_joint_pos[:, asset_cfg.joint_ids]
+        - env._post_save_stance_target[asset_cfg.joint_ids]
     )
     err = torch.sum(torch.square(delta), dim=-1)
     return torch.exp(-1.0 * err) * behind.float()

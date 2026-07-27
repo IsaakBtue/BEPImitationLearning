@@ -665,9 +665,18 @@ def goalkeeper_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
             weight=5.0,
             params={"ball_name": BALL_NAME, "asset_cfg": _RECOVERY_ARM_CFG},
         ),
+        # FIX 2026-07-27: 1.0 -> 3.0. User reported the waist visibly
+        # rotating post-save; training logs confirmed this reward stuck
+        # near its floor (~0.31 mean episode reward), the same "stuck
+        # near its floor relative to siblings" symptom -- and now
+        # magnitude -- that motivated postupperdofpos's 2026-07-23 bump
+        # (that fix's own comment above named postwaistdofpos as one of
+        # the terms postupperdofpos was compared against; that comparison
+        # is now stale). See postwaistdofpos's docstring (rewards.py) and
+        # docs/BugFixes.md.
         "postwaistdofpos": RewardTermCfg(
             func=gk_mdp.postwaistdofpos,
-            weight=1.0,
+            weight=3.0,
             params={"ball_name": BALL_NAME, "asset_cfg": _RECOVERY_WAIST_CFG},
         ),
         # FIX 2026-07-22: new leg-recovery term, no G1 equivalent to copy a
