@@ -96,8 +96,15 @@ HOME_KEYFRAME = EntityCfg.InitialStateCfg(
         # symmetric pose needs equal magnitude, opposite sign. See
         # docs/BugFixes.md.
         r"(Left_Shoulder_Pitch|Right_Shoulder_Pitch)": -0.21,
-        r"Left_Shoulder_Roll": -0.41,
-        r"Right_Shoulder_Roll": 0.41,
+        # FIX 2026-07-27 (user request, "look more soccer-like"): arms-out
+        # roll reduced from 0.41 rad (23.5 deg) to 0.1745 rad (10 deg) --
+        # 23.5 deg still read as "really far out" from the sides. Only
+        # Shoulder_Roll changed; Shoulder_Pitch/Elbow_Pitch/Elbow_Yaw
+        # (which weren't the "arms out" complaint) are untouched.
+        # _POST_SAVE_STANCE_MAP (rewards.py) mirrors this exact value --
+        # keep them in sync if either changes again. See docs/BugFixes.md.
+        r"Left_Shoulder_Roll": -0.1745,
+        r"Right_Shoulder_Roll": 0.1745,
         r"(Left_Elbow_Pitch|Right_Elbow_Pitch)": -0.13,
         r"Left_Elbow_Yaw": -0.21,
         r"Right_Elbow_Yaw": 0.21,
