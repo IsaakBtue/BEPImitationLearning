@@ -31,6 +31,7 @@ from __future__ import annotations
 import os
 import sys
 import types
+from collections import deque
 from sys import stderr
 from dataclasses import asdict, dataclass
 from pathlib import Path
@@ -43,6 +44,7 @@ import tyro
 
 from mjlab.envs import ManagerBasedRlEnv
 from mjlab.tasks.registry import list_tasks, load_env_cfg, load_rl_cfg, load_runner_cls
+from mjlab.utils.lab_api.math import quat_apply
 from mjlab.utils.torch import configure_torch_backends
 from mjlab.viewer import NativeMujocoViewer, ViserPlayViewer
 
@@ -457,6 +459,158 @@ def _patch_viewer_intercept_vis(native_viewer: "NativeMujocoViewer", env) -> Non
     native_viewer._update_debug_visualizers = _patched_update
 
 
+def _compute_foot_slip(env, env_idx: int) -> tuple[float, float]:
+    """Per-foot horizontal slip speed (m/s), 0.0 when that foot is not in
+    genuine GROUND contact.
+
+    Contact test mirrors the real `feet_slippage` reward function exactly
+    (rewards.py:2258-2270, FIX 2026-07-27): "in contact" is `feet_contact`
+    (any contact) with genuine foot-ball contact (`ball_contact` sensor)
+    excluded, NOT a height threshold -- a height proxy still reports "in
+    contact" for a few frames into a fast push-off (foot below the height
+    cutoff but already swinging at step speed), producing a false slip spike
+    the actual sensor-based reward never sees. Using the exact same contact
+    logic here keeps this plot directly comparable to the feet_slippage
+    reward plot next to it -- without the ball exclusion, this plot still
+    spikes on every foot-ball touch even though the reward (post-fix) no
+    longer penalizes it, which looks like the fix isn't working when it is.
+    """
+    raw_env = env.unwrapped if hasattr(env, "unwrapped") else env
+    robot = raw_env.scene["robot"]
+    foot_ids = robot.find_bodies(["left_foot_link", "right_foot_link"])[0]
+    foot_vel_w = robot.data.body_link_lin_vel_w[env_idx, foot_ids, :]  # [2, 3]
+    found = raw_env.scene["feet_contact"].data.found[env_idx]  # [8]
+    ball_found = raw_env.scene["ball_contact"].data.found[env_idx]  # [8], same layout
+    lf_contact = bool((found[:4] > 0).any().item()) and not bool((ball_found[:4] > 0).any().item())
+    rf_contact = bool((found[4:] > 0).any().item()) and not bool((ball_found[4:] > 0).any().item())
+    lf_slip = foot_vel_w[0, :2].norm().item() if lf_contact else 0.0
+    rf_slip = foot_vel_w[1, :2].norm().item() if rf_contact else 0.0
+    return lf_slip, rf_slip
+
+
+def _patch_viewer_feet_slip_plots(native_viewer: "NativeMujocoViewer", env) -> None:
+    """Add two extra P-panel plots ("left_foot_slip"/"right_foot_slip") showing
+    raw per-foot horizontal slip speed in m/s, alongside the existing per-reward-term
+    plots. The stock feet_slippage reward plot shows exp(-10*slip) squashed into
+    [0,1] -- these show the underlying speed directly, which is easier to read.
+    """
+    orig_setup = native_viewer.setup
+    orig_update_reward_figures = native_viewer._update_reward_figures
+
+    _SLIP_TERM_NAMES = ("left_foot_slip", "right_foot_slip")
+    # Existing reward-term plot(s) to also force into the visible slots, so
+    # the raw slip plots above have the actual reward to compare against.
+    _PROMOTED_REWARD_TERMS = ("feet_slippage",)
+
+    def _patched_setup() -> None:
+        orig_setup()
+        from mjlab.viewer.native.viewer import make_empty_figure
+        cfg = native_viewer._plot_cfg
+        for name in _SLIP_TERM_NAMES:
+            native_viewer._figures[name] = make_empty_figure(
+                name, cfg.grid_size, cfg.init_yrange, cfg.history, cfg.background_alpha,
+            )
+            native_viewer._histories[name] = deque(maxlen=cfg.history)
+            native_viewer._yrange[name] = cfg.init_yrange
+            native_viewer._scale[name] = 1.0
+        # Reorder (not append): _update_reward_figures only renders
+        # _term_names[:max_viewports] (default 12) -- this task registers 41
+        # active reward terms, so anything past index 12 is silently never
+        # rendered no matter what _show_plots/_is_paused say. feet_slippage
+        # itself sits at position ~30 in declaration order and was NEVER
+        # visible even before this patch. Move the two slip plots plus
+        # feet_slippage to the front so all three are always in view.
+        rest = [n for n in native_viewer._term_names if n not in _PROMOTED_REWARD_TERMS]
+        promoted = [n for n in _PROMOTED_REWARD_TERMS if n in native_viewer._term_names]
+        native_viewer._term_names = list(_SLIP_TERM_NAMES) + promoted + rest
+
+    def _patched_update_reward_figures(viewer_handle: "mujoco.viewer.Handle") -> None:
+        if native_viewer._show_plots and native_viewer._term_names and not native_viewer._is_paused:
+            lf_slip, rf_slip = _compute_foot_slip(env, native_viewer.env_idx)
+            native_viewer._append_point("left_foot_slip", lf_slip)
+            native_viewer._append_point("right_foot_slip", rf_slip)
+            native_viewer._write_history_to_figure("left_foot_slip")
+            native_viewer._write_history_to_figure("right_foot_slip")
+        orig_update_reward_figures(viewer_handle)
+
+    native_viewer.setup = _patched_setup
+    native_viewer._update_reward_figures = _patched_update_reward_figures
+
+
+def _compute_foot_yaw_error(env, env_idx: int) -> tuple[float, float]:
+    """Signed yaw deviation (degrees) of each foot's forward axis from world +X.
+
+    0 = foot's toe points along world +X -- the "facing the field" direction
+    this whole task assumes the robot holds (ang_vel_z's -0.5 weight, and the
+    ball's -X approach direction, see CLAUDE.md's Frame Convention section).
+    Positive = rotated counter-clockwise from forward (toe swings toward
+    +Y/left), negative = clockwise (toward -Y/right). Foot-local +X is the
+    toe-forward axis -- same convention feet_slippage's toe-tip contact point
+    uses (_TOE_X_LOCAL).
+    """
+    raw_env = env.unwrapped if hasattr(env, "unwrapped") else env
+    robot = raw_env.scene["robot"]
+    foot_ids = robot.find_bodies(["left_foot_link", "right_foot_link"])[0]
+    foot_quat_w = robot.data.body_link_quat_w[env_idx, foot_ids, :]  # [2, 4]
+    forward_local = torch.tensor(
+        [[1.0, 0.0, 0.0], [1.0, 0.0, 0.0]], device=foot_quat_w.device, dtype=foot_quat_w.dtype,
+    )
+    forward_world = quat_apply(foot_quat_w, forward_local)  # [2, 3]
+    yaw_deg = torch.rad2deg(torch.atan2(forward_world[:, 1], forward_world[:, 0]))  # [2]
+    return yaw_deg[0].item(), yaw_deg[1].item()
+
+
+def _patch_viewer_foot_orientation_plots(native_viewer: "NativeMujocoViewer", env) -> None:
+    """Add two P-panel plots ("left_foot_yaw_deg"/"right_foot_yaw_deg") showing
+    each foot's signed yaw deviation from forward (world +X) in degrees.
+
+    Added per user report: the non-leading (trailing/non-assigned) foot ends
+    up pointing in visually odd directions after a save. No dedicated reward
+    currently targets foot HEADING directly -- the closest existing term is
+    `postlegdofpos` (rewards.py:1846), which pulls all 12 leg joints
+    (including Hip_Yaw -- T1 has no ankle-yaw actuator, so hip yaw is what
+    actually controls where a foot points) back toward their default values,
+    but only post-save and only in joint space, not as a direct world-frame
+    heading target. Promoted here alongside the two new plots so the two can
+    be compared -- if yaw error stays large while postlegdofpos is near its
+    ceiling, that's evidence the indirect joint-space pull isn't sufficient
+    and a dedicated heading reward may be warranted (a separate, bigger
+    change, not implemented here).
+    """
+    orig_setup = native_viewer.setup
+    orig_update_reward_figures = native_viewer._update_reward_figures
+
+    _YAW_TERM_NAMES = ("left_foot_yaw_deg", "right_foot_yaw_deg")
+    _PROMOTED_REWARD_TERMS = ("postlegdofpos",)
+
+    def _patched_setup() -> None:
+        orig_setup()
+        from mjlab.viewer.native.viewer import make_empty_figure
+        cfg = native_viewer._plot_cfg
+        for name in _YAW_TERM_NAMES:
+            native_viewer._figures[name] = make_empty_figure(
+                name, cfg.grid_size, cfg.init_yrange, cfg.history, cfg.background_alpha,
+            )
+            native_viewer._histories[name] = deque(maxlen=cfg.history)
+            native_viewer._yrange[name] = cfg.init_yrange
+            native_viewer._scale[name] = 1.0
+        rest = [n for n in native_viewer._term_names if n not in _PROMOTED_REWARD_TERMS]
+        promoted = [n for n in _PROMOTED_REWARD_TERMS if n in native_viewer._term_names]
+        native_viewer._term_names = list(_YAW_TERM_NAMES) + promoted + rest
+
+    def _patched_update_reward_figures(viewer_handle: "mujoco.viewer.Handle") -> None:
+        if native_viewer._show_plots and native_viewer._term_names and not native_viewer._is_paused:
+            lf_yaw, rf_yaw = _compute_foot_yaw_error(env, native_viewer.env_idx)
+            native_viewer._append_point("left_foot_yaw_deg", lf_yaw)
+            native_viewer._append_point("right_foot_yaw_deg", rf_yaw)
+            native_viewer._write_history_to_figure("left_foot_yaw_deg")
+            native_viewer._write_history_to_figure("right_foot_yaw_deg")
+        orig_update_reward_figures(viewer_handle)
+
+    native_viewer.setup = _patched_setup
+    native_viewer._update_reward_figures = _patched_update_reward_figures
+
+
 def run_play(task_id: str, cfg: PlayConfig) -> None:
     configure_torch_backends()
     device = cfg.device or ("cuda:0" if torch.cuda.is_available() else "cpu")
@@ -635,6 +789,8 @@ def run_play(task_id: str, cfg: PlayConfig) -> None:
                 analytics.toggle()
         native_viewer = NativeMujocoViewer(env, final_policy, key_callback=_key_cb)
         _patch_viewer_intercept_vis(native_viewer, env)
+        _patch_viewer_feet_slip_plots(native_viewer, env)
+        _patch_viewer_foot_orientation_plots(native_viewer, env)
         native_viewer.run()
     elif resolved_viewer == "viser":
         ViserPlayViewer(env, final_policy).run()

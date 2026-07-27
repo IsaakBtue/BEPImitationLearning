@@ -1315,7 +1315,12 @@ def success(
     asset_cfg: SceneEntityCfg = _DEFAULT_FEET_CFG,
     strict_th: float = 0.15,
 ) -> torch.Tensor:
-    """Continuing, doubled-after-save, close-to-target reward. Ports G1 _reward_success.
+    """Continuing, tiered-after-save, close-to-target reward. Originally ported
+    from G1 _reward_success; FIX 2026-07-27 (user request) retiered the
+    multiplier off softstop/cleanstop instead of stopball -- see that fix's
+    comment further down this function for the current 1.0x/2.0x/3.0x ladder
+    and why. The `dist`/`landing_ok` mechanics below are unchanged from the
+    original G1 port.
 
     G1 (legged_robot.py:1402-1403): `(success_flag + 1.0) * (dist < strict_th)`.
     success_flag is set once inside _reward_stopball, on the exact same
@@ -1331,14 +1336,11 @@ def success(
     -- success requires closer proximity than the reach reward's own threshold.
 
     SGK port:
-      - success_flag -> env._sb_flag. stopball() (this module) sets _sb_flag on
-        the identical triggering event (its own delta_vx > threshold deflection,
-        `fired = deflection_now & ~env._sb_flag; env._sb_flag |= fired`) and
-        clears it only at reset -- the same one-shot-then-persistent semantics
-        as G1's success_flag, on the same underlying event (a qualifying
-        deflection). stopball is registered before this term in
-        goalkeeper_env_cfg.py's rewards dict, so _sb_flag is fresh (this step)
-        by the time this runs.
+      - success_flag -> originally env._sb_flag (stopball's flag, matching G1's
+        own event exactly). FIX 2026-07-27 changed this to a 3-tier ladder off
+        env._softstop_flag/env._cleanstop_flag instead -- a deliberate SGK
+        divergence beyond the literal G1 port, not a parity fix. See the
+        ordering/staleness comment further down this function.
       - dist -> distance from the task-assigned foot (_get_correct_foot_idx) to
         the same frozen-far/live-close crossing_point used by footreach and
         foot_proximity (see those docstrings: frozen crossing_y when the ball
@@ -1398,15 +1400,39 @@ def success(
     foot_pos_active = foot_pos_w[arange, foot_idx]
     dist = torch.norm(foot_pos_active - crossing_point, dim=-1)            # (N,)
 
-    success_flag = getattr(
-        env, "_sb_flag", torch.zeros(env.num_envs, dtype=torch.bool, device=env.device)
+    # FIX 2026-07-27 (user request): retiered off stopball (env._sb_flag) --
+    # stopball is just the initial deflection, the easiest/loosest event in
+    # this reward table, not the actual outcome the user wants "success" to
+    # track. Now a 3-tier ladder off softstop/cleanstop instead: 1.0x before
+    # either fires, 2.0x once softstop fires (full velocity reversal --
+    # "a little easier"), 3.0x once cleanstop fires (ball nearly dead +
+    # correct foot -- the genuinely hard, final outcome). cleanstop's own
+    # gate already requires softstop_fired first (cleanstop() reads
+    # env._softstop_flag), so cleanstop_flag=True implies softstop_flag=True
+    # -- the two terms can never double-count, this is a clean 1/2/3 ladder
+    # with no extra branching needed.
+    #
+    # IMPORTANT ORDERING NOTE: this term is registered in
+    # goalkeeper_env_cfg.py AFTER "cleanstop" (moved there specifically for
+    # this fix -- previously "success" was registered 3rd and "cleanstop"
+    # 5th) so that env._cleanstop_flag is guaranteed fresh THIS tick, not
+    # last tick's stale value -- the same class of staleness bug this
+    # project has hit before (see the 2026-07-23 asset_cfg staleness fix
+    # elsewhere in this file). env._softstop_flag is unaffected by ordering
+    # either way since softstop was already registered before success.
+    softstop_flag = getattr(
+        env, "_softstop_flag", torch.zeros(env.num_envs, dtype=torch.bool, device=env.device)
     )
+    cleanstop_flag = getattr(
+        env, "_cleanstop_flag", torch.zeros(env.num_envs, dtype=torch.bool, device=env.device)
+    )
+    multiplier = 1.0 + softstop_flag.float() + cleanstop_flag.float()
     # FIX 2026-07-24: reuses env._blue_landed_genuine (== env._blue_landed &
     # ~env._blue_landed_was_free, computed once in _get_reach_target_y,
     # already called above this line) instead of recomputing the same
     # expression locally -- pure dedup, same value as before.
     landing_ok = ~env._blue_wide | env._blue_landed_genuine
-    return (success_flag.float() + 1.0) * (dist < strict_th).float() * landing_ok.float()
+    return multiplier * (dist < strict_th).float() * landing_ok.float()
 
 
 def single_foot_save(
@@ -2166,6 +2192,112 @@ def foot_inner_face_continuous(
     return alignment * (~behind).float()
 
 
+def trailing_foot_forward_continuous(
+    env: "ManagerBasedRlEnv",
+    ball_name: str,
+    asset_cfg: SceneEntityCfg = _DEFAULT_FEET_CFG,
+) -> torch.Tensor:
+    """Continuous reward for the TRAILING (non-assigned) foot pointing forward.
+
+    NEW 2026-07-27 (user request). foot_inner_face_continuous/
+    inner_face_orientation_save both only ever shape the LEADING/assigned
+    foot's orientation (they pick one foot via _get_correct_foot_idx and
+    never touch the other) -- the trailing foot had no orientation shaping
+    anywhere in the reward table at all, which is the likely cause of the
+    visually odd trailing-foot orientation reported while watching sgk_play.
+    No G1 equivalent exists for this or its leading-foot sibling (checked --
+    no hand-orientation-during-catch reward anywhere in legged_robot.py), so
+    this is a pure SGK design addition, not a G1-parity change.
+
+    Unlike the leading foot's sideways (robot-local Y) target, the trailing
+    foot should stay forward-facing (robot-local +X) -- it isn't presenting
+    a blocking face, it's just standing. No left/right sign flip is needed
+    here (unlike the Y-axis version): "forward" is the same direction for
+    both feet, no mirroring required.
+
+    Metric: trailing_foot_long_axis_w . robot_forward_axis_w, in [-1, 1] --
+    1 when the trailing foot's toe points the same way the robot's own body
+    faces, negative if pointing backward. Deliberately unclamped (can go
+    negative), same rationale as foot_inner_face_continuous: a plain
+    zero-floor reward looks identical to "never engaged" as "pointing
+    backward" from the policy's perspective, so a real (if mild) penalty for
+    the wrong direction gives a clearer gradient.
+
+    Active the ENTIRE episode, no ~behind gate (user's explicit choice) --
+    the trailing foot's job (stay planted, forward-facing) doesn't end at
+    the save moment the way the leading foot's blocking-face job does; the
+    reported symptom was specifically about POST-save orientation.
+    """
+    robot: Entity = env.scene[asset_cfg.name]
+    foot_quat_w = robot.data.body_link_quat_w[:, asset_cfg.body_ids, :]  # (N, 2, 4)
+
+    foot_idx = _get_correct_foot_idx(env, ball_name)      # (N,) — leading foot, 0=left, 1=right
+    trailing_idx = 1 - foot_idx                             # (N,) — the OTHER foot
+
+    foot_long_local = torch.zeros(env.num_envs, 3, device=env.device)
+    foot_long_local[:, 0] = 1.0                                              # local X = toe dir
+    left_long_w  = quat_apply(foot_quat_w[:, 0, :], foot_long_local)        # (N, 3)
+    right_long_w = quat_apply(foot_quat_w[:, 1, :], foot_long_local)        # (N, 3)
+    trailing_long_w = torch.where((trailing_idx == 0)[:, None], left_long_w, right_long_w)  # (N, 3)
+
+    robot_forward_local = torch.zeros(env.num_envs, 3, device=env.device)
+    robot_forward_local[:, 0] = 1.0
+    robot_forward_w = quat_apply(robot.data.root_link_quat_w, robot_forward_local)  # (N, 3)
+
+    return (trailing_long_w * robot_forward_w).sum(dim=-1)  # (N,) in [-1, 1]
+
+
+def postleadfootorientation(
+    env: "ManagerBasedRlEnv",
+    ball_name: str,
+    asset_cfg: SceneEntityCfg = _DEFAULT_FEET_CFG,
+) -> torch.Tensor:
+    """Continuous reward for the LEADING (assigned) foot rotating back toward
+    forward (robot-local +X) once the save has happened.
+
+    NEW 2026-07-27 (user request). foot_inner_face_continuous actively wants
+    the leading foot turned SIDEWAYS while the save is in progress (gated
+    `~behind`) -- this term wants the same foot to rotate back to FORWARD
+    once the ball is behind, even while the foot is still airborne
+    recovering from an in-the-air save (no ground-contact requirement, no
+    settle wait -- continuous per-step, starts the instant `behind` flips).
+
+    These two terms cannot contradict each other: foot_inner_face_continuous
+    is gated `(~behind)` and this one is gated `behind` -- exactly
+    complementary, so at most one is ever active on a given step for a given
+    env. No code change to foot_inner_face_continuous was needed.
+
+    No G1 equivalent (see trailing_foot_forward_continuous's docstring --
+    no hand-orientation-during-catch reward exists anywhere in G1). Mirrors
+    the same "active only when ball is behind" convention already used by
+    postorientation/postangvel/postlinvel/postupperdofpos/postwaistdofpos/
+    postlegdofpos, but targets foot HEADING directly rather than a generic
+    joint-space default-pose pull -- postlegdofpos's Hip_Yaw term already
+    does this indirectly (see the foot-yaw P-panel plots added earlier this
+    session) but is a weak, indirect proxy; this targets the actual world-
+    frame quantity that matters.
+    """
+    robot: Entity = env.scene[asset_cfg.name]
+    foot_quat_w = robot.data.body_link_quat_w[:, asset_cfg.body_ids, :]  # (N, 2, 4)
+
+    foot_idx = _get_correct_foot_idx(env, ball_name)  # (N,) — leading foot, 0=left, 1=right
+
+    foot_long_local = torch.zeros(env.num_envs, 3, device=env.device)
+    foot_long_local[:, 0] = 1.0
+    left_long_w  = quat_apply(foot_quat_w[:, 0, :], foot_long_local)        # (N, 3)
+    right_long_w = quat_apply(foot_quat_w[:, 1, :], foot_long_local)        # (N, 3)
+    leading_long_w = torch.where((foot_idx == 0)[:, None], left_long_w, right_long_w)  # (N, 3)
+
+    robot_forward_local = torch.zeros(env.num_envs, 3, device=env.device)
+    robot_forward_local[:, 0] = 1.0
+    robot_forward_w = quat_apply(robot.data.root_link_quat_w, robot_forward_local)  # (N, 3)
+
+    alignment = (leading_long_w * robot_forward_w).sum(dim=-1)  # (N,) in [-1, 1]
+
+    behind = _ball_is_behind(env, ball_name)
+    return alignment * behind.float()
+
+
 def cleanstop(
     env: "ManagerBasedRlEnv",
     ball_name: str,
@@ -2202,24 +2334,41 @@ def foot_clearance(
     ball_name: str,
     asset_cfg: SceneEntityCfg = _DEFAULT_FEET_CFG,
     target_height: float = 0.10,
+    clearance_sigma: float = 300.0,
 ) -> torch.Tensor:
-    """Reward for lifting feet during ball approach — encourages active stepping.
+    """Reward for lifting a foot to (not past) a target height during ball approach.
 
-    Returns max foot height above floor normalized to [0, 1], clamped at target_height (10 cm).
     Deactivates once the ball is behind to avoid rewarding post-save hopping.
 
     The robot sometimes shuffles without lifting feet (keeps both grounded), producing
     a slide rather than a committed step or dive. This reward creates a gradient for any
     foot-lift, making stepping/diving strictly better than shuffling.
     Weight: +2.0.
+
+    FIX 2026-07-27 (user request): was a linear ramp clamped at target_height
+    (10 cm) -- 10cm, 20cm, and 1m all scored the identical 1.0 ceiling, so
+    nothing discouraged lifting the foot far higher than needed. Now a smooth
+    bump `exp(-clearance_sigma * (height - target_height)^2)`, peaking at
+    exactly 1.0 at target_height and decaying symmetrically on both sides --
+    matches this reward table's existing exp(-k*err) kernel convention
+    (feetorientation, footreach's phase1, etc.) instead of a hard clamp.
+    clearance_sigma=300 chosen so the shape tracks the old linear ramp
+    closely below the peak (h=0 -> ~0.05, h=0.05 -> ~0.47, close to the old
+    ramp's exact 0.0/0.5) while now also decaying above 10cm instead of
+    plateauing (h=0.15 -> ~0.47, h=0.20 -> ~0.05, mirroring the low side).
+    No G1 equivalent exists for this term at all (checked -- no
+    `_reward_feet_clearance`-style function anywhere in legged_robot.py), so
+    this remains a pure SGK design choice, not a G1-parity change. Not yet
+    validated against a live training run.
     """
     behind = _ball_is_behind(env, ball_name)
     robot: Entity = env.scene[asset_cfg.name]
     foot_pos_w = robot.data.body_link_pos_w[:, asset_cfg.body_ids, :]        # (N, 2, 3)
     floor_z = env.scene.env_origins[:, 2]                                     # (N,)
-    foot_z_above_floor = (foot_pos_w[:, :, 2] - floor_z[:, None]).clamp(0.0, target_height)  # (N, 2)
+    foot_z_above_floor = (foot_pos_w[:, :, 2] - floor_z[:, None]).clamp(0.0, None)  # (N, 2)
     max_foot_height = foot_z_above_floor.max(dim=-1).values                   # (N,)
-    return (max_foot_height / target_height) * (~behind).float()
+    reward = torch.exp(-clearance_sigma * (max_foot_height - target_height) ** 2)
+    return reward * (~behind).float()
 
 
 def feet_slippage(
@@ -2241,6 +2390,27 @@ def feet_slippage(
     preventing the force needed for stopball (delta_vx > 1 m/s).
     The trailing foot is NOT gated — it must remain non-sliding throughout.
 
+    FIX 2026-07-27: "feet_contact" has secondary=None (goalkeeper_env_cfg.py:107),
+    so it fires on contact with ANYTHING, not just the ground -- G1's identical
+    "any contact" assumption (legged_robot.py:1469-1473) is harmless there
+    because G1 catches with its hands, so feet never touch the ball. Here feet
+    ARE the ball-contact effector, so a genuine foot-ball impact was being
+    counted as ground slippage -- confirmed live (docs/BugFixes.md 2026-07-23
+    entry: feet_slippage crashing 2.65->0.13 in sync with a hard-impact
+    foot_ang_vel_xy spike, i.e. real contact, not sliding) and via sgk_play's
+    P-panel plots. The suppress[] block below only ever covered the
+    assigned/correct foot within 0.5m; the trailing foot got no such
+    protection, so it could be wrongly penalized just for touching the ball.
+    Now excludes genuine foot-ball contact for BOTH feet, using the
+    "ball_contact" sensor already built for exactly this foot-vs-ball
+    distinction (see penalize_wrong_foot_ball_contact). Known limitation
+    (2026-07-15 finding on stopball/softstop, same sensor): MuJoCo's contact
+    detection window for a small rolling ball can miss some frames of a
+    brief/glancing touch, so this reduces rather than guarantees elimination
+    of ball-contact false positives -- acceptable here since, unlike
+    stopball/softstop, this reward doesn't need to catch one precise step,
+    only reduce false penalization across a contact's duration.
+
     Sliding is measured as the worst-case horizontal speed across two contact
     points per foot: the center-bottom and the toe tip.  Rigid-body kinematics:
         v_contact = v_body + ω × r_contact
@@ -2259,6 +2429,15 @@ def feet_slippage(
     found = sensor.data.found  # [B, 8]
     left_in_contact  = (found[:, :4] > 0).any(dim=-1)
     right_in_contact = (found[:, 4:] > 0).any(dim=-1)
+
+    # Exclude genuine foot-ball contact (both feet) -- see FIX 2026-07-27 above.
+    ball_sensor: ContactSensor = env.scene["ball_contact"]
+    ball_found = ball_sensor.data.found  # [B, 8], same primary geom layout as feet_contact
+    left_touching_ball  = (ball_found[:, :4] > 0).any(dim=-1)
+    right_touching_ball = (ball_found[:, 4:] > 0).any(dim=-1)
+    left_in_contact  = left_in_contact & ~left_touching_ball
+    right_in_contact = right_in_contact & ~right_touching_ball
+
     in_contact = torch.stack([left_in_contact, right_in_contact], dim=-1).float()  # [B, 2]
 
     robot: Entity = env.scene[asset_cfg.name]

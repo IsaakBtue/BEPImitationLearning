@@ -520,12 +520,6 @@ def goalkeeper_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
             weight=36.46,
             params={"ball_name": BALL_NAME, "velocity_threshold": 0.05, "asset_cfg": _FEET_CFG},
         ),
-        # --- continuing close-to-target signal, doubled after first save (ports G1 _reward_success) ---
-        "success": RewardTermCfg(
-            func=gk_mdp.success,
-            weight=5.0,
-            params={"ball_name": BALL_NAME, "asset_cfg": _FEET_CFG, "strict_th": 0.15},
-        ),
         # --- single-foot save bonus: same foot first contacted AND caused the reversal ---
         "single_foot_save": RewardTermCfg(
             func=gk_mdp.single_foot_save,
@@ -538,6 +532,16 @@ def goalkeeper_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
             weight=17.36,
             params={"ball_name": BALL_NAME, "speed_threshold": 0.10},
         ),
+        # --- continuing close-to-target signal, tiered 1.0x/2.0x/3.0x by softstop/cleanstop
+        # (ports G1 _reward_success; FIX 2026-07-27 retiered off stopball -- see rewards.py).
+        # MUST stay registered after "cleanstop" above: success() reads env._cleanstop_flag,
+        # which cleanstop() only sets when IT runs -- registering success first would read a
+        # one-tick-stale value on the exact step cleanstop first fires. ---
+        "success": RewardTermCfg(
+            func=gk_mdp.success,
+            weight=5.0,
+            params={"ball_name": BALL_NAME, "asset_cfg": _FEET_CFG, "strict_th": 0.15},
+        ),
         # --- save quality bonuses (fire on top of softstop, not as a gate) ---
         "inner_face_orientation_save": RewardTermCfg(
             func=gk_mdp.inner_face_orientation_save,
@@ -547,6 +551,23 @@ def goalkeeper_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
         "foot_inner_face_continuous": RewardTermCfg(
             func=gk_mdp.foot_inner_face_continuous,
             weight=3.47,
+            params={"ball_name": BALL_NAME, "asset_cfg": _FEET_CFG},
+        ),
+        # --- NEW 2026-07-27 (user request): trailing foot has no orientation
+        # shaping anywhere else in this table (the two terms above only ever
+        # touch the leading/assigned foot) -- always active, no ~behind gate.
+        "trailing_foot_forward_continuous": RewardTermCfg(
+            func=gk_mdp.trailing_foot_forward_continuous,
+            weight=3.0,
+            params={"ball_name": BALL_NAME, "asset_cfg": _FEET_CFG},
+        ),
+        # --- NEW 2026-07-27 (user request): leading foot rotates back toward
+        # forward once the save has happened (behind-gated) -- complementary
+        # to foot_inner_face_continuous's (~behind)-gated sideways target, so
+        # the two can never be active on the same step.
+        "postleadfootorientation": RewardTermCfg(
+            func=gk_mdp.postleadfootorientation,
+            weight=2.0,
             params={"ball_name": BALL_NAME, "asset_cfg": _FEET_CFG},
         ),
         # --- ball interception (feet-only) ---

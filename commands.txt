@@ -1,14 +1,6 @@
 cd /home/isaak/BEPImitationlearning/interceptV2DualDis
+uv run sgk_play Mjlab-BeyondAMP-Goalkeeper-T1-MultiDisc \
+  --checkpoint-file interceptV2DualDis/logs/rsl_rl/intercept_simple_goalkeeper_multidisc/2026-07-26_14-16-18_intercept_phase1/model_15000.pt
 
-# right_far region (3 motions, rotated 5 deg clockwise)
-uv run sgk_play Mjlab-BeyondAMP-Goalkeeper-T1-MultiDisc-WithOverlay \
-    --agent zero --no-terminations True \
-    --motion-file src/simple_goalkeeper/motions/data/new_doublestepright_short_booster_t1.npz
-
-uv run sgk_play Mjlab-BeyondAMP-Goalkeeper-T1-MultiDisc-WithOverlay \
-    --agent zero --no-terminations True \
-    --motion-file src/simple_goalkeeper/motions/data/new_doublestepright_booster_t1.npz
-
-uv run sgk_play Mjlab-BeyondAMP-Goalkeeper-T1-MultiDisc-WithOverlay \
-    --agent zero --no-terminations True \
-    --motion-file src/simple_goalkeeper/motions/data/new_doublestepright_wide_booster_t1.npz
+# Press P in the viewer window to show the reward-term plot strip, now
+# including two new plots: left_foot_slip / right_foot_slip (raw m/s).
