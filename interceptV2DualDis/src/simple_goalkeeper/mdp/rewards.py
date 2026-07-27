@@ -125,13 +125,15 @@ _T1_VEL_LIMIT_MAP: dict[str, float] = {
 # that exact measured problem. Kept straight legs, replaced ONLY the arm
 # values with HOME_KEYFRAME's exact numbers (t1_constants.py:98-103).
 #
-# FIX 2026-07-27 (iterated three times same day): HOME_KEYFRAME's own
-# Shoulder_Roll was ALSO reduced, twice more, in the same session
-# (t1_constants.py): 0.41 -> 0.1745 -> 0.05 rad (23.5deg -> 10deg ->
-# ~2.9deg, "almost straight pointing down" per user request). Mirrored here
-# each time to keep this map and HOME_KEYFRAME's arm pose identical, as
-# intended -- if either changes again, update both together. Every joint
-# in _RECOVERY_ARM_CFG/
+# FIX 2026-07-27 (CORRECTED): three earlier same-day edits moved
+# Shoulder_Roll toward 0.0 (0.41 -> 0.1745 -> 0.05 rad), which -- confirmed
+# via an offscreen render, not just joint_pos numbers -- moves TOWARD a
+# T-pose, not away from it. 0.0 is this joint's horizontal/T-pose
+# reference; ~1.5 rad (near its range limit) is what actually brings the
+# arm down to the side. Corrected to 1.5 rad, mirroring HOME_KEYFRAME's own
+# corrected value (t1_constants.py) -- keep them in sync if either changes
+# again. See docs/BugFixes.md for the full misdiagnosis writeup. Every
+# joint in _RECOVERY_ARM_CFG/
 # _RECOVERY_LEG_CFG/_RECOVERY_WAIST_CFG has an explicit entry below --
 # including ones that don't change from default_joint_pos (Hip_Roll,
 # Hip_Yaw, Ankle_Roll, Waist, all already 0.0) -- so the map is a complete,
@@ -144,7 +146,7 @@ _POST_SAVE_STANCE_MAP: dict[str, float] = {
     "Left_Ankle_Pitch": 0.0,       "Right_Ankle_Pitch": 0.0,
     "Left_Ankle_Roll": 0.0,        "Right_Ankle_Roll": 0.0,
     "Left_Shoulder_Pitch": -0.21,  "Right_Shoulder_Pitch": -0.21,
-    "Left_Shoulder_Roll": -0.05,   "Right_Shoulder_Roll": 0.05,
+    "Left_Shoulder_Roll": -1.5,    "Right_Shoulder_Roll": 1.5,
     "Left_Elbow_Pitch": -0.13,     "Right_Elbow_Pitch": -0.13,
     "Left_Elbow_Yaw": -0.21,       "Right_Elbow_Yaw": 0.21,
     "Waist": 0.0,

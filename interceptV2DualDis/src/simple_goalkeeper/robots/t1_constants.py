@@ -96,22 +96,26 @@ HOME_KEYFRAME = EntityCfg.InitialStateCfg(
         # symmetric pose needs equal magnitude, opposite sign. See
         # docs/BugFixes.md.
         r"(Left_Shoulder_Pitch|Right_Shoulder_Pitch)": -0.21,
-        # FIX 2026-07-27 (user request, "look more soccer-like", iterated
-        # three times same day: 0.41 -> 0.1745 -> 0.05 rad / 23.5deg ->
-        # 10deg -> ~2.9deg). User wants the upper arm "almost straight
-        # pointing down" -- 0.05 rad keeps a small margin off the joint's
-        # literal 0.0 (mechanical straight-down) rather than sitting exactly
-        # on it, in case of self-collision with the torso at the true zero
-        # (unverified without a render -- see docs/BugFixes.md for the
-        # --agent zero command to check visually). Joint range is wide
-        # enough either way (Left: -1.74 to 1.57, Right: -1.57 to 1.74,
-        # t1_headless.xml) -- not a limits concern. Only Shoulder_Roll
-        # changed; Shoulder_Pitch/Elbow_Pitch/Elbow_Yaw (not part of the
-        # "arms out" complaint) are untouched. _POST_SAVE_STANCE_MAP
+        # FIX 2026-07-27 (CORRECTED, user request, "look more soccer-like"):
+        # three earlier same-day edits (0.41 -> 0.1745 -> 0.05 rad, i.e.
+        # toward 0.0) had the axis direction backwards -- confirmed via an
+        # offscreen mujoco.Renderer image (not just robot.data.joint_pos
+        # numbers, which read "correct" the whole time but didn't reveal
+        # the actual rendered pose) that Shoulder_Roll near 0.0 is a full
+        # T-POSE (arms horizontal), not "hanging down" as assumed. Rendered
+        # comparison images confirmed 1.5 rad (~86deg) -- close to this
+        # joint's own range limit (Left: -1.74..1.57, Right: -1.57..1.74,
+        # t1_headless.xml) rather than near its center -- is what actually
+        # produces arms hanging naturally at the sides. Verified within
+        # both the hard range and the 0.9 soft_joint_pos_limit_factor band
+        # used elsewhere in training. Only Shoulder_Roll changed;
+        # Shoulder_Pitch/Elbow_Pitch/Elbow_Yaw are untouched and still look
+        # natural at 1.5 rad per the same renders. _POST_SAVE_STANCE_MAP
         # (rewards.py) mirrors this exact value -- keep them in sync if
-        # either changes again.
-        r"Left_Shoulder_Roll": -0.05,
-        r"Right_Shoulder_Roll": 0.05,
+        # either changes again. See docs/BugFixes.md for the full
+        # misdiagnosis writeup and the actual reference images.
+        r"Left_Shoulder_Roll": -1.5,
+        r"Right_Shoulder_Roll": 1.5,
         r"(Left_Elbow_Pitch|Right_Elbow_Pitch)": -0.13,
         r"Left_Elbow_Yaw": -0.21,
         r"Right_Elbow_Yaw": 0.21,
