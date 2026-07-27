@@ -125,12 +125,13 @@ _T1_VEL_LIMIT_MAP: dict[str, float] = {
 # that exact measured problem. Kept straight legs, replaced ONLY the arm
 # values with HOME_KEYFRAME's exact numbers (t1_constants.py:98-103).
 #
-# FIX 2026-07-27 (second same-day change, user request): HOME_KEYFRAME's own
-# Shoulder_Roll was ALSO reduced 0.41 -> 0.1745 rad (23.5deg -> 10deg) in the
-# same session (t1_constants.py) -- still read as "really far out" even
-# after matching this map's arms to it. Mirrored here to keep this map and
-# HOME_KEYFRAME's arm pose identical, as intended -- if either changes
-# again, update both together. Every joint in _RECOVERY_ARM_CFG/
+# FIX 2026-07-27 (iterated three times same day): HOME_KEYFRAME's own
+# Shoulder_Roll was ALSO reduced, twice more, in the same session
+# (t1_constants.py): 0.41 -> 0.1745 -> 0.05 rad (23.5deg -> 10deg ->
+# ~2.9deg, "almost straight pointing down" per user request). Mirrored here
+# each time to keep this map and HOME_KEYFRAME's arm pose identical, as
+# intended -- if either changes again, update both together. Every joint
+# in _RECOVERY_ARM_CFG/
 # _RECOVERY_LEG_CFG/_RECOVERY_WAIST_CFG has an explicit entry below --
 # including ones that don't change from default_joint_pos (Hip_Roll,
 # Hip_Yaw, Ankle_Roll, Waist, all already 0.0) -- so the map is a complete,
@@ -143,7 +144,7 @@ _POST_SAVE_STANCE_MAP: dict[str, float] = {
     "Left_Ankle_Pitch": 0.0,       "Right_Ankle_Pitch": 0.0,
     "Left_Ankle_Roll": 0.0,        "Right_Ankle_Roll": 0.0,
     "Left_Shoulder_Pitch": -0.21,  "Right_Shoulder_Pitch": -0.21,
-    "Left_Shoulder_Roll": -0.1745, "Right_Shoulder_Roll": 0.1745,
+    "Left_Shoulder_Roll": -0.05,   "Right_Shoulder_Roll": 0.05,
     "Left_Elbow_Pitch": -0.13,     "Right_Elbow_Pitch": -0.13,
     "Left_Elbow_Yaw": -0.21,       "Right_Elbow_Yaw": 0.21,
     "Waist": 0.0,

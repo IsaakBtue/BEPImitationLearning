@@ -20,16 +20,17 @@ HOME_KEYFRAME's exact arm values at the time (Shoulder_Pitch=-0.21,
 Shoulder_Roll=-0.41/0.41, Elbow_Pitch=-0.13, Elbow_Yaw=-0.21/0.21) -- legs
 stay straight (the fix above is unaffected).
 
-FIX 2026-07-27 (third same-day change, user request): 0.41 rad (23.5 deg)
-Shoulder_Roll still read as "really far out"; both HOME_KEYFRAME
-(t1_constants.py) and this map's Shoulder_Roll were reduced together to
-0.1745 rad (10 deg), keeping them identical as intended. old_row below is a
-FROZEN historical fixture (the very first default_joint_pos, from before
-any of today's fixes) -- it deliberately does NOT track live constants, so
-it still uses 0.41 for Shoulder_Roll. Since the target's Shoulder_Roll has
-since moved to 0.1745, old_row's arm portion no longer matches the target
-(Shoulder_Pitch/Elbow_Pitch/Elbow_Yaw are unaffected, only Shoulder_Roll
-differs) -- the "old pose scores worse than new target" comparison is
+FIX 2026-07-27 (iterated further, same day, user request): Shoulder_Roll
+was reduced twice more in the same session -- 0.41 -> 0.1745 -> 0.05 rad
+(23.5deg -> 10deg -> ~2.9deg, "almost straight pointing down") -- both
+HOME_KEYFRAME (t1_constants.py) and this map kept in sync at each step.
+old_row below is a FROZEN historical fixture (the very first
+default_joint_pos, from before any of today's fixes) -- it deliberately
+does NOT track live constants, so it still uses 0.41 for Shoulder_Roll.
+Since the target's Shoulder_Roll has since moved to 0.05, old_row's arm
+portion no longer matches the target (Shoulder_Pitch/Elbow_Pitch/Elbow_Yaw
+are unaffected, only Shoulder_Roll differs) -- the "old pose scores worse
+than new target" comparison is
 valid again for arms, just via a different mechanism (arm target moved a
 second time) than legs (target's shape moved once, from crouched to
 straight).
@@ -136,8 +137,8 @@ def test_stance_target_resolves_in_declared_joint_order():
     assert torch.allclose(postwaistdofpos(env, "ball", asset_cfg=waist_cfg), torch.ones(1))
 
     cached = env._post_save_stance_target
-    assert cached[joint_names.index("Left_Shoulder_Roll")].item() == pytest.approx(-0.1745)
-    assert cached[joint_names.index("Right_Shoulder_Roll")].item() == pytest.approx(0.1745)
+    assert cached[joint_names.index("Left_Shoulder_Roll")].item() == pytest.approx(-0.05)
+    assert cached[joint_names.index("Right_Shoulder_Roll")].item() == pytest.approx(0.05)
     assert cached[joint_names.index("Left_Knee_Pitch")].item() == 0.0
     assert cached[joint_names.index("Waist")].item() == 0.0
 
@@ -164,8 +165,8 @@ def test_stance_target_resolves_correctly_under_shuffled_joint_order():
 
     assert torch.allclose(postupperdofpos(env, "ball", asset_cfg=arm_cfg), torch.ones(1))
     cached = env._post_save_stance_target
-    assert cached[joint_names.index("Left_Shoulder_Roll")].item() == pytest.approx(-0.1745)
-    assert cached[joint_names.index("Right_Shoulder_Roll")].item() == pytest.approx(0.1745)
+    assert cached[joint_names.index("Left_Shoulder_Roll")].item() == pytest.approx(-0.05)
+    assert cached[joint_names.index("Right_Shoulder_Roll")].item() == pytest.approx(0.05)
     assert cached[joint_names.index("Waist")].item() == 0.0
 
 
@@ -237,7 +238,7 @@ def test_reward_lower_at_old_default_pose_than_at_new_target():
     # dict above) no longer matches the current target, so arm_old is
     # measurably below 1.0 again (Shoulder_Pitch/Elbow_Pitch/Elbow_Yaw are
     # unchanged between old and target, only Shoulder_Roll differs).
-    assert 0.85 < arm_old < 0.95
+    assert 0.70 < arm_old < 0.85
 
     arm_new = postupperdofpos(env_new, "ball", asset_cfg=arm_cfg).item()
     leg_new = postlegdofpos(env_new, "ball", asset_cfg=leg_cfg).item()

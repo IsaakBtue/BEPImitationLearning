@@ -96,15 +96,22 @@ HOME_KEYFRAME = EntityCfg.InitialStateCfg(
         # symmetric pose needs equal magnitude, opposite sign. See
         # docs/BugFixes.md.
         r"(Left_Shoulder_Pitch|Right_Shoulder_Pitch)": -0.21,
-        # FIX 2026-07-27 (user request, "look more soccer-like"): arms-out
-        # roll reduced from 0.41 rad (23.5 deg) to 0.1745 rad (10 deg) --
-        # 23.5 deg still read as "really far out" from the sides. Only
-        # Shoulder_Roll changed; Shoulder_Pitch/Elbow_Pitch/Elbow_Yaw
-        # (which weren't the "arms out" complaint) are untouched.
-        # _POST_SAVE_STANCE_MAP (rewards.py) mirrors this exact value --
-        # keep them in sync if either changes again. See docs/BugFixes.md.
-        r"Left_Shoulder_Roll": -0.1745,
-        r"Right_Shoulder_Roll": 0.1745,
+        # FIX 2026-07-27 (user request, "look more soccer-like", iterated
+        # three times same day: 0.41 -> 0.1745 -> 0.05 rad / 23.5deg ->
+        # 10deg -> ~2.9deg). User wants the upper arm "almost straight
+        # pointing down" -- 0.05 rad keeps a small margin off the joint's
+        # literal 0.0 (mechanical straight-down) rather than sitting exactly
+        # on it, in case of self-collision with the torso at the true zero
+        # (unverified without a render -- see docs/BugFixes.md for the
+        # --agent zero command to check visually). Joint range is wide
+        # enough either way (Left: -1.74 to 1.57, Right: -1.57 to 1.74,
+        # t1_headless.xml) -- not a limits concern. Only Shoulder_Roll
+        # changed; Shoulder_Pitch/Elbow_Pitch/Elbow_Yaw (not part of the
+        # "arms out" complaint) are untouched. _POST_SAVE_STANCE_MAP
+        # (rewards.py) mirrors this exact value -- keep them in sync if
+        # either changes again.
+        r"Left_Shoulder_Roll": -0.05,
+        r"Right_Shoulder_Roll": 0.05,
         r"(Left_Elbow_Pitch|Right_Elbow_Pitch)": -0.13,
         r"Left_Elbow_Yaw": -0.21,
         r"Right_Elbow_Yaw": 0.21,
