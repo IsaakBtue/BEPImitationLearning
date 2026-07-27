@@ -1487,3 +1487,26 @@ multiplier = 1.0 + softstop_flag.float() + cleanstop_flag.float()
 - Weight-scale sanity check: remote's `postwaistdofpos` bump (1.0 -> 3.0) and this session's new terms (+2.0, +3.0) are independent, unrelated joints/quantities (waist yaw vs. foot heading) -- no double-counting risk there either.
 
 **Verification:** `env -u PYTHONPATH uv run pytest tests/ -q` after merge -- expect 72 tests (67 pre-existing + 5 new `test_post_save_stance.py`, none from this session added new test files). Live smoke test on the fully merged env to confirm all touched/new terms from both change sets coexist and compute without error. See the next tool-call evidence in this session's conversation log for the actual numbers (not duplicated here to avoid this file drifting out of sync with a specific run's output).
+
+---
+
+## 2026-07-27 -- `_POST_SAVE_STANCE_MAP`'s arm pose retargeted a second time (same day): from a 45-deg pure-roll T-pose to `HOME_KEYFRAME`'s exact arm values
+
+**Context:** user found the merged-in post-save stance target's arms "really far out" and asked to reduce the angle (first suggestion: 45deg -> 25deg), then separately asked whether the target could just reuse `HOME_KEYFRAME`'s own arm stance so there's one consistent pose to reason about, and whether resetting the env in `sgk_play` would let them preview it.
+
+**Root cause of "really far out" (not just the angle):** `_POST_SAVE_STANCE_MAP`'s arm portion was `Shoulder_Pitch=0.0, Shoulder_Roll=∓0.785 (45deg), Elbow_Pitch=0.0, Elbow_Yaw=0.0` -- a flat, fully-extended pure-roll pose. `HOME_KEYFRAME` (`t1_constants.py:98-103`) uses `Shoulder_Pitch=-0.21, Shoulder_Roll=∓0.41 (23.5deg), Elbow_Pitch=-0.13, Elbow_Yaw=∓0.21` -- a smaller roll angle, but critically also a forward shoulder-pitch and elbow bend that visually tucks the arm down and in. Zeroing pitch/elbow (as the original T-pose did) reads as far more extended than the roll-angle difference alone (45 vs 23.5deg) would suggest.
+
+**Clarified for the user (not a code change, a conceptual correction):** resetting the env in `sgk_play` shows `HOME_KEYFRAME` (the literal per-episode reset pose), NOT `_POST_SAVE_STANCE_MAP` (a reward *target* a trained policy only gradually learns to approach -- never a pose the env is ever forced into). These are two independently-justified poses for different purposes and were never the same thing, so "reset to check" only ever previews `HOME_KEYFRAME`, coincidentally already close to the initially-requested 25deg (`HOME_KEYFRAME`'s own roll is 23.5deg).
+
+**Option considered and rejected:** copying `HOME_KEYFRAME` wholesale (arms AND legs) into `_POST_SAVE_STANCE_MAP`. Explicitly rejected because `HOME_KEYFRAME`'s legs are the crouched pose (`Hip_Pitch=-0.3/Knee_Pitch=0.6/Ankle_Pitch=-0.3`) that motivated the entire stance-retarget fix in the first place (see the "Unify all 3 joint-position post-save recovery rewards" entry above) -- reverting legs would risk reintroducing the exact measured "policy won't settle" problem (`postlegdofpos` stuck ~0.07) that fix addressed. User confirmed (via an explicit two-option choice) to keep the straight-leg fix and only change the arm values.
+
+**Fix (`rewards.py:_POST_SAVE_STANCE_MAP`):** arm entries changed to `HOME_KEYFRAME`'s exact values --
+```python
+"Left_Shoulder_Pitch": -0.21,  "Right_Shoulder_Pitch": -0.21,
+"Left_Shoulder_Roll": -0.41,   "Right_Shoulder_Roll": 0.41,
+"Left_Elbow_Pitch": -0.13,     "Right_Elbow_Pitch": -0.13,
+"Left_Elbow_Yaw": -0.21,       "Right_Elbow_Yaw": 0.21,
+```
+Legs and waist unchanged (straight legs, waist 0.0). Since the arm target now numerically equals `HOME_KEYFRAME`/the old `default_joint_pos` for those 8 joints, `postupperdofpos`'s old-pose-vs-new-target comparison no longer shows an arm-specific improvement -- only legs still do. Updated `tests/simple_goalkeeper/test_post_save_stance.py` accordingly: two hardcoded `-0.785`/`0.785` assertions changed to `-0.41`/`0.41`, and `test_reward_lower_at_old_default_pose_than_at_new_target`'s arm assertions changed from "old scores worse than new" to "both old and new score ~1.0 for arms" (legs retain the original "old scores worse" assertion, since legs are the part that actually changed).
+
+**Verification:** `env -u PYTHONPATH uv run pytest tests/ -q` -- 72/72 pass (all 5 `test_post_save_stance.py` tests updated and passing under the new values). Live smoke test on the real multi-disc env: confirmed `env._post_save_stance_target[Left_Shoulder_Roll] == -0.41` / `[Right_Shoulder_Roll] == 0.41` (was `∓0.785`), `postupperdofpos` still present and computing without error. Not yet validated against a live training run.

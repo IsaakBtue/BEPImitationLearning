@@ -105,19 +105,32 @@ _T1_VEL_LIMIT_MAP: dict[str, float] = {
 }
 
 
-# Post-save recovery stance: straight legs, arms out to the sides at 45 deg,
-# waist centered. Source: docs/superpowers/specs/2026-07-25-post-save-stance-
-# design.md (arms/legs), extended 2026-07-27 to also cover the waist joint --
-# see FIX 2026-07-27 notes on postupperdofpos/postlegdofpos/postwaistdofpos
-# for the full rationale. Retargets those three functions away from
-# robot.data.default_joint_pos (the crouched HOME_KEYFRAME pose) -- a bent-
-# knee crouch requires continuous active torque to hold and the policy was
-# not reliably settling into it post-save. HOME_KEYFRAME itself is unchanged
-# (reset pose, out of scope). Every joint in _RECOVERY_ARM_CFG/
-# _RECOVERY_LEG_CFG/_RECOVERY_WAIST_CFG has an explicit entry below --
-# including ones that don't change from default_joint_pos (Hip_Roll, Hip_Yaw,
-# Ankle_Roll, Waist, all already 0.0) -- so the map is a complete, explicit
-# stance definition, not a partial override.
+# Post-save recovery stance: straight legs (unchanged rationale below), arms
+# matching HOME_KEYFRAME's exact pose, waist centered.
+#
+# FIX 2026-07-27 (user request, "look more soccer-like"): arms were
+# originally a flat 45-deg pure-roll T-pose (Shoulder_Pitch/Elbow_Pitch/
+# Elbow_Yaw all 0.0) -- user found this looked like the arms were "really
+# far out" compared to HOME_KEYFRAME's own arm pose. Root cause wasn't just
+# the roll angle (45 deg vs HOME_KEYFRAME's 23.5 deg) -- HOME_KEYFRAME also
+# bends Shoulder_Pitch/Elbow_Pitch/Elbow_Yaw, which visually tucks the arm
+# down and in; zeroing those (as the original T-pose did) reads as a much
+# more extreme, fully-extended pose regardless of roll angle. Considered
+# copying HOME_KEYFRAME wholesale (arms AND legs) but rejected: HOME_KEYFRAME
+# includes the crouched legs (Hip_Pitch=-0.3/Knee_Pitch=0.6/Ankle_Pitch=-0.3)
+# that motivated this whole stance-retarget fix in the first place -- a
+# bent-knee crouch requires continuous active torque to hold and training
+# logs showed the policy wasn't reliably settling into it post-save
+# (postlegdofpos stuck ~0.07). Reverting the legs would risk reintroducing
+# that exact measured problem. Kept straight legs, replaced ONLY the arm
+# values with HOME_KEYFRAME's exact numbers (t1_constants.py:98-103).
+#
+# HOME_KEYFRAME itself is unchanged (reset pose, out of scope -- see
+# t1_constants.py). Every joint in _RECOVERY_ARM_CFG/_RECOVERY_LEG_CFG/
+# _RECOVERY_WAIST_CFG has an explicit entry below -- including ones that
+# don't change from default_joint_pos (Hip_Roll, Hip_Yaw, Ankle_Roll, Waist,
+# all already 0.0) -- so the map is a complete, explicit stance definition,
+# not a partial override.
 _POST_SAVE_STANCE_MAP: dict[str, float] = {
     "Left_Hip_Roll": 0.0,          "Right_Hip_Roll": 0.0,
     "Left_Hip_Yaw": 0.0,           "Right_Hip_Yaw": 0.0,
@@ -125,10 +138,10 @@ _POST_SAVE_STANCE_MAP: dict[str, float] = {
     "Left_Knee_Pitch": 0.0,        "Right_Knee_Pitch": 0.0,
     "Left_Ankle_Pitch": 0.0,       "Right_Ankle_Pitch": 0.0,
     "Left_Ankle_Roll": 0.0,        "Right_Ankle_Roll": 0.0,
-    "Left_Shoulder_Pitch": 0.0,    "Right_Shoulder_Pitch": 0.0,
-    "Left_Shoulder_Roll": -0.785,  "Right_Shoulder_Roll": 0.785,
-    "Left_Elbow_Pitch": 0.0,       "Right_Elbow_Pitch": 0.0,
-    "Left_Elbow_Yaw": 0.0,         "Right_Elbow_Yaw": 0.0,
+    "Left_Shoulder_Pitch": -0.21,  "Right_Shoulder_Pitch": -0.21,
+    "Left_Shoulder_Roll": -0.41,   "Right_Shoulder_Roll": 0.41,
+    "Left_Elbow_Pitch": -0.13,     "Right_Elbow_Pitch": -0.13,
+    "Left_Elbow_Yaw": -0.21,       "Right_Elbow_Yaw": 0.21,
     "Waist": 0.0,
 }
 
