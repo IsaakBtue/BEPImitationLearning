@@ -2459,6 +2459,53 @@ def postleadfootorientation(
     return alignment * behind.float()
 
 
+def postheadingorientation(
+    env: "ManagerBasedRlEnv",
+    ball_name: str,
+    asset_cfg: SceneEntityCfg = _DEFAULT_ROBOT_CFG,
+) -> torch.Tensor:
+    """Reward the robot's root YAW HEADING returning to world +X after a save.
+
+    NEW 2026-07-28 (user request): user observed the whole body (not just a
+    foot) drifting into a left/right yaw after a save. No existing term
+    covers this. `postorientation` (this module) only tracks
+    `projected_gravity_b[:, :2]` -- roll/pitch tilt -- which is YAW-INVARIANT
+    (a robot standing upright but rotated 90 deg scores identically to one
+    facing forward), so it cannot supply this signal. `ang_vel_z`
+    (goalkeeper_env_cfg.py) only penalizes yaw ANGULAR VELOCITY, not final
+    heading -- a robot that yaws once then holds still pays nothing there.
+    `postlegdofpos`'s Hip_Yaw joint-space pull (rewards.py) is a weak,
+    indirect proxy (joint angle, not the actual world-frame heading), noted
+    as such in its own docstring and CLAUDE.md's divergence table.
+
+    No G1 equivalent (checked -- G1 is a static catch task with hands, it
+    never needs to reface after a catch). Mirrors the `behind`-gated
+    convention of the other post-save recovery terms (postorientation is the
+    one exception, always-active for a different, already-documented
+    reason). Reuses the same world-forward-axis `quat_apply` construction as
+    `trailing_foot_forward_continuous`/`postleadfootorientation` above, but
+    applied to the ROOT quaternion instead of a foot quaternion, and shaped
+    as `exp(-k*err)` to match postorientation/postangvel/postlinvel's bounded
+    [0,1] style rather than those two foot terms' raw [-1,1] dot product.
+
+    exp(-1.5 * 2*(1-alignment)) * behind -- bounded (0, 1], peaks at exactly
+    1.0 when the root's local +X axis points along world +X. Not yet
+    validated against a live training run.
+    """
+    robot: Entity = env.scene[asset_cfg.name]
+    forward_local = torch.zeros(env.num_envs, 3, device=env.device)
+    forward_local[:, 0] = 1.0
+    forward_w = quat_apply(robot.data.root_link_quat_w, forward_local)  # (N, 3)
+
+    world_x = torch.zeros(env.num_envs, 3, device=env.device)
+    world_x[:, 0] = 1.0
+    alignment = (forward_w * world_x).sum(dim=-1)  # (N,) in [-1, 1]
+
+    err = 2.0 * (1.0 - alignment)  # squared-chord-distance analog, >= 0
+    behind = _ball_is_behind(env, ball_name)
+    return torch.exp(-1.5 * err) * behind.float()
+
+
 def cleanstop(
     env: "ManagerBasedRlEnv",
     ball_name: str,

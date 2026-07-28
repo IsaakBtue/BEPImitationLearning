@@ -76,3 +76,26 @@ The next step for any of these is watching real training curves.
   `schedule="adaptive"` resume-collapse entries in `docs/BugFixes.md` for
   what that failure mode looks like in practice, though the cause there was
   different).
+
+## 2026-07-28 -- shin/knee wrong-foot blind spot fix (pulled), + new `postheadingorientation`/`arm_dof_vel`
+
+- **`penalize_wrong_foot_ball_contact`** (pulled from `f7856a2`): now also
+  catches wrong-side SHIN/KNEE contact, not just foot geoms — this was a
+  real detection blind spot (17 genuine events found completely invisible
+  to the old sensor via real-checkpoint replay). Same -100 weight, no new
+  tuning. Watch whether this term's logged magnitude actually *increases*
+  post-fix (it should — it's now catching contact it was blind to before)
+  and whether the underlying behavior (catching/resting with the trailing
+  leg) declines over training now that it's a visible penalty.
+- **New `postheadingorientation`** (+2.5, `behind`-gated): whole-body yaw
+  heading recovery — no historical baseline. Watch that it trends upward
+  from ~0 like the other new post-save terms did on 2026-07-27, and
+  separately watch (via play/viewer) whether the reported left/right hip
+  drift after a save actually decreases.
+- **New `arm_dof_vel`** (-5e-3, always active, arm joints only): first
+  empirical weight guess, real risk it's too strong and fights legitimate
+  in-dive counterbalance motion rather than only damping post-save idle
+  swinging. Watch `foot_proximity`/`softstop`/`single_foot_save` for any
+  regression (would suggest the arms needed that motion for balance during
+  the save itself) alongside whether visible arm swinging actually
+  decreases.

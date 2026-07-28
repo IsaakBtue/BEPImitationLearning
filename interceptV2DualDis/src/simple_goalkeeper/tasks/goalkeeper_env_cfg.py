@@ -615,6 +615,17 @@ def goalkeeper_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
             weight=2.0,
             params={"ball_name": BALL_NAME, "asset_cfg": _FEET_CFG},
         ),
+        # NEW 2026-07-28 (user request): whole-body yaw heading recovery --
+        # user observed the robot's hips/whole body drifting into a
+        # left/right yaw post-save, not just a foot. postorientation (below)
+        # is roll/pitch-only and yaw-invariant; ang_vel_z only penalizes yaw
+        # rate, not final heading. No G1 equivalent (static catch task never
+        # needs to reface). See rewards.py:postheadingorientation.
+        "postheadingorientation": RewardTermCfg(
+            func=gk_mdp.postheadingorientation,
+            weight=2.5,
+            params={"ball_name": BALL_NAME},
+        ),
         # --- ball interception (feet-only) ---
         "footreach": RewardTermCfg(
             func=gk_mdp.footreach,
@@ -912,6 +923,25 @@ def goalkeeper_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
             func=mjlab_mdp.joint_acc_l2,
             weight=-2.5e-7,
             params={"asset_cfg": _ALL_JOINTS_CFG},
+        ),
+        # NEW 2026-07-28 (user request): dof_vel above is diluted across all
+        # ~21 joints, giving any single arm joint's swing only a tiny share
+        # of the gradient. User reported the arms swinging noticeably for
+        # counterbalance -- this scopes the same joint_vel_l2 penalty to
+        # just the 8 arm joints (_RECOVERY_ARM_CFG, already defined above)
+        # for a concentrated, undiluted signal. No G1 equivalent to match --
+        # G1's smoothness/action-rate terms are flat, non-curriculum, and
+        # whole-body the entire run (checked g1_29_config.py -- no
+        # arm-specific or curriculum-scaled smoothness mechanism exists;
+        # g1_29_config.py's unrelated `curriculum_joints` list touches the
+        # same joint group but for actuator-noise-injection curriculum, not
+        # a reward). Weight is a first empirical guess (10x dof_vel's
+        # diluted per-joint share, since scoped to 8 joints instead of ~21),
+        # not a G1-matched value -- not yet validated against a live run.
+        "arm_dof_vel": RewardTermCfg(
+            func=mjlab_mdp.joint_vel_l2,
+            weight=-5e-3,
+            params={"asset_cfg": _RECOVERY_ARM_CFG},
         ),
     }
 
