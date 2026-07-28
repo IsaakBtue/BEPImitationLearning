@@ -129,6 +129,51 @@ def goalkeeper_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
             reduce="netforce",
             history_length=0,
         ),
+        # DEBUG 2026-07-28: "ball_contact" above only matches foot geoms, so a
+        # ball touch against the head/chin (head_collision, t1_headless.xml --
+        # a static sphere on H2, fixed since head joints were removed) is
+        # invisible to both feet_contact and ball_contact and therefore to
+        # penalize_wrong_foot_ball_contact and its viewer plot too. User
+        # observed the wrong-foot plot never reacting and asked whether the
+        # ball might actually be hitting the chin instead -- this sensor lets
+        # play.py's viewer confirm/deny that independently. Purely additive
+        # (new sensor, not read by any existing reward), no effect on
+        # feet_contact/ball_contact's shape or on training. See docs/BugFixes.md.
+        ContactSensorCfg(
+            name="head_ball_contact",
+            primary=ContactMatch(mode="geom", pattern="head_collision", entity="robot"),
+            secondary=ContactMatch(mode="geom", pattern="ball_geom", entity=BALL_NAME),
+            fields=("found", "force"),
+            reduce="netforce",
+            history_length=0,
+        ),
+        # DEBUG 2026-07-28: same gap class as head_ball_contact above, found
+        # via the user directly observing MuJoCo's native contact-point
+        # overlay (orange dot) between the trailing leg and the ball while
+        # penalize_wrong_foot_ball_contact stayed 0. Confirmed via a scripted
+        # replay of the real trained checkpoint: the shin (left_shin_collision/
+        # right_shin_collision) and knee geoms are NOT foot[1-4]_collision, so
+        # they were invisible to ball_contact/feet_contact -- the policy makes
+        # genuine foot-ball saves via the shin routinely, and confirmed at
+        # least one case of the WRONG side's shin/knee touching the ball
+        # while penalize_wrong_foot_ball_contact read 0. Primary resolves in
+        # geom-index order [left_shin, left_knee, right_knee, right_shin] --
+        # verified directly (env.scene["leg_ball_contact"].primary_names) --
+        # so found[:, :2]=left, found[:, 2:]=right, matching the existing
+        # feet_contact/ball_contact left/right split convention. See
+        # penalize_wrong_foot_ball_contact (rewards.py) and docs/BugFixes.md.
+        ContactSensorCfg(
+            name="leg_ball_contact",
+            primary=ContactMatch(
+                mode="geom",
+                pattern=r"^(left|right)_(shin|knee)_collision$",
+                entity="robot",
+            ),
+            secondary=ContactMatch(mode="geom", pattern="ball_geom", entity=BALL_NAME),
+            fields=("found", "force"),
+            reduce="netforce",
+            history_length=0,
+        ),
         ContactSensorCfg(
             name="self_collision",
             primary=ContactMatch(mode="subtree", pattern="Trunk", entity="robot"),

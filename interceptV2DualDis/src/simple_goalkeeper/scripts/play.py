@@ -98,6 +98,8 @@ class AnalyticsPolicy:
         self._step = 0
         self._ep = 0
         self._prev_ep_buf: "torch.Tensor | None" = None
+        self._wf_flash = 0.0
+        self._head_flash = 0.0
         # FIX 2026-07-22 (research: shank_height vs base_height termination
         # tuning): per-episode running minimums, so a deep-lunge episode's
         # worst height is captured even though the live status line
@@ -166,6 +168,16 @@ class AnalyticsPolicy:
             self._ep_was_wide = False
             self._ep_landed = False
         self._prev_ep_buf = ep_buf.clone()
+
+        # DEBUG 2026-07-28: called unconditionally (before the enabled-gate
+        # below, and independent of the viewer's _show_plots/_is_paused
+        # state) so the wrong-foot/head contact latch keeps advancing every
+        # step regardless of whether analytics printing or the P-panel
+        # plots happen to be toggled on -- the viewer-only version of this
+        # call (_patch_viewer_wrong_foot_contact_plot) only runs while
+        # _show_plots is True, which made it an unreliable ground-truth
+        # source for confirming whether contact is actually being detected.
+        self._wf_flash, self._head_flash = _compute_wrong_foot_contact_flash(env, 0)
 
         if not self.enabled:
             return actions
@@ -265,7 +277,9 @@ class AnalyticsPolicy:
         flags = (
             f"{'SB✓' if stopball_fired else 'SB·'} "
             f"{'SS✓' if softstop_fired else 'SS·'} "
-            f"{'CS✓' if cleanstop_fired else 'CS·'}"
+            f"{'CS✓' if cleanstop_fired else 'CS·'} "
+            f"{'WF✓' if self._wf_flash else 'WF·'} "
+            f"{'HD✓' if self._head_flash else 'HD·'}"
         )
         lf_tag = f"{'G' if lf_contact else 'A'}{lf_slip:.2f}"
         rf_tag = f"{'G' if rf_contact else 'A'}{rf_slip:.2f}"
@@ -537,6 +551,130 @@ def _patch_viewer_feet_slip_plots(native_viewer: "NativeMujocoViewer", env) -> N
     native_viewer._update_reward_figures = _patched_update_reward_figures
 
 
+_WRONG_FOOT_FLASH_STEPS = 15
+"""Steps to hold the wrong-foot-contact plot signal high after a touch (~0.3s
+at dt=0.02s). A genuine ball-vs-foot contact often lasts only 1-3 physics
+steps, well under the ~7-sample (2.3% of the 300-sample history window)
+floor _write_history_to_figure's percentile-based autoscale (viewer.py,
+p_lo=2/p_hi=98) needs to widen the y-range at all -- below that floor the
+spike is computed correctly but clipped out of the plotted range entirely,
+looking like no reaction. 15 steps clears that floor with margin."""
+
+
+def _compute_wrong_foot_contact_flash(env, env_idx: int) -> tuple[float, float]:
+    """Raw "bad ball contact" signals for the viewer's P-panel, each latched
+    high for _WRONG_FOOT_FLASH_STEPS steps after a detected touch: (1) the
+    WRONG (non-assigned) foot touching the ball, (2) the head/chin touching
+    the ball at all.
+
+    (1) mirrors penalize_wrong_foot_ball_contact's own detection exactly (same
+    "ball_contact" sensor + _get_correct_foot_idx) -- does NOT read the reward
+    term itself, since promoting that raw reward value (tried first) plots a
+    signal too sparse for the viewer's autoscale to ever show (see
+    docs/BugFixes.md).
+
+    (2) DEBUG 2026-07-28: added after the wrong-foot flash (1) still showed no
+    reaction and the user asked whether the ball might actually be hitting the
+    chin/head instead of a foot -- "ball_contact"/"feet_contact" only match
+    foot geoms, so a head touch is invisible to both and to (1) above. Reads
+    the new "head_ball_contact" sensor (goalkeeper_env_cfg.py) directly.
+
+    (1) EXTENDED 2026-07-28 (same day, later): user then spotted an orange
+    MuJoCo contact-point dot between the trailing leg and the ball while (1)
+    still read 0 -- confirmed via a real-checkpoint replay that the shin/knee
+    (not covered by ball_contact's foot[1-4]_collision pattern) genuinely
+    touches the ball, sometimes on the wrong side. Now also ORs in
+    "leg_ball_contact" (goalkeeper_env_cfg.py), mirroring
+    penalize_wrong_foot_ball_contact's own fix exactly so this flash can
+    never drift out of sync with what the reward actually penalizes.
+
+    Both are viewer-only display latches with no effect on training/reward.
+    """
+    raw_env = env.unwrapped if hasattr(env, "unwrapped") else env
+    from simple_goalkeeper.mdp.rewards import _get_correct_foot_idx
+
+    foot_idx = _get_correct_foot_idx(raw_env, "ball")  # (N,) 0=left, 1=right
+    found = raw_env.scene["ball_contact"].data.found  # [B, 8]
+    left_touch = (found[:, :4] > 0).any(dim=-1)
+    right_touch = (found[:, 4:] > 0).any(dim=-1)
+
+    leg_found = raw_env.scene["leg_ball_contact"].data.found  # [B, 4]: 0-1=left, 2-3=right
+    left_leg_touch = (leg_found[:, :2] > 0).any(dim=-1)
+    right_leg_touch = (leg_found[:, 2:] > 0).any(dim=-1)
+
+    foot_touch = torch.stack(
+        [left_touch | left_leg_touch, right_touch | right_leg_touch], dim=-1
+    )  # (B, 2)
+    wrong_foot_idx = 1 - foot_idx
+    wrong_touch = foot_touch[torch.arange(raw_env.num_envs, device=raw_env.device), wrong_foot_idx]
+
+    head_found = raw_env.scene["head_ball_contact"].data.found  # [B, N]
+    head_touch = (head_found > 0).any(dim=-1)
+
+    if not hasattr(raw_env, "_wrong_foot_flash_counter"):
+        raw_env._wrong_foot_flash_counter = torch.zeros(
+            raw_env.num_envs, dtype=torch.long, device=raw_env.device
+        )
+    if not hasattr(raw_env, "_head_contact_flash_counter"):
+        raw_env._head_contact_flash_counter = torch.zeros(
+            raw_env.num_envs, dtype=torch.long, device=raw_env.device
+        )
+    just_reset = raw_env.episode_length_buf <= 1
+
+    counter = raw_env._wrong_foot_flash_counter
+    counter[just_reset] = 0
+    counter[wrong_touch] = _WRONG_FOOT_FLASH_STEPS
+    counter[~wrong_touch & ~just_reset] = torch.clamp(counter[~wrong_touch & ~just_reset] - 1, min=0)
+
+    head_counter = raw_env._head_contact_flash_counter
+    head_counter[just_reset] = 0
+    head_counter[head_touch] = _WRONG_FOOT_FLASH_STEPS
+    head_counter[~head_touch & ~just_reset] = torch.clamp(head_counter[~head_touch & ~just_reset] - 1, min=0)
+
+    return float(counter[env_idx].item() > 0), float(head_counter[env_idx].item() > 0)
+
+
+def _patch_viewer_wrong_foot_contact_plot(native_viewer: "NativeMujocoViewer", env) -> None:
+    """Add two P-panel plots ("wrong_foot_ball_contact"/"head_ball_contact")
+    showing the latched raw bad-contact signals (see
+    _compute_wrong_foot_contact_flash), alongside the existing per-reward-term
+    plots. Mirrors _patch_viewer_feet_slip_plots' structure exactly.
+    """
+    orig_setup = native_viewer.setup
+    orig_update_reward_figures = native_viewer._update_reward_figures
+
+    _TERM_NAMES = ("wrong_foot_ball_contact", "head_ball_contact")
+
+    def _patched_setup() -> None:
+        orig_setup()
+        from mjlab.viewer.native.viewer import make_empty_figure
+        cfg = native_viewer._plot_cfg
+        for name in _TERM_NAMES:
+            native_viewer._figures[name] = make_empty_figure(
+                name, cfg.grid_size, cfg.init_yrange, cfg.history, cfg.background_alpha,
+            )
+            native_viewer._histories[name] = deque(maxlen=cfg.history)
+            native_viewer._yrange[name] = cfg.init_yrange
+            native_viewer._scale[name] = 1.0
+        # Front of the list -- same reasoning as the other promotions above:
+        # this task's 41 active reward terms exceed max_viewports (12), so
+        # anything not moved to the front is silently never rendered.
+        rest = [n for n in native_viewer._term_names]
+        native_viewer._term_names = list(_TERM_NAMES) + rest
+
+    def _patched_update_reward_figures(viewer_handle: "mujoco.viewer.Handle") -> None:
+        if native_viewer._show_plots and native_viewer._term_names and not native_viewer._is_paused:
+            wrong_foot_flash, head_flash = _compute_wrong_foot_contact_flash(env, native_viewer.env_idx)
+            native_viewer._append_point("wrong_foot_ball_contact", wrong_foot_flash)
+            native_viewer._write_history_to_figure("wrong_foot_ball_contact")
+            native_viewer._append_point("head_ball_contact", head_flash)
+            native_viewer._write_history_to_figure("head_ball_contact")
+        orig_update_reward_figures(viewer_handle)
+
+    native_viewer.setup = _patched_setup
+    native_viewer._update_reward_figures = _patched_update_reward_figures
+
+
 def _compute_foot_yaw_error(env, env_idx: int) -> tuple[float, float]:
     """Signed yaw deviation (degrees) of each foot's forward axis from world +X.
 
@@ -791,6 +929,7 @@ def run_play(task_id: str, cfg: PlayConfig) -> None:
         _patch_viewer_intercept_vis(native_viewer, env)
         _patch_viewer_feet_slip_plots(native_viewer, env)
         _patch_viewer_foot_orientation_plots(native_viewer, env)
+        _patch_viewer_wrong_foot_contact_plot(native_viewer, env)
         native_viewer.run()
     elif resolved_viewer == "viser":
         ViserPlayViewer(env, final_policy).run()

@@ -2117,13 +2117,46 @@ def penalize_wrong_foot_ball_contact(
     tier as the other "bad technique" penalties (penalize_self_collision
     -50, penalize_sharpcontact/penalize_baseheight -100) rather than the
     much weaker tier it was in before. Not yet validated against a live run.
+
+    FIX 2026-07-28: "ball_contact" above only matches foot[1-4]_collision
+    geoms -- it never saw genuine ball contact against the SHIN or KNEE
+    (left_shin_collision/right_shin_collision, left/right_knee_collision,
+    t1_headless.xml), which have no collision-sensor coverage anywhere in
+    this task. User spotted this live via MuJoCo's native contact-point
+    overlay (an orange dot between the trailing leg and the ball while this
+    reward read 0) and it was confirmed by replaying the real trained
+    checkpoint with a probe sensor: the policy makes genuine foot-ball
+    contact via the shin routinely, and at least one sampled event was the
+    WRONG side's shin touching the ball while this function still returned
+    0 -- a real, exploitable blind spot, not just a display artifact (see
+    docs/BugFixes.md). Added "leg_ball_contact" (goalkeeper_env_cfg.py,
+    same primary/secondary shape as ball_contact) and OR it into the
+    wrong-touch check below. Deliberately narrow: only the WRONG side's
+    leg counts (matches this function's existing scope -- wrong SIDE, not
+    "any non-foot body part"); the correct side's shin/knee touching is not
+    penalized here, since that's a save-quality question, not a wrong-foot
+    one. Same -100 weight, no new tuning.
+
+    Geom layout in leg_ball_contact sensor (geom-index order, verified via
+    primary_names, NOT alphabetical): 0-1: left_shin,left_knee -> left leg,
+    2-3: right_knee,right_shin -> right leg. Sub-order within each side
+    (shin-then-knee vs knee-then-shin) doesn't matter since only the
+    left/right split is used.
     """
     foot_idx = _get_correct_foot_idx(env, ball_name)  # (N,) 0=left, 1=right
     sensor: ContactSensor = env.scene["ball_contact"]
     found = sensor.data.found  # [B, 8]: 0-3=left, 4-7=right
     left_touch = (found[:, :4] > 0).any(dim=-1)   # (B,)
     right_touch = (found[:, 4:] > 0).any(dim=-1)  # (B,)
-    foot_touch = torch.stack([left_touch, right_touch], dim=-1)  # (B, 2)
+
+    leg_sensor: ContactSensor = env.scene["leg_ball_contact"]
+    leg_found = leg_sensor.data.found  # [B, 4]: 0-1=left, 2-3=right
+    left_leg_touch = (leg_found[:, :2] > 0).any(dim=-1)
+    right_leg_touch = (leg_found[:, 2:] > 0).any(dim=-1)
+
+    foot_touch = torch.stack(
+        [left_touch | left_leg_touch, right_touch | right_leg_touch], dim=-1
+    )  # (B, 2)
     wrong_foot_idx = 1 - foot_idx
     wrong_foot_touch = foot_touch[torch.arange(env.num_envs, device=env.device), wrong_foot_idx]
     return wrong_foot_touch.float()
