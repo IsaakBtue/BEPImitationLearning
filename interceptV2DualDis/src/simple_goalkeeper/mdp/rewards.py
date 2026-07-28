@@ -1871,14 +1871,118 @@ def torque_limits(
     return out_of_limit.sum(dim=-1)
 
 
+# Arm joint names for _resolve_arm_action_indices, matching _RECOVERY_ARM_CFG's
+# joint_names exactly (goalkeeper_env_cfg.py) -- kept as a literal tuple here,
+# not imported, since these two functions must resolve indices against the
+# ACTION term's own target_names ordering, not a SceneEntityCfg.joint_ids
+# (entity-order) resolution -- see the docstring below for why the two can
+# legitimately differ and why this project treats that distinction as load-
+# bearing after the footreach/_get_reach_target_y SceneEntityCfg-resolution
+# bug (docs/BugFixes.md, ~line 1107).
+_ARM_ACTION_JOINT_NAMES = (
+    "Left_Shoulder_Pitch", "Left_Shoulder_Roll", "Left_Elbow_Pitch", "Left_Elbow_Yaw",
+    "Right_Shoulder_Pitch", "Right_Shoulder_Roll", "Right_Elbow_Pitch", "Right_Elbow_Yaw",
+)
+
+
+def _resolve_arm_action_indices(env: "ManagerBasedRlEnv", action_term_name: str) -> torch.Tensor:
+    """Resolve arm joint columns within a specific action term's own tensor.
+
+    mjlab's built-in `action_rate_l2`/`action_acc_l2` (mjlab/envs/mdp/rewards.py)
+    take no `asset_cfg` at all -- they always sum the FULL action vector. To
+    scope to arms we must index `env.action_manager.action`/`prev_action`/
+    `prev_prev_action` directly, which are ordered by the action TERM's own
+    `target_names` (resolved at action-term construction, via `_find_targets`),
+    not necessarily identical to a `SceneEntityCfg`'s `joint_ids` (resolved
+    separately, at reward-manager setup, via regex-matched `find_joints`).
+    Both orderings happen to derive from the same entity and are expected to
+    agree in practice for this project's single ".*"-matching action term, but
+    this function deliberately does NOT assume that -- it looks up each arm
+    joint's position by NAME in the action term's actual `target_names` list,
+    so a future action-term reconfiguration (partial joint subset, reordering)
+    cannot silently desync the "arm slice" from the joints it's meant to cover.
+    """
+    cache_attr = f"_arm_action_indices_{action_term_name}"
+    if not hasattr(env, cache_attr):
+        target_names = env.action_manager.get_term(action_term_name).target_names
+        idx = [target_names.index(n) for n in _ARM_ACTION_JOINT_NAMES]
+        setattr(env, cache_attr, torch.tensor(idx, device=env.device, dtype=torch.long))
+    return getattr(env, cache_attr)
+
+
+def arm_action_rate_l2(
+    env: "ManagerBasedRlEnv",
+    action_term_name: str = "joint_pos",
+) -> torch.Tensor:
+    """Penalize action rate-of-change (1st order), scoped to the 8 arm joints only.
+
+    Same formula as mjlab's `action_rate_l2` (`action - prev_action`, squared,
+    summed) but restricted to the arm columns of `action_term_name`'s own
+    action tensor, resolved via `_resolve_arm_action_indices` -- see that
+    function's docstring for why this can't just reuse `_RECOVERY_ARM_CFG`
+    directly. No G1 equivalent (G1 has no `action_rate` reward at all,
+    confirmed via a fresh subagent re-check of `legged_robot.py`). Mirrors
+    the existing whole-body `action_rate_l2`/arm-scoped `arm_dof_vel` pattern:
+    concentrates a whole-body mechanism onto just the arms for undiluted
+    gradient, since the whole-body term's single scalar output mixes arm
+    jitter in with leg-dominant contributions.
+    """
+    idx = _resolve_arm_action_indices(env, action_term_name)
+    action = env.action_manager.action[:, idx]
+    prev_action = env.action_manager.prev_action[:, idx]
+    return torch.sum(torch.square(action - prev_action), dim=1)
+
+
+def arm_action_acc_l2(
+    env: "ManagerBasedRlEnv",
+    action_term_name: str = "joint_pos",
+) -> torch.Tensor:
+    """Penalize action acceleration (2nd order), scoped to the 8 arm joints only.
+
+    Same formula as mjlab's `action_acc_l2` (`action - 2*prev_action +
+    prev_prev_action`, squared, summed) -- the exact structural match for
+    G1's `_reward_smoothness` (`legged_robot.py:1532-1534`) -- but restricted
+    to the arm columns, resolved via `_resolve_arm_action_indices`. G1's
+    `_reward_smoothness` is flat, non-curriculum, and always whole-body
+    (confirmed via a fresh subagent re-check); no G1 arm-specific variant
+    exists to match, so this is a deliberate SGK-only divergence, same
+    rationale as `arm_action_rate_l2` above.
+    """
+    idx = _resolve_arm_action_indices(env, action_term_name)
+    action = env.action_manager.action[:, idx]
+    prev_action = env.action_manager.prev_action[:, idx]
+    prev_prev_action = env.action_manager.prev_prev_action[:, idx]
+    acc = action - 2 * prev_action + prev_prev_action
+    return torch.sum(torch.square(acc), dim=1)
+
+
 def postupperdofpos(
     env: "ManagerBasedRlEnv",
     ball_name: str,
     asset_cfg: SceneEntityCfg = _ARM_JOINT_CFG,
+    during_scale: float = 0.3,
 ) -> torch.Tensor:
-    """Reward arm joints returning to default pose after ball is behind. Mirrors ILB.
+    """Reward arm joints returning to default pose. Always active, weaker pre-save.
 
-    exp(-1 * sum_sq_err) × behind — bounded [0, 1], reward peaks at default pose.
+    exp(-1 * sum_sq_err) x (1.0 if behind else during_scale) -- bounded [0, 1].
+
+    FIX 2026-07-28 (user request, simplification): was `x behind.float()`
+    (zero during the approach). User reported arm_torque_limits/
+    arm_action_rate_l2/arm_action_acc_l2 (same-day, dynamics-based terms)
+    all read ~0 on an episode where the arms were visibly frozen pointing
+    backward -- correctly diagnosed as the wrong problem class (those
+    penalize movement/torque; a still, wrong-static-pose arm trips none of
+    them). This term is the one that's actually supposed to target static
+    pose, but gating it to zero for the ~80% of the episode before the save
+    meant a badly-drifted arm had already accumulated during approach with
+    no pull back until `behind` turned on. Rather than add yet another new
+    term, user asked to simplify: keep this one mechanism but make it always
+    active, at reduced strength (`during_scale=0.3`, first guess) before the
+    save so it doesn't fight legitimate counterbalance motion during a dive,
+    full strength (1.0) after. Does NOT fix the underlying exp(-err)
+    vanishing-gradient-far-from-target issue (still ~0 gradient once err is
+    large) -- this is a scope-limited fix per explicit user request, not a
+    claim the mechanism is now complete. Not yet validated against a live run.
 
     FIX 2026-07-23: weight raised 1.0 -> 5.0 (deliberate G1 divergence, not
     a parity fix -- G1 also uses 1.0, g1_29_config.py:317). User reported
@@ -1921,7 +2025,8 @@ def postupperdofpos(
         - env._post_save_stance_target[asset_cfg.joint_ids]
     )
     err = torch.sum(torch.square(delta), dim=-1)
-    return torch.exp(-1.0 * err) * behind.float()
+    scale = torch.where(behind, 1.0, during_scale)
+    return torch.exp(-1.0 * err) * scale
 
 
 def postwaistdofpos(
@@ -2509,32 +2614,77 @@ def postheadingorientation(
 def cleanstop(
     env: "ManagerBasedRlEnv",
     ball_name: str,
-    speed_threshold: float = 0.25,
+    speed_threshold: float = 1.0,
+    best_speed: float = 0.2,
+    decay_rate: float = 3.75,
+    settle_steps: int = 10,
 ) -> torch.Tensor:
-    """One-time reward when ball nearly stops after deflection AND correct foot made contact.
+    """One-time reward, scaled by how dead the ball is, when the correct foot deflects it.
 
     Fires once per episode when softstop has already triggered AND the ball's total
-    speed drops below speed_threshold (0.25 m/s) AND the correct foot was in contact
-    at softstop moment. Rewards a clean foot-trap style save over a hard uncontrolled deflection.
-    Weight: +25.0.
+    speed drops below speed_threshold (1.0 m/s) AND the correct foot was in contact
+    at softstop moment -- same one-time latch and gates as before. The PAYOUT is no
+    longer binary: it's `clamp(exp(-decay_rate*(speed-best_speed)), 0, 1)`, worst
+    (~0.05) at speed_threshold=1.0 m/s and best (1.0) at best_speed=0.2 m/s or below.
+
+    FIX 2026-07-28 (user request): was a hard binary bonus gated on
+    `speed < 0.10` -- an all-or-nothing cliff that gave zero gradient anywhere
+    in the 0.10-1.0 m/s range a real (if imperfect) deflection lands in. Ball
+    speed at the softstop moment is a direct, controllable consequence of the
+    foot's contact velocity/orientation (the same mechanism `stopball`/
+    `softstop` already exploit), so a continuous payout gives denser signal
+    without changing what triggers it. Deliberately kept single-fire (not a
+    continuous per-step reward): a per-step version would pay out on every
+    remaining tick of the episode once the ball is naturally at rest,
+    overshooting the peak-magnitude budget the 2026-07-20 fix (item 8)
+    capped this reward group to, and -- the concern that blocked a naive
+    "just remove the fire event" design -- would let ball rolling-friction
+    alone (no genuine foot contact) farm reward for free. The `softstop_fired`
+    gate (a genuine velocity-reversal event) and `correct_foot` gate are
+    unchanged, so friction-only deceleration still can never trigger this.
+    decay_rate=3.75 solves `exp(-3.75*(1.0-0.2)) = exp(-3.0) ~= 0.05` at the
+    threshold edge, so a bare deflection right at the old cutoff still earns
+    a small but non-zero credit rather than a wall at zero.
+
+    FIX 2026-07-28 (same day, user request): added a settle window
+    (`settle_steps=10`, ~0.2s), same "consecutive ticks under threshold"
+    pattern the `blue` landing mechanism already uses. Without it, this
+    fired on the FIRST tick crossing under speed_threshold -- which can be a
+    transient dip mid-bounce, not the ball's actual settled speed (user
+    spotted a live episode where the ball was still visibly rolling at
+    0.3-0.5 m/s well after cleanstop had already fired and paid out). Now
+    requires speed to stay below speed_threshold for `settle_steps`
+    consecutive ticks before firing, and scores the LATER, more-settled
+    speed at that point instead of the first crossing.
     """
     ball: Entity = env.scene[ball_name]
     ball_speed = ball.data.root_link_lin_vel_w.norm(dim=-1)  # (N,)
 
     if not hasattr(env, "_cleanstop_flag"):
         env._cleanstop_flag = torch.zeros(env.num_envs, dtype=torch.bool, device=env.device)
+    if not hasattr(env, "_cleanstop_settle_count"):
+        env._cleanstop_settle_count = torch.zeros(env.num_envs, dtype=torch.long, device=env.device)
 
     just_reset = env.episode_length_buf <= 1
     env._cleanstop_flag[just_reset] = False
+    env._cleanstop_settle_count[just_reset] = 0
 
     softstop_fired = getattr(env, "_softstop_flag", None)
     if softstop_fired is None:
         return torch.zeros(env.num_envs, device=env.device)
 
     correct_foot = getattr(env, "_softstop_correct_foot", torch.zeros(env.num_envs, dtype=torch.bool, device=env.device))
-    fired = softstop_fired & (ball_speed < speed_threshold) & correct_foot & ~env._cleanstop_flag
+    eligible = softstop_fired & correct_foot & ~env._cleanstop_flag
+    below = ball_speed < speed_threshold
+
+    env._cleanstop_settle_count[eligible & below] += 1
+    env._cleanstop_settle_count[~(eligible & below)] = 0
+
+    fired = eligible & (env._cleanstop_settle_count >= settle_steps)
     env._cleanstop_flag |= fired
-    return fired.float()
+
+    scale = torch.clamp(torch.exp(-decay_rate * (ball_speed - best_speed)), min=0.0, max=1.0)
+    return fired.float() * scale
 
 
 def foot_clearance(

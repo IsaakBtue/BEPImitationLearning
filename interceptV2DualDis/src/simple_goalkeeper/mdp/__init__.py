@@ -10,7 +10,7 @@ from .rewards import (
     trailing_foot_forward_continuous, postleadfootorientation, postheadingorientation,
     penalize_kneeheight, penalize_baseheight, dof_vel_limits,
     postorientation, postangvel, postlinvel,
-    torques_normalized_l2, torque_limits,
+    torques_normalized_l2, torque_limits, arm_action_rate_l2, arm_action_acc_l2,
     postupperdofpos, postwaistdofpos, postlegdofpos,
     penalize_sharpcontact, penalize_self_collision, feet_slippage,
     penalize_wrong_foot_ball_contact,

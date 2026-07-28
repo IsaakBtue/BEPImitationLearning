@@ -571,11 +571,15 @@ def goalkeeper_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
             weight=34.72,
             params={"ball_name": BALL_NAME},
         ),
-        # --- clean-trap bonus: ball nearly dead after deflection ---
+        # --- clean-trap bonus: continuous payout by how dead the ball is after deflection ---
+        # FIX 2026-07-28 (user request): speed_threshold widened 0.10->1.0 (fire
+        # condition, unchanged one-time latch) now that the payout itself is a
+        # continuous scale (best_speed/decay_rate, see cleanstop()'s docstring)
+        # instead of a binary bonus -- see rewards.py:cleanstop.
         "cleanstop": RewardTermCfg(
             func=gk_mdp.cleanstop,
             weight=17.36,
-            params={"ball_name": BALL_NAME, "speed_threshold": 0.10},
+            params={"ball_name": BALL_NAME, "speed_threshold": 1.0, "best_speed": 0.2, "decay_rate": 3.75},
         ),
         # --- continuing close-to-target signal, tiered 1.0x/2.0x/3.0x by softstop/cleanstop
         # (ports G1 _reward_success; FIX 2026-07-27 retiered off stopball -- see rewards.py).
@@ -851,6 +855,27 @@ def goalkeeper_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
             weight=-3.0,
             params={"asset_cfg": _ALL_JOINTS_CFG},
         ),
+        # NEW 2026-07-28 (user request): concentrates the same torque_limits
+        # mechanism onto just the 8 arm joints (_RECOVERY_ARM_CFG), same
+        # rationale as arm_dof_vel below -- the whole-body term's single
+        # scalar output mixes arm torque-excess in with leg-dominant
+        # contributions, diluting the training signal for arm-specific
+        # effort even though each joint's contribution to the sum is
+        # additive/independent. G1 also has a torque_limits reward
+        # (g1_29_config.py), giving this whole mechanism a G1 basis, but
+        # G1 never scopes it to arms specifically -- this split is a
+        # deliberate SGK-only divergence, not a G1 port. Weight -6.0 (2x
+        # whole-body, not arm_dof_vel's 10x convention) is a first guess:
+        # torque-limit excess is a rectified, unnormalized Nm quantity
+        # (unlike dof_vel's small squared term), and a real dive/save
+        # legitimately saturates arm effort, so a blind 10x risked
+        # punishing genuine athletic motion. Not yet validated against a
+        # live training run.
+        "arm_torque_limits": RewardTermCfg(
+            func=gk_mdp.torque_limits,
+            weight=-6.0,
+            params={"asset_cfg": _RECOVERY_ARM_CFG},
+        ),
         # --- stability ---
         "ang_vel_xy": RewardTermCfg(
             func=gk_mdp.ang_vel_xy_l2,
@@ -913,6 +938,32 @@ def goalkeeper_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
             # matched weight; see action_rate_l2's comment for the full swap
             # rationale.
             weight=-0.1,
+        ),
+        # NEW 2026-07-28 (user request, implemented last/deferred from the
+        # same-day arm_torque_limits/cleanstop fix pair specifically because
+        # mjlab's built-in action_rate_l2/action_acc_l2 (above) take no
+        # asset_cfg at all -- unlike arm_torque_limits, this needed brand-new
+        # custom functions indexing env.action_manager.action/prev_action/
+        # prev_prev_action directly. NOT SceneEntityCfg-based at all (avoids
+        # the footreach/_get_reach_target_y SceneEntityCfg-resolution bug,
+        # docs/BugFixes.md ~line 1107, entirely rather than just being
+        # careful with it): arm columns are resolved via the "joint_pos"
+        # action term's own target_names, cached in rewards.py's
+        # _resolve_arm_action_indices. No G1 equivalent (G1 has no
+        # action_rate reward at all, and its action_acc-equivalent
+        # `_reward_smoothness` is flat/whole-body -- confirmed via a fresh
+        # subagent re-check of legged_robot.py/g1_29_config.py). Weights are
+        # 10x the whole-body action_rate_l2/action_acc_l2 values above, same
+        # arm_dof_vel-style ratio-of-joints convention (8 of ~21 joints).
+        # Whole-body action_rate_l2/action_acc_l2 stay unchanged. Not yet
+        # validated against a live training run.
+        "arm_action_rate_l2": RewardTermCfg(
+            func=gk_mdp.arm_action_rate_l2,
+            weight=-0.5,
+        ),
+        "arm_action_acc_l2": RewardTermCfg(
+            func=gk_mdp.arm_action_acc_l2,
+            weight=-1.0,
         ),
         "dof_vel": RewardTermCfg(
             func=mjlab_mdp.joint_vel_l2,
