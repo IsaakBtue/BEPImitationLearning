@@ -1876,10 +1876,11 @@ def postupperdofpos(
     ball_name: str,
     asset_cfg: SceneEntityCfg = _ARM_JOINT_CFG,
     during_scale: float = 0.5,
+    kernel_scale: float = 0.15,
 ) -> torch.Tensor:
     """Reward arm joints returning to default pose. Always active, weaker pre-save.
 
-    exp(-1 * sum_sq_err) x (1.0 if behind else during_scale) -- bounded [0, 1].
+    exp(-kernel_scale * sum_sq_err) x (1.0 if behind else during_scale) -- bounded [0, 1].
 
     FIX 2026-07-28 (user request, simplification): was `x behind.float()`
     (zero during the approach). User reported arm_torque_limits/
@@ -1917,7 +1918,46 @@ def postupperdofpos(
     is kept unchanged -- same movement-penalty family as the three
     reverted terms, but a real G1-matched mechanism (dof_vel) at a small
     weight, judged a minor contributor to the regression, not the driver.
-    Not yet validated against a live training run. See docs/BugFixes.md.
+
+    FIX 2026-07-29 (2nd same-day change, user request): user reported the
+    2026-07-29 during_scale fix only seemed to help near-region episodes --
+    far-region arm movement still looked "really weird" both during and
+    after the save. Root-caused via direct checkpoint replay (--force-region
+    probe, both pre-save and post-save error tracked separately): far-region
+    dives require a much larger arm excursion than near-region ones, and
+    the arm error was NOT recovering after the save either -- measured
+    mean sum_sq_err was 0.155 (near, post-save) vs 7.810 (far, post-save),
+    a ~50x difference. At kernel_scale's old implicit value of 1.0,
+    exp(-1.0*7.81) = 0.0004 -- already fully saturated to the exp(-err)
+    kernel's zero-gradient floor, so this term provided essentially NO
+    learning signal for far-region post-save recovery, regardless of
+    during_scale (which only affects the PRE-save multiplier and can't fix
+    a post-save-only saturation). Near-region's much smaller error
+    (0.155) sits well within the kernel's sensitive range (exp(-1.0*0.155)
+    = 0.856), which is why only near-region episodes looked improved by
+    the during_scale change. This is not new/introduced by that change --
+    it's the pre-existing "exp(-err) vanishing-gradient-far-from-target"
+    limitation this docstring already flagged, just now empirically
+    localized to far regions specifically.
+
+    Fix: kernel_scale lowered from an implicit 1.0 to 0.15, flattening the
+    exponential's falloff so it retains real, non-vanishing gradient at
+    the error magnitudes far-region dives actually produce. Checked against
+    the measured near/far error values above: exp(-0.15*0.155)=0.977 (near,
+    barely changed from before) vs exp(-0.15*7.81)=0.310 (far, was
+    0.0004 -- no longer saturated, real signal restored) at post-save.
+    0.15 is an empirical choice balancing "far regions get meaningful
+    gradient" against "near regions don't lose their existing fine-grained
+    pose discrimination" -- not G1-matched (no G1 equivalent recovery-
+    quality kernel exists to size against). Deliberately kept the same
+    exp(-k*err) family already used throughout this reward table (postorientation/
+    postangvel/postlinvel/postlegdofpos/postwaistdofpos/foot_clearance all
+    use this shape) rather than switching to a different kernel family,
+    to stay consistent with the codebase's established convention. Only
+    postupperdofpos was touched -- postlegdofpos/postwaistdofpos likely
+    have the same latent far-region saturation risk (unverified, out of
+    scope for this fix, worth a follow-up check). Not yet validated
+    against a live training run. See docs/BugFixes.md.
 
     FIX 2026-07-23: weight raised 1.0 -> 5.0 (deliberate G1 divergence, not
     a parity fix -- G1 also uses 1.0, g1_29_config.py:317). User reported
@@ -1961,7 +2001,7 @@ def postupperdofpos(
     )
     err = torch.sum(torch.square(delta), dim=-1)
     scale = torch.where(behind, 1.0, during_scale)
-    return torch.exp(-1.0 * err) * scale
+    return torch.exp(-kernel_scale * err) * scale
 
 
 def postwaistdofpos(

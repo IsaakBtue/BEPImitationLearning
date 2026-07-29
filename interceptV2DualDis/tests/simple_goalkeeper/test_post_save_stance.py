@@ -232,7 +232,10 @@ def test_reward_lower_at_old_default_pose_than_at_new_target():
     leg_old = postlegdofpos(env_old, "ball", asset_cfg=leg_cfg).item()
     waist_old = postwaistdofpos(env_old, "ball", asset_cfg=waist_cfg).item()
 
-    assert arm_old == expected(arm_cfg, old_row, 1.0)
+    # FIX 2026-07-29 (2nd same-day change): postupperdofpos's kernel_scale
+    # lowered 1.0 -> 0.15 (far-region vanishing-gradient fix, see rewards.py
+    # docstring) -- postlegdofpos/postwaistdofpos unaffected, still exponent 1.0/3.0.
+    assert arm_old == expected(arm_cfg, old_row, 0.15)
     assert leg_old == expected(leg_cfg, old_row, 1.0)
     assert waist_old == expected(waist_cfg, old_row, 3.0)
 
@@ -244,9 +247,10 @@ def test_reward_lower_at_old_default_pose_than_at_new_target():
     # (0.41 -> 0.1745 rad, matching HOME_KEYFRAME's own second reduction) --
     # old_row's arm portion (frozen at the ORIGINAL 0.41 default, see this
     # dict above) no longer matches the current target, so arm_old is
-    # measurably below 1.0 again (Shoulder_Pitch/Elbow_Pitch/Elbow_Yaw are
-    # unchanged between old and target, only Shoulder_Roll differs).
-    assert 0.09 < arm_old < 0.15
+    # measurably below 1.0. With kernel_scale=0.15 (2026-07-29 fix), the same
+    # underlying error (~2.12) now scores ~0.73 instead of the old kernel's
+    # ~0.12 -- the flatter kernel is precisely why, not a change in error.
+    assert 0.7 < arm_old < 0.75
 
     arm_new = postupperdofpos(env_new, "ball", asset_cfg=arm_cfg).item()
     leg_new = postlegdofpos(env_new, "ball", asset_cfg=leg_cfg).item()

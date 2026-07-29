@@ -122,3 +122,31 @@ arm *movement*.
 - The actual stated goal (arm not ending up behind the body post-save) is
   a play/viewer observation, not a wandb metric — worth a live check once
   there's a checkpoint worth watching.
+
+## 2026-07-29 (same day, follow-up) -- postupperdofpos kernel_scale 1.0->0.15 (far-region gradient was fully saturated)
+
+Comparing `armrevert`'s `model_19000` against itself with `--force-region`
+pinned to `left_near` vs `left_far` showed the arm-recovery gradient was
+essentially dead for far regions specifically — post-save arm error was
+~50x larger there (0.155 near vs 7.81 far) and the old `exp(-1.0*err)`
+kernel had already collapsed to ~0.0004 at that magnitude, meaning
+`postupperdofpos` was providing zero real signal for far-region recovery
+regardless of `during_scale`. Lowered `kernel_scale` to 0.15 so the reward
+doesn't vanish at the error magnitudes far dives actually produce
+(`exp(-0.15*7.81)=0.31`) while barely changing near-region's near-ceiling
+value (`exp(-0.15*0.155)=0.977`).
+
+**What to watch on the next run:**
+- Re-run the same `--force-region left_far` vs `left_near` probe against a
+  later checkpoint (the methodology is in `docs/BugFixes.md` — reset,
+  step with the trained policy, read `env._post_save_stance_target` vs
+  actual arm joint positions, split by `_softstop_flag`) to confirm
+  far-region post-save `postupperdofpos` is now actually nonzero and
+  climbing, not just that the standalone kernel math checks out.
+- Watch (via `sgk_play --force-region left_far`) whether the arm actually
+  stops looking "really weird" post-save on far shots specifically —
+  that's the real test, not any wandb aggregate (which averages all 4
+  regions together and would dilute a far-only improvement).
+- `postlegdofpos`/`postwaistdofpos` were NOT touched and use the same
+  `exp(-k*err)` shape — worth the same near/far probe if far-region leg or
+  waist recovery also looks off, since they likely share this failure mode.
