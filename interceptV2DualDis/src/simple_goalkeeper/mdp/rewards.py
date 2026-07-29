@@ -1871,96 +1871,11 @@ def torque_limits(
     return out_of_limit.sum(dim=-1)
 
 
-# Arm joint names for _resolve_arm_action_indices, matching _RECOVERY_ARM_CFG's
-# joint_names exactly (goalkeeper_env_cfg.py) -- kept as a literal tuple here,
-# not imported, since these two functions must resolve indices against the
-# ACTION term's own target_names ordering, not a SceneEntityCfg.joint_ids
-# (entity-order) resolution -- see the docstring below for why the two can
-# legitimately differ and why this project treats that distinction as load-
-# bearing after the footreach/_get_reach_target_y SceneEntityCfg-resolution
-# bug (docs/BugFixes.md, ~line 1107).
-_ARM_ACTION_JOINT_NAMES = (
-    "Left_Shoulder_Pitch", "Left_Shoulder_Roll", "Left_Elbow_Pitch", "Left_Elbow_Yaw",
-    "Right_Shoulder_Pitch", "Right_Shoulder_Roll", "Right_Elbow_Pitch", "Right_Elbow_Yaw",
-)
-
-
-def _resolve_arm_action_indices(env: "ManagerBasedRlEnv", action_term_name: str) -> torch.Tensor:
-    """Resolve arm joint columns within a specific action term's own tensor.
-
-    mjlab's built-in `action_rate_l2`/`action_acc_l2` (mjlab/envs/mdp/rewards.py)
-    take no `asset_cfg` at all -- they always sum the FULL action vector. To
-    scope to arms we must index `env.action_manager.action`/`prev_action`/
-    `prev_prev_action` directly, which are ordered by the action TERM's own
-    `target_names` (resolved at action-term construction, via `_find_targets`),
-    not necessarily identical to a `SceneEntityCfg`'s `joint_ids` (resolved
-    separately, at reward-manager setup, via regex-matched `find_joints`).
-    Both orderings happen to derive from the same entity and are expected to
-    agree in practice for this project's single ".*"-matching action term, but
-    this function deliberately does NOT assume that -- it looks up each arm
-    joint's position by NAME in the action term's actual `target_names` list,
-    so a future action-term reconfiguration (partial joint subset, reordering)
-    cannot silently desync the "arm slice" from the joints it's meant to cover.
-    """
-    cache_attr = f"_arm_action_indices_{action_term_name}"
-    if not hasattr(env, cache_attr):
-        target_names = env.action_manager.get_term(action_term_name).target_names
-        idx = [target_names.index(n) for n in _ARM_ACTION_JOINT_NAMES]
-        setattr(env, cache_attr, torch.tensor(idx, device=env.device, dtype=torch.long))
-    return getattr(env, cache_attr)
-
-
-def arm_action_rate_l2(
-    env: "ManagerBasedRlEnv",
-    action_term_name: str = "joint_pos",
-) -> torch.Tensor:
-    """Penalize action rate-of-change (1st order), scoped to the 8 arm joints only.
-
-    Same formula as mjlab's `action_rate_l2` (`action - prev_action`, squared,
-    summed) but restricted to the arm columns of `action_term_name`'s own
-    action tensor, resolved via `_resolve_arm_action_indices` -- see that
-    function's docstring for why this can't just reuse `_RECOVERY_ARM_CFG`
-    directly. No G1 equivalent (G1 has no `action_rate` reward at all,
-    confirmed via a fresh subagent re-check of `legged_robot.py`). Mirrors
-    the existing whole-body `action_rate_l2`/arm-scoped `arm_dof_vel` pattern:
-    concentrates a whole-body mechanism onto just the arms for undiluted
-    gradient, since the whole-body term's single scalar output mixes arm
-    jitter in with leg-dominant contributions.
-    """
-    idx = _resolve_arm_action_indices(env, action_term_name)
-    action = env.action_manager.action[:, idx]
-    prev_action = env.action_manager.prev_action[:, idx]
-    return torch.sum(torch.square(action - prev_action), dim=1)
-
-
-def arm_action_acc_l2(
-    env: "ManagerBasedRlEnv",
-    action_term_name: str = "joint_pos",
-) -> torch.Tensor:
-    """Penalize action acceleration (2nd order), scoped to the 8 arm joints only.
-
-    Same formula as mjlab's `action_acc_l2` (`action - 2*prev_action +
-    prev_prev_action`, squared, summed) -- the exact structural match for
-    G1's `_reward_smoothness` (`legged_robot.py:1532-1534`) -- but restricted
-    to the arm columns, resolved via `_resolve_arm_action_indices`. G1's
-    `_reward_smoothness` is flat, non-curriculum, and always whole-body
-    (confirmed via a fresh subagent re-check); no G1 arm-specific variant
-    exists to match, so this is a deliberate SGK-only divergence, same
-    rationale as `arm_action_rate_l2` above.
-    """
-    idx = _resolve_arm_action_indices(env, action_term_name)
-    action = env.action_manager.action[:, idx]
-    prev_action = env.action_manager.prev_action[:, idx]
-    prev_prev_action = env.action_manager.prev_prev_action[:, idx]
-    acc = action - 2 * prev_action + prev_prev_action
-    return torch.sum(torch.square(acc), dim=1)
-
-
 def postupperdofpos(
     env: "ManagerBasedRlEnv",
     ball_name: str,
     asset_cfg: SceneEntityCfg = _ARM_JOINT_CFG,
-    during_scale: float = 0.3,
+    during_scale: float = 0.5,
 ) -> torch.Tensor:
     """Reward arm joints returning to default pose. Always active, weaker pre-save.
 
@@ -1977,12 +1892,32 @@ def postupperdofpos(
     meant a badly-drifted arm had already accumulated during approach with
     no pull back until `behind` turned on. Rather than add yet another new
     term, user asked to simplify: keep this one mechanism but make it always
-    active, at reduced strength (`during_scale=0.3`, first guess) before the
-    save so it doesn't fight legitimate counterbalance motion during a dive,
-    full strength (1.0) after. Does NOT fix the underlying exp(-err)
-    vanishing-gradient-far-from-target issue (still ~0 gradient once err is
-    large) -- this is a scope-limited fix per explicit user request, not a
-    claim the mechanism is now complete. Not yet validated against a live run.
+    active, at reduced strength before the save so it doesn't fight
+    legitimate counterbalance motion during a dive, full strength (1.0)
+    after. Does NOT fix the underlying exp(-err) vanishing-gradient-far-
+    from-target issue (still ~0 gradient once err is large) -- this is a
+    scope-limited fix per explicit user request, not a claim the mechanism
+    is now complete.
+
+    FIX 2026-07-29 (user request): `during_scale` 0.3 -> 0.5, alongside
+    fully reverting arm_torque_limits/arm_action_rate_l2/arm_action_acc_l2
+    (goalkeeper_env_cfg.py, functions removed from this file). Matched-
+    iteration comparison against the pre-2026-07-28 run confirmed those
+    three -- and this term's own 0.3 pre-save scale -- were collectively
+    over-constraining the arms: footreach/ball_exit/episode-length all
+    regressed, and this term's OWN reward collapsed ~10x (1.64->0.16 at
+    matched iterations), consistent with "always-on toward a pose, plus
+    three separate movement/effort penalties" fighting the arm motion
+    needed for dives. User's actual goal was narrower than the full
+    penalty stack suggested: prevent the arm ending up in a bad static
+    position (e.g. behind the body), not dampen all arm motion generally.
+    Keeping only this pose-matching mechanism (raised toward, not all the
+    way to, full pre-save strength) targets that directly without the
+    movement-agnostic side penalties. arm_dof_vel (goalkeeper_env_cfg.py)
+    is kept unchanged -- same movement-penalty family as the three
+    reverted terms, but a real G1-matched mechanism (dof_vel) at a small
+    weight, judged a minor contributor to the regression, not the driver.
+    Not yet validated against a live training run. See docs/BugFixes.md.
 
     FIX 2026-07-23: weight raised 1.0 -> 5.0 (deliberate G1 divergence, not
     a parity fix -- G1 also uses 1.0, g1_29_config.py:317). User reported

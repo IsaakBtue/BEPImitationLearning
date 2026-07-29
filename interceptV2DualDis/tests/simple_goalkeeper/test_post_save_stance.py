@@ -269,9 +269,11 @@ def test_gated_off_when_ball_not_behind():
     waist_cfg = _cfg(joint_names, _WAIST_JOINT_NAMES)
 
     # FIX 2026-07-28 (user request): postupperdofpos is no longer fully gated
-    # off pre-save -- it stays active at during_scale=0.3 (default) so it
-    # provides some pull toward the arm stance throughout, not only post-save.
-    # At the target pose (err=0, exp(-err)=1.0), that's 0.3 exactly.
-    assert postupperdofpos(env, "ball", asset_cfg=arm_cfg).item() == pytest.approx(0.3)
+    # off pre-save -- it stays active at during_scale (default, tuned 0.3->0.5
+    # on 2026-07-29 alongside reverting arm_torque_limits/arm_action_rate_l2/
+    # arm_action_acc_l2, see rewards.py) so it provides some pull toward the
+    # arm stance throughout, not only post-save. At the target pose (err=0,
+    # exp(-err)=1.0), that's during_scale exactly.
+    assert postupperdofpos(env, "ball", asset_cfg=arm_cfg).item() == pytest.approx(0.5)
     assert postlegdofpos(env, "ball", asset_cfg=leg_cfg).item() == 0.0
     assert postwaistdofpos(env, "ball", asset_cfg=waist_cfg).item() == 0.0

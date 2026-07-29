@@ -99,3 +99,26 @@ The next step for any of these is watching real training curves.
   regression (would suggest the arms needed that motion for balance during
   the save itself) alongside whether visible arm swinging actually
   decreases.
+
+## 2026-07-29 -- reverted arm_torque_limits/arm_action_rate_l2/arm_action_acc_l2 (pulled 2026-07-28), postupperdofpos during_scale 0.3->0.5
+
+The pulled arm-penalty batch (`e76ac55`) regressed footreach/ball_exit/
+episode-length and caused `postupperdofpos` itself to collapse ~10x
+(confirmed via matched-iteration comparison, `docs/BugFixes.md`) — the 3
+movement/effort penalties were fighting legitimate dive counterbalance
+motion. Reverted all 3; kept `arm_dof_vel` (small, G1-grounded, minor
+contributor) and raised `postupperdofpos`'s pre-save strength instead,
+since that's the mechanism that actually targets arm *pose* rather than
+arm *movement*.
+
+**What to watch on the next run:**
+- `footreach`/`Episode_Termination/ball_exit`/`Train/mean_episode_length`
+  should recover toward (or exceed) the pre-2026-07-28 baseline
+  (`6144_headingarmfix_2026-07-28`) at matched iterations — if they don't,
+  the regression wasn't (only) about the 3 reverted terms.
+- `postupperdofpos` should no longer collapse the way it did — watch it
+  stay comparable to `postlegdofpos`/`postwaistdofpos` rather than falling
+  far below them again.
+- The actual stated goal (arm not ending up behind the body post-save) is
+  a play/viewer observation, not a wandb metric — worth a live check once
+  there's a checkpoint worth watching.

@@ -855,27 +855,18 @@ def goalkeeper_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
             weight=-3.0,
             params={"asset_cfg": _ALL_JOINTS_CFG},
         ),
-        # NEW 2026-07-28 (user request): concentrates the same torque_limits
-        # mechanism onto just the 8 arm joints (_RECOVERY_ARM_CFG), same
-        # rationale as arm_dof_vel below -- the whole-body term's single
-        # scalar output mixes arm torque-excess in with leg-dominant
-        # contributions, diluting the training signal for arm-specific
-        # effort even though each joint's contribution to the sum is
-        # additive/independent. G1 also has a torque_limits reward
-        # (g1_29_config.py), giving this whole mechanism a G1 basis, but
-        # G1 never scopes it to arms specifically -- this split is a
-        # deliberate SGK-only divergence, not a G1 port. Weight -6.0 (2x
-        # whole-body, not arm_dof_vel's 10x convention) is a first guess:
-        # torque-limit excess is a rectified, unnormalized Nm quantity
-        # (unlike dof_vel's small squared term), and a real dive/save
-        # legitimately saturates arm effort, so a blind 10x risked
-        # punishing genuine athletic motion. Not yet validated against a
-        # live training run.
-        "arm_torque_limits": RewardTermCfg(
-            func=gk_mdp.torque_limits,
-            weight=-6.0,
-            params={"asset_cfg": _RECOVERY_ARM_CFG},
-        ),
+        # REVERTED 2026-07-29 (user request): arm_torque_limits penalized
+        # actual torque/effort regardless of resulting pose -- diagnosed
+        # (alongside arm_action_rate_l2/arm_action_acc_l2 below) as fighting
+        # legitimate counterbalance motion during a dive, dragging down
+        # footreach/ball_exit/episode-length (confirmed via matched-iteration
+        # comparison against the pre-2026-07-28 run, docs/BugFixes.md). User
+        # wants arm posture controlled by postupperdofpos (a pose-matching
+        # term, not a movement/effort penalty) instead -- see that term's
+        # during_scale bump below. arm_dof_vel (further down) is kept: same
+        # movement-penalty family, but a real G1-matched mechanism (dof_vel)
+        # at a small, mostly-inert weight, not one of these three speculative
+        # SGK-only additions.
         # --- stability ---
         "ang_vel_xy": RewardTermCfg(
             func=gk_mdp.ang_vel_xy_l2,
@@ -939,32 +930,14 @@ def goalkeeper_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
             # rationale.
             weight=-0.1,
         ),
-        # NEW 2026-07-28 (user request, implemented last/deferred from the
-        # same-day arm_torque_limits/cleanstop fix pair specifically because
-        # mjlab's built-in action_rate_l2/action_acc_l2 (above) take no
-        # asset_cfg at all -- unlike arm_torque_limits, this needed brand-new
-        # custom functions indexing env.action_manager.action/prev_action/
-        # prev_prev_action directly. NOT SceneEntityCfg-based at all (avoids
-        # the footreach/_get_reach_target_y SceneEntityCfg-resolution bug,
-        # docs/BugFixes.md ~line 1107, entirely rather than just being
-        # careful with it): arm columns are resolved via the "joint_pos"
-        # action term's own target_names, cached in rewards.py's
-        # _resolve_arm_action_indices. No G1 equivalent (G1 has no
-        # action_rate reward at all, and its action_acc-equivalent
-        # `_reward_smoothness` is flat/whole-body -- confirmed via a fresh
-        # subagent re-check of legged_robot.py/g1_29_config.py). Weights are
-        # 10x the whole-body action_rate_l2/action_acc_l2 values above, same
-        # arm_dof_vel-style ratio-of-joints convention (8 of ~21 joints).
-        # Whole-body action_rate_l2/action_acc_l2 stay unchanged. Not yet
-        # validated against a live training run.
-        "arm_action_rate_l2": RewardTermCfg(
-            func=gk_mdp.arm_action_rate_l2,
-            weight=-0.5,
-        ),
-        "arm_action_acc_l2": RewardTermCfg(
-            func=gk_mdp.arm_action_acc_l2,
-            weight=-1.0,
-        ),
+        # REVERTED 2026-07-29 (user request): arm_action_rate_l2/
+        # arm_action_acc_l2 penalized how fast the commanded arm target
+        # changed, again independent of resulting pose -- same "wrong
+        # problem class" diagnosis as arm_torque_limits above. Reverted
+        # alongside it; see that entry's comment and docs/BugFixes.md for
+        # the full regression evidence. The underlying custom functions
+        # (_resolve_arm_action_indices helper included) were removed from
+        # rewards.py since nothing else calls them.
         "dof_vel": RewardTermCfg(
             func=mjlab_mdp.joint_vel_l2,
             weight=-5e-4,
