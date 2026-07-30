@@ -44,7 +44,6 @@ import tyro
 
 from mjlab.envs import ManagerBasedRlEnv
 from mjlab.tasks.registry import list_tasks, load_env_cfg, load_rl_cfg, load_runner_cls
-from mjlab.utils.lab_api.math import quat_apply
 from mjlab.utils.torch import configure_torch_backends
 from mjlab.viewer import NativeMujocoViewer, ViserPlayViewer
 
@@ -484,7 +483,7 @@ def _patch_viewer_new_reward_plots(native_viewer: "NativeMujocoViewer", env) -> 
     `cleanstop`, `arm_torque_limits`, `arm_action_rate_l2`, `arm_action_acc_l2`
     are already ordinary reward terms with their own auto-created figures --
     they just need to be moved to the front of `_term_names`, same mechanism
-    `postlegdofpos`'s promotion in `_patch_viewer_foot_orientation_plots` uses.
+    `postupperdofpos`'s promotion in `_patch_viewer_postupperdofpos_plot` uses.
     Without this, they're silently never rendered: this task registers ~48
     active reward terms against `max_viewports` (12), so anything past index
     12 in declaration order never appears no matter what `_show_plots` says.
@@ -516,50 +515,79 @@ looking like no reaction. 15 steps clears that floor with margin."""
 
 def _compute_wrong_foot_contact_flash(env, env_idx: int) -> tuple[float, float]:
     """Raw "bad ball contact" signals for the viewer's P-panel, each latched
-    high for _WRONG_FOOT_FLASH_STEPS steps after a detected touch: (1) the
-    WRONG (non-assigned) foot touching the ball, (2) the head/chin touching
-    the ball at all.
+    high for _WRONG_FOOT_FLASH_STEPS steps after a detected touch: (1) any
+    ball contact penalize_wrong_foot_ball_contact treats as bad EXCEPT the
+    chin (wrong-side foot sole OR either side's knee/shin), (2) the
+    head/chin touching the ball at all.
 
     (1) mirrors penalize_wrong_foot_ball_contact's own detection exactly (same
-    "ball_contact" sensor + _get_correct_foot_idx) -- does NOT read the reward
-    term itself, since promoting that raw reward value (tried first) plots a
-    signal too sparse for the viewer's autoscale to ever show (see
-    docs/BugFixes.md).
+    "ball_contact"/"leg_ball_contact" sensors + _get_correct_foot_idx) -- does
+    NOT read the reward term itself, since promoting that raw reward value
+    (tried first) plots a signal too sparse for the viewer's autoscale to
+    ever show (see docs/BugFixes.md).
 
     (2) DEBUG 2026-07-28: added after the wrong-foot flash (1) still showed no
     reaction and the user asked whether the ball might actually be hitting the
     chin/head instead of a foot -- "ball_contact"/"feet_contact" only match
     foot geoms, so a head touch is invisible to both and to (1) above. Reads
-    the new "head_ball_contact" sensor (goalkeeper_env_cfg.py) directly.
+    the "head_ball_contact" sensor (goalkeeper_env_cfg.py) directly.
 
     (1) EXTENDED 2026-07-28 (same day, later): user then spotted an orange
     MuJoCo contact-point dot between the trailing leg and the ball while (1)
     still read 0 -- confirmed via a real-checkpoint replay that the shin/knee
     (not covered by ball_contact's foot[1-4]_collision pattern) genuinely
-    touches the ball, sometimes on the wrong side. Now also ORs in
-    "leg_ball_contact" (goalkeeper_env_cfg.py), mirroring
-    penalize_wrong_foot_ball_contact's own fix exactly so this flash can
-    never drift out of sync with what the reward actually penalizes.
+    touches the ball, sometimes on the wrong side. Added
+    "leg_ball_contact" (goalkeeper_env_cfg.py).
+
+    (1) REVISED 2026-07-30 (user request, after a live-checkpoint probe found
+    the "knee/shin" label was misleading -- nearly every firing was genuinely
+    the SHIN, never the knee sphere itself, see docs/BugFixes.md): now mirrors
+    penalize_wrong_foot_ball_contact's final asymmetric shape exactly --
+    WRONG side: whole leg (sole OR shin OR knee, contact-sensor based).
+    CORRECT/leading side: KNEE PROXIMITY (distance-based, not contact-sensor
+    "found" -- see rewards.py's docstring for why: the contact flag needs
+    real geometric overlap and under-fires relative to visible near-misses).
+    Chin stays a separate flash (2) even though it's not currently read by
+    the reward at all (reverted).
+
+    leg_ball_contact geom-index order: 0=left_shin, 1=left_knee, 2=right_knee,
+    3=right_shin (same as penalize_wrong_foot_ball_contact, rewards.py).
 
     Both are viewer-only display latches with no effect on training/reward.
     """
     raw_env = env.unwrapped if hasattr(env, "unwrapped") else env
     from simple_goalkeeper.mdp.rewards import _get_correct_foot_idx
 
-    foot_idx = _get_correct_foot_idx(raw_env, "ball")  # (N,) 0=left, 1=right
-    found = raw_env.scene["ball_contact"].data.found  # [B, 8]
-    left_touch = (found[:, :4] > 0).any(dim=-1)
-    right_touch = (found[:, 4:] > 0).any(dim=-1)
+    _KNEE_GEOM_RADIUS = 0.06
+    _BALL_GEOM_RADIUS = 0.10
+    _KNEE_PROXIMITY_MARGIN = 0.05  # must match rewards.py's default
 
-    leg_found = raw_env.scene["leg_ball_contact"].data.found  # [B, 4]: 0-1=left, 2-3=right
+    foot_idx = _get_correct_foot_idx(raw_env, "ball")  # (N,) 0=left, 1=right
+    wrong_foot_idx = 1 - foot_idx
+    env_ar = torch.arange(raw_env.num_envs, device=raw_env.device)
+
+    found = raw_env.scene["ball_contact"].data.found  # [B, 8]
+    left_sole = (found[:, :4] > 0).any(dim=-1)
+    right_sole = (found[:, 4:] > 0).any(dim=-1)
+    sole_touch = torch.stack([left_sole, right_sole], dim=-1)  # (B, 2)
+    wrong_sole_touch = sole_touch[env_ar, wrong_foot_idx]
+
+    leg_found = raw_env.scene["leg_ball_contact"].data.found  # [B, 4]
     left_leg_touch = (leg_found[:, :2] > 0).any(dim=-1)
     right_leg_touch = (leg_found[:, 2:] > 0).any(dim=-1)
+    leg_touch = torch.stack([left_leg_touch, right_leg_touch], dim=-1)  # (B, 2)
+    wrong_leg_touch = leg_touch[env_ar, wrong_foot_idx]
 
-    foot_touch = torch.stack(
-        [left_touch | left_leg_touch, right_touch | right_leg_touch], dim=-1
-    )  # (B, 2)
-    wrong_foot_idx = 1 - foot_idx
-    wrong_touch = foot_touch[torch.arange(raw_env.num_envs, device=raw_env.device), wrong_foot_idx]
+    ball_pos_w = raw_env.scene["ball"].data.root_link_pos_w  # (B, 3)
+    robot = raw_env.scene["robot"]
+    shank_ids = robot.find_bodies(["Shank_Left", "Shank_Right"])[0]
+    knee_pos_w = robot.data.body_link_pos_w[:, shank_ids, :]  # (B, 2, 3)
+    dist_to_knee = (ball_pos_w.unsqueeze(1) - knee_pos_w).norm(dim=-1)  # (B, 2)
+    knee_threshold = _KNEE_GEOM_RADIUS + _BALL_GEOM_RADIUS + _KNEE_PROXIMITY_MARGIN
+    knee_near = dist_to_knee < knee_threshold  # (B, 2)
+    leading_knee_touch = knee_near[env_ar, foot_idx]
+
+    wrong_touch = wrong_sole_touch | wrong_leg_touch | leading_knee_touch
 
     head_found = raw_env.scene["head_ball_contact"].data.found  # [B, N]
     head_touch = (head_found > 0).any(dim=-1)
@@ -629,78 +657,37 @@ def _patch_viewer_wrong_foot_contact_plot(native_viewer: "NativeMujocoViewer", e
     native_viewer._update_reward_figures = _patched_update_reward_figures
 
 
-def _compute_foot_yaw_error(env, env_idx: int) -> tuple[float, float]:
-    """Signed yaw deviation (degrees) of each foot's forward axis from world +X.
+def _patch_viewer_postupperdofpos_plot(native_viewer: "NativeMujocoViewer", env) -> None:
+    """Promote `postupperdofpos` (arm post-save recovery reward) into the
+    always-visible front P-panel slots.
 
-    0 = foot's toe points along world +X -- the "facing the field" direction
-    this whole task assumes the robot holds (ang_vel_z's -0.5 weight, and the
-    ball's -X approach direction, see CLAUDE.md's Frame Convention section).
-    Positive = rotated counter-clockwise from forward (toe swings toward
-    +Y/left), negative = clockwise (toward -Y/right). Foot-local +X is the
-    toe-forward axis -- same convention feet_slippage's toe-tip contact point
-    uses (_TOE_X_LOCAL).
-    """
-    raw_env = env.unwrapped if hasattr(env, "unwrapped") else env
-    robot = raw_env.scene["robot"]
-    foot_ids = robot.find_bodies(["left_foot_link", "right_foot_link"])[0]
-    foot_quat_w = robot.data.body_link_quat_w[env_idx, foot_ids, :]  # [2, 4]
-    forward_local = torch.tensor(
-        [[1.0, 0.0, 0.0], [1.0, 0.0, 0.0]], device=foot_quat_w.device, dtype=foot_quat_w.dtype,
-    )
-    forward_world = quat_apply(foot_quat_w, forward_local)  # [2, 3]
-    yaw_deg = torch.rad2deg(torch.atan2(forward_world[:, 1], forward_world[:, 0]))  # [2]
-    return yaw_deg[0].item(), yaw_deg[1].item()
+    FIX 2026-07-30 (user request): replaces this function's prior content
+    (`left_foot_yaw_deg`/`right_foot_yaw_deg` custom plots + `postlegdofpos`
+    promotion) -- removed outright, not just deprioritized, per user request.
+    `postupperdofpos` is an ordinary reward term with its own auto-created
+    figure, so this only needs the promotion mechanism (no custom raw plot),
+    same pattern as `_patch_viewer_new_reward_plots`.
 
-
-def _patch_viewer_foot_orientation_plots(native_viewer: "NativeMujocoViewer", env) -> None:
-    """Add two P-panel plots ("left_foot_yaw_deg"/"right_foot_yaw_deg") showing
-    each foot's signed yaw deviation from forward (world +X) in degrees.
-
-    Added per user report: the non-leading (trailing/non-assigned) foot ends
-    up pointing in visually odd directions after a save. No dedicated reward
-    currently targets foot HEADING directly -- the closest existing term is
-    `postlegdofpos` (rewards.py:1846), which pulls all 12 leg joints
-    (including Hip_Yaw -- T1 has no ankle-yaw actuator, so hip yaw is what
-    actually controls where a foot points) back toward their default values,
-    but only post-save and only in joint space, not as a direct world-frame
-    heading target. Promoted here alongside the two new plots so the two can
-    be compared -- if yaw error stays large while postlegdofpos is near its
-    ceiling, that's evidence the indirect joint-space pull isn't sufficient
-    and a dedicated heading reward may be warranted (a separate, bigger
-    change, not implemented here).
+    FIX 2026-07-30 (2nd follow-up, user request): also promoted
+    `penalize_arm_above_shoulder` (the new shoulder-height penalty, same
+    date, see rewards.py) and `trailing_foot_forward_continuous` (existing
+    term, previously never promoted so silently unrendered past the top-12
+    viewport cap) alongside it -- all three are arm/posture-adjacent terms
+    useful to watch together while diagnosing the "arms flying" behavior.
     """
     orig_setup = native_viewer.setup
-    orig_update_reward_figures = native_viewer._update_reward_figures
 
-    _YAW_TERM_NAMES = ("left_foot_yaw_deg", "right_foot_yaw_deg")
-    _PROMOTED_REWARD_TERMS = ("postlegdofpos",)
+    _PROMOTED_REWARD_TERMS = (
+        "postupperdofpos", "penalize_arm_above_shoulder", "trailing_foot_forward_continuous",
+    )
 
     def _patched_setup() -> None:
         orig_setup()
-        from mjlab.viewer.native.viewer import make_empty_figure
-        cfg = native_viewer._plot_cfg
-        for name in _YAW_TERM_NAMES:
-            native_viewer._figures[name] = make_empty_figure(
-                name, cfg.grid_size, cfg.init_yrange, cfg.history, cfg.background_alpha,
-            )
-            native_viewer._histories[name] = deque(maxlen=cfg.history)
-            native_viewer._yrange[name] = cfg.init_yrange
-            native_viewer._scale[name] = 1.0
         rest = [n for n in native_viewer._term_names if n not in _PROMOTED_REWARD_TERMS]
         promoted = [n for n in _PROMOTED_REWARD_TERMS if n in native_viewer._term_names]
-        native_viewer._term_names = list(_YAW_TERM_NAMES) + promoted + rest
-
-    def _patched_update_reward_figures(viewer_handle: "mujoco.viewer.Handle") -> None:
-        if native_viewer._show_plots and native_viewer._term_names and not native_viewer._is_paused:
-            lf_yaw, rf_yaw = _compute_foot_yaw_error(env, native_viewer.env_idx)
-            native_viewer._append_point("left_foot_yaw_deg", lf_yaw)
-            native_viewer._append_point("right_foot_yaw_deg", rf_yaw)
-            native_viewer._write_history_to_figure("left_foot_yaw_deg")
-            native_viewer._write_history_to_figure("right_foot_yaw_deg")
-        orig_update_reward_figures(viewer_handle)
+        native_viewer._term_names = promoted + rest
 
     native_viewer.setup = _patched_setup
-    native_viewer._update_reward_figures = _patched_update_reward_figures
 
 
 def run_play(task_id: str, cfg: PlayConfig) -> None:
@@ -882,7 +869,7 @@ def run_play(task_id: str, cfg: PlayConfig) -> None:
         native_viewer = NativeMujocoViewer(env, final_policy, key_callback=_key_cb)
         _patch_viewer_intercept_vis(native_viewer, env)
         _patch_viewer_new_reward_plots(native_viewer, env)
-        _patch_viewer_foot_orientation_plots(native_viewer, env)
+        _patch_viewer_postupperdofpos_plot(native_viewer, env)
         _patch_viewer_wrong_foot_contact_plot(native_viewer, env)
         native_viewer.run()
     elif resolved_viewer == "viser":

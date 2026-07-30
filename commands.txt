@@ -1,3 +1,4 @@
 cd interceptV2DualDis
 uv run sgk_play Mjlab-BeyondAMP-Goalkeeper-T1-MultiDisc \
-    --checkpoint-file logs/rsl_rl/intercept_simple_goalkeeper_multidisc/2026-07-27_14-57-13_6144_postpull_2026-07-27/model_39750.pt
+    --checkpoint-file logs/rsl_rl/intercept_simple_goalkeeper_multidisc/2026-07-29_09-52-42_6144_armrevert_2026-07-29/model_18250.pt \
+    --analytics True

@@ -32,6 +32,12 @@ _ARM_JOINT_CFG = SceneEntityCfg(
     ),
 )
 _WAIST_JOINT_CFG_RECOVERY = SceneEntityCfg("robot", joint_names=("Waist",))
+# NEW 2026-07-30: local default mirroring goalkeeper_env_cfg.py's _ARM_HEIGHT_CFG
+# (same body order requirement -- see penalize_arm_above_shoulder's docstring).
+_ARM_HEIGHT_CFG = SceneEntityCfg(
+    "robot",
+    body_names=("AL2", "AR2", "left_hand_link", "right_hand_link"),
+)
 # FIX 2026-07-22: added alongside postupperdofpos/postwaistdofpos -- see
 # postlegdofpos's docstring below for why G1 has no equivalent reward to
 # port for these joints, and why that's a task-structure fact, not a gap
@@ -1875,7 +1881,7 @@ def postupperdofpos(
     env: "ManagerBasedRlEnv",
     ball_name: str,
     asset_cfg: SceneEntityCfg = _ARM_JOINT_CFG,
-    during_scale: float = 0.5,
+    during_scale: float = 0.8,
     kernel_scale: float = 0.15,
 ) -> torch.Tensor:
     """Reward arm joints returning to default pose. Always active, weaker pre-save.
@@ -1959,6 +1965,26 @@ def postupperdofpos(
     scope for this fix, worth a follow-up check). Not yet validated
     against a live training run. See docs/BugFixes.md.
 
+    FIX 2026-07-30: `during_scale` 0.5 -> 0.8 (user request). Hypothesis:
+    the post-save arm-pose target is only reachable with real gradient once
+    the ball goes behind (scale=1.0) -- if the pre-save arm position drifts
+    too far from the target during the ~0.5-strength approach window, the
+    post-save error may START from a worse position than the reward's
+    exp(-kernel_scale*err) kernel can climb out of in the remaining episode
+    time, especially compounding with the far-region saturation this
+    function already has a documented history of. Raising the pre-save pull
+    closer to full strength (0.8, still short of 1.0 to avoid re-fighting
+    legitimate dive counterbalance motion, the exact regression that
+    motivated introducing during_scale in the first place) is a direct,
+    testable lever on the STARTING error post-save, distinct from
+    kernel_scale (which reshapes the reward's sensitivity to a given error,
+    not the error itself). Not yet validated against a live training run --
+    compare mean post-save postupperdofpos and the raw joint-space error
+    (see debugging methodology this session established, e.g.
+    `.claude/skills/debugging-mujoco-contact-sensors/probe_template.py`'s
+    "load real checkpoint, measure real state" pattern) against this same
+    checkpoint lineage once retrained. See docs/BugFixes.md.
+
     FIX 2026-07-23: weight raised 1.0 -> 5.0 (deliberate G1 divergence, not
     a parity fix -- G1 also uses 1.0, g1_29_config.py:317). User reported
     arm pose still looking "really weird" post-save on both master's last
@@ -2002,6 +2028,108 @@ def postupperdofpos(
     err = torch.sum(torch.square(delta), dim=-1)
     scale = torch.where(behind, 1.0, during_scale)
     return torch.exp(-kernel_scale * err) * scale
+
+
+def penalize_arm_above_shoulder(
+    env: "ManagerBasedRlEnv",
+    ball_name: str,
+    asset_cfg: SceneEntityCfg = _ARM_HEIGHT_CFG,
+    steady_steps: int = 20,
+) -> torch.Tensor:
+    """Penalty for a hand rising above its own shoulder height, gated to only
+    the STEADY (genuinely settled) post-save window.
+
+    NEW 2026-07-30 (user request). `postupperdofpos` already pulls the arms
+    toward a fixed target pose, but its `exp(-kernel_scale*err)` shape gives
+    no special weight to any one axis of the error -- it doesn't specifically
+    discourage the visually worst failure mode the user reported ("arms
+    flying above the shoulders"), just the aggregate 8-joint deviation. This
+    term targets that specific geometry directly.
+
+    Geometry: compares each hand body's world Z against its OWN shoulder's
+    world Z (not a fixed height) -- `AL2`/`AR2` (t1_headless.xml: the
+    shoulder-roll link, carries `left/right_shoulder_collision`) and
+    `left_hand_link`/`right_hand_link` (elbow-yaw link). Per-side excess =
+    clamp(hand_z - shoulder_z, min=0) -- zero unless the hand is literally
+    above the shoulder, squared for a smooth gradient. Using each side's OWN
+    shoulder (not a robot-frame constant) stays correct through any base
+    pitch/roll/height, unlike a fixed world-Z threshold.
+
+    FIX 2026-07-30 (caught live before shipping, per this session's own
+    debugging-mujoco-contact-sensors skill -- "never assume order, verify
+    against the live object"): `SceneEntityCfg.body_ids` does NOT preserve
+    declared `body_names` order -- it resolves in MODEL body-index order.
+    Verified live: `_ARM_HEIGHT_CFG`'s declared (AL2, AR2, left_hand_link,
+    right_hand_link) resolves as (AL2, left_hand_link, AR2, right_hand_link)
+    instead, because the model's kinematic tree fully declares the left-arm
+    chain (AL1->AL2->AL3->left_hand_link) before the right-arm chain begins
+    -- so AL2 and left_hand_link end up adjacent in index order, ahead of
+    AR2. A naive positional 0/1/2/3 index into `asset_cfg.body_ids` would
+    have silently paired the LEFT hand against the RIGHT shoulder. Fixed by
+    resolving each body's actual position via `robot.find_bodies(...)`'s
+    returned (ids, names) pair and looking up by NAME, not position (cached
+    on `env._arm_above_shoulder_body_idx` after first call).
+
+    Gating: A live-checkpoint balance-correlation probe this session (see
+    docs/BugFixes.md, 2026-07-30) found arm-pose error genuinely correlates
+    with body tilt during far-region dives (r=+0.22 to +0.59 across two
+    checkpoints) -- i.e. raised arms during an active dive or the immediate
+    post-save recovery window are plausibly real balance-recovery motion,
+    not pure bad habit. Penalizing that unconditionally would repeat the
+    exact mistake `arm_torque_limits`/`arm_action_rate_l2`/`arm_action_acc_l2`
+    made (added 2026-07-28, reverted 2026-07-29 for over-suppressing
+    legitimate dive counterbalance motion and regressing real save metrics).
+    So this term is gated to fire ONLY once `_ball_is_behind` has held for
+    more than `steady_steps` (20, ~0.4s, matches this session's probe-script
+    convention for "genuinely stuck" vs "still settling") consecutive steps
+    -- never during the dive, never in the immediate post-save window.
+    Maintains its own run-length counter (`env._arm_above_shoulder_run_len`),
+    separate from any other counter in this file, reset on episode boundary
+    the same way `_wrong_foot_flash_counter` is in play.py (compares against
+    `episode_length_buf`, not a `dones` signal, since reward functions don't
+    receive `dones` directly).
+
+    Weight -2.0 (modest, supplementary -- comparable to `postleadfootorientation`
+    at 2.0 in magnitude, not in the same -100 "bad technique" tier as
+    `penalize_wrong_foot_ball_contact`/`penalize_self_collision`; this is a
+    posture refinement on top of `postupperdofpos`, not a hard technique
+    violation). Not yet validated against a live training run. See
+    docs/BugFixes.md.
+    """
+    robot: Entity = env.scene[asset_cfg.name]
+
+    if not hasattr(env, "_arm_above_shoulder_body_idx"):
+        ids, names = robot.find_bodies(list(asset_cfg.body_names))
+        pos_in_ids = {name: i for i, name in enumerate(names)}
+        env._arm_above_shoulder_body_idx = {
+            "left_shoulder": pos_in_ids["AL2"],
+            "right_shoulder": pos_in_ids["AR2"],
+            "left_hand": pos_in_ids["left_hand_link"],
+            "right_hand": pos_in_ids["right_hand_link"],
+        }
+    idx = env._arm_above_shoulder_body_idx
+
+    body_pos_w = robot.data.body_link_pos_w[:, asset_cfg.body_ids, :]  # (N, 4, 3)
+    left_shoulder_z = body_pos_w[:, idx["left_shoulder"], 2]
+    right_shoulder_z = body_pos_w[:, idx["right_shoulder"], 2]
+    left_hand_z = body_pos_w[:, idx["left_hand"], 2]
+    right_hand_z = body_pos_w[:, idx["right_hand"], 2]
+
+    left_excess = torch.clamp(left_hand_z - left_shoulder_z, min=0.0)
+    right_excess = torch.clamp(right_hand_z - right_shoulder_z, min=0.0)
+    excess = torch.square(left_excess) + torch.square(right_excess)
+
+    if not hasattr(env, "_arm_above_shoulder_run_len"):
+        env._arm_above_shoulder_run_len = torch.zeros(env.num_envs, dtype=torch.long, device=env.device)
+    just_reset = env.episode_length_buf <= 1
+    behind = _ball_is_behind(env, ball_name)
+    env._arm_above_shoulder_run_len = torch.where(
+        just_reset, torch.zeros_like(env._arm_above_shoulder_run_len),
+        torch.where(behind, env._arm_above_shoulder_run_len + 1, torch.zeros_like(env._arm_above_shoulder_run_len)),
+    )
+    steady = behind & (env._arm_above_shoulder_run_len > steady_steps)
+
+    return excess * steady.float()
 
 
 def postwaistdofpos(
@@ -2155,8 +2283,13 @@ def penalize_self_collision(env: "ManagerBasedRlEnv") -> torch.Tensor:
 def penalize_wrong_foot_ball_contact(
     env: "ManagerBasedRlEnv",
     ball_name: str,
+    knee_proximity_margin: float = 0.05,
 ) -> torch.Tensor:
-    """Binary penalty when the ball touches the WRONG (non-assigned) foot.
+    """Binary penalty when: the WRONG (trailing) leg touches the ball with
+    ANY part (sole, shin, or knee), OR the CORRECT (leading) leg touches the
+    ball with its KNEE specifically (sole = legitimate save, shin = excluded,
+    see FIX 2026-07-30 below for why). Chin was tried and reverted the same
+    day (see below).
 
     FIX 2026-07-22: user reported (from reviewing checkpoints around
     iteration ~10000 of green_gradpen10_2026-07-21) that the policy learned
@@ -2222,24 +2355,88 @@ def penalize_wrong_foot_ball_contact(
     2-3: right_knee,right_shin -> right leg. Sub-order within each side
     (shin-then-knee vs knee-then-shin) doesn't matter since only the
     left/right split is used.
+
+    FIX 2026-07-30 (user request, revised same day after two follow-ups):
+    widened beyond "wrong SIDE sole only" to also cover:
+    (1) WRONG side: the whole leg now counts, not just the sole -- sole OR
+    shin OR knee on the trailing/non-assigned side all penalized the same as
+    before (the trailing leg touching the ball with ANY body part is bad
+    technique, regardless of which part).
+    (2) CORRECT/leading side: KNEE ONLY (not shin) is also penalized -- the
+    leading foot deflecting the ball with its knee specifically is still bad
+    technique (uncontrolled deflection vs a controlled sole/toe save). The
+    leading side's SHIN is deliberately left unpenalized: a live-checkpoint
+    probe (docs/BugFixes.md) found the leg_ball_contact sensor's "knee/shin"
+    label was misleading in practice -- nearly every real firing was
+    genuinely the SHIN (confirmed via surface-gap math: ~0.001m at the shin,
+    ~0.11m at the knee, i.e. the knee sphere was never actually touching),
+    which fires on essentially every save given the shin's position relative
+    to a rolling ball's height -- an unavoidable-contact problem in the same
+    class as chin (see (3) below), not a useful "bad technique" signal on
+    the leading side specifically.
+    (3) Chin/head contact was tried and reverted (same day): the chin is
+    essentially unavoidable contact given this task's ball trajectories, so
+    penalizing it produces an inescapable penalty rather than a useful
+    signal. `head_ball_contact` stays a viewer-only diagnostic sensor
+    (goalkeeper_env_cfg.py, play.py), not read by this or any other reward.
+    Net effect: penalty fires on (wrong-side sole OR wrong-side shin OR
+    wrong-side knee) OR (leading-side knee only). Same -100 weight except
+    for the leading-knee term (see FIX 2026-07-30 2nd follow-up below).
+
+    leg_ball_contact geom-index order (verified via primary_names): 0=left_shin,
+    1=left_knee, 2=right_knee, 3=right_shin.
+
+    FIX 2026-07-30 (2nd follow-up, user request): the leading-knee check above
+    used the "found" contact flag (`leg_ball_contact`), which requires actual
+    geometric overlap within MuJoCo's contact margin -- user reported this
+    essentially never fires even when the ball visibly passes right by the
+    knee, because contact resolution needs real penetration and the knee
+    sphere (r=0.06m) is small relative to a single physics step's ball
+    displacement at typical approach speeds. Replaced with a direct
+    ball-to-knee distance check instead of the contact sensor: fires whenever
+    the ball's surface comes within `knee_proximity_margin` of the knee
+    sphere's surface, not just literal contact. Knee sphere center = the
+    Shank_Left/Shank_Right body origin (t1_headless.xml: `left/right_knee_
+    collision` has no `pos` offset, so it's exactly at the body origin);
+    radius 0.06m (`_KNEE_GEOM_RADIUS`). Ball radius 0.10m (`_BALL_GEOM_
+    RADIUS`, ball.xml). `knee_proximity_margin` default 0.05m widens the
+    trigger zone 5cm beyond literal contact -- tunable via this function's
+    param (goalkeeper_env_cfg.py). The wrong-side whole-leg check is left on
+    the contact sensor (unchanged) -- only the leading-knee case had a
+    reported under-firing problem.
     """
+    _KNEE_GEOM_RADIUS = 0.06
+    _BALL_GEOM_RADIUS = 0.10
+
     foot_idx = _get_correct_foot_idx(env, ball_name)  # (N,) 0=left, 1=right
+    wrong_foot_idx = 1 - foot_idx
+    env_ar = torch.arange(env.num_envs, device=env.device)
+
     sensor: ContactSensor = env.scene["ball_contact"]
     found = sensor.data.found  # [B, 8]: 0-3=left, 4-7=right
-    left_touch = (found[:, :4] > 0).any(dim=-1)   # (B,)
-    right_touch = (found[:, 4:] > 0).any(dim=-1)  # (B,)
+    left_sole = (found[:, :4] > 0).any(dim=-1)   # (B,)
+    right_sole = (found[:, 4:] > 0).any(dim=-1)  # (B,)
+    sole_touch = torch.stack([left_sole, right_sole], dim=-1)  # (B, 2)
+    wrong_sole_touch = sole_touch[env_ar, wrong_foot_idx]
 
     leg_sensor: ContactSensor = env.scene["leg_ball_contact"]
-    leg_found = leg_sensor.data.found  # [B, 4]: 0-1=left, 2-3=right
-    left_leg_touch = (leg_found[:, :2] > 0).any(dim=-1)
-    right_leg_touch = (leg_found[:, 2:] > 0).any(dim=-1)
+    leg_found = leg_sensor.data.found  # [B, 4]: 0=left_shin,1=left_knee,2=right_knee,3=right_shin
+    left_leg_touch = (leg_found[:, :2] > 0).any(dim=-1)   # left shin OR knee
+    right_leg_touch = (leg_found[:, 2:] > 0).any(dim=-1)  # right knee OR shin
+    leg_touch = torch.stack([left_leg_touch, right_leg_touch], dim=-1)  # (B, 2)
+    wrong_leg_touch = leg_touch[env_ar, wrong_foot_idx]  # wrong side: whole leg
 
-    foot_touch = torch.stack(
-        [left_touch | left_leg_touch, right_touch | right_leg_touch], dim=-1
-    )  # (B, 2)
-    wrong_foot_idx = 1 - foot_idx
-    wrong_foot_touch = foot_touch[torch.arange(env.num_envs, device=env.device), wrong_foot_idx]
-    return wrong_foot_touch.float()
+    ball: Entity = env.scene[ball_name]
+    ball_pos_w = ball.data.root_link_pos_w  # (B, 3)
+    robot: Entity = env.scene["robot"]
+    shank_ids = robot.find_bodies(["Shank_Left", "Shank_Right"])[0]
+    knee_pos_w = robot.data.body_link_pos_w[:, shank_ids, :]  # (B, 2, 3): 0=left,1=right
+    dist_to_knee = (ball_pos_w.unsqueeze(1) - knee_pos_w).norm(dim=-1)  # (B, 2)
+    knee_threshold = _KNEE_GEOM_RADIUS + _BALL_GEOM_RADIUS + knee_proximity_margin
+    knee_near = dist_to_knee < knee_threshold  # (B, 2)
+    leading_knee_touch = knee_near[env_ar, foot_idx]  # correct side: knee proximity only
+
+    return (wrong_sole_touch | wrong_leg_touch | leading_knee_touch).float()
 
 
 def airborne_at_save(

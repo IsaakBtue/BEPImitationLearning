@@ -13,7 +13,7 @@ from .rewards import (
     torques_normalized_l2, torque_limits,
     postupperdofpos, postwaistdofpos, postlegdofpos,
     penalize_sharpcontact, penalize_self_collision, feet_slippage,
-    penalize_wrong_foot_ball_contact,
+    penalize_wrong_foot_ball_contact, penalize_arm_above_shoulder,
     blue_ball_landed, blue_overshoot_penalty, blue_stick_landing, blue_trunk_drive,
 )
 from .commands import GhostMotionCommand, GhostMotionCommandCfg

@@ -45,6 +45,19 @@ _RECOVERY_ARM_CFG = SceneEntityCfg(
         "Right_Shoulder_Pitch", "Right_Shoulder_Roll", "Right_Elbow_Pitch", "Right_Elbow_Yaw",
     ),
 )
+# NEW 2026-07-30 (user request): AL2/AR2 (not AL1/AR1) chosen as "the
+# shoulder" because they carry left/right_shoulder_collision, the same body
+# already used as the shoulder reference elsewhere in this task. NOTE:
+# resolved SceneEntityCfg.body_ids order does NOT match this declared
+# body_names order (verified live -- see penalize_arm_above_shoulder's
+# docstring, rewards.py) -- the reward function resolves each name
+# explicitly via robot.find_bodies(...)'s returned names list rather than
+# assuming a fixed position, so this declaration order is documentation
+# only, not load-bearing.
+_ARM_HEIGHT_CFG = SceneEntityCfg(
+    "robot",
+    body_names=("AL2", "AR2", "left_hand_link", "right_hand_link"),
+)
 _RECOVERY_WAIST_CFG = SceneEntityCfg("robot", joint_names=("Waist",))
 # FIX 2026-07-22: see postlegdofpos's docstring (rewards.py) -- G1 has no
 # leg-recovery reward to port because its legs aren't the catching limb;
@@ -136,9 +149,10 @@ def goalkeeper_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
         # penalize_wrong_foot_ball_contact and its viewer plot too. User
         # observed the wrong-foot plot never reacting and asked whether the
         # ball might actually be hitting the chin instead -- this sensor lets
-        # play.py's viewer confirm/deny that independently. Purely additive
-        # (new sensor, not read by any existing reward), no effect on
-        # feet_contact/ball_contact's shape or on training. See docs/BugFixes.md.
+        # play.py's viewer confirm/deny that independently. Was purely
+        # additive/display-only at introduction; FIX 2026-07-30 wired it into
+        # penalize_wrong_foot_ball_contact (rewards.py) as a real training
+        # penalty. See docs/BugFixes.md.
         ContactSensorCfg(
             name="head_ball_contact",
             primary=ContactMatch(mode="geom", pattern="head_collision", entity="robot"),
@@ -745,6 +759,19 @@ def goalkeeper_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
             func=gk_mdp.postupperdofpos,
             weight=5.0,
             params={"ball_name": BALL_NAME, "asset_cfg": _RECOVERY_ARM_CFG},
+        ),
+        # NEW 2026-07-30 (user request): supplementary to postupperdofpos --
+        # specifically targets "hand above its own shoulder" rather than the
+        # aggregate 8-joint pose error. Gated to the STEADY post-save window
+        # only (see penalize_arm_above_shoulder's docstring, rewards.py) so
+        # it can't fight legitimate dive/balance-recovery arm motion, the
+        # exact failure mode that got arm_torque_limits/arm_action_rate_l2/
+        # arm_action_acc_l2 reverted 2026-07-29. Weight modest/supplementary,
+        # not the -100 "bad technique" tier. See docs/BugFixes.md.
+        "penalize_arm_above_shoulder": RewardTermCfg(
+            func=gk_mdp.penalize_arm_above_shoulder,
+            weight=-2.0,
+            params={"ball_name": BALL_NAME, "asset_cfg": _ARM_HEIGHT_CFG},
         ),
         # FIX 2026-07-27: 1.0 -> 3.0. User reported the waist visibly
         # rotating post-save; training logs confirmed this reward stuck
