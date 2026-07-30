@@ -1,28 +1,29 @@
 cd /home/isaak/BEPImitationlearning/interceptV2DualDis
 
-# DRAFTS -- 50% swing-leg hip/knee damping toward T1 standing neutral, FK-refit,
-# re-leveled. NOT yet written into the repo files. Original vs corrected, all 6.
+# Original (true, never-edited mocap) vs NEW (0.8 hip/knee damping + flat-foot
+# ankle correction, tilt restored to ~0.000 on every frame). Original preserved
+# at scratchpad/originals/ since motions/data/ itself was overwritten.
 
 # --- LEFT short ---
+uv run sgk_play Mjlab-BeyondAMP-Goalkeeper-T1-MultiDisc-WithOverlay --agent zero --no-terminations True --motion-file /tmp/claude-1000/-home-isaak-BEPImitationlearning/6a208429-b5f5-4b18-bb14-9ccbb6661ab3/scratchpad/originals/new_doublestepleft_short_booster_t1.npz
 uv run sgk_play Mjlab-BeyondAMP-Goalkeeper-T1-MultiDisc-WithOverlay --agent zero --no-terminations True --motion-file src/simple_goalkeeper/motions/data/new_doublestepleft_short_booster_t1.npz
-uv run sgk_play Mjlab-BeyondAMP-Goalkeeper-T1-MultiDisc-WithOverlay --agent zero --no-terminations True --motion-file /tmp/claude-1000/-home-isaak-BEPImitationlearning/6a208429-b5f5-4b18-bb14-9ccbb6661ab3/scratchpad/new_doublestepleft_short_booster_t1_CORRECTED.npz
 
 # --- LEFT base ---
+uv run sgk_play Mjlab-BeyondAMP-Goalkeeper-T1-MultiDisc-WithOverlay --agent zero --no-terminations True --motion-file /tmp/claude-1000/-home-isaak-BEPImitationlearning/6a208429-b5f5-4b18-bb14-9ccbb6661ab3/scratchpad/originals/new_doublestepleft_booster_t1.npz
 uv run sgk_play Mjlab-BeyondAMP-Goalkeeper-T1-MultiDisc-WithOverlay --agent zero --no-terminations True --motion-file src/simple_goalkeeper/motions/data/new_doublestepleft_booster_t1.npz
-uv run sgk_play Mjlab-BeyondAMP-Goalkeeper-T1-MultiDisc-WithOverlay --agent zero --no-terminations True --motion-file /tmp/claude-1000/-home-isaak-BEPImitationlearning/6a208429-b5f5-4b18-bb14-9ccbb6661ab3/scratchpad/new_doublestepleft_booster_t1_CORRECTED.npz
 
 # --- LEFT wide ---
+uv run sgk_play Mjlab-BeyondAMP-Goalkeeper-T1-MultiDisc-WithOverlay --agent zero --no-terminations True --motion-file /tmp/claude-1000/-home-isaak-BEPImitationlearning/6a208429-b5f5-4b18-bb14-9ccbb6661ab3/scratchpad/originals/new_doublestepleft_wide_booster_t1.npz
 uv run sgk_play Mjlab-BeyondAMP-Goalkeeper-T1-MultiDisc-WithOverlay --agent zero --no-terminations True --motion-file src/simple_goalkeeper/motions/data/new_doublestepleft_wide_booster_t1.npz
-uv run sgk_play Mjlab-BeyondAMP-Goalkeeper-T1-MultiDisc-WithOverlay --agent zero --no-terminations True --motion-file /tmp/claude-1000/-home-isaak-BEPImitationlearning/6a208429-b5f5-4b18-bb14-9ccbb6661ab3/scratchpad/new_doublestepleft_wide_booster_t1_CORRECTED.npz
 
 # --- RIGHT short ---
+uv run sgk_play Mjlab-BeyondAMP-Goalkeeper-T1-MultiDisc-WithOverlay --agent zero --no-terminations True --motion-file /tmp/claude-1000/-home-isaak-BEPImitationlearning/6a208429-b5f5-4b18-bb14-9ccbb6661ab3/scratchpad/originals/new_doublestepright_short_booster_t1.npz
 uv run sgk_play Mjlab-BeyondAMP-Goalkeeper-T1-MultiDisc-WithOverlay --agent zero --no-terminations True --motion-file src/simple_goalkeeper/motions/data/new_doublestepright_short_booster_t1.npz
-uv run sgk_play Mjlab-BeyondAMP-Goalkeeper-T1-MultiDisc-WithOverlay --agent zero --no-terminations True --motion-file /tmp/claude-1000/-home-isaak-BEPImitationlearning/6a208429-b5f5-4b18-bb14-9ccbb6661ab3/scratchpad/new_doublestepright_short_booster_t1_CORRECTED.npz
 
 # --- RIGHT base ---
+uv run sgk_play Mjlab-BeyondAMP-Goalkeeper-T1-MultiDisc-WithOverlay --agent zero --no-terminations True --motion-file /tmp/claude-1000/-home-isaak-BEPImitationlearning/6a208429-b5f5-4b18-bb14-9ccbb6661ab3/scratchpad/originals/new_doublestepright_booster_t1.npz
 uv run sgk_play Mjlab-BeyondAMP-Goalkeeper-T1-MultiDisc-WithOverlay --agent zero --no-terminations True --motion-file src/simple_goalkeeper/motions/data/new_doublestepright_booster_t1.npz
-uv run sgk_play Mjlab-BeyondAMP-Goalkeeper-T1-MultiDisc-WithOverlay --agent zero --no-terminations True --motion-file /tmp/claude-1000/-home-isaak-BEPImitationlearning/6a208429-b5f5-4b18-bb14-9ccbb6661ab3/scratchpad/new_doublestepright_booster_t1_CORRECTED.npz
 
 # --- RIGHT wide ---
+uv run sgk_play Mjlab-BeyondAMP-Goalkeeper-T1-MultiDisc-WithOverlay --agent zero --no-terminations True --motion-file /tmp/claude-1000/-home-isaak-BEPImitationlearning/6a208429-b5f5-4b18-bb14-9ccbb6661ab3/scratchpad/originals/new_doublestepright_wide_booster_t1.npz
 uv run sgk_play Mjlab-BeyondAMP-Goalkeeper-T1-MultiDisc-WithOverlay --agent zero --no-terminations True --motion-file src/simple_goalkeeper/motions/data/new_doublestepright_wide_booster_t1.npz
-uv run sgk_play Mjlab-BeyondAMP-Goalkeeper-T1-MultiDisc-WithOverlay --agent zero --no-terminations True --motion-file /tmp/claude-1000/-home-isaak-BEPImitationlearning/6a208429-b5f5-4b18-bb14-9ccbb6661ab3/scratchpad/new_doublestepright_wide_booster_t1_CORRECTED.npz
