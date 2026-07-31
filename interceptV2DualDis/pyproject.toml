@@ -44,6 +44,7 @@ sgk_export          = "simple_goalkeeper.scripts.export_onnx:main"
 sgk_view            = "simple_goalkeeper.scripts.view_motion:main"
 sgk_play_rsi        = "simple_goalkeeper.scripts.play_rsi_doublestep:run"
 sgk_mirror          = "simple_goalkeeper.scripts.mirror_motion:cli"
+sgk_amp_eye_view    = "simple_goalkeeper.scripts.amp_eye_view:cli"
 
 [build-system]
 requires = ["setuptools>=61"]

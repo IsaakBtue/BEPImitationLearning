@@ -21,6 +21,14 @@ Usage:
     uv run sgk_play Mjlab-BeyondAMP-Goalkeeper-T1-WithOverlay \\
         --agent zero --no-terminations True
 
+    # Same, but rendered as AMP's discriminator actually perceives it
+    # (re-anchored to whichever foot is planted each frame, root orientation
+    # cancelled out -- reveals whether an edit to a reference clip is real
+    # training signal or purely a root-orientation visual):
+    uv run sgk_play Mjlab-BeyondAMP-Goalkeeper-T1-WithOverlay \\
+        --agent zero --no-terminations True --amp-eye-view True \\
+        --motion-file src/simple_goalkeeper/motions/data/<clip>.npz
+
     # Multi-disc (intercept) checkpoint, with ghost overlay cycling through
     # this task's own 4-motion AMP dataset (REGION_MOTION_FILES):
     uv run sgk_play Mjlab-BeyondAMP-Goalkeeper-T1-MultiDisc-WithOverlay \\
@@ -60,6 +68,22 @@ class PlayConfig:
     checkpoint_file: str | None = None
     motion_file: str | None = None
     """Optional NPZ motion file for the WithOverlay task (overrides default)."""
+    amp_eye_view: bool = False
+    """When set with --motion-file: re-anchor the ghost, every frame, to
+    whichever foot is currently planted (canonical: flat, fixed position)
+    before rendering, instead of the file's own root frame. This cancels out
+    root orientation entirely (a rigid re-expression relative to a body
+    already known to be flat/grounded), so what's left is driven purely by
+    relative joint angles -- exactly what AMP's discriminator perceives
+    (joint_pos/joint_vel only; it never observes root orientation). Without
+    this flag, the ghost faithfully replays the file's real root+joint data,
+    which is correct for judging what a clip LOOKS like but is easy to
+    mistake for what AMP is actually trained on whenever the clip's root
+    orientation itself carries information (see docs/BugFixes.md,
+    2026-08-01, and the Visualization Honesty Rule in CLAUDE.md). Expect a
+    visible jump in the render each time stance switches feet -- that's
+    expected, not a bug. Never use the derived file this produces as
+    training data -- see scripts/amp_eye_view.py's module docstring."""
     num_envs: int | None = None
     device: str | None = None
     no_terminations: bool = False
@@ -757,7 +781,22 @@ def run_play(task_id: str, cfg: PlayConfig) -> None:
         motion_path = Path(cfg.motion_file)
         if not motion_path.exists():
             raise FileNotFoundError(f"Motion file not found: {motion_path}")
-        print(f"[INFO]: Using motion file: {motion_path.name}")
+
+        if cfg.amp_eye_view:
+            from simple_goalkeeper.scripts.amp_eye_view import make_amp_eye_view
+            import tempfile
+            eye_path = Path(tempfile.gettempdir()) / f"amp_eye_view_{motion_path.stem}.npz"
+            make_amp_eye_view(motion_path, eye_path)
+            print(
+                f"[AMP-EYE-VIEW]: {motion_path.name} re-anchored to the currently-planted "
+                f"foot each frame (root transform cancelled out) -> {eye_path.name}. This is "
+                f"what the AMP discriminator actually observes (joint_pos/joint_vel only, no "
+                f"root term) -- NOT a training-data file, diagnostic rendering only. Expect a "
+                f"visible jump each time stance switches feet."
+            )
+            motion_path = eye_path
+        else:
+            print(f"[INFO]: Using motion file: {motion_path.name}")
         env_cfg.commands["motion_ghost"] = GhostMotionCommandCfg(
             motion_file=str(motion_path),
             anchor_body_name="Trunk",

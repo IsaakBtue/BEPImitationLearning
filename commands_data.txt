@@ -1,0 +1,77 @@
+cd /home/isaak/BEPImitationlearning/interceptV2DualDis
+
+# Far-region AMP reference clips: comparing current committed data (root-tilt
+# +8deg only, already pushed) against a draft adding +5deg extra forward
+# Hip_Pitch on the swing leg (Option 1 -- joint-space, so THIS part actually
+# reaches AMP; the root tilt alone does not -- see docs/BugFixes.md 2026-08-01).
+# Draft only -- nothing below is written to motions/data/ yet.
+#
+# Each clip has 4 commands:
+#   1. REAL view, BEFORE  -- full root+joint, current committed file, what a human sees
+#   2. REAL view, AFTER   -- same, but with the draft hip-flex edit added
+#   3. AMP-EYE view, BEFORE -- re-anchored to whichever foot is planted each
+#      frame (root cancelled out) -- what AMP's discriminator actually
+#      perceives for the CURRENT committed file. Feet stay flat by
+#      construction; expect a jump each time stance switches feet.
+#   4. AMP-EYE view, AFTER  -- same lens, applied to the hip-flex draft --
+#      this is where the edit's real (AMP-visible) effect should show up.
+
+# ============================== LEFT short ==============================
+# 1. REAL / BEFORE
+uv run sgk_play Mjlab-BeyondAMP-Goalkeeper-T1-MultiDisc-WithOverlay --agent zero --no-terminations True --motion-file src/simple_goalkeeper/motions/data/new_doublestepleft_short_booster_t1.npz
+# 2. REAL / AFTER
+uv run sgk_play Mjlab-BeyondAMP-Goalkeeper-T1-MultiDisc-WithOverlay --agent zero --no-terminations True --motion-file /tmp/claude-1000/-home-isaak-BEPImitationlearning-interceptV2DualDis/9bf3bbf2-ce07-4ad9-bbcd-b46cb44e124f/scratchpad/hip_flex_drafts/new_doublestepleft_short_booster_t1.npz
+# 3. AMP-EYE / BEFORE
+uv run sgk_play Mjlab-BeyondAMP-Goalkeeper-T1-MultiDisc-WithOverlay --agent zero --no-terminations True --motion-file /tmp/claude-1000/-home-isaak-BEPImitationlearning-interceptV2DualDis/9bf3bbf2-ce07-4ad9-bbcd-b46cb44e124f/scratchpad/amp_eye_before/new_doublestepleft_short_booster_t1.npz
+# 4. AMP-EYE / AFTER
+uv run sgk_play Mjlab-BeyondAMP-Goalkeeper-T1-MultiDisc-WithOverlay --agent zero --no-terminations True --motion-file /tmp/claude-1000/-home-isaak-BEPImitationlearning-interceptV2DualDis/9bf3bbf2-ce07-4ad9-bbcd-b46cb44e124f/scratchpad/amp_eye_after/new_doublestepleft_short_booster_t1.npz
+
+# ============================== LEFT base ==============================
+# 1. REAL / BEFORE
+uv run sgk_play Mjlab-BeyondAMP-Goalkeeper-T1-MultiDisc-WithOverlay --agent zero --no-terminations True --motion-file src/simple_goalkeeper/motions/data/new_doublestepleft_booster_t1.npz
+# 2. REAL / AFTER
+uv run sgk_play Mjlab-BeyondAMP-Goalkeeper-T1-MultiDisc-WithOverlay --agent zero --no-terminations True --motion-file /tmp/claude-1000/-home-isaak-BEPImitationlearning-interceptV2DualDis/9bf3bbf2-ce07-4ad9-bbcd-b46cb44e124f/scratchpad/hip_flex_drafts/new_doublestepleft_booster_t1.npz
+# 3. AMP-EYE / BEFORE
+uv run sgk_play Mjlab-BeyondAMP-Goalkeeper-T1-MultiDisc-WithOverlay --agent zero --no-terminations True --motion-file /tmp/claude-1000/-home-isaak-BEPImitationlearning-interceptV2DualDis/9bf3bbf2-ce07-4ad9-bbcd-b46cb44e124f/scratchpad/amp_eye_before/new_doublestepleft_booster_t1.npz
+# 4. AMP-EYE / AFTER
+uv run sgk_play Mjlab-BeyondAMP-Goalkeeper-T1-MultiDisc-WithOverlay --agent zero --no-terminations True --motion-file /tmp/claude-1000/-home-isaak-BEPImitationlearning-interceptV2DualDis/9bf3bbf2-ce07-4ad9-bbcd-b46cb44e124f/scratchpad/amp_eye_after/new_doublestepleft_booster_t1.npz
+
+# ============================== LEFT wide ==============================
+# 1. REAL / BEFORE
+uv run sgk_play Mjlab-BeyondAMP-Goalkeeper-T1-MultiDisc-WithOverlay --agent zero --no-terminations True --motion-file src/simple_goalkeeper/motions/data/new_doublestepleft_wide_booster_t1.npz
+# 2. REAL / AFTER
+uv run sgk_play Mjlab-BeyondAMP-Goalkeeper-T1-MultiDisc-WithOverlay --agent zero --no-terminations True --motion-file /tmp/claude-1000/-home-isaak-BEPImitationlearning-interceptV2DualDis/9bf3bbf2-ce07-4ad9-bbcd-b46cb44e124f/scratchpad/hip_flex_drafts/new_doublestepleft_wide_booster_t1.npz
+# 3. AMP-EYE / BEFORE
+uv run sgk_play Mjlab-BeyondAMP-Goalkeeper-T1-MultiDisc-WithOverlay --agent zero --no-terminations True --motion-file /tmp/claude-1000/-home-isaak-BEPImitationlearning-interceptV2DualDis/9bf3bbf2-ce07-4ad9-bbcd-b46cb44e124f/scratchpad/amp_eye_before/new_doublestepleft_wide_booster_t1.npz
+# 4. AMP-EYE / AFTER
+uv run sgk_play Mjlab-BeyondAMP-Goalkeeper-T1-MultiDisc-WithOverlay --agent zero --no-terminations True --motion-file /tmp/claude-1000/-home-isaak-BEPImitationlearning-interceptV2DualDis/9bf3bbf2-ce07-4ad9-bbcd-b46cb44e124f/scratchpad/amp_eye_after/new_doublestepleft_wide_booster_t1.npz
+
+# ============================== RIGHT short ==============================
+# 1. REAL / BEFORE
+uv run sgk_play Mjlab-BeyondAMP-Goalkeeper-T1-MultiDisc-WithOverlay --agent zero --no-terminations True --motion-file src/simple_goalkeeper/motions/data/new_doublestepright_short_booster_t1.npz
+# 2. REAL / AFTER
+uv run sgk_play Mjlab-BeyondAMP-Goalkeeper-T1-MultiDisc-WithOverlay --agent zero --no-terminations True --motion-file /tmp/claude-1000/-home-isaak-BEPImitationlearning-interceptV2DualDis/9bf3bbf2-ce07-4ad9-bbcd-b46cb44e124f/scratchpad/hip_flex_drafts/new_doublestepright_short_booster_t1.npz
+# 3. AMP-EYE / BEFORE
+uv run sgk_play Mjlab-BeyondAMP-Goalkeeper-T1-MultiDisc-WithOverlay --agent zero --no-terminations True --motion-file /tmp/claude-1000/-home-isaak-BEPImitationlearning-interceptV2DualDis/9bf3bbf2-ce07-4ad9-bbcd-b46cb44e124f/scratchpad/amp_eye_before/new_doublestepright_short_booster_t1.npz
+# 4. AMP-EYE / AFTER
+uv run sgk_play Mjlab-BeyondAMP-Goalkeeper-T1-MultiDisc-WithOverlay --agent zero --no-terminations True --motion-file /tmp/claude-1000/-home-isaak-BEPImitationlearning-interceptV2DualDis/9bf3bbf2-ce07-4ad9-bbcd-b46cb44e124f/scratchpad/amp_eye_after/new_doublestepright_short_booster_t1.npz
+
+# ============================== RIGHT base ==============================
+# 1. REAL / BEFORE
+uv run sgk_play Mjlab-BeyondAMP-Goalkeeper-T1-MultiDisc-WithOverlay --agent zero --no-terminations True --motion-file src/simple_goalkeeper/motions/data/new_doublestepright_booster_t1.npz
+# 2. REAL / AFTER
+uv run sgk_play Mjlab-BeyondAMP-Goalkeeper-T1-MultiDisc-WithOverlay --agent zero --no-terminations True --motion-file /tmp/claude-1000/-home-isaak-BEPImitationlearning-interceptV2DualDis/9bf3bbf2-ce07-4ad9-bbcd-b46cb44e124f/scratchpad/hip_flex_drafts/new_doublestepright_booster_t1.npz
+# 3. AMP-EYE / BEFORE
+uv run sgk_play Mjlab-BeyondAMP-Goalkeeper-T1-MultiDisc-WithOverlay --agent zero --no-terminations True --motion-file /tmp/claude-1000/-home-isaak-BEPImitationlearning-interceptV2DualDis/9bf3bbf2-ce07-4ad9-bbcd-b46cb44e124f/scratchpad/amp_eye_before/new_doublestepright_booster_t1.npz
+# 4. AMP-EYE / AFTER
+uv run sgk_play Mjlab-BeyondAMP-Goalkeeper-T1-MultiDisc-WithOverlay --agent zero --no-terminations True --motion-file /tmp/claude-1000/-home-isaak-BEPImitationlearning-interceptV2DualDis/9bf3bbf2-ce07-4ad9-bbcd-b46cb44e124f/scratchpad/amp_eye_after/new_doublestepright_booster_t1.npz
+
+# ============================== RIGHT wide ==============================
+# 1. REAL / BEFORE
+uv run sgk_play Mjlab-BeyondAMP-Goalkeeper-T1-MultiDisc-WithOverlay --agent zero --no-terminations True --motion-file src/simple_goalkeeper/motions/data/new_doublestepright_wide_booster_t1.npz
+# 2. REAL / AFTER
+uv run sgk_play Mjlab-BeyondAMP-Goalkeeper-T1-MultiDisc-WithOverlay --agent zero --no-terminations True --motion-file /tmp/claude-1000/-home-isaak-BEPImitationlearning-interceptV2DualDis/9bf3bbf2-ce07-4ad9-bbcd-b46cb44e124f/scratchpad/hip_flex_drafts/new_doublestepright_wide_booster_t1.npz
+# 3. AMP-EYE / BEFORE
+uv run sgk_play Mjlab-BeyondAMP-Goalkeeper-T1-MultiDisc-WithOverlay --agent zero --no-terminations True --motion-file /tmp/claude-1000/-home-isaak-BEPImitationlearning-interceptV2DualDis/9bf3bbf2-ce07-4ad9-bbcd-b46cb44e124f/scratchpad/amp_eye_before/new_doublestepright_wide_booster_t1.npz
+# 4. AMP-EYE / AFTER
+uv run sgk_play Mjlab-BeyondAMP-Goalkeeper-T1-MultiDisc-WithOverlay --agent zero --no-terminations True --motion-file /tmp/claude-1000/-home-isaak-BEPImitationlearning-interceptV2DualDis/9bf3bbf2-ce07-4ad9-bbcd-b46cb44e124f/scratchpad/amp_eye_after/new_doublestepright_wide_booster_t1.npz
