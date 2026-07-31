@@ -150,3 +150,24 @@ value (`exp(-0.15*0.155)=0.977`).
 - `postlegdofpos`/`postwaistdofpos` were NOT touched and use the same
   `exp(-k*err)` shape — worth the same near/far probe if far-region leg or
   waist recovery also looks off, since they likely share this failure mode.
+
+## 2026-08-01 -- far-region AMP clips got +8deg forward torso tilt (pulled); postupperdofpos during_scale 0.8->1.0 (no more pre-/post-save distinction)
+
+The pulled clip edit is display/data-quality only — root orientation in
+these NPZ files isn't read by `reset_from_motion_data` or the AMP
+observation (joint_pos/joint_vel only), so it should have **zero direct
+effect** on trained-policy behavior. If a later run's fall-back tendency
+actually improves, that's not from this pull; look elsewhere (reward
+shaping, RSI, curriculum).
+
+`postupperdofpos`'s `during_scale` is now 1.0 — full strength the entire
+episode, pre- and post-save alike, no discount during the approach/dive.
+This is the fourth retune of this parameter (0.3→0.5→0.8→1.0). **The
+specific risk to watch**: `during_scale` existed below 1.0 in the first
+place because pulling the arms toward a static target pose *during* an
+active dive can fight the counterbalance motion a real save needs — the
+exact mechanism that got `arm_torque_limits`/`arm_action_rate_l2`/
+`arm_action_acc_l2` reverted on 2026-07-29. Watch `footreach`/`ball_exit`/
+`Train/mean_episode_length` on the next run for the same regression
+signature seen back then; if they drop, `during_scale=1.0` is too strong
+and needs to come back down.

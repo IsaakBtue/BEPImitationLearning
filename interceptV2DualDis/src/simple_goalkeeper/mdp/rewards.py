@@ -1881,12 +1881,15 @@ def postupperdofpos(
     env: "ManagerBasedRlEnv",
     ball_name: str,
     asset_cfg: SceneEntityCfg = _ARM_JOINT_CFG,
-    during_scale: float = 0.8,
+    during_scale: float = 1.0,
     kernel_scale: float = 0.15,
 ) -> torch.Tensor:
-    """Reward arm joints returning to default pose. Always active, weaker pre-save.
+    """Reward arm joints returning to default pose. Always active, same strength throughout.
 
     exp(-kernel_scale * sum_sq_err) x (1.0 if behind else during_scale) -- bounded [0, 1].
+    With during_scale=1.0 (current default), the `behind` branch is a no-op --
+    this term now pulls toward the target pose at full, constant strength for
+    the entire episode, pre- and post-save alike.
 
     FIX 2026-07-28 (user request, simplification): was `x behind.float()`
     (zero during the approach). User reported arm_torque_limits/
@@ -1984,6 +1987,18 @@ def postupperdofpos(
     `.claude/skills/debugging-mujoco-contact-sensors/probe_template.py`'s
     "load real checkpoint, measure real state" pattern) against this same
     checkpoint lineage once retrained. See docs/BugFixes.md.
+
+    FIX 2026-08-01: `during_scale` 0.8 -> 1.0 (user request) -- explicitly
+    to remove the pre-/post-save distinction entirely, so this term pulls
+    toward the target pose at the SAME strength for the whole episode,
+    not just during the recovery window. This makes the `torch.where(behind,
+    1.0, during_scale)` branch a literal no-op (both branches now evaluate
+    to 1.0) -- kept as a parameter rather than hardcoded, since during_scale
+    has been retuned three times already (0.3->0.5->0.8->1.0) and may be
+    lowered again if this reintroduces the original 2026-07-28 regression
+    (arms fighting legitimate dive/counterbalance motion, which is why
+    during_scale existed below full strength in the first place). Not yet
+    validated against a live training run.
 
     FIX 2026-07-23: weight raised 1.0 -> 5.0 (deliberate G1 divergence, not
     a parity fix -- G1 also uses 1.0, g1_29_config.py:317). User reported

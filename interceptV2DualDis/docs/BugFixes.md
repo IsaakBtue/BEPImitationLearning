@@ -1855,3 +1855,13 @@ No weight change (-100, unchanged) -- this is a scope widening of an existing SG
 **Verification:** no NaNs in `joint_pos`/`body_pos_w` for any of the 6 files; foot-contact-Z minimum restored to exactly 0.0300 m after re-leveling on all 6; previewed via the real mjlab viewer (`-WithOverlay --agent zero --no-terminations True`, before vs. after paths) before overwriting `motions/data/` -- user confirmed the result looked right. Not yet validated against a live training run (expected: no training-time effect at all, per the caveat above, since this data path isn't read by `reset_from_motion_data` or the AMP observation).
 
 ---
+
+## 2026-08-01 (same day, follow-up) -- postupperdofpos's during_scale raised 0.8 -> 1.0, removing the pre-/post-save distinction entirely
+
+**Context:** user asked to raise `postupperdofpos`'s pre-save multiplier so it has the "same weight as before and after saving the ball" -- i.e. remove the `during_scale` discount pre-save entirely, not just narrow it further.
+
+**Fix:** `during_scale` default changed `0.8 -> 1.0` (`rewards.py:postupperdofpos`). At 1.0, `torch.where(behind, 1.0, during_scale)` evaluates to `1.0` on both branches -- a literal no-op, so the term now pulls toward the target arm pose at constant, full strength for the entire episode, not just a reduced pull pre-save. Kept as a parameter (not hardcoded/removed) since this value has now been retuned four times (`0.3 -> 0.5 -> 0.8 -> 1.0`) and the original reason `during_scale` existed below 1.0 at all -- avoiding a fight with legitimate dive/counterbalance arm motion, the exact regression that got `arm_torque_limits`/`arm_action_rate_l2`/`arm_action_acc_l2` reverted on 2026-07-29 -- is a real, documented risk if this proves too strong once retrained.
+
+**Verification:** updated `tests/simple_goalkeeper/test_post_save_stance.py::test_gated_off_when_ball_not_behind` (hardcoded the old `during_scale=0.8` expected value at the target pose; changed to `1.0` -- the test now correctly shows no distinction between the `behind`/`not behind` cases, which is the intended effect of this fix, not a loss of coverage). `uv run pytest tests/simple_goalkeeper/ -q` -- 72/72 pass. Live smoke test: real `ManagerBasedRlEnv` construction, reset + 50 zero-action steps, finite rewards. Not yet validated against a live training run -- watch whether this reintroduces the 2026-07-28 "arms fighting dive motion" regression (footreach/ball_exit/episode-length dropping), since that's the specific risk of removing the pre-save discount entirely.
+
+---
