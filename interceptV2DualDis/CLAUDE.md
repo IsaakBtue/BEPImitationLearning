@@ -290,6 +290,16 @@ uv run sgk_play Mjlab-BeyondAMP-Goalkeeper-T1-MultiDisc --agent zero --num-envs 
 uv run sgk_play Mjlab-BeyondAMP-Goalkeeper-T1-MultiDisc --checkpoint-file logs/rsl_rl/intercept_simple_goalkeeper_multidisc/<run>/model_500.pt
 ```
 
+## Exporting a Checkpoint to ONNX for Deployment
+
+**Observation scaling (`base_ang_vel*0.25`, `joint_vel*0.05`, etc.) is already automatic during training** — it's baked unconditionally into `goalkeeper_env_cfg()`, the single config function both `train.py` and `play.py` call, since `e930b425da` (2026-07-22). Nothing about training needs to change for this, and no run needs to be restarted on account of it. The part that is **not** automatic is producing a deployable artifact that carries the same scaling — that's a manual step, run it every time a checkpoint is handed off for deployment:
+
+```bash
+uv run sgk_export <checkpoint.pt> [--output path.onnx] [--device cpu]
+```
+
+This always derives the per-term scale live from the checkpoint's own env config and bakes it into the ONNX graph as its first op — the exported graph accepts **raw, unscaled** sensor values, so a deploy consumer never needs to independently track or hardcode the training-side scale convention. Do not hand-write an export or a deploy-side observation-scaling step instead — a prior hand-export (`model_18500`) skipped this and shipped a checkpoint that received `joint_vel` ~20x its trained-on magnitude, most visible during fast motions like a swing-leg lift. Applying the exact scale a policy was trained on at inference time is standard practice for any deployed learned-control policy (the RL equivalent of feature normalization in classical ML) — it introduces no sim-to-real gap by itself; the only real risk is inconsistency between train-time and deploy-time scaling, which baking the scale into the export eliminates by construction. Full mechanism, HIM-architecture handling, and how to verify an export without the training stack: `.claude/skills/exporting-him-checkpoints-to-onnx/SKILL.md`.
+
 ## Training Run Monitoring
 
 **After launching any training run, ask the user: "Do you want scheduled monitoring?"** Don't set it up unasked, and don't re-explain this workflow each time — just do it once they say yes.
