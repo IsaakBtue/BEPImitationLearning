@@ -633,6 +633,16 @@ def goalkeeper_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
             weight=2.0,
             params={"ball_name": BALL_NAME, "asset_cfg": _FEET_CFG},
         ),
+        # NEW 2026-08-01 (user request): flat, time-boxed bonus (~0.2s) for
+        # the assigned foot staying airborne right after the save, so
+        # postleadfootorientation actually has hangtime to work with instead
+        # of relying on whatever the dive physics happens to leave it. See
+        # rewards.py:postsave_foot_airtime docstring.
+        "postsave_foot_airtime": RewardTermCfg(
+            func=gk_mdp.postsave_foot_airtime,
+            weight=1.0,
+            params={"ball_name": BALL_NAME, "asset_cfg": _FEET_CFG},
+        ),
         # NEW 2026-07-28 (user request): whole-body yaw heading recovery --
         # user observed the robot's hips/whole body drifting into a
         # left/right yaw post-save, not just a foot. postorientation (below)
@@ -1055,7 +1065,7 @@ def goalkeeper_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
             "ball_name":      BALL_NAME,
             "dist_range":     (1.5, 3.5),
             "y_start_range":  (-0.3, 0.3),
-            "y_end_range":    (-1.3, 1.3),
+            "y_end_range":    (-1.1, 1.1),
             "t_flight_range": (0.7, 1.1),
             "spawn_z":        0.12,
         },
@@ -1144,7 +1154,7 @@ def goalkeeper_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
                 "ball_name":     BALL_NAME,
                 "dist_range":    (1.5, 3.5),
                 "y_start_range": (-0.3, 0.3),
-                "y_end_range":   (-1.3, 1.3),
+                "y_end_range":   (-1.1, 1.1),
                 "t_flight_range": (0.7, 1.1),
                 "spawn_z":       0.12,
             },

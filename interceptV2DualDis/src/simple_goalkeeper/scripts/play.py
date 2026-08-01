@@ -399,8 +399,8 @@ def _patch_viewer_intercept_vis(native_viewer: "NativeMujocoViewer", env) -> Non
 
     Two-stage wide-crossing visualization (v2 reimplementation, 2026-07-23, of
     the blue-ball-waypoint branch's mechanism -- see rewards.py's
-    _get_reach_target_y). When |crossing_y - start_y| > wide_threshold (0.65
-    as of the 2026-07-23 widening -- kept symbolic here rather than
+    _get_reach_target_y). When |crossing_y - start_y| > wide_threshold (0.5
+    as of the 2026-08-01 revert -- kept symbolic here rather than
     hardcoded so this comment can't drift out of sync with rewards.py's
     actual default again) or the region is a far region, and the assigned
     foot has not yet landed at the midpoint,
@@ -681,6 +681,95 @@ def _patch_viewer_wrong_foot_contact_plot(native_viewer: "NativeMujocoViewer", e
     native_viewer._update_reward_figures = _patched_update_reward_figures
 
 
+_FOOT_TARGET_ANGLE_DEG = 60.0
+"""Must match rewards.py's _FOOT_TARGET_ANGLE_DEG (leading-foot block-posture
+target, 2026-08-01). Kept as a separate literal here (viewer-only display,
+no runtime dependency on rewards.py's private constant) purely for the plot
+title -- verify against rewards.py if that constant ever changes."""
+
+_FOOT_TARGET_TOLERANCE_DEG = 45.57
+"""degrees(acos(0.7)) -- inner_face_orientation_save/foot_inner_face_continuous's
+alignment_threshold=0.7 expressed as an angular tolerance around the target,
+for the plot title. Not itself read by any reward function."""
+
+
+def _compute_assigned_foot_angle_deg(env, env_idx: int) -> float:
+    """Assigned/leading foot's long-axis angle off robot-forward, in degrees,
+    for the single env at env_idx.
+
+    NEW 2026-08-01 (user request): visual verification for the
+    inner_face_orientation_save/foot_inner_face_continuous retarget (was 90
+    deg/parallel-to-Y, now _FOOT_TARGET_ANGLE_DEG deg off forward) -- lets a
+    human watching sgk_play confirm the foot is actually settling near the
+    new target instead of trusting the reward-curve shape alone. Reuses the
+    exact foot_inner_face_continuous geometry (rewards.py) so the plotted
+    number matches what the reward itself sees, not a fresh reimplementation.
+    Unsigned (0-180 deg): the assigned foot is always evaluated against its
+    own side's target, so magnitude alone is meaningful here.
+    """
+    raw_env = env.unwrapped if hasattr(env, "unwrapped") else env
+    from mjlab.utils.lab_api.math import quat_apply
+    from simple_goalkeeper.mdp.rewards import _get_correct_foot_idx
+
+    robot = raw_env.scene["robot"]
+    foot_ids = robot.find_bodies(["left_foot_link", "right_foot_link"])[0]
+    foot_quat_w = robot.data.body_link_quat_w[:, foot_ids, :]  # (N, 2, 4)
+
+    foot_idx = _get_correct_foot_idx(raw_env, "ball")  # (N,) 0=left, 1=right
+
+    foot_long_local = torch.zeros(raw_env.num_envs, 3, device=raw_env.device)
+    foot_long_local[:, 0] = 1.0
+    left_long_w  = quat_apply(foot_quat_w[:, 0, :], foot_long_local)
+    right_long_w = quat_apply(foot_quat_w[:, 1, :], foot_long_local)
+    foot_long_w  = torch.where((foot_idx == 0)[:, None], left_long_w, right_long_w)  # (N, 3)
+
+    forward_local = torch.zeros(raw_env.num_envs, 3, device=raw_env.device)
+    forward_local[:, 0] = 1.0
+    forward_w = quat_apply(robot.data.root_link_quat_w, forward_local)  # (N, 3)
+
+    cos_angle = (foot_long_w * forward_w).sum(dim=-1).clamp(-1.0, 1.0)  # (N,)
+    angle_deg = torch.rad2deg(torch.acos(cos_angle))  # (N,) in [0, 180]
+
+    return float(angle_deg[env_idx].item())
+
+
+def _patch_viewer_foot_orientation_plot(native_viewer: "NativeMujocoViewer", env) -> None:
+    """Add an "assigned_foot_angle_deg" P-panel plot (see
+    _compute_assigned_foot_angle_deg), promoted to an always-visible front
+    slot. NEW 2026-08-01 (user request), same structural pattern as
+    _patch_viewer_wrong_foot_contact_plot (raw custom plot, not an ordinary
+    reward-term figure).
+    """
+    orig_setup = native_viewer.setup
+    orig_update_reward_figures = native_viewer._update_reward_figures
+
+    _NAME = "assigned_foot_angle_deg"
+
+    def _patched_setup() -> None:
+        orig_setup()
+        from mjlab.viewer.native.viewer import make_empty_figure
+        cfg = native_viewer._plot_cfg
+        native_viewer._figures[_NAME] = make_empty_figure(
+            f"{_NAME} (target={_FOOT_TARGET_ANGLE_DEG:.0f}+/-{_FOOT_TARGET_TOLERANCE_DEG:.0f})",
+            cfg.grid_size, cfg.init_yrange, cfg.history, cfg.background_alpha,
+        )
+        native_viewer._histories[_NAME] = deque(maxlen=cfg.history)
+        native_viewer._yrange[_NAME] = cfg.init_yrange
+        native_viewer._scale[_NAME] = 1.0
+        rest = [n for n in native_viewer._term_names]
+        native_viewer._term_names = [_NAME] + rest
+
+    def _patched_update_reward_figures(viewer_handle: "mujoco.viewer.Handle") -> None:
+        if native_viewer._show_plots and native_viewer._term_names and not native_viewer._is_paused:
+            angle_deg = _compute_assigned_foot_angle_deg(env, native_viewer.env_idx)
+            native_viewer._append_point(_NAME, angle_deg)
+            native_viewer._write_history_to_figure(_NAME)
+        orig_update_reward_figures(viewer_handle)
+
+    native_viewer.setup = _patched_setup
+    native_viewer._update_reward_figures = _patched_update_reward_figures
+
+
 def _patch_viewer_postupperdofpos_plot(native_viewer: "NativeMujocoViewer", env) -> None:
     """Promote `postupperdofpos` (arm post-save recovery reward) into the
     always-visible front P-panel slots.
@@ -910,6 +999,7 @@ def run_play(task_id: str, cfg: PlayConfig) -> None:
         _patch_viewer_new_reward_plots(native_viewer, env)
         _patch_viewer_postupperdofpos_plot(native_viewer, env)
         _patch_viewer_wrong_foot_contact_plot(native_viewer, env)
+        _patch_viewer_foot_orientation_plot(native_viewer, env)
         native_viewer.run()
     elif resolved_viewer == "viser":
         ViserPlayViewer(env, final_policy).run()

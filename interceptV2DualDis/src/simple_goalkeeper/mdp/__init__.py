@@ -7,7 +7,7 @@ from .rewards import (
     stayonline, noretreat, feetorientation, foot_ang_vel_xy, deviation_waist_joint,
     footreach, foot_proximity, near_stick_reach, stopball, softstop, success, single_foot_save, cleanstop, foot_clearance,
     airborne_at_save, inner_face_orientation_save, foot_inner_face_continuous,
-    trailing_foot_forward_continuous, postleadfootorientation, postheadingorientation,
+    trailing_foot_forward_continuous, postleadfootorientation, postsave_foot_airtime, postheadingorientation,
     penalize_kneeheight, penalize_baseheight, dof_vel_limits,
     postorientation, postangvel, postlinvel,
     torques_normalized_l2, torque_limits,

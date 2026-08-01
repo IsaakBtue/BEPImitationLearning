@@ -1,6 +1,7 @@
 """Goalkeeper reward terms for SimpleGoalKeeper (Phase 1 — feet only)."""
 from __future__ import annotations
 
+import math
 from typing import TYPE_CHECKING
 
 import torch
@@ -23,6 +24,17 @@ if TYPE_CHECKING:
 
 _DEFAULT_FEET_CFG = SceneEntityCfg("robot", body_names=("left_foot_link", "right_foot_link"))
 _DEFAULT_ROBOT_CFG = SceneEntityCfg("robot")
+
+# FIX 2026-08-01 (user request): leading-foot "block posture" target angle,
+# used by inner_face_orientation_save/foot_inner_face_continuous. Was a pure
+# axis target (foot long axis parallel to Y = 90 deg off forward, i.e. fully
+# sideways). Now 60 deg off forward (30 deg off full-sideways Y) -- a
+# shallower, more forward-leaning block stance. expected_sign flips the Y
+# component: +sin for the left foot's +Y-leaning target, -sin for the right
+# foot's -Y-leaning target.
+_FOOT_TARGET_ANGLE_DEG = 60.0
+_FOOT_TARGET_COS = math.cos(math.radians(_FOOT_TARGET_ANGLE_DEG))
+_FOOT_TARGET_SIN = math.sin(math.radians(_FOOT_TARGET_ANGLE_DEG))
 _DEFAULT_KNEE_CFG = SceneEntityCfg("robot", body_names=("Shank_Left", "Shank_Right"))
 _ARM_JOINT_CFG = SceneEntityCfg(
     "robot",
@@ -249,7 +261,7 @@ def _get_reach_target_y(
     env: "ManagerBasedRlEnv",
     ball_name: str,
     asset_cfg: SceneEntityCfg = _DEFAULT_FEET_CFG,
-    wide_threshold: float = 0.65,  # FIX 2026-07-23: was 0.5, kept in sync with regions.py's near/far boundary
+    wide_threshold: float = 0.5,  # FIX 2026-08-01: was 0.65, reverted to 0.5, kept in sync with regions.py's near/far boundary
     landing_radius: float = 0.15,  # FIX 2026-07-24: was 0.08 (user request: too strict at full difficulty)
     landing_speed_threshold: float = 1.0,  # FIX 2026-07-24: reverted to the pre-2026-07-23 value (was 0.15); see below
 ) -> torch.Tensor:
@@ -2504,12 +2516,19 @@ def inner_face_orientation_save(
     """One-time bonus when softstop fires and the assigned foot is turned sideways
     (block posture), rotated toward the side it's actually saving on.
 
-    Checks that the foot's long axis (toe-heel, local X) is parallel to world Y at the save
-    moment — meaning the foot is rotated 90° so its broad inner face is presented to the ball
-    rather than the toe or heel.
+    Checks that the foot's long axis (toe-heel, local X) is within alignment_threshold
+    of a world-frame target direction 60° off forward / 30° off full-sideways world Y
+    (_FOOT_TARGET_COS/_FOOT_TARGET_SIN) at the save moment — a shallower block posture
+    than the old fully-perpendicular (parallel-to-Y) target.
 
-    quat_apply(foot_quat, [1,0,0]) · [0,1,0] * expected_sign > threshold
-    threshold=0.7 ≈ cos(45°): foot long axis within 45° of world Y, in the correct direction.
+    quat_apply(foot_quat, [1,0,0]) · target_w > threshold, target_w = (cos60°, ±sin60°, 0)
+    threshold=0.7 ≈ cos(45°): foot long axis within ~45° of the target direction, in the
+    correct (side-matched) direction.
+
+    FIX 2026-08-01 (user request): target retargeted from full-sideways (90° off forward,
+    parallel to world Y) to 60° off forward (30° off Y) — see _FOOT_TARGET_ANGLE_DEG.
+    alignment_threshold left unchanged; it now measures a ~45° cone around the new target
+    instead of the old one.
 
     FIX 2026-07-10: was `.abs()` on the alignment ("either +Y or -Y direction is a
     valid sideways save"). That reasoning was wrong -- a left-side save needs the
@@ -2581,12 +2600,17 @@ def inner_face_orientation_save(
     # Pick the assigned foot's long axis.
     foot_long_w = torch.where(is_left[:, None], left_long_w, right_long_w)  # (N, 3)
 
-    # "Lengthy side parallel to Y, in the correct direction" = long axis aligned
-    # with +Y for the left foot, -Y for the right foot.
-    world_y = torch.tensor([0.0, 1.0, 0.0], device=env.device).expand(env.num_envs, -1)
-    y_alignment_signed = (foot_long_w * world_y).sum(dim=-1)               # (N,)
+    # Target direction: 60 deg off world forward (+X), leaning toward +Y for
+    # the left foot / -Y for the right foot (FIX 2026-08-01, see
+    # _FOOT_TARGET_ANGLE_DEG docstring above).
     expected_sign = torch.where(is_left, 1.0, -1.0)                        # (N,)
-    oriented_correctly = (y_alignment_signed * expected_sign) > alignment_threshold
+    target_w = torch.stack([
+        torch.full((env.num_envs,), _FOOT_TARGET_COS, device=env.device),
+        expected_sign * _FOOT_TARGET_SIN,
+        torch.zeros(env.num_envs, device=env.device),
+    ], dim=-1)                                                              # (N, 3)
+    target_alignment = (foot_long_w * target_w).sum(dim=-1)                # (N,)
+    oriented_correctly = target_alignment > alignment_threshold
 
     correct_foot = getattr(env, "_softstop_correct_foot", torch.zeros(env.num_envs, dtype=torch.bool, device=env.device))
     fired = just_fired & oriented_correctly & correct_foot & ~env._ifos_flag
@@ -2606,10 +2630,11 @@ def foot_inner_face_continuous(
     Uses the same assigned foot as footreach (_get_correct_foot_idx: left=0 for +Y
     balls, right=1 for -Y balls).
 
-    Metric: foot_long_axis_w · robot_y_w * expected_sign — negative/zero when foot
-    points forward or the wrong way, up to 1 when fully turned sideways in the
-    correct direction (+Y for the left foot, -Y for the right foot). Uses robot
-    local Y (not world Y) so a dive yaw doesn't degrade the signal.
+    Metric: foot_long_axis_w · target_w — negative when foot points opposite the
+    target, up to 1 when exactly aligned with the target direction (60° off
+    robot-forward, 30° off robot-local Y, toward +Y for the left foot / -Y for
+    the right foot). Uses robot-local axes (not world) so a dive yaw doesn't
+    degrade the signal.
 
     FIX 2026-07-10: was `.abs()` — same bug as inner_face_orientation_save (see
     that function's docstring for the full analysis and live evidence). This is
@@ -2621,6 +2646,11 @@ def foot_inner_face_continuous(
     toward the correct mirror-image direction than merely withholding reward,
     which would look identical to "never rotated at all" from the policy's
     perspective.
+
+    FIX 2026-08-01 (user request): retargeted from full-sideways (robot-local Y)
+    to 60° off robot-forward (30° off Y), matching inner_face_orientation_save's
+    new target exactly (_FOOT_TARGET_COS/_FOOT_TARGET_SIN) so the dense per-step
+    pull and the one-shot save bonus no longer disagree on where "correct" is.
     """
     robot: Entity = env.scene[asset_cfg.name]
 
@@ -2634,12 +2664,15 @@ def foot_inner_face_continuous(
     right_long_w = quat_apply(foot_quat_w[:, 1, :], foot_long_local)        # (N, 3)
     foot_long_w  = torch.where((foot_idx == 0)[:, None], left_long_w, right_long_w)  # (N, 3)
 
-    robot_y_local = torch.zeros(env.num_envs, 3, device=env.device)
-    robot_y_local[:, 1] = 1.0
-    robot_y_w = quat_apply(robot.data.root_link_quat_w, robot_y_local)      # (N, 3)
-
     expected_sign = torch.where(foot_idx == 0, 1.0, -1.0)                   # (N,) left=+Y, right=-Y
-    alignment = (foot_long_w * robot_y_w).sum(dim=-1) * expected_sign       # (N,) in [-1, 1]
+    target_local = torch.stack([
+        torch.full((env.num_envs,), _FOOT_TARGET_COS, device=env.device),
+        expected_sign * _FOOT_TARGET_SIN,
+        torch.zeros(env.num_envs, device=env.device),
+    ], dim=-1)                                                              # (N, 3)
+    target_w = quat_apply(robot.data.root_link_quat_w, target_local)       # (N, 3)
+
+    alignment = (foot_long_w * target_w).sum(dim=-1)                       # (N,) in [-1, 1]
 
     behind = _ball_is_behind(env, ball_name)
     return alignment * (~behind).float()
@@ -2729,6 +2762,18 @@ def postleadfootorientation(
     does this indirectly (see the foot-yaw P-panel plots added earlier this
     session) but is a weak, indirect proxy; this targets the actual world-
     frame quantity that matters.
+
+    FIX 2026-08-01 (user request): zero while the assigned foot is grounded.
+    Was unconditional through the whole post-save window (airborne AND
+    grounded) -- user found it was pulling a PLANTED foot to keep rotating,
+    which slips against the ground instead of actually turning (same
+    "active rotation while in ground contact = slippage" issue feet_slippage
+    already has to guard against). Now only pays out while the foot is
+    genuinely airborne, using the same feet_contact/ball_contact pattern
+    feet_slippage uses to distinguish ground contact from a lingering
+    foot-ball touch (a raw feet_contact reading can't tell the two apart).
+    Net effect: rotation is only rewarded during the hangtime the policy
+    already has post-save, with no pressure to rotate once planted.
     """
     robot: Entity = env.scene[asset_cfg.name]
     foot_quat_w = robot.data.body_link_quat_w[:, asset_cfg.body_ids, :]  # (N, 2, 4)
@@ -2748,7 +2793,99 @@ def postleadfootorientation(
     alignment = (leading_long_w * robot_forward_w).sum(dim=-1)  # (N,) in [-1, 1]
 
     behind = _ball_is_behind(env, ball_name)
-    return alignment * behind.float()
+
+    # Ground-contact gate (FIX 2026-08-01) -- same sensor pair/exclusion
+    # feet_slippage uses (rewards.py:feet_slippage).
+    contact_sensor: ContactSensor = env.scene["feet_contact"]
+    found = contact_sensor.data.found  # (N, 8)
+    left_in_contact  = (found[:, :4] > 0).any(dim=-1)
+    right_in_contact = (found[:, 4:] > 0).any(dim=-1)
+
+    ball_sensor: ContactSensor = env.scene["ball_contact"]
+    ball_found = ball_sensor.data.found  # (N, 8), same primary geom layout as feet_contact
+    left_touching_ball  = (ball_found[:, :4] > 0).any(dim=-1)
+    right_touching_ball = (ball_found[:, 4:] > 0).any(dim=-1)
+    left_in_contact  = left_in_contact & ~left_touching_ball
+    right_in_contact = right_in_contact & ~right_touching_ball
+
+    leading_in_contact = torch.where(foot_idx == 0, left_in_contact, right_in_contact)  # (N,)
+    airborne = ~leading_in_contact
+
+    return alignment * behind.float() * airborne.float()
+
+
+def postsave_foot_airtime(
+    env: "ManagerBasedRlEnv",
+    ball_name: str,
+    asset_cfg: SceneEntityCfg = _DEFAULT_FEET_CFG,
+    window_steps: int = 10,
+) -> torch.Tensor:
+    """Flat bonus for the assigned/leading foot staying airborne for a short,
+    fixed window right after the save (starting the instant `behind` first
+    flips true).
+
+    NEW 2026-08-01 (user request). Complements postleadfootorientation's
+    airborne-only gate (FIX 2026-08-01, same day): that gate only pays out
+    WHILE the foot happens to be airborne, it creates no pressure to delay
+    landing in the first place. This term gives that direct, bounded push --
+    "stay up a little longer" -- so postleadfootorientation actually has
+    hangtime to work with instead of relying on whatever the dive physics
+    happens to leave it.
+
+    Time-boxed (window_steps=10, ~0.2s at dt=0.02s) rather than unconditional
+    for the rest of the post-save window: foot_clearance's own docstring
+    explains why an unbounded post-save airborne reward causes "post-save
+    hopping" (it's deactivated via `~behind` for exactly that reason). A
+    short fixed window buys real extra rotation time without opening the
+    door to indefinite hopping -- once the window elapses this term is zero
+    regardless of contact state, even if the foot is still airborne.
+
+    Deliberately a FLAT bonus (1.0 while airborne and in-window, else 0), not
+    foot_clearance's height-targeted bump: after a dive/step the foot's
+    post-save height trajectory has no natural 10cm target the way an
+    approach-phase step does -- any airborne moment in the window is equally
+    useful for rotation, no shape beyond "off the ground" is meaningful here.
+
+    Ground-contact detection reuses postleadfootorientation's exact
+    feet_contact/ball_contact pattern (distinguishes genuine ground contact
+    from a lingering foot-ball touch). No G1 equivalent (see
+    trailing_foot_forward_continuous's docstring -- no post-catch airborne
+    shaping of any kind exists in G1).
+    """
+    if not hasattr(env, "_psa_prev_behind"):
+        env._psa_prev_behind = torch.zeros(env.num_envs, dtype=torch.bool, device=env.device)
+        env._psa_window_start = torch.full((env.num_envs,), -1, dtype=torch.int64, device=env.device)
+
+    just_reset = env.episode_length_buf <= 1
+    env._psa_prev_behind[just_reset] = False
+    env._psa_window_start[just_reset] = -1
+
+    behind = _ball_is_behind(env, ball_name)
+    just_became_behind = behind & ~env._psa_prev_behind
+    env._psa_window_start[just_became_behind] = env.episode_length_buf[just_became_behind]
+    env._psa_prev_behind[:] = behind
+
+    has_window = env._psa_window_start >= 0
+    in_window = has_window & ((env.episode_length_buf - env._psa_window_start) < window_steps)
+
+    foot_idx = _get_correct_foot_idx(env, ball_name)  # (N,) — leading foot, 0=left, 1=right
+
+    contact_sensor: ContactSensor = env.scene["feet_contact"]
+    found = contact_sensor.data.found  # (N, 8)
+    left_in_contact  = (found[:, :4] > 0).any(dim=-1)
+    right_in_contact = (found[:, 4:] > 0).any(dim=-1)
+
+    ball_sensor: ContactSensor = env.scene["ball_contact"]
+    ball_found = ball_sensor.data.found  # (N, 8), same primary geom layout as feet_contact
+    left_touching_ball  = (ball_found[:, :4] > 0).any(dim=-1)
+    right_touching_ball = (ball_found[:, 4:] > 0).any(dim=-1)
+    left_in_contact  = left_in_contact & ~left_touching_ball
+    right_in_contact = right_in_contact & ~right_touching_ball
+
+    leading_in_contact = torch.where(foot_idx == 0, left_in_contact, right_in_contact)  # (N,)
+    airborne = ~leading_in_contact
+
+    return (in_window & airborne).float()
 
 
 def postheadingorientation(
