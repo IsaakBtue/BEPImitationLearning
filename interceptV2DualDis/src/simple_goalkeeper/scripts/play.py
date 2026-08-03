@@ -803,6 +803,39 @@ def _patch_viewer_postupperdofpos_plot(native_viewer: "NativeMujocoViewer", env)
     native_viewer.setup = _patched_setup
 
 
+def _patch_viewer_postsave_airtime_plot(native_viewer: "NativeMujocoViewer", env) -> None:
+    """Swap the `stopball` P-panel plot for `postsave_foot_airtime` (2026-08-01
+    airborne-hangtime bonus, rewards.py).
+
+    NEW 2026-08-03 (user request): user wants to watch postsave_foot_airtime
+    live while replaying a checkpoint in the native viewer instead of
+    stopball -- stopball reliably fires already and doesn't need dedicated
+    screen space. Same promotion mechanism as
+    _patch_viewer_postupperdofpos_plot, but also explicitly demotes
+    `stopball` to the back of `_term_names` (this task registers far more
+    reward terms than `max_viewports` (12), so anything not in the front 12
+    is silently unrendered) -- without this, promoting postsave_foot_airtime
+    alone wouldn't guarantee stopball drops off, only that something at the
+    tail of the list does.
+    """
+    orig_setup = native_viewer.setup
+
+    _PROMOTED = ("postsave_foot_airtime",)
+    _DEMOTED = ("stopball",)
+
+    def _patched_setup() -> None:
+        orig_setup()
+        rest = [
+            n for n in native_viewer._term_names
+            if n not in _PROMOTED and n not in _DEMOTED
+        ]
+        promoted = [n for n in _PROMOTED if n in native_viewer._term_names]
+        demoted = [n for n in _DEMOTED if n in native_viewer._term_names]
+        native_viewer._term_names = promoted + rest + demoted
+
+    native_viewer.setup = _patched_setup
+
+
 def run_play(task_id: str, cfg: PlayConfig) -> None:
     configure_torch_backends()
     device = cfg.device or ("cuda:0" if torch.cuda.is_available() else "cpu")
@@ -1000,6 +1033,7 @@ def run_play(task_id: str, cfg: PlayConfig) -> None:
         _patch_viewer_postupperdofpos_plot(native_viewer, env)
         _patch_viewer_wrong_foot_contact_plot(native_viewer, env)
         _patch_viewer_foot_orientation_plot(native_viewer, env)
+        _patch_viewer_postsave_airtime_plot(native_viewer, env)
         native_viewer.run()
     elif resolved_viewer == "viser":
         ViserPlayViewer(env, final_policy).run()

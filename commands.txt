@@ -1,0 +1,2 @@
+cd interceptV2DualDis
+uv run sgk_play Mjlab-BeyondAMP-Goalkeeper-T1-MultiDisc-WithOverlay --checkpoint-file logs/rsl_rl/intercept_simple_goalkeeper_multidisc/2026-08-01_17-14-57_6144_footorientfix_2026-08-01/model_39750.pt

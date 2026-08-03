@@ -8,7 +8,7 @@ import torch
 
 from mjlab.entity import Entity
 from mjlab.managers.scene_entity_config import SceneEntityCfg
-from mjlab.sensor import ContactSensor
+from mjlab.sensor import BuiltinSensor, ContactSensor
 from mjlab.utils.lab_api.math import quat_apply, quat_inv
 
 from simple_goalkeeper.robots.t1_constants import (
@@ -36,11 +36,34 @@ _FOOT_TARGET_ANGLE_DEG = 60.0
 _FOOT_TARGET_COS = math.cos(math.radians(_FOOT_TARGET_ANGLE_DEG))
 _FOOT_TARGET_SIN = math.sin(math.radians(_FOOT_TARGET_ANGLE_DEG))
 _DEFAULT_KNEE_CFG = SceneEntityCfg("robot", body_names=("Shank_Left", "Shank_Right"))
+# FIX 2026-08-03 (user request, G1-comparison finding): postupperdofpos's ONLY
+# consumer. Was Shoulder_Pitch/Roll + Elbow_Pitch/Yaw x2 sides (8 joints) --
+# now Elbow_Pitch/Yaw only (4 joints), matching G1's actual scope exactly.
+# G1's own post-catch upper-body recovery reward (_reward_postupperdofpos,
+# Humanoid-Goalkeeper/legged_gym/legged_gym/envs/base/legged_robot.py:1502-1507)
+# never includes shoulder: `upper_body_joint_indices = cat(elbow_joint_indices,
+# wrist_joint_indices)` (legged_robot.py:1315), built from cfg.control.elbow_joints
+# (2 total) + wrist_joints (6 total) (g1_29_config.py:175,177) -- shoulder is
+# never in this specific reward's target set. SGK's version included shoulder,
+# the joint with by far the largest dive-reach excursion, into the SAME
+# exp(-kernel_scale*sum_sq_err) kernel as the small-range joints -- confirmed
+# via live checkpoint replay (rewards.py's own postupperdofpos docstring
+# history) that post-save error is ~50x larger in far regions (7.81) than
+# near (0.155), saturating the kernel to near-zero gradient regardless of
+# kernel_scale tuning. Once a joint pins at a static extreme under that
+# saturated kernel, nothing else in the table pulls it back (arm_dof_vel/
+# action_rate_l2/action_acc_l2 penalize MOVEMENT, not position -- a still
+# joint reads ~0 on all of them). G1 avoids this entirely by never asking
+# this reward to recover the joint that legitimately needs to travel far for
+# a reach/dive. Dropping shoulder mirrors that -- postupperdofpos no longer
+# fights genuine counterbalance need, matching G1's actual design rather
+# than a literal-but-wrong joint-count port. Not yet validated against a
+# live training run. See docs/BugFixes.md.
 _ARM_JOINT_CFG = SceneEntityCfg(
     "robot",
     joint_names=(
-        "Left_Shoulder_Pitch", "Left_Shoulder_Roll", "Left_Elbow_Pitch", "Left_Elbow_Yaw",
-        "Right_Shoulder_Pitch", "Right_Shoulder_Roll", "Right_Elbow_Pitch", "Right_Elbow_Yaw",
+        "Left_Elbow_Pitch", "Left_Elbow_Yaw",
+        "Right_Elbow_Pitch", "Right_Elbow_Yaw",
     ),
 )
 _WAIST_JOINT_CFG_RECOVERY = SceneEntityCfg("robot", joint_names=("Waist",))
@@ -2025,6 +2048,16 @@ def postupperdofpos(
     relative pressure here even though it was sufficient for G1's own task.
     Not yet validated against a live run.
 
+    CORRECTION 2026-08-03: the "G1's arms have structural pull from
+    catching" explanation above was never actually checked against G1's
+    code (no file/line citation accompanied it) and turned out to be wrong
+    -- see the FIX 2026-08-03 entry below and `_ARM_JOINT_CFG`'s comment for
+    the real, cited difference (G1 never asks this reward to recover
+    shoulder at all, avoiding the exact saturation this port's inclusion of
+    shoulder was causing). Weight is left at 5.0 unchanged by that fix --
+    only the joint scope narrowed -- so this entry's weight history remains
+    accurate, just not its causal story.
+
     FIX 2026-07-27: retargeted from robot.data.default_joint_pos (the
     crouched HOME_KEYFRAME pose) to _POST_SAVE_STANCE_MAP's straight-leg,
     45-deg-arms-out stance -- a bent-knee crouch requires continuous active
@@ -2036,6 +2069,28 @@ def postupperdofpos(
     hasattr guard makes this safe regardless of which of the three runs
     first each tick. Weight/shape/curriculum unchanged -- only the
     comparison target moved. See docs/BugFixes.md.
+
+    FIX 2026-08-03 (user request, G1-comparison finding): `asset_cfg`'s
+    default (`_ARM_JOINT_CFG`) narrowed from 8 joints (shoulder+elbow x2) to
+    4 (elbow only x2), matching G1's actual upper-body-recovery joint scope
+    exactly -- G1's `_reward_postupperdofpos` (`legged_robot.py:1502-1507`)
+    only ever targets `upper_body_joint_indices = cat(elbow_joint_indices,
+    wrist_joint_indices)` (`legged_robot.py:1315`, from `g1_29_config.py:
+    175,177`) -- shoulder is never in G1's version of this reward. Root-
+    caused via live checkpoint replay comparing two sequential training
+    runs: post-save arm error was ~50x larger in far regions (7.81) than
+    near (0.155) -- shoulder's own large dive-reach excursion dominating the
+    shared sum-of-squares -- saturating `exp(-kernel_scale*err)` to near-
+    zero regardless of `kernel_scale` tuning, and once a joint pinned at a
+    static extreme under that saturated kernel nothing else in the reward
+    table pulled it back (`arm_dof_vel`/`action_rate_l2`/`action_acc_l2` all
+    penalize MOVEMENT, not position -- a still joint reads ~0 on all of
+    them). G1 avoids this by design, never asking this reward to recover
+    the one joint that legitimately needs to travel far for a reach/dive.
+    See `_ARM_JOINT_CFG`'s own comment and docs/BugFixes.md for the full
+    investigation trail (during_scale and the foot-orientation retarget
+    were both investigated and ruled out/downgraded as the primary cause
+    first). Not yet validated against a live training run.
     """
     behind = _ball_is_behind(env, ball_name)
     robot: Entity = env.scene[asset_cfg.name]
@@ -2157,6 +2212,50 @@ def penalize_arm_above_shoulder(
     steady = behind & (env._arm_above_shoulder_run_len > steady_steps)
 
     return excess * steady.float()
+
+
+def angular_momentum_penalty(
+    env: "ManagerBasedRlEnv",
+    sensor_name: str = "robot/root_angmom",
+) -> torch.Tensor:
+    """Penalize whole-body angular momentum -- a physically-adaptive
+    alternative/complement to postupperdofpos's fixed-pose arm pull.
+
+    NEW 2026-08-03 (user request), ported near-verbatim from the sibling
+    BoosterT1mjlab project (`tasks/velocity/mdp/rewards.py:angular_momentum_
+    penalty`, weight -0.02 there), which uses this exact mechanism
+    ("Penalize whole-body angular momentum to encourage natural arm swing")
+    for its own T1 locomotion policy. Reads MuJoCo's native `subtreeangmom`
+    sensor (`<subtreeangmom name="root_angmom" body="Trunk"/>`, already
+    present in this project's own t1.xml/t1_headless.xml since they share
+    the same robot asset lineage -- confirmed via grep this sensor existed
+    in both XMLs already but was never read by any Python code here before
+    this fix) -- whole-body angular momentum about the Trunk subtree,
+    shape (N, 3).
+
+    Unlike postupperdofpos (pulls arms toward a fixed target pose,
+    regardless of whether the body actually needs counterbalancing right
+    now -- the mechanism repeatedly found fighting legitimate dive/
+    counterbalance motion this session, see that function's FIX 2026-08-03
+    entry), this is physically adaptive: a real dive/save naturally
+    produces high whole-body angular momentum (that's what counterbalancing
+    IS), so this term only meaningfully penalizes once the body is already
+    stable and momentum is needlessly nonzero -- it can never tell a
+    genuine counterbalance swing from gratuitous flailing on its own, so it
+    is intentionally a small, gentle regularizer (matching BoosterT1mjlab's
+    own -0.02) layered alongside postupperdofpos, not a replacement for it.
+
+    No G1 equivalent (G1 catches with hands, no equivalent whole-body-
+    momentum reward exists in legged_robot.py -- grepped, none found).
+    Also grounded in external literature (arXiv 2507.04140, "Learning
+    Humanoid Arm Motion via Centroidal Momentum Regularized Multi-Agent
+    RL") which independently arrives at the same technique (a "CAM damping
+    reward") for the same underlying problem (natural arm motion during
+    dynamic whole-body balance). Not yet validated against a live training
+    run. See docs/BugFixes.md.
+    """
+    angmom_sensor: BuiltinSensor = env.scene[sensor_name]
+    return torch.sum(torch.square(angmom_sensor.data), dim=-1)
 
 
 def postwaistdofpos(
@@ -2851,18 +2950,34 @@ def postsave_foot_airtime(
     from a lingering foot-ball touch). No G1 equivalent (see
     trailing_foot_forward_continuous's docstring -- no post-catch airborne
     shaping of any kind exists in G1).
+
+    FIX 2026-08-03 (user request): window-open is now a one-shot-per-episode
+    latch (env._psa_used), not just a `behind`-rising-edge restart. `behind`
+    (_ball_is_behind) is NOT itself latched on its raw `ball_x_local < 0`
+    component -- only its _sb_flag/_softstop_flag components are sticky, and
+    those require correct_foot_contact. A WRONG-foot touch can knock the
+    ball back to x>=0 without setting either flag, flipping `behind` back to
+    False; if the ball then crosses behind again, the un-gated version would
+    re-open a fresh airborne window with no genuine save behind it -- user
+    was concerned this could let the policy learn to hop the foot
+    repeatedly to farm the bonus. Now the window can only ever open once per
+    episode: the first `behind` rising edge sets _psa_used, and every
+    subsequent rising edge is ignored for the rest of that episode.
     """
     if not hasattr(env, "_psa_prev_behind"):
         env._psa_prev_behind = torch.zeros(env.num_envs, dtype=torch.bool, device=env.device)
         env._psa_window_start = torch.full((env.num_envs,), -1, dtype=torch.int64, device=env.device)
+        env._psa_used = torch.zeros(env.num_envs, dtype=torch.bool, device=env.device)
 
     just_reset = env.episode_length_buf <= 1
     env._psa_prev_behind[just_reset] = False
     env._psa_window_start[just_reset] = -1
+    env._psa_used[just_reset] = False
 
     behind = _ball_is_behind(env, ball_name)
-    just_became_behind = behind & ~env._psa_prev_behind
+    just_became_behind = behind & ~env._psa_prev_behind & ~env._psa_used
     env._psa_window_start[just_became_behind] = env.episode_length_buf[just_became_behind]
+    env._psa_used |= just_became_behind
     env._psa_prev_behind[:] = behind
 
     has_window = env._psa_window_start >= 0

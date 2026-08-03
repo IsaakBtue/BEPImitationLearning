@@ -783,6 +783,24 @@ def goalkeeper_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
             weight=-2.0,
             params={"ball_name": BALL_NAME, "asset_cfg": _ARM_HEIGHT_CFG},
         ),
+        # NEW 2026-08-03 (user request): ported near-verbatim from sibling
+        # project BoosterT1mjlab (tasks/velocity/mdp/rewards.py, weight -0.02
+        # there), which uses this exact mechanism to "encourage natural arm
+        # swing" for its own T1 locomotion policy. Reads the native MuJoCo
+        # subtreeangmom sensor (root_angmom, already present in this
+        # project's t1.xml/t1_headless.xml but never read by any code here
+        # before this fix) -- whole-body angular momentum about the Trunk.
+        # Physically-adaptive complement to postupperdofpos: doesn't fight
+        # a genuine counterbalance swing (which legitimately produces high
+        # momentum), only penalizes momentum that's still nonzero once the
+        # body should already be stable. Small/gentle by design, matching
+        # BoosterT1mjlab's own weight -- not meant to replace postupperdofpos.
+        # See rewards.py:angular_momentum_penalty and docs/BugFixes.md.
+        "angular_momentum_penalty": RewardTermCfg(
+            func=gk_mdp.angular_momentum_penalty,
+            weight=-0.02,
+            params={},
+        ),
         # FIX 2026-07-27: 1.0 -> 3.0. User reported the waist visibly
         # rotating post-save; training logs confirmed this reward stuck
         # near its floor (~0.31 mean episode reward), the same "stuck
