@@ -836,6 +836,51 @@ def _patch_viewer_postsave_airtime_plot(native_viewer: "NativeMujocoViewer", env
     native_viewer.setup = _patched_setup
 
 
+def _patch_viewer_post_recovery_plots(native_viewer: "NativeMujocoViewer", env) -> None:
+    """Make the P-panel (KEY_P already toggles its visibility natively --
+    `_safe_key_callback`'s `TOGGLE_PLOTS` action, mjlab's own binding, not a
+    new one added here) show the full post-recovery reward family in the
+    front 12 visible slots, superseding whatever the earlier promotion
+    patches in this file left there.
+
+    NEW 2026-08-03 (user request): "put all the rewards that are on at post
+    recovery" when pressing P. Built directly from this file's own
+    `_ball_is_behind`-gated reward functions (grepped `rewards.py` for every
+    function containing a `_ball_is_behind(env` call, excluding the
+    APPROACH-phase terms that instead gate OFF once behind --
+    `footreach`/`foot_proximity`/`foot_inner_face_continuous`/
+    `foot_clearance`/`blue_trunk_drive` -- those are the opposite family):
+    `postangvel`, `postlinvel`, `postupperdofpos`, `postwaistdofpos`,
+    `postlegdofpos`, `postleadfootorientation`, `postsave_foot_airtime`,
+    `postheadingorientation`, `penalize_arm_above_shoulder` (steady-post-save
+    gated). Plus three always-active terms from the same "recovery" family
+    by naming/purpose, included since they're exactly what's under
+    investigation for the post-save arm-drift bug: `postorientation`
+    (upright recovery, always active per its own docstring -- AMP has no
+    root-orientation signal to supply this itself), `angular_momentum_penalty`
+    (2026-08-03, whole-body momentum), `arm_dof_vel` (arm velocity
+    regularization). Exactly 12 terms -- fits `max_viewports` (12) with no
+    overflow, so all twelve are guaranteed visible with no need to also
+    demote anything else.
+    """
+    orig_setup = native_viewer.setup
+
+    _POST_RECOVERY_REWARD_TERMS = (
+        "postorientation", "postangvel", "postlinvel",
+        "postupperdofpos", "postwaistdofpos", "postlegdofpos",
+        "postleadfootorientation", "postsave_foot_airtime", "postheadingorientation",
+        "penalize_arm_above_shoulder", "angular_momentum_penalty", "arm_dof_vel",
+    )
+
+    def _patched_setup() -> None:
+        orig_setup()
+        rest = [n for n in native_viewer._term_names if n not in _POST_RECOVERY_REWARD_TERMS]
+        promoted = [n for n in _POST_RECOVERY_REWARD_TERMS if n in native_viewer._term_names]
+        native_viewer._term_names = promoted + rest
+
+    native_viewer.setup = _patched_setup
+
+
 def run_play(task_id: str, cfg: PlayConfig) -> None:
     configure_torch_backends()
     device = cfg.device or ("cuda:0" if torch.cuda.is_available() else "cpu")
@@ -1034,6 +1079,7 @@ def run_play(task_id: str, cfg: PlayConfig) -> None:
         _patch_viewer_wrong_foot_contact_plot(native_viewer, env)
         _patch_viewer_foot_orientation_plot(native_viewer, env)
         _patch_viewer_postsave_airtime_plot(native_viewer, env)
+        _patch_viewer_post_recovery_plots(native_viewer, env)
         native_viewer.run()
     elif resolved_viewer == "viser":
         ViserPlayViewer(env, final_policy).run()

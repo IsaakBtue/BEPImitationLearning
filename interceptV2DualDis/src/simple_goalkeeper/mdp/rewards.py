@@ -2832,10 +2832,71 @@ def trailing_foot_forward_continuous(
     return (trailing_long_w * robot_forward_w).sum(dim=-1)  # (N,) in [-1, 1]
 
 
+def _postsave_airtime_window(
+    env: "ManagerBasedRlEnv",
+    ball_name: str,
+    window_steps: int = 10,
+) -> torch.Tensor:
+    """Shared one-shot-per-episode post-save airborne window (bool mask, (N,)).
+
+    FIX 2026-08-03 (user request): factored out of postsave_foot_airtime so
+    postleadfootorientation can share the EXACT same window instead of
+    running unbounded for the rest of the post-save episode. Root-caused
+    this session (docs/BugFixes.md): postleadfootorientation rotates the
+    assigned foot back to forward using that leg's Hip_Yaw (T1's ankle has
+    no yaw DOF at all -- confirmed in t1_headless.xml -- so Hip_Yaw is the
+    ONLY joint that can change foot heading), and that Hip_Yaw rotation
+    reaction-torques the trunk into a whole-body yaw drift (confirmed via
+    live checkpoint replay: mirror-symmetric by which foot is assigned,
+    +11.3deg for left-foot saves vs -5.1deg for right-foot saves at 40
+    steps post-save, tracking each leg's own Hip_Yaw unwinding). Letting
+    postleadfootorientation keep paying out for the ENTIRE post-save
+    episode (its old gate: just `behind & airborne`, no time limit) gives
+    the policy no reason to stop applying that reaction torque once the
+    rotation is done -- capping it to the same short window
+    postsave_foot_airtime already uses bounds how long the disturbance can
+    be incentivized, without touching the rotation itself (foot orientation
+    quality at the moment of landing is unaffected -- both terms already
+    only reward WHILE airborne).
+
+    Calling this from more than one reward function in the same tick is
+    safe/idempotent: the state-mutating part (`_psa_window_start`/
+    `_psa_used` latch) only reacts to a `behind` RISING EDGE, and
+    `_psa_prev_behind` is updated to the current `behind` value on every
+    call -- so a second call in the same tick sees `just_became_behind` as
+    always False (`_psa_prev_behind` already equals `behind` from the
+    first call) and only recomputes the (unchanged) `in_window` result. No
+    double-consumption risk regardless of which reward term happens to be
+    registered first in goalkeeper_env_cfg.py's RewardManager this tick.
+    See postsave_foot_airtime's own docstring for the one-shot-latch
+    rationale itself (2026-08-03, wrong-foot-deflection re-trigger
+    concern, a separate earlier fix this same day).
+    """
+    if not hasattr(env, "_psa_prev_behind"):
+        env._psa_prev_behind = torch.zeros(env.num_envs, dtype=torch.bool, device=env.device)
+        env._psa_window_start = torch.full((env.num_envs,), -1, dtype=torch.int64, device=env.device)
+        env._psa_used = torch.zeros(env.num_envs, dtype=torch.bool, device=env.device)
+
+    just_reset = env.episode_length_buf <= 1
+    env._psa_prev_behind[just_reset] = False
+    env._psa_window_start[just_reset] = -1
+    env._psa_used[just_reset] = False
+
+    behind = _ball_is_behind(env, ball_name)
+    just_became_behind = behind & ~env._psa_prev_behind & ~env._psa_used
+    env._psa_window_start[just_became_behind] = env.episode_length_buf[just_became_behind]
+    env._psa_used |= just_became_behind
+    env._psa_prev_behind[:] = behind
+
+    has_window = env._psa_window_start >= 0
+    return has_window & ((env.episode_length_buf - env._psa_window_start) < window_steps)
+
+
 def postleadfootorientation(
     env: "ManagerBasedRlEnv",
     ball_name: str,
     asset_cfg: SceneEntityCfg = _DEFAULT_FEET_CFG,
+    window_steps: int = 10,
 ) -> torch.Tensor:
     """Continuous reward for the LEADING (assigned) foot rotating back toward
     forward (robot-local +X) once the save has happened.
@@ -2873,6 +2934,20 @@ def postleadfootorientation(
     foot-ball touch (a raw feet_contact reading can't tell the two apart).
     Net effect: rotation is only rewarded during the hangtime the policy
     already has post-save, with no pressure to rotate once planted.
+
+    FIX 2026-08-03 (user request): additionally gated to the same fixed
+    `window_steps`-long window `postsave_foot_airtime` uses (via the shared
+    `_postsave_airtime_window` helper), not the entire post-save episode.
+    Root cause: rotating the assigned foot back to forward requires that
+    leg's Hip_Yaw (T1's ankle has no yaw DOF), and that rotation reaction-
+    torques the trunk into a whole-body yaw drift -- confirmed via live
+    checkpoint replay to be mirror-symmetric by assigned foot side (+11.3deg
+    for left-foot saves vs -5.1deg for right, matching each leg's own
+    Hip_Yaw unwinding on the same timescale). Capping how long this term
+    keeps paying out caps how long the policy is incentivized to keep
+    applying that reaction torque, without changing the rotation's target
+    or its airborne-only gate. See `_postsave_airtime_window`'s and
+    `postsave_foot_airtime`'s docstrings, and docs/BugFixes.md.
     """
     robot: Entity = env.scene[asset_cfg.name]
     foot_quat_w = robot.data.body_link_quat_w[:, asset_cfg.body_ids, :]  # (N, 2, 4)
@@ -2910,7 +2985,9 @@ def postleadfootorientation(
     leading_in_contact = torch.where(foot_idx == 0, left_in_contact, right_in_contact)  # (N,)
     airborne = ~leading_in_contact
 
-    return alignment * behind.float() * airborne.float()
+    in_window = _postsave_airtime_window(env, ball_name, window_steps)
+
+    return alignment * behind.float() * airborne.float() * in_window.float()
 
 
 def postsave_foot_airtime(
@@ -2963,25 +3040,13 @@ def postsave_foot_airtime(
     repeatedly to farm the bonus. Now the window can only ever open once per
     episode: the first `behind` rising edge sets _psa_used, and every
     subsequent rising edge is ignored for the rest of that episode.
+
+    FIX 2026-08-03 (2nd same-day change): window computation factored out
+    into `_postsave_airtime_window` (now shared with `postleadfootorientation`,
+    gated to this same window -- see that function's docstring for why).
+    Pure extraction, no behavior change to this function.
     """
-    if not hasattr(env, "_psa_prev_behind"):
-        env._psa_prev_behind = torch.zeros(env.num_envs, dtype=torch.bool, device=env.device)
-        env._psa_window_start = torch.full((env.num_envs,), -1, dtype=torch.int64, device=env.device)
-        env._psa_used = torch.zeros(env.num_envs, dtype=torch.bool, device=env.device)
-
-    just_reset = env.episode_length_buf <= 1
-    env._psa_prev_behind[just_reset] = False
-    env._psa_window_start[just_reset] = -1
-    env._psa_used[just_reset] = False
-
-    behind = _ball_is_behind(env, ball_name)
-    just_became_behind = behind & ~env._psa_prev_behind & ~env._psa_used
-    env._psa_window_start[just_became_behind] = env.episode_length_buf[just_became_behind]
-    env._psa_used |= just_became_behind
-    env._psa_prev_behind[:] = behind
-
-    has_window = env._psa_window_start >= 0
-    in_window = has_window & ((env.episode_length_buf - env._psa_window_start) < window_steps)
+    in_window = _postsave_airtime_window(env, ball_name, window_steps)
 
     foot_idx = _get_correct_foot_idx(env, ball_name)  # (N,) — leading foot, 0=left, 1=right
 
