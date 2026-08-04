@@ -277,7 +277,7 @@ _ARM_JOINT_NAMES: tuple[str, ...] = (
 
 def joint_pos_abs_arms_masked_by_region(
     env: "ManagerBasedRlEnv",
-    far_region_ids: tuple[int, ...] = (1, 3),
+    far_region_ids: tuple[int, ...] = (),
 ) -> torch.Tensor:
     """Like joint_pos_abs (full 21-DOF, softstop-gated), but additionally
     freezes arm joints to their default pose for envs whose env._region_id
@@ -295,6 +295,27 @@ def joint_pos_abs_arms_masked_by_region(
     incentive to move sensibly). This targets only the far/double-step
     regions the original "weird arm swinging" complaints were about,
     leaving near regions unaffected.
+
+    FIX 2026-08-04 (user request): `far_region_ids` default changed
+    `(1, 3) -> ()` -- far regions now keep real, live arm motion in their
+    AMP input too, matching near. Different from the reverted 2026-07-15
+    attempt (which masked EVERYONE, found worse than the status quo at the
+    time) -- this instead UNMASKS everyone, a combination not previously
+    tested. Motivated by live-checkpoint replay this session finding near
+    region's post-save arm recovery is measurably better than far's; user's
+    hypothesis is that far's live arm supervision (removed 2026-07-16 for a
+    different, pre-save "weird arm swinging" complaint) may help post-save
+    recovery quality the same way it apparently does for near. Note: this
+    only affects the PRE-save/approach phase -- the separate softstop-gated
+    freeze above (`joint_pos[softstop_fired] = default_joint_pos[...]`)
+    still blanks ALL joints, both regions, the instant a save is confirmed,
+    unchanged by this fix (confirmed via live checkpoint replay this same
+    session: AMP's arm columns read frozen, not live, in both regions from
+    ~k=15 post-save onward regardless of this parameter). Expert/reference-
+    clip side updated to match in the same commit
+    (`goalkeeper_multidisc_amp_cfg.py`'s `freeze_joint_names`) -- both sides
+    must agree per the original 2026-07-16 fix's own stated invariant. Not
+    yet validated against a live training run. See docs/BugFixes.md.
     """
     robot: Entity = env.scene["robot"]
     joint_pos = robot.data.joint_pos.clone()
@@ -322,7 +343,7 @@ def joint_pos_abs_arms_masked_by_region(
 
 def joint_vel_abs_arms_masked_by_region(
     env: "ManagerBasedRlEnv",
-    far_region_ids: tuple[int, ...] = (1, 3),
+    far_region_ids: tuple[int, ...] = (),
 ) -> torch.Tensor:
     """Like joint_vel_abs (full 21-DOF, softstop-gated), but additionally
     zeroes arm joint velocity columns for envs whose env._region_id is in
@@ -338,6 +359,12 @@ def joint_vel_abs_arms_masked_by_region(
     supported this generically (MotionDatasetCfg.freeze_joint_names zeroes
     whichever amp_obs_terms are configured, including joint_vel) with no
     code changes needed there -- only this policy-side term was missing.
+
+    FIX 2026-08-04 (user request): `far_region_ids` default changed
+    `(1, 3) -> ()`, same as `joint_pos_abs_arms_masked_by_region` -- see
+    that function's docstring for the full rationale. Both functions must
+    stay in sync (same `far_region_ids` default) since they mask the same
+    joint set for the same regions.
     """
     robot: Entity = env.scene["robot"]
     joint_vel = robot.data.joint_vel.clone()

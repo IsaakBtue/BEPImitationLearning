@@ -348,6 +348,17 @@ def goalkeeper_multidisc_amp_runner_cfg() -> dict:
     # columns frozen (matches the "amp" observation group's region-
     # conditional masking above) -- near regions keep real arm motion
     # capture data, both sides (expert and policy) must agree per region.
+    #
+    # FIX 2026-08-04 (user request): far regions' arm freeze removed here too
+    # (freeze_joint_names now always None) -- matches
+    # observations.py's joint_pos_abs_arms_masked_by_region/
+    # joint_vel_abs_arms_masked_by_region far_region_ids default changing
+    # (1, 3) -> () in the same commit. _FAR_REGION_NAMES kept (not deleted)
+    # since motion_weights below still uses it for an unrelated purpose
+    # (per-motion AMP sampling weight, not arm-freezing). See that
+    # function's docstring and docs/BugFixes.md for the full rationale --
+    # both sides (expert and policy) must still agree per region, now on
+    # "unmasked everywhere" instead of "far masked, near live".
     _FAR_REGION_NAMES = {"left_far", "right_far"}
     amp_data = {
         name: MotionDatasetCfg(
@@ -355,7 +366,7 @@ def goalkeeper_multidisc_amp_runner_cfg() -> dict:
             body_names=GOALKEEPER_KEY_BODY_NAMES,
             amp_obs_terms=_MULTIDISC_AMP_OBS_TERMS,
             anchor_name=GOALKEEPER_ANCHOR_NAME,
-            freeze_joint_names=list(ARM_JOINT_NAMES) if name in _FAR_REGION_NAMES else None,
+            freeze_joint_names=None,
             motion_weights=list(_FAR_REGION_MOTION_WEIGHTS) if name in _FAR_REGION_NAMES else None,
         )
         for name, paths in REGION_MOTION_FILES.items()

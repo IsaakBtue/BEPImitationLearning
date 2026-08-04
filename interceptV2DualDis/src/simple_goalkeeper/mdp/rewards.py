@@ -2835,7 +2835,7 @@ def trailing_foot_forward_continuous(
 def _postsave_airtime_window(
     env: "ManagerBasedRlEnv",
     ball_name: str,
-    window_steps: int = 10,
+    window_steps: int = 20,
 ) -> torch.Tensor:
     """Shared one-shot-per-episode post-save airborne window (bool mask, (N,)).
 
@@ -2896,7 +2896,7 @@ def postleadfootorientation(
     env: "ManagerBasedRlEnv",
     ball_name: str,
     asset_cfg: SceneEntityCfg = _DEFAULT_FEET_CFG,
-    window_steps: int = 10,
+    window_steps: int = 20,
 ) -> torch.Tensor:
     """Continuous reward for the LEADING (assigned) foot rotating back toward
     forward (robot-local +X) once the save has happened.
@@ -2994,11 +2994,11 @@ def postsave_foot_airtime(
     env: "ManagerBasedRlEnv",
     ball_name: str,
     asset_cfg: SceneEntityCfg = _DEFAULT_FEET_CFG,
-    window_steps: int = 10,
+    window_steps: int = 20,
 ) -> torch.Tensor:
-    """Flat bonus for the assigned/leading foot staying airborne for a short,
-    fixed window right after the save (starting the instant `behind` first
-    flips true).
+    """Ramped bonus for the assigned/leading foot staying airborne, growing
+    the longer it stays up, within a short fixed window right after the
+    save (starting the instant `behind` first flips true).
 
     NEW 2026-08-01 (user request). Complements postleadfootorientation's
     airborne-only gate (FIX 2026-08-01, same day): that gate only pays out
@@ -3008,7 +3008,7 @@ def postsave_foot_airtime(
     hangtime to work with instead of relying on whatever the dive physics
     happens to leave it.
 
-    Time-boxed (window_steps=10, ~0.2s at dt=0.02s) rather than unconditional
+    Time-boxed (window_steps=20, ~0.4s at dt=0.02s) rather than unconditional
     for the rest of the post-save window: foot_clearance's own docstring
     explains why an unbounded post-save airborne reward causes "post-save
     hopping" (it's deactivated via `~behind` for exactly that reason). A
@@ -3016,11 +3016,24 @@ def postsave_foot_airtime(
     door to indefinite hopping -- once the window elapses this term is zero
     regardless of contact state, even if the foot is still airborne.
 
-    Deliberately a FLAT bonus (1.0 while airborne and in-window, else 0), not
-    foot_clearance's height-targeted bump: after a dive/step the foot's
-    post-save height trajectory has no natural 10cm target the way an
-    approach-phase step does -- any airborne moment in the window is equally
-    useful for rotation, no shape beyond "off the ground" is meaningful here.
+    FIX 2026-08-04 (user request): window_steps 10 -> 20 (~0.2s -> ~0.4s) --
+    user judged the original window too short.
+
+    FIX 2026-08-04 (2nd same-day change, user request): reshaped from a FLAT
+    bonus (1.0 whenever airborne and in-window, regardless of how long
+    already airborne) to a LINEAR RAMP that grows with elapsed time since
+    the window opened: `(elapsed_steps + 1) / window_steps`, so a foot that
+    lands almost immediately scores close to `1/window_steps` (barely
+    anything) while a foot that stays up for the whole window scores close
+    to 1.0 at the final in-window step. User's stated reasoning: a flat
+    bonus gives no gradient rewarding LONGER hangtime specifically (landing
+    at step 1 vs step 19 of a 20-step window scored identically before this
+    fix) -- the ramp gives the policy a real incentive to keep extending
+    airtime within the bounded window, not just to be airborne for a single
+    qualifying instant. Peak magnitude unchanged (still tops out at 1.0 x
+    weight, same ceiling as the old flat version) -- this reshapes WHERE the
+    reward is concentrated within the window, not how much total reward is
+    available.
 
     Ground-contact detection reuses postleadfootorientation's exact
     feet_contact/ball_contact pattern (distinguishes genuine ground contact
@@ -3065,7 +3078,13 @@ def postsave_foot_airtime(
     leading_in_contact = torch.where(foot_idx == 0, left_in_contact, right_in_contact)  # (N,)
     airborne = ~leading_in_contact
 
-    return (in_window & airborne).float()
+    # FIX 2026-08-04: linear ramp instead of a flat 1.0 -- see docstring.
+    # env._psa_window_start is guaranteed set by _postsave_airtime_window
+    # above (its hasattr-init block runs unconditionally on first call).
+    elapsed = (env.episode_length_buf - env._psa_window_start).clamp(min=0).float()
+    ramp = (elapsed + 1.0) / window_steps
+
+    return (in_window & airborne).float() * ramp
 
 
 def postheadingorientation(
