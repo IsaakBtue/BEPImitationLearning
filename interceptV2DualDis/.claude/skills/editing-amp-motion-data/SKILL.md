@@ -277,6 +277,47 @@ at the two files (there's no side-by-side mode) -- keep the true original
 around at a scratch path per the recovery step above so both commands stay
 runnable throughout an iteration cycle.
 
+**Where to keep the "old" copy for a live comparison session:** a sibling
+directory of `motions/data/` (e.g. `motions/data_pre_<fixname>_backup/`),
+NOT a path outside the repo -- every motion loader in this project globs
+non-recursively (`_MOTIONS_DIR.glob("*.npz")`), so a sibling directory is
+never picked up by training/AMP/the diagnostic RSI script, but both `old`
+and `new` commands stay one relative-path edit apart, which matters when
+you're iterating through several rounds of "try a fix, compare, try
+again" in the same session (2026-08-05's far-region double-step fix went
+through 5+ rounds). Delete the backup dir once the user has confirmed the
+fix (it's scratch, never commit it) -- or recover the true original from
+git history (`git show <commit>:<path>`) if the backup was already
+cleaned up and you need to re-compare.
+
+**Programmatic comparison, not just eyeballing the viewer:** for a whole-
+body position/trajectory question (root drift, foot excursion, "does this
+loop look right"), a top-down (bird's-eye) matplotlib plot of `world X`
+vs. `world Y` for the trunk and both feet -- old and new side by side --
+is far more diagnostic than watching the 3D viewer, especially for
+catching a SHAPE regression (e.g. a new loop/zigzag a fix introduced)
+that's easy to miss in real-time playback but obvious as a static trace:
+
+```python
+import matplotlib; matplotlib.use("Agg")
+import matplotlib.pyplot as plt
+import numpy as np
+
+TRUNK, LFOOT, RFOOT = 0, 17, 23  # body indices -- verify live, don't hardcode (see NPZ Format Recap)
+for label, path in [("old", old_path), ("new", new_path)]:
+    d = np.load(path)
+    bp = d["body_pos_w"]
+    plt.plot(bp[:,TRUNK,0], bp[:,TRUNK,1], 'k.-', label="trunk")
+    plt.plot(bp[:,LFOOT,0], bp[:,LFOOT,1], 'b.-', label="left foot")
+    plt.plot(bp[:,RFOOT,0], bp[:,RFOOT,1], 'r.-', label="right foot")
+    # ... start/end markers, axvline(0), aspect('equal') -- see docs/BugFixes.md
+    # 2026-08-05 entries for the full worked version that caught two
+    # separate regressions this way before they were ever applied for real.
+```
+Frame-label the points (`ax.annotate(str(t), ...)`) when zooming into a
+specific window -- this is what actually identified which frame was the
+true outlier in a joint-angle discontinuity, not just that one existed.
+
 ## Quick Reference
 
 | Question | How to answer it |

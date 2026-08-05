@@ -765,10 +765,20 @@ def goalkeeper_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
         # See postupperdofpos's docstring (rewards.py) -- stuck near its
         # floor on both master's last run and the v2 branch, unlike
         # postlegdofpos/postwaistdofpos at the same weight tier.
+        # FIX 2026-08-06: this registration was explicitly overriding
+        # postupperdofpos's asset_cfg with the OLD 8-joint _RECOVERY_ARM_CFG
+        # (shoulder+elbow), silently undoing the 2026-08-03 fix that dropped
+        # shoulder from the function's own default (_ARM_JOINT_CFG, elbow
+        # only, matching G1's real scope) -- params always wins over a
+        # function default (mjlab reward_manager.py:125 calls
+        # func(env, **params)), so postupperdofpos had been evaluating all 8
+        # joints this whole time despite the 08-03 fix's docstring/BugFixes.md
+        # entry claiming otherwise. Removed the override so the function's
+        # own _ARM_JOINT_CFG default actually applies. See docs/BugFixes.md.
         "postupperdofpos": RewardTermCfg(
             func=gk_mdp.postupperdofpos,
             weight=5.0,
-            params={"ball_name": BALL_NAME, "asset_cfg": _RECOVERY_ARM_CFG},
+            params={"ball_name": BALL_NAME},
         ),
         # NEW 2026-07-30 (user request): supplementary to postupperdofpos --
         # specifically targets "hand above its own shoulder" rather than the

@@ -99,23 +99,73 @@ class _FakeBall:
         self.data = _FakeBallData(x_local)
 
 
+class _FakeContactSensorData:
+    def __init__(self, found: torch.Tensor):
+        self.found = found
+
+
+class _FakeContactSensor:
+    def __init__(self, num_envs: int, right_grounded: bool):
+        # (N, 8): geoms 0:4 = left foot, 4:8 = right foot -- same layout
+        # postleadfootorientation/feet_slippage read. _get_correct_foot_idx
+        # always resolves to the RIGHT foot (1) in this fake harness (see
+        # _FakeEnv's env_origins/episode_length_buf comment below), so only
+        # the right-side columns need to vary per test.
+        found = torch.zeros(num_envs, 8)
+        if right_grounded:
+            found[:, 4:] = 1.0
+        self.data = _FakeContactSensorData(found)
+
+
 class _Scene:
-    def __init__(self, robot: _FakeRobot, ball: _FakeBall, num_envs: int):
+    def __init__(
+        self,
+        robot: _FakeRobot,
+        ball: _FakeBall,
+        num_envs: int,
+        leading_foot_grounded: bool = False,
+    ):
         self._robot = robot
         self._ball = ball
         self.env_origins = torch.zeros(num_envs, 3)
+        # Empty (no contact) ball_contact sensor -- postlegdofpos's airborne
+        # gate excludes genuine ball-touch from counting as "grounded", but
+        # no test here exercises that exclusion specifically, only the
+        # ground-contact/airborne split itself.
+        self._feet_contact = _FakeContactSensor(num_envs, right_grounded=leading_foot_grounded)
+        self._ball_contact = _FakeContactSensor(num_envs, right_grounded=False)
 
     def __getitem__(self, name: str):
+        if name == "feet_contact":
+            return self._feet_contact
+        if name == "ball_contact":
+            return self._ball_contact
         return self._robot if name == "robot" else self._ball
 
 
 class _FakeEnv:
-    def __init__(self, joint_names: list[str], joint_pos: torch.Tensor, ball_behind: bool = True):
+    def __init__(
+        self,
+        joint_names: list[str],
+        joint_pos: torch.Tensor,
+        ball_behind: bool = True,
+        leading_foot_grounded: bool = False,
+    ):
         num_envs = joint_pos.shape[0]
         self.num_envs = num_envs
         self.device = "cpu"
         x_local = torch.full((num_envs,), -1.0 if ball_behind else 1.0)
-        self.scene = _Scene(_FakeRobot(joint_names, joint_pos), _FakeBall(x_local), num_envs)
+        self.scene = _Scene(
+            _FakeRobot(joint_names, joint_pos), _FakeBall(x_local), num_envs,
+            leading_foot_grounded=leading_foot_grounded,
+        )
+        # postlegdofpos now calls _get_correct_foot_idx (FIX 2026-08-06),
+        # which needs episode_length_buf to resolve _get_ball_crossing_y.
+        # Kept > 1 (not "just reset") so it takes the env_origins[:, 1]
+        # fallback (0.0) rather than needing _rsi_cross_y/ball velocity --
+        # crossing_y(0.0) > env_origins[:, 1](0.0) is False, so foot_idx
+        # always resolves to 1 (right foot) in every test in this file.
+        self.episode_length_buf = torch.full((num_envs,), 10, dtype=torch.long)
 
 
 def _cfg(joint_names: list[str], names: tuple[str, ...]) -> SceneEntityCfg:
@@ -286,3 +336,22 @@ def test_gated_off_when_ball_not_behind():
     assert postupperdofpos(env, "ball", asset_cfg=arm_cfg).item() == pytest.approx(1.0)
     assert postlegdofpos(env, "ball", asset_cfg=leg_cfg).item() == 0.0
     assert postwaistdofpos(env, "ball", asset_cfg=waist_cfg).item() == 0.0
+
+
+def test_postlegdofpos_gated_off_when_leading_foot_grounded():
+    """FIX 2026-08-06 (user request): postlegdofpos now only pays out while
+    the leading (assigned) foot is airborne, mirroring
+    postleadfootorientation's FIX 2026-08-01 gate -- was unconditional on
+    `behind` alone, pulling all 12 leg joints toward the stance target even
+    while the leading foot was already planted.
+    """
+    joint_names = list(_LEG_JOINT_NAMES + _ARM_JOINT_NAMES + _WAIST_JOINT_NAMES)
+    target_row = _target_row(joint_names)  # exactly at target -> err=0, would score 1.0
+    joint_pos = target_row.unsqueeze(0)
+    leg_cfg = _cfg(joint_names, _LEG_JOINT_NAMES)
+
+    env_airborne = _FakeEnv(joint_names, joint_pos, leading_foot_grounded=False)
+    env_grounded = _FakeEnv(joint_names, joint_pos, leading_foot_grounded=True)
+
+    assert postlegdofpos(env_airborne, "ball", asset_cfg=leg_cfg).item() == pytest.approx(1.0)
+    assert postlegdofpos(env_grounded, "ball", asset_cfg=leg_cfg).item() == 0.0

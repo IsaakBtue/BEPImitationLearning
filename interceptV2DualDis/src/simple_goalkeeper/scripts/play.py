@@ -858,18 +858,34 @@ def _patch_viewer_post_recovery_plots(native_viewer: "NativeMujocoViewer", env) 
     investigation for the post-save arm-drift bug: `postorientation`
     (upright recovery, always active per its own docstring -- AMP has no
     root-orientation signal to supply this itself), `angular_momentum_penalty`
-    (2026-08-03, whole-body momentum), `arm_dof_vel` (arm velocity
-    regularization). Exactly 12 terms -- fits `max_viewports` (12) with no
-    overflow, so all twelve are guaranteed visible with no need to also
-    demote anything else.
+    (2026-08-03, whole-body momentum). Exactly 12 terms -- fits `max_viewports`
+    (12) with no overflow, so all twelve are guaranteed visible with no need
+    to also demote anything else.
+
+    FIX 2026-08-06 (user request): swapped `arm_dof_vel` (12th slot) for
+    `inner_face_orientation_save` -- the one-time save-moment leading-foot
+    "block posture" reward, retargeted 2026-08-01 (commit 036222f) from 90deg
+    off forward (parallel to world Y) to 60deg off forward (30deg off Y).
+    It's an APPROACH-phase term by this function's own earlier classification
+    (fires at the softstop moment, not gated by `_ball_is_behind` like the
+    other 11), included here anyway so the new save-angle target can be
+    watched directly in the panel.
     """
     orig_setup = native_viewer.setup
 
+    # FIX 2026-08-06 (user request): swapped `arm_dof_vel` out for
+    # `inner_face_orientation_save` -- the save-moment leading-foot "block
+    # posture" reward retargeted 2026-08-01 (commit 036222f) to 60deg off
+    # forward / 30deg off world Y (`_FOOT_TARGET_ANGLE_DEG`, rewards.py).
+    # It's an APPROACH-phase term (fires at the softstop moment, not
+    # `~behind`-gated like the other 11), included here anyway so the foot's
+    # save-angle can be watched directly; `arm_dof_vel` was judged the least
+    # foot-orientation-relevant of the original 12.
     _POST_RECOVERY_REWARD_TERMS = (
         "postorientation", "postangvel", "postlinvel",
         "postupperdofpos", "postwaistdofpos", "postlegdofpos",
         "postleadfootorientation", "postsave_foot_airtime", "postheadingorientation",
-        "penalize_arm_above_shoulder", "angular_momentum_penalty", "arm_dof_vel",
+        "penalize_arm_above_shoulder", "angular_momentum_penalty", "inner_face_orientation_save",
     )
 
     def _patched_setup() -> None:

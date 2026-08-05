@@ -2377,9 +2377,39 @@ def postlegdofpos(
     curriculum unchanged -- only the comparison target moved. See
     docs/superpowers/specs/2026-07-25-post-save-stance-design.md and
     docs/BugFixes.md.
+
+    FIX 2026-08-06 (user request): added the same leading-foot airborne
+    gate postleadfootorientation uses (its FIX 2026-08-01 entry) -- was
+    unconditional `behind` only, so this term (all 12 leg joints, straight-
+    leg stance target) pulled even while the leading foot was already
+    planted, same "active pull while grounded = slippage against the
+    floor" issue postleadfootorientation's own gate was added to prevent.
+    Now zero unless the leading (assigned) foot is genuinely airborne,
+    using the identical feet_contact/ball_contact exclusion pattern
+    (feet_slippage/postleadfootorientation) to tell a lingering foot-ball
+    touch apart from real ground contact. No window_steps cap added here
+    (unlike postleadfootorientation's 2026-08-03 follow-up) -- not
+    requested; this only adds the airborne condition. See docs/BugFixes.md.
     """
     behind = _ball_is_behind(env, ball_name)
     robot: Entity = env.scene[asset_cfg.name]
+
+    foot_idx = _get_correct_foot_idx(env, ball_name)  # (N,) leading foot, 0=left, 1=right
+
+    contact_sensor: ContactSensor = env.scene["feet_contact"]
+    found = contact_sensor.data.found  # (N, 8)
+    left_in_contact  = (found[:, :4] > 0).any(dim=-1)
+    right_in_contact = (found[:, 4:] > 0).any(dim=-1)
+
+    ball_sensor: ContactSensor = env.scene["ball_contact"]
+    ball_found = ball_sensor.data.found  # (N, 8), same primary geom layout as feet_contact
+    left_touching_ball  = (ball_found[:, :4] > 0).any(dim=-1)
+    right_touching_ball = (ball_found[:, 4:] > 0).any(dim=-1)
+    left_in_contact  = left_in_contact & ~left_touching_ball
+    right_in_contact = right_in_contact & ~right_touching_ball
+
+    leading_in_contact = torch.where(foot_idx == 0, left_in_contact, right_in_contact)  # (N,)
+    airborne = ~leading_in_contact
 
     if not hasattr(env, "_post_save_stance_target"):
         all_names = robot.joint_names
@@ -2394,7 +2424,7 @@ def postlegdofpos(
         - env._post_save_stance_target[asset_cfg.joint_ids]
     )
     err = torch.sum(torch.square(delta), dim=-1)
-    return torch.exp(-1.0 * err) * behind.float()
+    return torch.exp(-1.0 * err) * behind.float() * airborne.float()
 
 
 

@@ -1,2 +1,26 @@
-cd interceptV2DualDis
-uv run sgk_play Mjlab-BeyondAMP-Goalkeeper-T1-MultiDisc-WithOverlay --checkpoint-file logs/rsl_rl/intercept_simple_goalkeeper_multidisc/2026-08-01_17-14-57_6144_footorientfix_2026-08-01/model_39750.pt
+# Compare OLD (pre-fix, original capture) vs NEW (rotated + both feet pulled near X=0) for the 6 far-region double-step clips
+# Run from interceptV2DualDis. Old copies live in motions/data_pre_rotatefix_backup/ (not picked up by AMP, only *.npz in motions/data/ is used).
+
+# --- new_doublestepleft_booster_t1 ---
+uv run sgk_play Mjlab-BeyondAMP-Goalkeeper-T1-WithOverlay --agent zero --no-terminations True --motion-file src/simple_goalkeeper/motions/data_pre_rotatefix_backup/new_doublestepleft_booster_t1.npz
+uv run sgk_play Mjlab-BeyondAMP-Goalkeeper-T1-WithOverlay --agent zero --no-terminations True --motion-file src/simple_goalkeeper/motions/data/new_doublestepleft_booster_t1.npz
+
+# --- new_doublestepleft_short_booster_t1 ---
+uv run sgk_play Mjlab-BeyondAMP-Goalkeeper-T1-WithOverlay --agent zero --no-terminations True --motion-file src/simple_goalkeeper/motions/data_pre_rotatefix_backup/new_doublestepleft_short_booster_t1.npz
+uv run sgk_play Mjlab-BeyondAMP-Goalkeeper-T1-WithOverlay --agent zero --no-terminations True --motion-file src/simple_goalkeeper/motions/data/new_doublestepleft_short_booster_t1.npz
+
+# --- new_doublestepleft_wide_booster_t1 ---
+uv run sgk_play Mjlab-BeyondAMP-Goalkeeper-T1-WithOverlay --agent zero --no-terminations True --motion-file src/simple_goalkeeper/motions/data_pre_rotatefix_backup/new_doublestepleft_wide_booster_t1.npz
+uv run sgk_play Mjlab-BeyondAMP-Goalkeeper-T1-WithOverlay --agent zero --no-terminations True --motion-file src/simple_goalkeeper/motions/data/new_doublestepleft_wide_booster_t1.npz
+
+# --- new_doublestepright_booster_t1 ---
+uv run sgk_play Mjlab-BeyondAMP-Goalkeeper-T1-WithOverlay --agent zero --no-terminations True --motion-file src/simple_goalkeeper/motions/data_pre_rotatefix_backup/new_doublestepright_booster_t1.npz
+uv run sgk_play Mjlab-BeyondAMP-Goalkeeper-T1-WithOverlay --agent zero --no-terminations True --motion-file src/simple_goalkeeper/motions/data/new_doublestepright_booster_t1.npz
+
+# --- new_doublestepright_short_booster_t1 ---
+uv run sgk_play Mjlab-BeyondAMP-Goalkeeper-T1-WithOverlay --agent zero --no-terminations True --motion-file src/simple_goalkeeper/motions/data_pre_rotatefix_backup/new_doublestepright_short_booster_t1.npz
+uv run sgk_play Mjlab-BeyondAMP-Goalkeeper-T1-WithOverlay --agent zero --no-terminations True --motion-file src/simple_goalkeeper/motions/data/new_doublestepright_short_booster_t1.npz
+
+# --- new_doublestepright_wide_booster_t1 ---
+uv run sgk_play Mjlab-BeyondAMP-Goalkeeper-T1-WithOverlay --agent zero --no-terminations True --motion-file src/simple_goalkeeper/motions/data_pre_rotatefix_backup/new_doublestepright_wide_booster_t1.npz
+uv run sgk_play Mjlab-BeyondAMP-Goalkeeper-T1-WithOverlay --agent zero --no-terminations True --motion-file src/simple_goalkeeper/motions/data/new_doublestepright_wide_booster_t1.npz
