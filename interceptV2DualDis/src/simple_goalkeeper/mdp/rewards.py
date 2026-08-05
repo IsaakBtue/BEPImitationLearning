@@ -35,6 +35,29 @@ _DEFAULT_ROBOT_CFG = SceneEntityCfg("robot")
 _FOOT_TARGET_ANGLE_DEG = 60.0
 _FOOT_TARGET_COS = math.cos(math.radians(_FOOT_TARGET_ANGLE_DEG))
 _FOOT_TARGET_SIN = math.sin(math.radians(_FOOT_TARGET_ANGLE_DEG))
+
+# FIX 2026-08-05 (user request): overshoot-side steepening for
+# foot_inner_face_continuous. Was a plain cos(angle-target) on both sides of
+# the target -- symmetric in shape but very flat near its own peak (a 30deg
+# overshoot, i.e. drifting back to the OLD 90deg value, only cost ~13% of
+# peak value: cos(30deg)=0.87). A live checkpoint replay (model_39750,
+# 2026-08-04_16-43-37_6144_airtimerampfix run) found exactly this drift:
+# far-region saves converged to ~69deg (near target), near-region saves
+# stayed at ~83-85deg (near the OLD target) -- the weak overshoot gradient
+# was too easily overridden by stopball/softstop's much heavier pull toward
+# a near-perpendicular block angle for near-region's more head-on ball
+# trajectories. Same steepness convention as foot_clearance's
+# clearance_sigma=300 (exp(-clearance_sigma*(height-target)^2)): chosen so
+# error = target_magnitude (foot_clearance: 0.10m; here: the 30deg gap back
+# to the old 90deg value) scores ~0.05, half that error scores ~0.47.
+# Applied ONLY on the overshoot side (foot rotated past the target, on the
+# correct side) -- the undershoot/wrong-side branch keeps the original
+# cos(angle-target) formula unchanged, preserving the deliberate 2026-07-10
+# fix (a plain zero-floor reward can't distinguish "never rotated" from
+# "rotated the wrong way"; cos's asymmetric shape around a non-90deg target
+# already does distinguish them, and a symmetric Gaussian rescale would
+# have erased that distinction).
+_FOOT_OVERSHOOT_SIGMA = 0.00333
 _DEFAULT_KNEE_CFG = SceneEntityCfg("robot", body_names=("Shank_Left", "Shank_Right"))
 # FIX 2026-08-03 (user request, G1-comparison finding): postupperdofpos's ONLY
 # consumer. Was Shoulder_Pitch/Roll + Elbow_Pitch/Yaw x2 sides (8 joints) --
@@ -2750,6 +2773,15 @@ def foot_inner_face_continuous(
     to 60° off robot-forward (30° off Y), matching inner_face_orientation_save's
     new target exactly (_FOOT_TARGET_COS/_FOOT_TARGET_SIN) so the dense per-step
     pull and the one-shot save bonus no longer disagree on where "correct" is.
+
+    FIX 2026-08-05 (user request): the metric above (raw cos(angle-target)) is
+    kept for the UNDERSHOOT/wrong-side region, but the OVERSHOOT region (foot
+    rotated past the target, on the correct side -- i.e. drifting back toward
+    the old 90° value) now uses a steeper foot_clearance-style Gaussian instead
+    of cosine's own near-flat tail there. See _FOOT_OVERSHOOT_SIGMA's docstring
+    for the live-checkpoint evidence and calibration. The two pieces agree
+    exactly at the target (both equal 1.0), so this is a continuous, just not
+    smooth, splice.
     """
     robot: Entity = env.scene[asset_cfg.name]
 
@@ -2773,8 +2805,27 @@ def foot_inner_face_continuous(
 
     alignment = (foot_long_w * target_w).sum(dim=-1)                       # (N,) in [-1, 1]
 
+    # Overshoot detection: foot's angle off robot-forward (unsigned), and
+    # which side it's rotated toward (correct side = positive).
+    forward_local = torch.zeros(env.num_envs, 3, device=env.device)
+    forward_local[:, 0] = 1.0
+    forward_w = quat_apply(robot.data.root_link_quat_w, forward_local)     # (N, 3)
+    cos_from_forward = (foot_long_w * forward_w).sum(dim=-1).clamp(-1.0, 1.0)
+    angle_from_forward_deg = torch.rad2deg(torch.acos(cos_from_forward))   # (N,) in [0, 180]
+
+    lateral_local = torch.zeros(env.num_envs, 3, device=env.device)
+    lateral_local[:, 1] = 1.0
+    lateral_w = quat_apply(robot.data.root_link_quat_w, lateral_local)     # (N, 3), robot-local +Y
+    side_sign = (foot_long_w * lateral_w).sum(dim=-1) * expected_sign      # (N,) >0 = correct side
+
+    overshoot_mask = (side_sign > 0.0) & (angle_from_forward_deg > _FOOT_TARGET_ANGLE_DEG)
+    overshoot_err = angle_from_forward_deg - _FOOT_TARGET_ANGLE_DEG
+    overshoot_reward = torch.exp(-_FOOT_OVERSHOOT_SIGMA * overshoot_err ** 2)
+
+    reward = torch.where(overshoot_mask, overshoot_reward, alignment)      # (N,)
+
     behind = _ball_is_behind(env, ball_name)
-    return alignment * (~behind).float()
+    return reward * (~behind).float()
 
 
 def trailing_foot_forward_continuous(

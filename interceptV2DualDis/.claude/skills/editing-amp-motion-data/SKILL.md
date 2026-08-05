@@ -26,6 +26,10 @@ what a downstream joint like the ankle is responsible for.
   a second problem.
 - Creating a brand-new corrected clip from raw PKL, or hand-patching an
   existing NPZ in place.
+- A foot/leg needs to be moved CLOSER TO a target position (not just
+  flatness) -- e.g. "the trailing foot sticks out too far forward" -- see
+  "Correcting Foot Position" below, a different and harder class of edit
+  than pure orientation fixes.
 
 **Don't use for:** reward-function bugs (`penalize_wrong_foot_ball_contact`
 etc. -- see `debugging-mujoco-contact-sensors`), or training/curriculum
@@ -184,6 +188,72 @@ Steps, in order:
    feet** -- the last check is the one this skill exists to remind you not
    to skip.
 
+## Correcting Foot Position (not just orientation) -- IK is fragile, prefer damping
+
+The flatness fix above only ever solves 2 DOF (`Ankle_Pitch`/`Ankle_Roll`)
+for an ORIENTATION target -- that Newton solve is well-behaved because
+ankle rotation barely moves the foot's position, so there's no real
+multi-solution ambiguity. **Solving `Hip_Pitch`+`Knee_Pitch` for a
+POSITION target (e.g. "pull this foot's X closer to the trunk") is a
+different, much more fragile problem**: it's a classic 2-link IK setup
+with two valid solution branches ("knee bent one way vs. the other"), and
+a per-frame-independent Newton solve can jump between branches frame to
+frame even though every individual frame reports full convergence. This
+happened repeatedly correcting the far-region double-step clips' trailing
+foot (2026-08-05, `docs/BugFixes.md`) -- five different mitigation
+attempts each surfaced a new failure mode:
+
+- **Exact-target IK** (drive rel-X to 0, or to a damped fraction of
+  original): converges per-frame, but joint angles can snap ~15-20deg for
+  a single frame relative to a smooth trend either side -- a real velocity
+  discontinuity, not a false alarm.
+- **Warm-starting each frame from the previous frame's solved values**
+  (the standard fix for branch-jumping): made it WORSE here, oscillating
+  chaotically instead of jumping once -- the required correction routes
+  the knee near a singular (straight-leg) configuration for several
+  consecutive frames, where the linearization is ill-conditioned
+  regardless of starting point.
+- **Revert a spiking frame to its original value**: creates a NEW seam,
+  since original and corrected trajectories don't generally coincide at
+  that boundary.
+- **Interpolate a spiking frame from its corrected neighbors**: leaves a
+  whack-a-mole residual -- fixing one frame in a tight cluster just makes
+  an adjacent frame the new outlier.
+
+**What actually worked:** damp `Hip_Pitch`/`Knee_Pitch` toward T1's
+standing-neutral pose (`-0.3`/`0.6`) by a constant fraction -- NOT solving
+IK at all, just linear interpolation of an already-smooth signal, which
+cannot itself produce a discontinuity. If a position TARGET is still
+needed (not just "move it somewhen closer"), use the damped pose's own
+resulting position as the IK target (proven smooth) while forcing Z back
+to the exact original height every frame (see next paragraph for why), then
+clean up any remaining spike with a **uniform moving-average smooth over
+the WHOLE clip's hip/knee columns**, iterated until velocity drops at or
+below the original clip's own max -- a moving average of a bounded signal
+has a hard bound on its own derivative, so it can't miss a case the way a
+targeted single-frame patch can.
+
+**Different legs need different damping strengths, and more damping is
+NOT always better.** The trailing foot's large offset needs strong
+damping; the leading foot's small offset gets pushed the WRONG way
+(overshoots past the target) by the same strong damping. Grid-search each
+leg's own damping factor independently against its own foot's resulting
+`max|trunk-relative-X|` -- don't assume a single shared factor is optimal
+for both.
+
+**Always verify ground-contact TIMING survived, not just flatness/NaN/
+velocity.** A damping-only pass (no explicit Z target) passed every
+existing check -- including zero velocity spike -- and still silently
+swapped which foot touches the ground when: the trailing foot's genuine
+footfall disappeared (min height rose ~8mm, well past the 0.033m grounded
+threshold) while the leading foot gained a footfall that never existed in
+the original capture. Caught only by explicitly diffing the boolean
+grounded mask (`z<0.033`, frame-by-frame) old vs. new -- a metric this
+skill's own flatness-focused checklist did not previously mention. Add it:
+**compare `body_pos_w[:,foot_idx,2] < 0.033` old vs. new and confirm no
+systematic shift**, not just that the minimum is still near 0.030
+somewhere in the clip.
+
 ## Viewing Clips: Use the Real Viewer, Not the Bare One
 
 `sgk_view <path.npz>` uses a bare `mujoco.viewer.launch_passive` call --
@@ -216,3 +286,5 @@ runnable throughout an iteration cycle.
 | What's the real joint order / body order? | Fetch live from the MJCF via `mujoco.mj_id2name` -- never hardcode from memory, it silently drifts from the XML |
 | Am I re-tuning a parameter (e.g. damping strength)? | Re-source from the TRUE original (git-recovered if needed), never from the already-corrected file -- stacking compounds nonlinearly |
 | Did my edit only touch position, or orientation too? | Assume orientation is affected for every body downstream of the edited joint in the kinematic chain, and verify with FK -- don't assume "I didn't touch that joint" means "that joint's world orientation is unaffected" |
+| Need to move a foot's POSITION, not just fix its orientation? | Prefer damping Hip/Knee toward neutral over solving IK for an exact target -- IK for position (unlike the 2-DOF ankle-orientation solve) is a real 2-link-arm problem with multiple solution branches and can jump between them frame to frame even when each frame converges |
+| Did a position/damping edit change WHEN a foot touches the ground? | Diff the boolean `z<0.033` grounded mask, old vs. new, frame-by-frame -- a pass can look perfect on flatness/NaN/velocity and still silently swap which foot is grounded when |
