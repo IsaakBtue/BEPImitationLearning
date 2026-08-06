@@ -21,11 +21,14 @@ plus live env checks only.
   (`postlegdofpos`, `postleadfootorientation`, `postsave_foot_airtime`) with
   one latch that locks "landed" permanently on first genuine ground contact
   -- a bounce/sensor dropout can no longer reopen it.
-- `foot_inner_face_continuous`: continuous cos()+overshoot-Gaussian shaping
-  replaced with a binary `alignment > 0.7` threshold check (matches
-  `inner_face_orientation_save`'s own mechanism). Active window extended
-  from strict `~behind` to also include the shared post-save `window_steps`
-  window (20 steps).
+- `foot_inner_face_continuous`: timing only, reward math unchanged. Gate
+  changed from `(~behind)` to `~softstop_fired` (`env._softstop_flag`) --
+  the exact event `inner_face_orientation_save`'s one-shot bonus fires on,
+  so the dense term hands off with no gap/overlap ("stop when that one
+  launches"). Two corrections landed same day: a shape-simplification
+  attempt (binary threshold) was reverted, and the gate itself moved from
+  an initial `~sb_flag` (stopball, easier/earlier threshold) to the
+  correct `~softstop_flag` -- see `docs/BugFixes.md`'s correction entries.
 - `postheadingorientation`: target is now the trunk's OWN forward direction
   captured at the exact save instant (`env._heading_target_w`), not a
   hardcoded world +X. Also now windowed (20 steps post-save) instead of

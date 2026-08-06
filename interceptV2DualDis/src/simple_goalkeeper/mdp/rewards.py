@@ -2874,47 +2874,64 @@ def foot_inner_face_continuous(
     env: "ManagerBasedRlEnv",
     ball_name: str,
     asset_cfg: SceneEntityCfg = _DEFAULT_FEET_CFG,
-    alignment_threshold: float = 0.7,
-    window_steps: int = 20,
 ) -> torch.Tensor:
-    """Binary per-step check: is the assigned foot's inner face turned to the
-    block-posture target angle (60° off robot-forward, side-matched), yes/no.
+    """Continuous reward for rotating the assigned foot's inner face toward the ball,
+    in the correct (side-matched) direction.
 
-    Active while the ball is live (`~behind`) AND for the same short post-save
-    window `postleadfootorientation`/`postsave_foot_airtime` use, instead of
-    cutting to zero the instant the ball is deflected. Uses the same assigned
-    foot as footreach (_get_correct_foot_idx: left=0 for +Y balls, right=1
-    for -Y balls), same target direction as `inner_face_orientation_save`
-    (`_FOOT_TARGET_COS`/`_FOOT_TARGET_SIN`, robot-local frame here, matching
-    this function's own pre-existing convention).
+    Active until `softstop` fires (env._softstop_flag) -- the same event
+    `inner_face_orientation_save`'s one-shot bonus itself fires on -- not the
+    compound `~behind` gate. Uses the same assigned foot as footreach
+    (_get_correct_foot_idx: left=0 for +Y balls, right=1 for -Y balls).
 
-    FIX 2026-08-06 (user request, simplification): replaced the continuous
-    `cos(angle-target)` + overshoot-side Gaussian shaping (2026-08-05 fix,
-    see git history) with a hard `alignment > alignment_threshold` check --
-    the same mechanism `inner_face_orientation_save` already uses for its
-    own one-shot save-moment bonus, so the dense per-step term and the
-    one-shot bonus now share one simple criterion instead of two different
-    shaping functions describing the same target. Trade-off, noted
-    explicitly: the old continuous version gave a real (if small) NEGATIVE
-    gradient for a wrong-direction rotation (deliberately, per its own
-    2026-07-10 fix -- "a plain zero-floor reward can't distinguish 'never
-    rotated' from 'rotated the wrong way'"); this binary version cannot
-    distinguish those two cases either (both score 0). Accepted per explicit
-    user request favoring simplicity over that extra signal.
+    Metric: foot_long_axis_w · target_w — negative when foot points opposite the
+    target, up to 1 when exactly aligned with the target direction (60° off
+    robot-forward, 30° off robot-local Y, toward +Y for the left foot / -Y for
+    the right foot). Uses robot-local axes (not world) so a dive yaw doesn't
+    degrade the signal.
 
-    FIX 2026-08-06 (same day): window extended to include the shared
-    post-save `window_steps` (default 20, `_postsave_airtime_window`) instead
-    of stopping dead at the exact instant `behind` flips true -- so foot-angle
-    quality is still checked for the brief window right after the save, not
-    just before it. `foot_inner_face_continuous` and `postleadfootorientation`
-    remain non-overlapping in what they reward (this checks the BLOCK angle,
-    that one rewards rotating BACK to forward), but now share the same
-    active-window boundary instead of one cutting off exactly where the
-    other begins.
+    FIX 2026-07-10: was `.abs()` — same bug as inner_face_orientation_save (see
+    that function's docstring for the full analysis and live evidence). This is
+    the DENSE, per-step version of the same reward, so it was actually the
+    dominant source of the wrong-direction-tolerant gradient (far more total
+    signal than the one-shot bonus) -- fixing this one specifically should matter
+    most. Deliberately left unclamped (can go negative for a wrong-direction
+    rotation, not just zero) -- a mild, informative penalty gives clearer gradient
+    toward the correct mirror-image direction than merely withholding reward,
+    which would look identical to "never rotated at all" from the policy's
+    perspective.
 
-    Previous fix history (target retargeting, mirror-direction bug, overshoot
-    shaping) is preserved in git log / docs/BugFixes.md -- superseded by this
-    simplification, not re-described here.
+    FIX 2026-08-01 (user request): retargeted from full-sideways (robot-local Y)
+    to 60° off robot-forward (30° off Y), matching inner_face_orientation_save's
+    new target exactly (_FOOT_TARGET_COS/_FOOT_TARGET_SIN) so the dense per-step
+    pull and the one-shot save bonus no longer disagree on where "correct" is.
+
+    FIX 2026-08-05 (user request): the metric above (raw cos(angle-target)) is
+    kept for the UNDERSHOOT/wrong-side region, but the OVERSHOOT region (foot
+    rotated past the target, on the correct side -- i.e. drifting back toward
+    the old 90° value) now uses a steeper foot_clearance-style Gaussian instead
+    of cosine's own near-flat tail there. See _FOOT_OVERSHOOT_SIGMA's docstring
+    for the live-checkpoint evidence and calibration. The two pieces agree
+    exactly at the target (both equal 1.0), so this is a continuous, just not
+    smooth, splice.
+
+    FIX 2026-08-06 (user request -- a same-day simplification attempt to a
+    binary threshold check was reverted; user wanted ONLY the timing
+    changed, not the shaping mechanism): gate changed from `(~behind)` to
+    `~softstop_fired` (env._softstop_flag). First pass used `~sb_flag`
+    (stopball's own, EARLIER/easier threshold, delta_vx > 1.0 m/s) per a
+    literal "on until stopball" reading -- corrected per follow-up user
+    request to key off `_softstop_flag` instead, since that's the exact
+    event `inner_face_orientation_save`'s one-shot bonus fires on ("i want
+    the foot continuous to stop when that one launches"). This creates a
+    clean handoff with no gap and no overlap: the dense per-step term shapes
+    the angle through the whole approach and up to the precise instant the
+    one-shot bonus evaluates and fires, then goes silent, handing judgment
+    of that exact moment entirely to the one-shot term. `_ball_is_behind`
+    (the original gate) is a compound condition (ball_x<0 OR softstop_flag
+    OR sb_flag) that can flip True purely from ball position before any
+    real contact, which could have cut this term off before the actual
+    save event -- keying off `_softstop_flag` directly avoids that. Reward
+    math/shaping itself is unchanged from the 2026-08-05 state.
     """
     robot: Entity = env.scene[asset_cfg.name]
 
@@ -2937,12 +2954,28 @@ def foot_inner_face_continuous(
     target_w = quat_apply(robot.data.root_link_quat_w, target_local)       # (N, 3)
 
     alignment = (foot_long_w * target_w).sum(dim=-1)                       # (N,) in [-1, 1]
-    oriented_correctly = (alignment > alignment_threshold).float()
 
-    behind = _ball_is_behind(env, ball_name)
-    in_window = _postsave_airtime_window(env, ball_name, window_steps)
-    active = (~behind) | (behind & in_window)
-    return oriented_correctly * active.float()
+    # Overshoot detection: foot's angle off robot-forward (unsigned), and
+    # which side it's rotated toward (correct side = positive).
+    forward_local = torch.zeros(env.num_envs, 3, device=env.device)
+    forward_local[:, 0] = 1.0
+    forward_w = quat_apply(robot.data.root_link_quat_w, forward_local)     # (N, 3)
+    cos_from_forward = (foot_long_w * forward_w).sum(dim=-1).clamp(-1.0, 1.0)
+    angle_from_forward_deg = torch.rad2deg(torch.acos(cos_from_forward))   # (N,) in [0, 180]
+
+    lateral_local = torch.zeros(env.num_envs, 3, device=env.device)
+    lateral_local[:, 1] = 1.0
+    lateral_w = quat_apply(robot.data.root_link_quat_w, lateral_local)     # (N, 3), robot-local +Y
+    side_sign = (foot_long_w * lateral_w).sum(dim=-1) * expected_sign      # (N,) >0 = correct side
+
+    overshoot_mask = (side_sign > 0.0) & (angle_from_forward_deg > _FOOT_TARGET_ANGLE_DEG)
+    overshoot_err = angle_from_forward_deg - _FOOT_TARGET_ANGLE_DEG
+    overshoot_reward = torch.exp(-_FOOT_OVERSHOOT_SIGMA * overshoot_err ** 2)
+
+    reward = torch.where(overshoot_mask, overshoot_reward, alignment)      # (N,)
+
+    softstop_fired = getattr(env, "_softstop_flag", torch.zeros(env.num_envs, dtype=torch.bool, device=env.device))
+    return reward * (~softstop_fired).float()
 
 
 def trailing_foot_forward_continuous(

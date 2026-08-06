@@ -2221,3 +2221,23 @@ Checked systematically for other instances of the same bug class: cross-referenc
 **Verification:** `ast.parse` on all changed files -- no syntax errors. `env -u PYTHONPATH uv run pytest tests/ -q` -- 76/76 pass (73 pre-existing + 3 new). Live checks on a real `ManagerBasedRlEnv`: all 5 touched reward terms (`postlegdofpos`, `postleadfootorientation`, `postsave_foot_airtime`, `foot_inner_face_continuous`, `postheadingorientation`) registered and execute without error across a 60-step random-action rollout, `reward_manager.compute()` runs clean; a separate 150-step/32-env rollout confirmed `postheadingorientation` produces real near-1.0 values immediately after a save (target correctly captured) and the captured `_heading_target_w` stays CONSTANT across consecutive steps for the same env (confirmed by comparing printed values step-to-step) rather than re-snapping every tick. Not yet validated against a live training run.
 
 ---
+
+## 2026-08-06 (later same day, correction) -- foot_inner_face_continuous: reverted the shape simplification, kept only the timing fix
+
+**Context:** the previous entry ("foot/leg orientation rework") misread the user's request for `foot_inner_face_continuous` as "replace the continuous shaping with a binary threshold check." User corrected this immediately: they only wanted the TIMING changed, not the reward mechanism -- "just the timing of it, i wanted to be on until stopball. dont change how it worked."
+
+**Fix:** reverted the reward math back to its exact 2026-08-05 state (continuous `cos(angle-target)` for the undershoot/wrong-side region, `foot_clearance`-style Gaussian for the overshoot region -- byte-identical to the pre-simplification code, confirmed by diffing against the 2026-08-05 commit). Kept only the timing change, and corrected it to match what was actually asked: gate changed from `(~behind)` (and my incorrect first-pass `(~behind) | (behind & in_window)`) to `~stopball_fired` (`env._sb_flag`, with a `getattr` fallback matching the established pattern `_ball_is_behind` itself uses). `_ball_is_behind` is a compound condition -- `(ball_x_local < 0) | softstop_flag | sb_flag` -- that can flip True purely from the ball's position crossing the goal line, before any genuine foot-ball contact has happened; gating on `_sb_flag` directly instead keeps this term active for the entire approach through the exact instant of the real save (matching "on until stopball" literally), rather than whichever of the three `_ball_is_behind` conditions happens to trip first.
+
+**Verification:** `ast.parse` -- no syntax errors. `env -u PYTHONPATH uv run pytest tests/ -q` -- 76/76 pass (unchanged). Live check on a real 32-env rollout: confirmed `foot_inner_face_continuous` produces real nonzero values (e.g. 0.5) in the gap where `_ball_is_behind` is already True but `_sb_flag` has not yet fired -- exactly the window the old `~behind` gate would have already zeroed out. Not yet validated against a live training run.
+
+---
+
+## 2026-08-06 (later same day, 2nd correction) -- foot_inner_face_continuous: gate corrected from stopball to softstop
+
+**Context:** immediate follow-up to the previous correction. User clarified "on until stopball" actually meant "stop when `inner_face_orientation_save` (the one-shot bonus) fires" -- and that one-shot bonus fires on `softstop` (`env._softstop_flag`), not `stopball` (`env._sb_flag`) -- confirmed by re-reading `inner_face_orientation_save`'s own code (`softstop_fired = getattr(env, "_softstop_flag", None)`). `stopball`/`softstop` are two distinct, independently-flagged events in this codebase: `stopball` is an easier partial-deflection threshold (`delta_vx > 1.0 m/s`), `softstop` is a harder full-reversal threshold, and `stopball` typically fires first (or at the same tick), `softstop` fires later (or not at all, if the deflection doesn't fully reverse).
+
+**Fix:** `foot_inner_face_continuous`'s gate changed from `~sb_flag` to `~softstop_flag`. This creates the clean handoff the user wanted: the dense per-step term shapes the foot angle through the whole approach up to the EXACT instant the one-shot bonus evaluates and fires, then goes silent -- no gap (dense term active until the precise moment), no overlap (dense term never double-counts the same instant the one-shot bonus judges).
+
+**Verification:** `ast.parse` -- no syntax errors. `env -u PYTHONPATH uv run pytest tests/ -q` -- 76/76 pass (unchanged). Live check on a real 32-env rollout: confirmed `foot_inner_face_continuous` reads exactly `0.0` for an env the instant `env._softstop_flag` is found True (step 97, env 3) -- the precise handoff boundary requested. Not yet validated against a live training run.
+
+---
