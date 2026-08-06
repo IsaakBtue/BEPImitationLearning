@@ -2497,26 +2497,19 @@ def postlegdofpos(
     touch apart from real ground contact. No window_steps cap added here
     (unlike postleadfootorientation's 2026-08-03 follow-up) -- not
     requested; this only adds the airborne condition. See docs/BugFixes.md.
+
+    FIX 2026-08-06 (later same day, user request): airborne now sourced from
+    `_leading_foot_airborne_latched` instead of a raw per-step contact read
+    computed locally -- the raw version could flicker back to "airborne"
+    after a bounce/sensor dropout right at touchdown, re-opening this term's
+    pull on a foot that had already genuinely landed. See that helper's
+    docstring for the full mechanism and `postleadfootorientation`'s FIX
+    2026-08-06 entry for the user-observed symptom that caused this.
     """
     behind = _ball_is_behind(env, ball_name)
     robot: Entity = env.scene[asset_cfg.name]
 
-    foot_idx = _get_correct_foot_idx(env, ball_name)  # (N,) leading foot, 0=left, 1=right
-
-    contact_sensor: ContactSensor = env.scene["feet_contact"]
-    found = contact_sensor.data.found  # (N, 8)
-    left_in_contact  = (found[:, :4] > 0).any(dim=-1)
-    right_in_contact = (found[:, 4:] > 0).any(dim=-1)
-
-    ball_sensor: ContactSensor = env.scene["ball_contact"]
-    ball_found = ball_sensor.data.found  # (N, 8), same primary geom layout as feet_contact
-    left_touching_ball  = (ball_found[:, :4] > 0).any(dim=-1)
-    right_touching_ball = (ball_found[:, 4:] > 0).any(dim=-1)
-    left_in_contact  = left_in_contact & ~left_touching_ball
-    right_in_contact = right_in_contact & ~right_touching_ball
-
-    leading_in_contact = torch.where(foot_idx == 0, left_in_contact, right_in_contact)  # (N,)
-    airborne = ~leading_in_contact
+    airborne = _leading_foot_airborne_latched(env, ball_name)
 
     if not hasattr(env, "_post_save_stance_target"):
         all_names = robot.joint_names
@@ -2881,44 +2874,47 @@ def foot_inner_face_continuous(
     env: "ManagerBasedRlEnv",
     ball_name: str,
     asset_cfg: SceneEntityCfg = _DEFAULT_FEET_CFG,
+    alignment_threshold: float = 0.7,
+    window_steps: int = 20,
 ) -> torch.Tensor:
-    """Continuous reward for rotating the assigned foot's inner face toward the ball,
-    in the correct (side-matched) direction.
+    """Binary per-step check: is the assigned foot's inner face turned to the
+    block-posture target angle (60° off robot-forward, side-matched), yes/no.
 
-    Active every step while the ball is live (same ~behind gate as footreach).
-    Uses the same assigned foot as footreach (_get_correct_foot_idx: left=0 for +Y
-    balls, right=1 for -Y balls).
+    Active while the ball is live (`~behind`) AND for the same short post-save
+    window `postleadfootorientation`/`postsave_foot_airtime` use, instead of
+    cutting to zero the instant the ball is deflected. Uses the same assigned
+    foot as footreach (_get_correct_foot_idx: left=0 for +Y balls, right=1
+    for -Y balls), same target direction as `inner_face_orientation_save`
+    (`_FOOT_TARGET_COS`/`_FOOT_TARGET_SIN`, robot-local frame here, matching
+    this function's own pre-existing convention).
 
-    Metric: foot_long_axis_w · target_w — negative when foot points opposite the
-    target, up to 1 when exactly aligned with the target direction (60° off
-    robot-forward, 30° off robot-local Y, toward +Y for the left foot / -Y for
-    the right foot). Uses robot-local axes (not world) so a dive yaw doesn't
-    degrade the signal.
+    FIX 2026-08-06 (user request, simplification): replaced the continuous
+    `cos(angle-target)` + overshoot-side Gaussian shaping (2026-08-05 fix,
+    see git history) with a hard `alignment > alignment_threshold` check --
+    the same mechanism `inner_face_orientation_save` already uses for its
+    own one-shot save-moment bonus, so the dense per-step term and the
+    one-shot bonus now share one simple criterion instead of two different
+    shaping functions describing the same target. Trade-off, noted
+    explicitly: the old continuous version gave a real (if small) NEGATIVE
+    gradient for a wrong-direction rotation (deliberately, per its own
+    2026-07-10 fix -- "a plain zero-floor reward can't distinguish 'never
+    rotated' from 'rotated the wrong way'"); this binary version cannot
+    distinguish those two cases either (both score 0). Accepted per explicit
+    user request favoring simplicity over that extra signal.
 
-    FIX 2026-07-10: was `.abs()` — same bug as inner_face_orientation_save (see
-    that function's docstring for the full analysis and live evidence). This is
-    the DENSE, per-step version of the same reward, so it was actually the
-    dominant source of the wrong-direction-tolerant gradient (far more total
-    signal than the one-shot bonus) -- fixing this one specifically should matter
-    most. Deliberately left unclamped (can go negative for a wrong-direction
-    rotation, not just zero) -- a mild, informative penalty gives clearer gradient
-    toward the correct mirror-image direction than merely withholding reward,
-    which would look identical to "never rotated at all" from the policy's
-    perspective.
+    FIX 2026-08-06 (same day): window extended to include the shared
+    post-save `window_steps` (default 20, `_postsave_airtime_window`) instead
+    of stopping dead at the exact instant `behind` flips true -- so foot-angle
+    quality is still checked for the brief window right after the save, not
+    just before it. `foot_inner_face_continuous` and `postleadfootorientation`
+    remain non-overlapping in what they reward (this checks the BLOCK angle,
+    that one rewards rotating BACK to forward), but now share the same
+    active-window boundary instead of one cutting off exactly where the
+    other begins.
 
-    FIX 2026-08-01 (user request): retargeted from full-sideways (robot-local Y)
-    to 60° off robot-forward (30° off Y), matching inner_face_orientation_save's
-    new target exactly (_FOOT_TARGET_COS/_FOOT_TARGET_SIN) so the dense per-step
-    pull and the one-shot save bonus no longer disagree on where "correct" is.
-
-    FIX 2026-08-05 (user request): the metric above (raw cos(angle-target)) is
-    kept for the UNDERSHOOT/wrong-side region, but the OVERSHOOT region (foot
-    rotated past the target, on the correct side -- i.e. drifting back toward
-    the old 90° value) now uses a steeper foot_clearance-style Gaussian instead
-    of cosine's own near-flat tail there. See _FOOT_OVERSHOOT_SIGMA's docstring
-    for the live-checkpoint evidence and calibration. The two pieces agree
-    exactly at the target (both equal 1.0), so this is a continuous, just not
-    smooth, splice.
+    Previous fix history (target retargeting, mirror-direction bug, overshoot
+    shaping) is preserved in git log / docs/BugFixes.md -- superseded by this
+    simplification, not re-described here.
     """
     robot: Entity = env.scene[asset_cfg.name]
 
@@ -2941,28 +2937,12 @@ def foot_inner_face_continuous(
     target_w = quat_apply(robot.data.root_link_quat_w, target_local)       # (N, 3)
 
     alignment = (foot_long_w * target_w).sum(dim=-1)                       # (N,) in [-1, 1]
-
-    # Overshoot detection: foot's angle off robot-forward (unsigned), and
-    # which side it's rotated toward (correct side = positive).
-    forward_local = torch.zeros(env.num_envs, 3, device=env.device)
-    forward_local[:, 0] = 1.0
-    forward_w = quat_apply(robot.data.root_link_quat_w, forward_local)     # (N, 3)
-    cos_from_forward = (foot_long_w * forward_w).sum(dim=-1).clamp(-1.0, 1.0)
-    angle_from_forward_deg = torch.rad2deg(torch.acos(cos_from_forward))   # (N,) in [0, 180]
-
-    lateral_local = torch.zeros(env.num_envs, 3, device=env.device)
-    lateral_local[:, 1] = 1.0
-    lateral_w = quat_apply(robot.data.root_link_quat_w, lateral_local)     # (N, 3), robot-local +Y
-    side_sign = (foot_long_w * lateral_w).sum(dim=-1) * expected_sign      # (N,) >0 = correct side
-
-    overshoot_mask = (side_sign > 0.0) & (angle_from_forward_deg > _FOOT_TARGET_ANGLE_DEG)
-    overshoot_err = angle_from_forward_deg - _FOOT_TARGET_ANGLE_DEG
-    overshoot_reward = torch.exp(-_FOOT_OVERSHOOT_SIGMA * overshoot_err ** 2)
-
-    reward = torch.where(overshoot_mask, overshoot_reward, alignment)      # (N,)
+    oriented_correctly = (alignment > alignment_threshold).float()
 
     behind = _ball_is_behind(env, ball_name)
-    return reward * (~behind).float()
+    in_window = _postsave_airtime_window(env, ball_name, window_steps)
+    active = (~behind) | (behind & in_window)
+    return oriented_correctly * active.float()
 
 
 def trailing_foot_forward_continuous(
@@ -3018,6 +2998,80 @@ def trailing_foot_forward_continuous(
     robot_forward_w = quat_apply(robot.data.root_link_quat_w, robot_forward_local)  # (N, 3)
 
     return (trailing_long_w * robot_forward_w).sum(dim=-1)  # (N,) in [-1, 1]
+
+
+def _leading_foot_airborne_latched(env: "ManagerBasedRlEnv", ball_name: str) -> torch.Tensor:
+    """Sound, LATCHED "is the leading (assigned) foot still airborne since the
+    save" flag -- (N,) bool. True from the exact instant `behind` first flips
+    (the save moment), stays True while the foot is genuinely airborne, and
+    the instant it registers its FIRST real ground contact, latches to False
+    PERMANENTLY for the rest of that post-save period -- a later bounce or a
+    brief contact-sensor dropout right at touchdown can never flip it back to
+    True.
+
+    NEW 2026-08-06 (user request, "spikes twice" bug). Before this fix,
+    `postlegdofpos`, `postleadfootorientation`, and `postsave_foot_airtime`
+    each independently recomputed `airborne = ~leading_in_contact` FRESH,
+    EVERY STEP, straight from the raw `feet_contact` sensor (ball-contact
+    excluded). That's unlatched by construction: MuJoCo contact sensors can
+    miss a step or two right at the moment of touchdown (documented in the
+    `debugging-mujoco-contact-sensors` skill -- "can miss brief/glancing
+    touches"), so right after the foot's genuine first landing, `found` can
+    briefly read 0 again, flipping `airborne` back to True for a step or two
+    -- which the user observed as `postleadfootorientation` visibly firing a
+    SECOND burst within the same post-save window, well after the real
+    landing. Latching on first contact (rather than re-reading raw contact
+    every step) makes a bounce/sensor-dropout physically unable to reopen an
+    already-closed airborne period.
+
+    Shared across all three consumers (mirrors `_postsave_airtime_window`'s
+    own shared-helper pattern) so there's exactly one state machine computing
+    "has the leading foot landed yet," not three independently-duplicated,
+    independently-driftable copies of the same sensor logic.
+
+    Re-arms on every `behind` RISING EDGE (a fresh save gets its own fresh
+    airborne-until-landed tracking), not just once per episode -- this is a
+    different concept from `_postsave_airtime_window`'s intentional
+    one-shot-per-episode TIME window (that one exists to bound how long a
+    reward can pay out at all; this one exists to correctly detect a single
+    physical event -- the first landing -- regardless of how many times it's
+    checked). Calling this from multiple reward functions in the same tick is
+    safe: the state-mutating parts only react to a `behind` rising edge or a
+    genuine contact reading, both idempotent to re-evaluate.
+    """
+    if not hasattr(env, "_leading_landed"):
+        env._leading_landed = torch.zeros(env.num_envs, dtype=torch.bool, device=env.device)
+        env._leading_landed_prev_behind = torch.zeros(env.num_envs, dtype=torch.bool, device=env.device)
+
+    just_reset = env.episode_length_buf <= 1
+    behind = _ball_is_behind(env, ball_name)
+    just_became_behind = behind & ~env._leading_landed_prev_behind
+    env._leading_landed[just_reset | just_became_behind] = False
+    env._leading_landed_prev_behind[:] = behind
+
+    foot_idx = _get_correct_foot_idx(env, ball_name)  # (N,) leading foot, 0=left, 1=right
+
+    contact_sensor: ContactSensor = env.scene["feet_contact"]
+    found = contact_sensor.data.found  # (N, 8)
+    left_in_contact  = (found[:, :4] > 0).any(dim=-1)
+    right_in_contact = (found[:, 4:] > 0).any(dim=-1)
+
+    ball_sensor: ContactSensor = env.scene["ball_contact"]
+    ball_found = ball_sensor.data.found  # (N, 8), same primary geom layout as feet_contact
+    left_touching_ball  = (ball_found[:, :4] > 0).any(dim=-1)
+    right_touching_ball = (ball_found[:, 4:] > 0).any(dim=-1)
+    left_in_contact  = left_in_contact & ~left_touching_ball
+    right_in_contact = right_in_contact & ~right_touching_ball
+
+    leading_in_contact = torch.where(foot_idx == 0, left_in_contact, right_in_contact)  # (N,)
+
+    # Latch: once genuine ground contact is seen while behind, lock landed
+    # permanently until the next fresh save (behind rising edge) or episode
+    # reset -- a later bounce/dropout can only OR further True bits in, never
+    # clear the latch back to False.
+    env._leading_landed |= behind & leading_in_contact
+
+    return behind & ~env._leading_landed
 
 
 def _postsave_airtime_window(
@@ -3136,6 +3190,16 @@ def postleadfootorientation(
     applying that reaction torque, without changing the rotation's target
     or its airborne-only gate. See `_postsave_airtime_window`'s and
     `postsave_foot_airtime`'s docstrings, and docs/BugFixes.md.
+
+    FIX 2026-08-06 (later same day, user request -- "spikes twice" bug):
+    airborne was a raw per-step `~leading_in_contact` read, computed fresh
+    every tick straight from the `feet_contact` sensor -- unlatched, so a
+    contact-sensor dropout or a small bounce right after the foot's genuine
+    first landing could flip `airborne` back to True for a step or two
+    later in the same `window_steps` window, firing this term a SECOND time
+    well after the real landing (confirmed by the user watching the P-panel
+    plot). Now sourced from `_leading_foot_airborne_latched`, which latches
+    to "landed" permanently on first genuine contact and cannot reopen.
     """
     robot: Entity = env.scene[asset_cfg.name]
     foot_quat_w = robot.data.body_link_quat_w[:, asset_cfg.body_ids, :]  # (N, 2, 4)
@@ -3155,24 +3219,7 @@ def postleadfootorientation(
     alignment = (leading_long_w * robot_forward_w).sum(dim=-1)  # (N,) in [-1, 1]
 
     behind = _ball_is_behind(env, ball_name)
-
-    # Ground-contact gate (FIX 2026-08-01) -- same sensor pair/exclusion
-    # feet_slippage uses (rewards.py:feet_slippage).
-    contact_sensor: ContactSensor = env.scene["feet_contact"]
-    found = contact_sensor.data.found  # (N, 8)
-    left_in_contact  = (found[:, :4] > 0).any(dim=-1)
-    right_in_contact = (found[:, 4:] > 0).any(dim=-1)
-
-    ball_sensor: ContactSensor = env.scene["ball_contact"]
-    ball_found = ball_sensor.data.found  # (N, 8), same primary geom layout as feet_contact
-    left_touching_ball  = (ball_found[:, :4] > 0).any(dim=-1)
-    right_touching_ball = (ball_found[:, 4:] > 0).any(dim=-1)
-    left_in_contact  = left_in_contact & ~left_touching_ball
-    right_in_contact = right_in_contact & ~right_touching_ball
-
-    leading_in_contact = torch.where(foot_idx == 0, left_in_contact, right_in_contact)  # (N,)
-    airborne = ~leading_in_contact
-
+    airborne = _leading_foot_airborne_latched(env, ball_name)
     in_window = _postsave_airtime_window(env, ball_name, window_steps)
 
     return alignment * behind.float() * airborne.float() * in_window.float()
@@ -3246,25 +3293,21 @@ def postsave_foot_airtime(
     into `_postsave_airtime_window` (now shared with `postleadfootorientation`,
     gated to this same window -- see that function's docstring for why).
     Pure extraction, no behavior change to this function.
+
+    FIX 2026-08-06 (later same day, user request -- found while fixing the
+    same bug in postleadfootorientation): airborne was a raw per-step
+    `~leading_in_contact` read, unlatched -- a bounce/sensor dropout right
+    after the genuine first landing could flip it back to True later in the
+    same window, and since `ramp` here depends only on time-since-window-
+    opened (not time-since-this-particular-liftoff), that second "airborne"
+    reading could score a LARGER ramp value than it deserves -- effectively
+    paying out for exactly the "land once, then hop again" pattern this
+    term's own time-boxing was designed to discourage (see the foot_clearance
+    "post-save hopping" reference above). Now sourced from
+    `_leading_foot_airborne_latched`, which cannot reopen once landed.
     """
     in_window = _postsave_airtime_window(env, ball_name, window_steps)
-
-    foot_idx = _get_correct_foot_idx(env, ball_name)  # (N,) — leading foot, 0=left, 1=right
-
-    contact_sensor: ContactSensor = env.scene["feet_contact"]
-    found = contact_sensor.data.found  # (N, 8)
-    left_in_contact  = (found[:, :4] > 0).any(dim=-1)
-    right_in_contact = (found[:, 4:] > 0).any(dim=-1)
-
-    ball_sensor: ContactSensor = env.scene["ball_contact"]
-    ball_found = ball_sensor.data.found  # (N, 8), same primary geom layout as feet_contact
-    left_touching_ball  = (ball_found[:, :4] > 0).any(dim=-1)
-    right_touching_ball = (ball_found[:, 4:] > 0).any(dim=-1)
-    left_in_contact  = left_in_contact & ~left_touching_ball
-    right_in_contact = right_in_contact & ~right_touching_ball
-
-    leading_in_contact = torch.where(foot_idx == 0, left_in_contact, right_in_contact)  # (N,)
-    airborne = ~leading_in_contact
+    airborne = _leading_foot_airborne_latched(env, ball_name)
 
     # FIX 2026-08-04: linear ramp instead of a flat 1.0 -- see docstring.
     # env._psa_window_start is guaranteed set by _postsave_airtime_window
@@ -3279,8 +3322,10 @@ def postheadingorientation(
     env: "ManagerBasedRlEnv",
     ball_name: str,
     asset_cfg: SceneEntityCfg = _DEFAULT_ROBOT_CFG,
+    window_steps: int = 20,
 ) -> torch.Tensor:
-    """Reward the robot's root YAW HEADING returning to world +X after a save.
+    """Reward the robot's root YAW HEADING returning to whatever direction it
+    was facing AT THE SAVE MOMENT, for a short window after the save.
 
     NEW 2026-07-28 (user request): user observed the whole body (not just a
     foot) drifting into a left/right yaw after a save. No existing term
@@ -3295,31 +3340,68 @@ def postheadingorientation(
     as such in its own docstring and CLAUDE.md's divergence table.
 
     No G1 equivalent (checked -- G1 is a static catch task with hands, it
-    never needs to reface after a catch). Mirrors the `behind`-gated
-    convention of the other post-save recovery terms (postorientation is the
-    one exception, always-active for a different, already-documented
-    reason). Reuses the same world-forward-axis `quat_apply` construction as
-    `trailing_foot_forward_continuous`/`postleadfootorientation` above, but
-    applied to the ROOT quaternion instead of a foot quaternion, and shaped
-    as `exp(-k*err)` to match postorientation/postangvel/postlinvel's bounded
-    [0,1] style rather than those two foot terms' raw [-1,1] dot product.
+    never needs to reface after a catch). Reuses the same world-forward-axis
+    `quat_apply` construction as `trailing_foot_forward_continuous`/
+    `postleadfootorientation` above, but applied to the ROOT quaternion
+    instead of a foot quaternion, and shaped as `exp(-k*err)` to match
+    postorientation/postangvel/postlinvel's bounded [0,1] style rather than
+    those two foot terms' raw [-1,1] dot product.
 
-    exp(-1.5 * 2*(1-alignment)) * behind -- bounded (0, 1], peaks at exactly
-    1.0 when the root's local +X axis points along world +X. Not yet
-    validated against a live training run.
+    FIX 2026-08-06 (user request): the target was a hardcoded world +X --
+    i.e. a fixed compass direction the robot was forced to face for the
+    ENTIRE rest of the episode after a save, with no time limit (unlike
+    every other post-save foot/leg term, which are all either time-windowed
+    or airborne-gated). User's complaint: forcing a specific facing
+    direction on an otherwise-stationary, already-settled robot (no
+    locomotion, no stepping) is physically arbitrary -- there's no reason a
+    goalkeeper MUST face exactly world +X once it's done saving and holding
+    still, only that it shouldn't have drifted mid-recovery. Fix: instead of
+    a fixed world-frame target, capture the root's own forward-facing
+    direction AT THE INSTANT `behind` first flips true (the save moment,
+    same rising edge `_postsave_airtime_window`/`_leading_foot_airborne_
+    latched` key off) and use THAT as the per-episode target -- rewards
+    holding the heading it already had at the moment of the save, not
+    snapping to an arbitrary global compass direction. Also gated to the
+    same shared post-save `window_steps` (default 20,
+    `_postsave_airtime_window`) instead of running unbounded for the rest of
+    the episode -- once the window elapses (the robot should be settled by
+    then), nothing further constrains heading, matching the "unnatural when
+    stationary" complaint directly: this term now only fights genuine
+    save-induced yaw drift during the recovery window, not indefinitely.
+    `postorientation` (roll/pitch, upright) is intentionally UNCHANGED --
+    it has no directional/heading component at all (see its own docstring),
+    so the "forced to point somewhere" complaint doesn't apply to it.
+
+    exp(-1.5 * 2*(1-alignment)) * behind * in_window -- bounded (0, 1],
+    peaks at exactly 1.0 when the root's local +X axis matches its own
+    save-moment heading. Not yet validated against a live training run.
     """
     robot: Entity = env.scene[asset_cfg.name]
     forward_local = torch.zeros(env.num_envs, 3, device=env.device)
     forward_local[:, 0] = 1.0
     forward_w = quat_apply(robot.data.root_link_quat_w, forward_local)  # (N, 3)
 
-    world_x = torch.zeros(env.num_envs, 3, device=env.device)
-    world_x[:, 0] = 1.0
-    alignment = (forward_w * world_x).sum(dim=-1)  # (N,) in [-1, 1]
+    if not hasattr(env, "_heading_target_w"):
+        env._heading_target_w = forward_w.clone()
+        env._heading_prev_behind = torch.zeros(env.num_envs, dtype=torch.bool, device=env.device)
+
+    just_reset = env.episode_length_buf <= 1
+    env._heading_prev_behind[just_reset] = False
+
+    behind = _ball_is_behind(env, ball_name)
+    just_became_behind = behind & ~env._heading_prev_behind
+    # Snapshot the trunk's own forward direction at the exact save instant --
+    # only meaningfully read once `behind` is true (return is gated on it
+    # below), so no reset-on-episode-boundary is needed for the target
+    # itself, only for the rising-edge tracker above.
+    env._heading_target_w[just_became_behind] = forward_w[just_became_behind]
+    env._heading_prev_behind[:] = behind
+
+    alignment = (forward_w * env._heading_target_w).sum(dim=-1)  # (N,) in [-1, 1]
 
     err = 2.0 * (1.0 - alignment)  # squared-chord-distance analog, >= 0
-    behind = _ball_is_behind(env, ball_name)
-    return torch.exp(-1.5 * err) * behind.float()
+    in_window = _postsave_airtime_window(env, ball_name, window_steps)
+    return torch.exp(-1.5 * err) * behind.float() * in_window.float()
 
 
 def cleanstop(

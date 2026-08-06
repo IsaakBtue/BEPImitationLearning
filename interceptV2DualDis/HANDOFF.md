@@ -5,6 +5,64 @@ Running log of what to watch for after recent reward changes, for whoever
 full rationale/evidence on each item — this file is just the "what to watch"
 distillation.
 
+## 2026-08-06 (later same day, 2nd batch) -- foot/leg orientation rework: sound airborne latch, foot_inner_face_continuous simplified, postheadingorientation targets save-time heading
+
+Four changes landed together, all stemming from the user reporting
+`postleadfootorientation` visibly firing twice per save and finding
+`postheadingorientation`'s fixed world+X target conceptually wrong for a
+stationary robot. See `docs/BugFixes.md`'s same-dated entry for full
+rationale/evidence. **None of this has been validated against a live
+training run yet** -- verified via a new unit test (`test_airborne_latch.py`)
+plus live env checks only.
+
+### What changed
+- New shared `_leading_foot_airborne_latched` helper (`rewards.py`):
+  replaces three independent, unlatched, per-step raw contact reads
+  (`postlegdofpos`, `postleadfootorientation`, `postsave_foot_airtime`) with
+  one latch that locks "landed" permanently on first genuine ground contact
+  -- a bounce/sensor dropout can no longer reopen it.
+- `foot_inner_face_continuous`: continuous cos()+overshoot-Gaussian shaping
+  replaced with a binary `alignment > 0.7` threshold check (matches
+  `inner_face_orientation_save`'s own mechanism). Active window extended
+  from strict `~behind` to also include the shared post-save `window_steps`
+  window (20 steps).
+- `postheadingorientation`: target is now the trunk's OWN forward direction
+  captured at the exact save instant (`env._heading_target_w`), not a
+  hardcoded world +X. Also now windowed (20 steps post-save) instead of
+  running for the rest of the episode. `postorientation` (roll/pitch,
+  upright) is UNCHANGED -- confirmed it has no heading/direction component
+  in its code at all, so the "unnatural direction" complaint doesn't apply.
+- P-panel (`play.py`): dropped `postwaistdofpos`/`angular_momentum_penalty`,
+  added `foot_inner_face_continuous` (now 11 terms, was 12).
+
+### What to watch once a training run has real data
+- **`postleadfootorientation`**: confirm the double-firing pattern is
+  actually gone in a live training run's P-panel plot, not just in the
+  synthetic bounce/dropout unit test -- the test proves the latch mechanism
+  works, not that this was the ONLY source of the visual symptom.
+- **`postsave_foot_airtime`**: watch for a DECREASE in mean reward compared
+  to pre-fix runs -- this is expected and correct if the policy was
+  previously farming a second "airborne" burst via a bounce; a real drop
+  here is the fix working, not a regression, unless episode-length/save-rate
+  metrics also drop alongside it.
+- **`foot_inner_face_continuous`**: this term lost its wrong-direction
+  negative-gradient signal (binary now, can't distinguish "never rotated"
+  from "rotated the wrong way"). If training shows the foot mirror-flipping
+  to the wrong side again (the exact 2026-07-10 bug this term was built to
+  prevent), that lost signal is the likely reason -- worth reconsidering the
+  simplification if so.
+- **`postheadingorientation`**: no historical baseline under the new target
+  (values aren't comparable to pre-fix runs, which measured alignment to
+  world +X specifically). Watch that it trends upward from its untrained
+  starting point and that whole-body yaw drift post-save (the original
+  2026-07-28 symptom this term exists to fix) doesn't reappear within the
+  20-step window or shortly after it elapses.
+- **General**: this is the SECOND same-day rework of the post-save
+  orientation/leg-recovery family (first batch: shoulder/elbow arm rewards
+  and the far-region AMP damping, see the entry above this one) -- worth
+  comparing the next checkpoint's full P-panel against pre-both-batches
+  behavior rather than attributing any single metric change to just one fix.
+
 ## 2026-08-06 (later same day) -- far-region arm-swing batch: postshoulderdofpos, penalize_arm_above_shoulder always-on, far bound 1.1->1.0, arm-column damping, + a 3rd wiring-bug fix
 
 Five changes landed together, all stemming from a `model_12500.pt`

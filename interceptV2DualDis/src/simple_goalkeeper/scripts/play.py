@@ -881,11 +881,20 @@ def _patch_viewer_post_recovery_plots(native_viewer: "NativeMujocoViewer", env) 
     # `~behind`-gated like the other 11), included here anyway so the foot's
     # save-angle can be watched directly; `arm_dof_vel` was judged the least
     # foot-orientation-relevant of the original 12.
+    #
+    # FIX 2026-08-06 (user request): dropped `postwaistdofpos` and
+    # `angular_momentum_penalty` to make room for the 4 terms touched by
+    # today's foot/leg orientation rework (airborne-latch fix affecting
+    # `postlegdofpos`/`postleadfootorientation`, the simplified
+    # `foot_inner_face_continuous`, and the save-time-captured
+    # `postheadingorientation`) -- added `foot_inner_face_continuous`
+    # (the only one of the 4 not already in this list). 11 terms now, not
+    # backfilled to 12 -- the display cap, not a requirement to hit exactly.
     _POST_RECOVERY_REWARD_TERMS = (
         "postorientation", "postangvel", "postlinvel",
-        "postupperdofpos", "postwaistdofpos", "postlegdofpos",
+        "postupperdofpos", "postlegdofpos",
         "postleadfootorientation", "postsave_foot_airtime", "postheadingorientation",
-        "penalize_arm_above_shoulder", "angular_momentum_penalty", "inner_face_orientation_save",
+        "penalize_arm_above_shoulder", "inner_face_orientation_save", "foot_inner_face_continuous",
     )
 
     def _patched_setup() -> None:
