@@ -909,7 +909,7 @@ class far_travel_curriculum:
         self._update_interval = p.get("update_interval", 500)
         self._ep_len_divisor  = p.get("ep_len_divisor",   50)
         self._lo              = p.get("lo", 0.5)  # FIX 2026-08-01: reverted to 0.5 (was 0.65 since 2026-07-23)
-        self._hi              = p.get("hi", 1.1)  # FIX 2026-08-01: reverted to 1.1 (was 1.3)
+        self._hi              = p.get("hi", 1.0)  # FIX 2026-08-06: 1.1 -> 1.0 (was 1.3 pre-2026-08-01)
         # FIX 2026-07-20: was -(update_interval) -- see reward_curriculum_ep_len's
         # __init__ comment for the full explanation. 0 matches G1's
         # last_step_counter=0 init, requiring a full window before first fire.

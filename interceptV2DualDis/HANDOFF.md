@@ -5,6 +5,78 @@ Running log of what to watch for after recent reward changes, for whoever
 full rationale/evidence on each item — this file is just the "what to watch"
 distillation.
 
+## 2026-08-06 (later same day) -- far-region arm-swing batch: postshoulderdofpos, penalize_arm_above_shoulder always-on, far bound 1.1->1.0, arm-column damping, + a 3rd wiring-bug fix
+
+Five changes landed together, all stemming from a `model_12500.pt`
+(`6144_shoulderscopewiring_2026-08-06`) force-region probe that found the
+shoulder had zero pose-recovery pull anywhere in the episode. See
+`docs/BugFixes.md`'s three 2026-08-06 entries for full rationale/evidence.
+**None of this has been validated against a live training run yet.**
+
+### What changed
+- `penalize_arm_above_shoulder`: no longer gated to the "steady" (>20 steps
+  post-save) window -- now fires for the whole post-save (`behind`) window.
+- New `postshoulderdofpos` (weight 5.0, `kernel_scale=0.15`,
+  `during_scale=0.3`): separate reward/kernel for the 4 shoulder joints,
+  deliberately not merged into `postupperdofpos` to avoid re-mixing
+  shoulder's larger error into elbow's kernel.
+- Far outer region bound narrowed 1.1m -> 1.0m (`regions.py`, `events.py`,
+  `goalkeeper_env_cfg.py` train+play, all 3 synced locations).
+- 6 far-region AMP reference clips (`new_doublestepleft/right_{booster_t1,
+  short,wide}.npz`) had their 8 arm `joint_pos` columns smoothed (9-tap box
+  filter) -- mean arm speed down 31-55%, peak down 17-35%. True originals at
+  `motions/data_pre_armdamp_backup/` (local scratch, git-ignored, not
+  committed -- recoverable via git history if deleted).
+- **Separately found and fixed:** `postupperdofpos`'s earlier same-day
+  "shoulder-scope wiring fix" never actually worked -- mjlab's
+  `RewardManager` only resolves `SceneEntityCfg` objects passed explicitly
+  via `params`, never a function's own default argument. `postupperdofpos`
+  was silently running on ALL 21 joints (not 4) this whole time despite that
+  fix's own verification claiming otherwise. Both `postupperdofpos` and the
+  new `postshoulderdofpos` now pass `asset_cfg` explicitly. Checked all 33
+  scoped-default rewards in `rewards.py` for the same bug class -- this was
+  the only real instance.
+
+### What to watch once a training run has real data
+- **`postshoulderdofpos`**: brand new, no baseline. Watch it trend upward
+  from its untrained starting point. If it stays near 0 or the arms still
+  look wild specifically DURING the dive (not just post-save), the
+  conservative `during_scale=0.3` may be too weak -- consider raising it
+  gradually (mirrors `postupperdofpos`'s own 0.3->0.5->0.8->1.0 history, but
+  don't assume that same endpoint transfers -- shoulder's excursion is
+  larger).
+- **`postupperdofpos`**: now genuinely elbow-only for the first time (prior
+  runs, including everything up through `model_12500.pt`, were secretly
+  whole-body). Expect this run's `postupperdofpos` values to look
+  DIFFERENT from every prior checkpoint's history in `docs/BugFixes.md` --
+  that's the fix working, not a new regression. Compare against the
+  `kernel_scale=0.15` sensitivity math in that entry, not against old
+  checkpoint numbers directly.
+- **`penalize_arm_above_shoulder`**: watch for the exact failure mode its
+  original 20-step gate was designed to prevent -- if `footreach`/
+  `Episode_Termination/ball_exit`/`Train/mean_episode_length` regress
+  compared to pre-this-batch runs, the always-on gate may be fighting
+  legitimate dive/immediate-post-save balance motion, and should get a
+  narrower window back (not necessarily the old 20-step one).
+- **Far outer bound 1.0m**: `far_travel_curriculum`'s cu=0 seed gap
+  self-adapts (proportional formula) -- no separate check needed beyond
+  confirming `env._far_outer` actually reaches 1.0 at full curriculum
+  (`ball_difficulty` saturated).
+- **Arm-column damping**: watch (via `sgk_play --force-region left_far`)
+  whether the AMP-driven pre-save arm motion looks less jerky specifically
+  during the approach/dive -- this only touches the reference clips, so any
+  improvement should show up as smoother tracking toward a still-genuine
+  double-step arm swing, not a frozen/flat one. If arm-swing quality gets
+  WORSE, note the 2026-07-15/16 history of this exact region's AMP-arm
+  masking flipping back and forth -- this is a new, different lever (motion
+  smoothness, not masking), but worth comparing against that history if it
+  doesn't help.
+- **General**: this is the third same-session change to
+  `postupperdofpos`'s wiring specifically (shoulder-scope default 2026-08-03,
+  wiring-not-applied fix + params-passthrough fix both 2026-08-06) --
+  worth extra scrutiny on this term's actual behavior in the next run
+  before trusting any further tuning built on top of it.
+
 ## 2026-07-27 -- feet_slippage/foot_clearance/post-save-orientation/success batch
 
 Two parallel change sets landed together today (merge commit after

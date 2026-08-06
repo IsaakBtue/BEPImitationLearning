@@ -38,13 +38,14 @@ _REGION_Y_START_RANGE: dict[int, tuple[float, float]] = {
 }
 _REGION_Y_END_RANGE: dict[int, tuple[float, float]] = {
     0: (0.15, 0.5),    # left_near: crosses on the left, under 0.5 m
-    1: (0.5, 1.1),     # left_far: crosses on the left, at/above 0.5 m
+    1: (0.5, 1.0),     # left_far: crosses on the left, at/above 0.5 m
     2: (-0.5, -0.15),  # right_near
-    3: (-1.1, -0.5),   # right_far
+    3: (-1.0, -0.5),   # right_far
 }
 # FIX 2026-08-01: far outer bound narrowed 1.3 -> 1.1 (user request), kept
 # in sync with far_travel_curriculum's `hi` default (events.py) and
 # goalkeeper_env_cfg.py's single-disc reset_ball/play y_end_range.
+# FIX 2026-08-06: far outer bound narrowed again, 1.1 -> 1.0 (user request).
 
 
 def assign_static_regions(env: "ManagerBasedRlEnv", env_ids: torch.Tensor | None) -> None:

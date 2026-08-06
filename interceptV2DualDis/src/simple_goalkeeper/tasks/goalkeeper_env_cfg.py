@@ -773,12 +773,51 @@ def goalkeeper_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
         # function default (mjlab reward_manager.py:125 calls
         # func(env, **params)), so postupperdofpos had been evaluating all 8
         # joints this whole time despite the 08-03 fix's docstring/BugFixes.md
-        # entry claiming otherwise. Removed the override so the function's
-        # own _ARM_JOINT_CFG default actually applies. See docs/BugFixes.md.
+        # entry claiming otherwise.
+        #
+        # FIX 2026-08-06 (same day, follow-up -- a SECOND, separate wiring
+        # bug found while wiring up postshoulderdofpos below): removing the
+        # params override entirely (this entry's original fix, `params=
+        # {"ball_name": BALL_NAME}` only) does NOT actually let the
+        # function's 4-joint _ARM_JOINT_CFG default apply as intended.
+        # mjlab's RewardManager only calls SceneEntityCfg.resolve() on
+        # objects found in `term_cfg.params.values()`
+        # (manager_base.py:_resolve_common_term_cfg) -- a function's own
+        # default argument is invisible to this mechanism, since it's never
+        # placed into `params`. Confirmed live: `_ARM_JOINT_CFG.joint_ids`
+        # stayed `slice(None, None, None)` even after real env.step() calls
+        # through the registered term -- i.e. postupperdofpos was silently
+        # indexing ALL 21 joints (slice(None) selects everything), not the
+        # intended 4, for every run since this SAME date's earlier fix
+        # landed (including the model_12500 checkpoint analyzed this
+        # session). Every OTHER asset-scoped reward in this table
+        # (postwaistdofpos/postlegdofpos/penalize_arm_above_shoulder/
+        # arm_dof_vel/etc.) already follows the correct pattern -- explicit
+        # `asset_cfg` in `params`, sourced from a SceneEntityCfg object --
+        # which is the only way `.resolve()` ever actually runs. Fixed by
+        # explicitly passing `gk_mdp.rewards._ARM_JOINT_CFG` (the SAME
+        # object the function uses as its own default, imported directly
+        # rather than duplicated, to keep one source of truth) via params.
+        # See docs/BugFixes.md.
         "postupperdofpos": RewardTermCfg(
             func=gk_mdp.postupperdofpos,
             weight=5.0,
-            params={"ball_name": BALL_NAME},
+            params={"ball_name": BALL_NAME, "asset_cfg": gk_mdp.rewards._ARM_JOINT_CFG},
+        ),
+        # NEW 2026-08-06 (user request): separate reward/kernel for the shoulder
+        # joints postupperdofpos no longer targets (2026-08-03/08-06 fixes,
+        # elbow-only scope). Kept as its own RewardTermCfg (not merged into
+        # postupperdofpos's asset_cfg) specifically to avoid re-mixing
+        # shoulder's much larger error magnitude into the same kernel as
+        # elbow's -- the exact saturation bug the 2026-08-03 fix removed
+        # shoulder to fix in the first place. See postshoulderdofpos's
+        # docstring (rewards.py) and docs/BugFixes.md. `asset_cfg` passed
+        # explicitly (see postupperdofpos's comment just above for why this
+        # is required, not optional, for the resolve() mechanism to run).
+        "postshoulderdofpos": RewardTermCfg(
+            func=gk_mdp.postshoulderdofpos,
+            weight=5.0,
+            params={"ball_name": BALL_NAME, "asset_cfg": gk_mdp.rewards._SHOULDER_JOINT_CFG},
         ),
         # NEW 2026-07-30 (user request): supplementary to postupperdofpos --
         # specifically targets "hand above its own shoulder" rather than the
@@ -1093,7 +1132,7 @@ def goalkeeper_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
             "ball_name":      BALL_NAME,
             "dist_range":     (1.5, 3.5),
             "y_start_range":  (-0.3, 0.3),
-            "y_end_range":    (-1.1, 1.1),
+            "y_end_range":    (-1.0, 1.0),  # FIX 2026-08-06: 1.1 -> 1.0 (user request)
             "t_flight_range": (0.7, 1.1),
             "spawn_z":        0.12,
         },
@@ -1182,7 +1221,7 @@ def goalkeeper_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
                 "ball_name":     BALL_NAME,
                 "dist_range":    (1.5, 3.5),
                 "y_start_range": (-0.3, 0.3),
-                "y_end_range":   (-1.1, 1.1),
+                "y_end_range":   (-1.0, 1.0),  # FIX 2026-08-06: 1.1 -> 1.0 (user request)
                 "t_flight_range": (0.7, 1.1),
                 "spawn_z":       0.12,
             },

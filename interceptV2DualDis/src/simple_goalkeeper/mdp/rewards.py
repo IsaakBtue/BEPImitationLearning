@@ -89,6 +89,22 @@ _ARM_JOINT_CFG = SceneEntityCfg(
         "Right_Elbow_Pitch", "Right_Elbow_Yaw",
     ),
 )
+# NEW 2026-08-06 (user request): postshoulderdofpos's ONLY consumer. Deliberately
+# a SEPARATE SceneEntityCfg/reward from _ARM_JOINT_CFG/postupperdofpos rather
+# than adding shoulder back into that term's scope -- the whole reason shoulder
+# was removed from postupperdofpos (2026-08-03 fix, see that function's
+# docstring) was that mixing shoulder's large dive-reach excursion into the
+# same sum-of-squares as elbow's much smaller range saturated the shared
+# exp(-kernel_scale*err) kernel for BOTH joints at once. Keeping shoulder in
+# its own kernel means its (much larger) error magnitude can be tuned
+# independently without dragging elbow's sensitivity along with it.
+_SHOULDER_JOINT_CFG = SceneEntityCfg(
+    "robot",
+    joint_names=(
+        "Left_Shoulder_Pitch", "Left_Shoulder_Roll",
+        "Right_Shoulder_Pitch", "Right_Shoulder_Roll",
+    ),
+)
 _WAIST_JOINT_CFG_RECOVERY = SceneEntityCfg("robot", joint_names=("Waist",))
 # NEW 2026-07-30: local default mirroring goalkeeper_env_cfg.py's _ARM_HEIGHT_CFG
 # (same body order requirement -- see penalize_arm_above_shoulder's docstring).
@@ -2135,14 +2151,102 @@ def postupperdofpos(
     return torch.exp(-kernel_scale * err) * scale
 
 
+def postshoulderdofpos(
+    env: "ManagerBasedRlEnv",
+    ball_name: str,
+    asset_cfg: SceneEntityCfg = _SHOULDER_JOINT_CFG,
+    during_scale: float = 0.3,
+    kernel_scale: float = 0.15,
+) -> torch.Tensor:
+    """Reward shoulder joints returning to default pose. Same exp(-kernel_scale
+    * sum_sq_err) x (1.0 if behind else during_scale) shape as `postupperdofpos`,
+    but a SEPARATE reward/kernel targeting `_SHOULDER_JOINT_CFG` (Shoulder_Pitch/
+    Roll x2 sides) instead of `_ARM_JOINT_CFG` (Elbow_Pitch/Yaw x2 sides).
+
+    NEW 2026-08-06 (user request), root-caused by a live-checkpoint replay of
+    `model_12500.pt` (6144_shoulderscopewiring run, force-region probe, left_far/
+    right_far/left_near): after the 2026-08-03/08-06 fixes correctly narrowed
+    `postupperdofpos` to elbow-only (matching G1's real scope, see that
+    function's docstring), NOTHING in the reward table pulls the shoulder
+    toward a rest pose at any point in the episode -- `penalize_arm_above_shoulder`
+    only penalizes the specific "hand above its own shoulder" geometry, not
+    general shoulder deviation; `arm_dof_vel` penalizes shoulder VELOCITY only
+    (and is diluted across all 8 arm joints, weight -5e-3); `angular_momentum_
+    penalty` is whole-body and gentle (-0.02). Measured directly: far-region
+    `shoulder_err` (this function's own error term, unrewarded before this fix)
+    climbs monotonically through the post-save window instead of recovering --
+    left_far: 0.74 (pre-save) -> 1.76 (early-post, steps 0-20) -> 9.57 (steady-
+    post, >20 steps); right_far: 0.79 -> 0.95 -> 2.03. This is a genuine
+    unsupervised drift (gets WORSE the longer the episode continues after the
+    save), not a slow-convergence artifact -- exactly the kind of gap
+    `postupperdofpos`'s own history (this file, FIX 2026-08-03) already
+    predicted once shoulder was correctly dropped from that term's scope but
+    never given a replacement.
+
+    Why a NEW reward instead of adding shoulder back into `postupperdofpos`'s
+    `asset_cfg` (user's explicit request, and the right call): that's exactly
+    the state the 2026-08-03 fix moved AWAY from -- shoulder's error magnitude
+    (0.7-9.6 in the data above) is roughly an order of magnitude larger than
+    elbow's own post-save error family at comparable kernel_scale, so sharing
+    one sum-of-squares/one kernel_scale between them re-creates the original
+    saturation risk for whichever joint has the smaller natural range (elbow).
+    A separate kernel lets each joint group's `kernel_scale` be tuned to its
+    own error distribution independently.
+
+    Parameter choices (both first empirical guesses, NOT yet validated against
+    a live training run):
+    - `kernel_scale=0.15`: reused from `postupperdofpos` rather than re-derived,
+      since the measured shoulder-only error range above (0.7 pre-save to 9.6
+      steady-post-far) is close to the range `kernel_scale=0.15` was originally
+      tuned against (the OLD 8-joint combined error, up to 7.81 far) -- shoulder
+      was in fact the dominant contributor to that old combined error, so this
+      is a reasonable starting point, not an arbitrary copy.
+    - `during_scale=0.3` (NOT 1.0, unlike `postupperdofpos`'s current value):
+      deliberately more conservative than elbow's already-tuned 1.0.
+      `postupperdofpos` only reached during_scale=1.0 after a long tuning
+      history (0.3->0.5->0.8->1.0) that happened AFTER shoulder had already
+      been removed from its scope -- that history says nothing about whether
+      full-strength pre-save pull is safe for shoulder specifically. Shoulder
+      is the single largest-excursion counterbalance joint during a dive; a
+      strong pre-save pull risks reintroducing the exact over-suppression that
+      got `arm_torque_limits`/`arm_action_rate_l2`/`arm_action_acc_l2` reverted
+      2026-07-29 (all three fought legitimate dive counterbalance motion).
+      Starting conservative (0.3, matching postupperdofpos's own ORIGINAL
+      starting point before its ramp-up) and raising later if post-save
+      recovery data supports it, rather than assuming elbow's fully-tuned
+      endpoint transfers directly.
+
+    Weight 5.0, matching `postupperdofpos`'s tier (same "large-excursion arm
+    joint needs an undiluted, single-purpose pose-recovery pull" reasoning).
+    Not yet validated against a live training run. See docs/BugFixes.md.
+    """
+    behind = _ball_is_behind(env, ball_name)
+    robot: Entity = env.scene[asset_cfg.name]
+
+    if not hasattr(env, "_post_save_stance_target"):
+        all_names = robot.joint_names
+        stance_all = torch.zeros(len(all_names), device=env.device)
+        for i, name in enumerate(all_names):
+            if name in _POST_SAVE_STANCE_MAP:
+                stance_all[i] = _POST_SAVE_STANCE_MAP[name]
+        env._post_save_stance_target = stance_all
+
+    delta = (
+        robot.data.joint_pos[:, asset_cfg.joint_ids]
+        - env._post_save_stance_target[asset_cfg.joint_ids]
+    )
+    err = torch.sum(torch.square(delta), dim=-1)
+    scale = torch.where(behind, 1.0, during_scale)
+    return torch.exp(-kernel_scale * err) * scale
+
+
 def penalize_arm_above_shoulder(
     env: "ManagerBasedRlEnv",
     ball_name: str,
     asset_cfg: SceneEntityCfg = _ARM_HEIGHT_CFG,
-    steady_steps: int = 20,
 ) -> torch.Tensor:
-    """Penalty for a hand rising above its own shoulder height, gated to only
-    the STEADY (genuinely settled) post-save window.
+    """Penalty for a hand rising above its own shoulder height, active for the
+    entire post-save window (any step `_ball_is_behind` is true).
 
     NEW 2026-07-30 (user request). `postupperdofpos` already pulls the arms
     toward a fixed target pose, but its `exp(-kernel_scale*err)` shape gives
@@ -2178,21 +2282,32 @@ def penalize_arm_above_shoulder(
     Gating: A live-checkpoint balance-correlation probe this session (see
     docs/BugFixes.md, 2026-07-30) found arm-pose error genuinely correlates
     with body tilt during far-region dives (r=+0.22 to +0.59 across two
-    checkpoints) -- i.e. raised arms during an active dive or the immediate
-    post-save recovery window are plausibly real balance-recovery motion,
-    not pure bad habit. Penalizing that unconditionally would repeat the
-    exact mistake `arm_torque_limits`/`arm_action_rate_l2`/`arm_action_acc_l2`
-    made (added 2026-07-28, reverted 2026-07-29 for over-suppressing
-    legitimate dive counterbalance motion and regressing real save metrics).
-    So this term is gated to fire ONLY once `_ball_is_behind` has held for
-    more than `steady_steps` (20, ~0.4s, matches this session's probe-script
-    convention for "genuinely stuck" vs "still settling") consecutive steps
-    -- never during the dive, never in the immediate post-save window.
-    Maintains its own run-length counter (`env._arm_above_shoulder_run_len`),
-    separate from any other counter in this file, reset on episode boundary
-    the same way `_wrong_foot_flash_counter` is in play.py (compares against
-    `episode_length_buf`, not a `dones` signal, since reward functions don't
-    receive `dones` directly).
+    checkpoints) -- i.e. raised arms during an active dive are plausibly
+    real balance-recovery motion, not pure bad habit. This term stays gated
+    OFF for the dive itself (`~behind`) to avoid repeating the exact mistake
+    `arm_torque_limits`/`arm_action_rate_l2`/`arm_action_acc_l2` made (added
+    2026-07-28, reverted 2026-07-29 for over-suppressing legitimate dive
+    counterbalance motion and regressing real save metrics).
+
+    FIX 2026-08-06 (user request): was additionally gated to only fire once
+    `_ball_is_behind` had held for > 20 consecutive steps (the "steady"
+    window), via a dedicated `env._arm_above_shoulder_run_len` counter --
+    i.e. completely silent for the first ~0.4s after every save. A live
+    checkpoint replay of `model_12500.pt` (6144_shoulderscopewiring run)
+    found this is exactly the window where the visible "violent arm swing"
+    happens: elbow/shoulder joint speed roughly doubles-to-quadruples in
+    that first 20 steps versus the dive itself (far-region, right side
+    worst: elbow speed mean 4.32 rad/s vs 1.38 rad/s pre-save), and with
+    this gate at 20 steps nothing was penalizing "hand above shoulder"
+    anywhere in that window. Removed the run-length counter and its
+    steady_steps parameter entirely -- now fires for the whole post-save
+    window (`behind` alone), matching `postupperdofpos`'s own
+    always-full-strength-post-save convention (during_scale=1.0). Not yet
+    validated against a live training run -- if this reintroduces fighting
+    against genuine post-save balance-recovery motion (the risk the
+    original 20-step gate existed to avoid), the gate should come back,
+    narrower (e.g. a short window right after `behind` flips, not the full
+    steady window this fix removes). See docs/BugFixes.md.
 
     Weight -2.0 (modest, supplementary -- comparable to `postleadfootorientation`
     at 2.0 in magnitude, not in the same -100 "bad technique" tier as
@@ -2224,17 +2339,9 @@ def penalize_arm_above_shoulder(
     right_excess = torch.clamp(right_hand_z - right_shoulder_z, min=0.0)
     excess = torch.square(left_excess) + torch.square(right_excess)
 
-    if not hasattr(env, "_arm_above_shoulder_run_len"):
-        env._arm_above_shoulder_run_len = torch.zeros(env.num_envs, dtype=torch.long, device=env.device)
-    just_reset = env.episode_length_buf <= 1
     behind = _ball_is_behind(env, ball_name)
-    env._arm_above_shoulder_run_len = torch.where(
-        just_reset, torch.zeros_like(env._arm_above_shoulder_run_len),
-        torch.where(behind, env._arm_above_shoulder_run_len + 1, torch.zeros_like(env._arm_above_shoulder_run_len)),
-    )
-    steady = behind & (env._arm_above_shoulder_run_len > steady_steps)
 
-    return excess * steady.float()
+    return excess * behind.float()
 
 
 def angular_momentum_penalty(
