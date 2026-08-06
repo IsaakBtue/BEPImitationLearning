@@ -894,10 +894,17 @@ def goalkeeper_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
             weight=-100.0,
             params={"min_height": 0.59},
         ),
+        # FIX 2026-08-06 (user request, "just a tiny bit"): 1700 -> 1800 N.
+        # Continues this term's own established history (1000->1200->1350->
+        # 1450->1700, docs/BugFixes.md) of raising the threshold in small
+        # steps whenever it's found too sensitive to legitimate aggressive
+        # stepping/diving -- same direction, same ~100N step size as every
+        # prior adjustment. No live evidence gathered this time (user request
+        # alone); revert if it turns out to tolerate genuine ground-slamming.
         "penalize_sharpcontact": RewardTermCfg(
             func=gk_mdp.penalize_sharpcontact,
             weight=-100.0,
-            params={"force_threshold": 1700.0},
+            params={"force_threshold": 1800.0},
         ),
         "penalize_self_collision": RewardTermCfg(
             func=gk_mdp.penalize_self_collision,
@@ -1177,9 +1184,16 @@ def goalkeeper_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
             params={"ball_name": BALL_NAME, "behind_threshold": -0.5},
             time_out=False,
         ),
+        # FIX 2026-08-06 (user request, "just a tiny bit"): 2500 -> 2600 N,
+        # same direction/reasoning as penalize_sharpcontact's threshold raise
+        # just above -- a small, single step, not a live-evidence-driven
+        # retune. CLAUDE.md's terminations line previously (incorrectly)
+        # documented this as 1500N -- that was sharpforce_termination's own
+        # unused function default (rewards.py); this params override has
+        # always been the real active value. Doc corrected alongside.
         "sharpforce": TerminationTermCfg(
             func=gk_mdp.sharpforce_termination,
-            params={"max_contact_force": 2500.0},
+            params={"max_contact_force": 2600.0},
             time_out=False,
         ),
         # shank_height REMOVED 2026-07-22 -- see base_height's FIX comment
