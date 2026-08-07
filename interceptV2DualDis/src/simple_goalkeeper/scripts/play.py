@@ -890,11 +890,16 @@ def _patch_viewer_post_recovery_plots(native_viewer: "NativeMujocoViewer", env) 
     # `postheadingorientation`) -- added `foot_inner_face_continuous`
     # (the only one of the 4 not already in this list). 11 terms now, not
     # backfilled to 12 -- the display cap, not a requirement to hit exactly.
+    #
+    # FIX 2026-08-06 (later same day, user request): swapped
+    # `penalize_arm_above_shoulder` out for `penalize_sharpcontact` --
+    # user just retuned that term's force threshold (1700->1800N) and
+    # wants to watch it directly in the panel.
     _POST_RECOVERY_REWARD_TERMS = (
         "postorientation", "postangvel", "postlinvel",
         "postupperdofpos", "postlegdofpos",
         "postleadfootorientation", "postsave_foot_airtime", "postheadingorientation",
-        "penalize_arm_above_shoulder", "inner_face_orientation_save", "foot_inner_face_continuous",
+        "penalize_sharpcontact", "inner_face_orientation_save", "foot_inner_face_continuous",
     )
 
     def _patched_setup() -> None:
