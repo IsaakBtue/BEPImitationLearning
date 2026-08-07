@@ -150,9 +150,14 @@ def goalkeeper_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
         # observed the wrong-foot plot never reacting and asked whether the
         # ball might actually be hitting the chin instead -- this sensor lets
         # play.py's viewer confirm/deny that independently. Was purely
-        # additive/display-only at introduction; FIX 2026-07-30 wired it into
-        # penalize_wrong_foot_ball_contact (rewards.py) as a real training
-        # penalty. See docs/BugFixes.md.
+        # additive/display-only at introduction; FIX 2026-07-30 wired a
+        # chin/head penalty into penalize_wrong_foot_ball_contact
+        # (rewards.py), then reverted same day (chin judged unavoidable).
+        # 2026-08-07: re-added, reverted (process violation, no user
+        # approval first), then re-added again after explicit confirmation --
+        # penalize_wrong_foot_ball_contact now reads this sensor's geometry
+        # (via a distance-based proximity check, not the raw "found" field
+        # directly) again. See docs/BugFixes.md for the full history.
         ContactSensorCfg(
             name="head_ball_contact",
             primary=ContactMatch(mode="geom", pattern="head_collision", entity="robot"),
@@ -962,7 +967,42 @@ def goalkeeper_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
         "penalize_wrong_foot_ball_contact": RewardTermCfg(
             func=gk_mdp.penalize_wrong_foot_ball_contact,
             weight=-100.0,
-            params={"ball_name": BALL_NAME},
+            # FIX 2026-08-07 (user request): knee_proximity_margin 0.05->0.10m,
+            # explicit now (was relying on the function's own default) --
+            # see rewards.py:penalize_wrong_foot_ball_contact docstring.
+            # FIX 2026-08-07 (2nd same-day increase, user request): 0.10->0.15m.
+            # FIX 2026-08-07 (3rd same-day increase, DIAGNOSTIC-ONLY, user
+            # request, REVERTED same day): 0.15->1.0m -- oversized on purpose
+            # so the P-panel plots visibly spiked for verification (confirmed
+            # working, then reverted -- see rewards.py docstring).
+            # FIX 2026-08-07 (4th same-day change, REVERT): back to 0.15.
+            # FIX 2026-08-07 (5th same-day change, user request): 0.15->0.05 --
+            # the ORIGINAL, pre-session default (this key had no explicit
+            # override at all before today), so model_10250.pt and every
+            # other checkpoint from this run can be watched under the exact
+            # threshold they were actually trained/checkpointed under.
+            # FIX 2026-08-07 (6th same-day change, user request, re-adds
+            # chin/head after explicit confirmation via AskUserQuestion):
+            # head_proximity_margin=0.20 -- distance-based (not raw contact
+            # "found", which under-fires -- same fix already proven for the
+            # knee), independent of knee_proximity_margin per explicit user
+            # request to keep the knee's own threshold unchanged.
+            # FIX 2026-08-07 (7th same-day change, user request): 0.20->0.65 --
+            # 0.38m total radius was smaller than the CLOSEST real approach
+            # (0.736m) measured in this session's own checkpoint-replay probe,
+            # so it could never fire in practice. See rewards.py docstring.
+            # FIX 2026-08-07 (8th same-day change, user request): 0.65->1.0.
+            # FIX 2026-08-07 (9th same-day change, user request: "i only want
+            # the treshold of the chin so revert back again, and ignore the
+            # whole head thing, even remove the whole head touch penalty for
+            # now"): head_proximity_margin param removed entirely --
+            # penalize_wrong_foot_ball_contact no longer has a head/chin
+            # sub-condition at all (see rewards.py docstring). Back to just
+            # the two params below, unchanged from the pre-session baseline.
+            params={
+                "ball_name": BALL_NAME,
+                "knee_proximity_margin": 0.05,
+            },
         ),
         "feet_slippage": RewardTermCfg(
             func=gk_mdp.feet_slippage,

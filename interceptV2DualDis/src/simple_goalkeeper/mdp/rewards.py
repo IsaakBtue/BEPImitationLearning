@@ -2712,11 +2712,63 @@ def penalize_wrong_foot_ball_contact(
     (3) Chin/head contact was tried and reverted (same day): the chin is
     essentially unavoidable contact given this task's ball trajectories, so
     penalizing it produces an inescapable penalty rather than a useful
-    signal. `head_ball_contact` stays a viewer-only diagnostic sensor
-    (goalkeeper_env_cfg.py, play.py), not read by this or any other reward.
+    signal. `head_ball_contact` stayed a viewer-only diagnostic sensor
+    (goalkeeper_env_cfg.py, play.py), not read by this or any other reward
+    -- UNTIL FIX 2026-08-07 below.
+
+    FIX 2026-08-07 (user request, re-added after explicit confirmation):
+    chin/head contact re-wired back in. History of this specific flip-flop,
+    all same day: (a) added once on a direct-sounding user request without
+    first listing the change and waiting for approval -- a violation of
+    this project's Change Approval Workflow (see CLAUDE.md), caught by the
+    user, reverted; (b) extensive same-day investigation followed (a
+    1,280-episode real-checkpoint replay probe, a forced-contact unit test,
+    the "HD" console indicator, a P-panel visibility fix) all confirming
+    the sensor and detection pipeline work correctly but genuine chin/head-
+    ball contact essentially never happens with the real trained policy;
+    (c) user then explicitly asked to re-add it anyway, and this time was
+    asked to confirm given the direct contradiction with their own earlier
+    "we deliberately dont choose the chin because that one doesn't work" --
+    confirmed via AskUserQuestion. Given (b), this is expected to have
+    near-zero practical effect on training (the event essentially never
+    fires) -- it's a defensive close of the exploit path, not a response to
+    an active, measured problem.
+
+    FIX 2026-08-07 (same day, immediate follow-up, user request: "make it
+    really strict the chin, but keep the threshold of the knee"): switched
+    from the raw `head_ball_contact` "found" contact flag to a distance-
+    based proximity check instead, mirroring the EXACT fix already proven
+    for the leading knee (FIX 2026-07-30 2nd follow-up below) -- "found"
+    requires real geometric penetration and under-fires relative to visible
+    near-misses (the same problem that motivated the knee's own distance-
+    based rewrite). New `head_proximity_margin` param (default 0.20m,
+    independent of and NOT reusing `knee_proximity_margin` -- user
+    explicitly asked to keep the knee's own threshold unchanged). Head
+    sphere: radius 0.08m (`_HEAD_GEOM_RADIUS`, t1_headless.xml
+    `head_collision`), center offset (0.01, 0, 0.11) from the H2 body's
+    local origin (NOT zero, unlike the knee spheres -- requires rotating
+    the local offset into world frame via quat_apply before computing
+    distance). Total trigger radius from the offset head-sphere center:
+    0.08 + 0.10 (ball) + 0.20 = 0.38m. Unconditional (no side split, single
+    head geom), same -100 weight tier as every other sub-condition here.
+
+    FIX 2026-08-07 (same day, immediate follow-up, user request: "increase
+    the threshold of the chin again it is not working properly"):
+    `head_proximity_margin` 0.20m -> 0.65m (total trigger radius 0.38m ->
+    0.83m). At 0.38m the check could never fire in practice -- the
+    1,280-episode real-checkpoint replay probe done earlier this session
+    (see docs/BugFixes.md) found the CLOSEST the ball ever got to the head
+    across every sampled episode was 0.736m, already outside a 0.38m
+    trigger radius. 0.65m pushes the total radius (0.83m) past that
+    measured closest-approach data point, so the check can now actually
+    fire against real observed behavior instead of being geometrically
+    unreachable. Still meaningfully smaller than the knee's own diagnostic-
+    only 1.0m excursion earlier today (never intended as a real value).
+
     Net effect: penalty fires on (wrong-side sole OR wrong-side shin OR
-    wrong-side knee) OR (leading-side knee only). Same -100 weight except
-    for the leading-knee term (see FIX 2026-07-30 2nd follow-up below).
+    wrong-side knee) OR (leading-side knee only) OR (head/chin proximity,
+    distance-based). Same -100 weight except for the leading-knee term (see
+    FIX 2026-07-30 2nd follow-up below).
 
     leg_ball_contact geom-index order (verified via primary_names): 0=left_shin,
     1=left_knee, 2=right_knee, 3=right_shin.
@@ -2734,13 +2786,97 @@ def penalize_wrong_foot_ball_contact(
     Shank_Left/Shank_Right body origin (t1_headless.xml: `left/right_knee_
     collision` has no `pos` offset, so it's exactly at the body origin);
     radius 0.06m (`_KNEE_GEOM_RADIUS`). Ball radius 0.10m (`_BALL_GEOM_
-    RADIUS`, ball.xml). `knee_proximity_margin` default 0.05m widens the
-    trigger zone 5cm beyond literal contact -- tunable via this function's
-    param (goalkeeper_env_cfg.py). The wrong-side whole-leg check is left on
-    the contact sensor (unchanged) -- only the leading-knee case had a
+    RADIUS`, ball.xml). `knee_proximity_margin` widens the trigger zone
+    beyond literal contact -- tunable via this function's param
+    (goalkeeper_env_cfg.py). The wrong-side whole-leg check is left on the
+    contact sensor (unchanged) -- only the leading-knee case had a
     reported under-firing problem.
+
+    FIX 2026-08-07 (user request): `knee_proximity_margin` 0.05m -> 0.10m
+    (total leading-knee trigger radius from the knee sphere's center:
+    0.21m -> 0.26m). User reviewed `model_10250.pt` and found the policy
+    still using the chin/head to make saves. Chin/head contact itself is
+    NOT re-penalized here (that attempt was made and reverted the same
+    session per this project's Change Approval Workflow -- see
+    docs/BugFixes.md); this widens the EXISTING leading-knee proximity
+    penalty instead, as a lower-risk first step toward discouraging
+    any-body-part-except-the-sole saves more broadly. First doubling,
+    not data-driven -- not yet validated against a live training run.
+
+    FIX 2026-08-07 (2nd same-day increase, user request): `knee_proximity_
+    margin` 0.10m -> 0.15m (total trigger radius 0.26m -> 0.31m). Same-day
+    follow-up increase, same reasoning as above -- chin/head deliberately
+    stays un-penalized (explicit user confirmation this session: "we
+    deliberately dont choose the chin because that one doesn't work"), so
+    the knee-proximity lever remains the sole tuning knob for this
+    exploit-family concern for now. Not data-driven, not yet validated
+    against a live training run.
+
+    FIX 2026-08-07 (3rd same-day increase, DIAGNOSTIC-ONLY, user request,
+    REVERTED same day): `knee_proximity_margin` 0.15m -> 1.0m (total trigger
+    radius 0.31m -> 1.16m), purely so the user could visually confirm the
+    "wrong_foot_ball_contact"/"knee_distance_contact" P-panel plots actually
+    react in the live viewer. Confirmed working -- at 1.0m the plots
+    correctly spiked whenever the correct foot merely approached/overshot
+    the footreach aim point (ball broadly nearby, nowhere close to literal
+    knee contact) and maxed out right at episode start (ball spawns within
+    1.16m of the knee from step one) -- both expected artifacts of the
+    oversized radius, not bugs, and both went away once reverted.
+
+    FIX 2026-08-07 (4th same-day change, REVERT, user-confirmed diagnostic
+    complete): `knee_proximity_margin` back to 0.15m (total trigger radius
+    0.31m) -- the last genuinely-tuned value from earlier today. Restores
+    the signal's meaning: fires on genuine near-knee proximity, not "ball
+    is somewhere near the robot."
+
+    FIX 2026-08-07 (5th same-day change, user request): `knee_proximity_
+    margin` 0.15m -> 0.05m (total trigger radius 0.31m -> 0.21m) -- user
+    wanted to watch `model_10250.pt` (run `6144_footyawspinfix_2026-08-07`)
+    under the EXACT threshold it was actually trained/checkpointed under.
+    Before any change made in this session, `goalkeeper_env_cfg.py` had no
+    explicit `knee_proximity_margin` override at all -- the registration
+    silently relied on this function's own original default, 0.05m, which
+    is therefore the true value in effect for every checkpoint from this
+    run including model_10250.pt. This is the original, pre-session value,
+    not a new tuning decision.
+
+    FIX 2026-08-07 (6th same-day change, user request: "i only want the
+    treshold of the chin so revert back again, and ignore the whole head
+    thing, even remove the whole head touch penalty for now"): removed the
+    head/chin proximity sub-condition entirely (`head_proximity_margin`
+    param, `_HEAD_GEOM_RADIUS`/`_HEAD_LOCAL_OFFSET`/`head_center_w`/
+    `dist_to_head`/`head_threshold`/`head_near`, and its OR into the
+    return) -- back to exactly the pre-2026-08-07-session form (wrong-side
+    sole/leg OR leading-knee proximity only). The chin/head mechanism had
+    gone through five threshold changes this session (0.20->0.65->1.0) plus
+    a viewer-visualization detour without ever being confirmed working
+    against real play; rather than continue tuning a param the user no
+    longer wants active, it's removed outright. `knee_proximity_margin`
+    (this function's remaining tunable) is unaffected. `_compute_wrong_foot_
+    contact_flash` (play.py) and its P-panel/console head-diagnostics were
+    reverted the same way in the same change -- see docs/BugFixes.md.
+
+    FIX 2026-08-07 (7th same-day change, user request: "implement it in the
+    wrong foot ball contact" -- referring to the new `left_shin`/`right_shin`
+    MuJoCo sites added to t1_headless.xml/t1.xml the same day): added a
+    leading-shin proximity sub-condition, the same distance-based pattern as
+    the existing leading-knee check just above, but against the shin's own
+    mid-point (t1_headless.xml's `left_shin`/`right_shin` sites, roughly
+    midway between the knee joint and the ankle -- see the XML's own
+    comment) instead of the knee joint. Read via `robot.find_sites(...)` +
+    `robot.data.site_pos_w` -- the actual compiled site position, not a
+    hand-duplicated offset constant (the exact "3-file-duplicated-constant"
+    problem the head/chin mechanism had earlier this session). Reuses
+    `knee_proximity_margin` rather than adding a new param -- both are the
+    same "leading leg proximity" concept, just checked at two different
+    points along the leg (knee joint vs mid-shin), and the user's own
+    "keep the threshold of the knee" instruction earlier this session
+    treated the leg's proximity margin as a single tunable. `_SHIN_GEOM_
+    RADIUS` (0.05) matches `left_shin_collision`'s/`left_shin_vis`'s own
+    radius in the XML (t1_headless.xml).
     """
     _KNEE_GEOM_RADIUS = 0.06
+    _SHIN_GEOM_RADIUS = 0.05
     _BALL_GEOM_RADIUS = 0.10
 
     foot_idx = _get_correct_foot_idx(env, ball_name)  # (N,) 0=left, 1=right
@@ -2771,7 +2907,14 @@ def penalize_wrong_foot_ball_contact(
     knee_near = dist_to_knee < knee_threshold  # (B, 2)
     leading_knee_touch = knee_near[env_ar, foot_idx]  # correct side: knee proximity only
 
-    return (wrong_sole_touch | wrong_leg_touch | leading_knee_touch).float()
+    shin_site_ids = robot.find_sites(["left_shin", "right_shin"])[0]
+    shin_pos_w = robot.data.site_pos_w[:, shin_site_ids, :]  # (B, 2, 3): 0=left,1=right
+    dist_to_shin = (ball_pos_w.unsqueeze(1) - shin_pos_w).norm(dim=-1)  # (B, 2)
+    shin_threshold = _SHIN_GEOM_RADIUS + _BALL_GEOM_RADIUS + knee_proximity_margin
+    shin_near = dist_to_shin < shin_threshold  # (B, 2)
+    leading_shin_touch = shin_near[env_ar, foot_idx]  # correct side: shin proximity only
+
+    return (wrong_sole_touch | wrong_leg_touch | leading_knee_touch | leading_shin_touch).float()
 
 
 def airborne_at_save(

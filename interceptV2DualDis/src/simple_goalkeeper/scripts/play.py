@@ -105,6 +105,12 @@ class PlayConfig:
     analytics: bool = True
     """Print ball velocity, delta_vx, foot heights, and stopball/softstop state to stdout each step.
     Also toggleable at runtime with the V key."""
+    # REMOVED 2026-08-07 (user request: "ignore the whole head thing, even
+    # remove the whole head touch penalty for now"): force_head_contact_test
+    # existed solely to verify the "HD" console indicator / head_ball_contact
+    # P-panel plot, both of which were removed the same day alongside the
+    # reward's head/chin sub-condition itself (rewards.py:
+    # penalize_wrong_foot_ball_contact). See docs/BugFixes.md.
 
 
 class AnalyticsPolicy:
@@ -122,7 +128,7 @@ class AnalyticsPolicy:
         self._ep = 0
         self._prev_ep_buf: "torch.Tensor | None" = None
         self._wf_flash = 0.0
-        self._head_flash = 0.0
+        self._knee_flash = 0.0
         # FIX 2026-07-22 (research: shank_height vs base_height termination
         # tuning): per-episode running minimums, so a deep-lunge episode's
         # worst height is captured even though the live status line
@@ -194,13 +200,13 @@ class AnalyticsPolicy:
 
         # DEBUG 2026-07-28: called unconditionally (before the enabled-gate
         # below, and independent of the viewer's _show_plots/_is_paused
-        # state) so the wrong-foot/head contact latch keeps advancing every
+        # state) so the wrong-foot contact latch keeps advancing every
         # step regardless of whether analytics printing or the P-panel
         # plots happen to be toggled on -- the viewer-only version of this
         # call (_patch_viewer_wrong_foot_contact_plot) only runs while
         # _show_plots is True, which made it an unreliable ground-truth
         # source for confirming whether contact is actually being detected.
-        self._wf_flash, self._head_flash = _compute_wrong_foot_contact_flash(env, 0)
+        self._wf_flash, self._knee_flash = _compute_wrong_foot_contact_flash(env, 0)
 
         if not self.enabled:
             return actions
@@ -302,7 +308,7 @@ class AnalyticsPolicy:
             f"{'SS✓' if softstop_fired else 'SS·'} "
             f"{'CS✓' if cleanstop_fired else 'CS·'} "
             f"{'WF✓' if self._wf_flash else 'WF·'} "
-            f"{'HD✓' if self._head_flash else 'HD·'}"
+            f"{'KN✓' if self._knee_flash else 'KN·'}"
         )
         lf_tag = f"{'G' if lf_contact else 'A'}{lf_slip:.2f}"
         rf_tag = f"{'G' if rf_contact else 'A'}{rf_slip:.2f}"
@@ -540,9 +546,18 @@ looking like no reaction. 15 steps clears that floor with margin."""
 def _compute_wrong_foot_contact_flash(env, env_idx: int) -> tuple[float, float]:
     """Raw "bad ball contact" signals for the viewer's P-panel, each latched
     high for _WRONG_FOOT_FLASH_STEPS steps after a detected touch: (1) any
-    ball contact penalize_wrong_foot_ball_contact treats as bad EXCEPT the
-    chin (wrong-side foot sole OR either side's knee/shin), (2) the
-    head/chin touching the ball at all.
+    ball contact penalize_wrong_foot_ball_contact treats as bad (wrong-side
+    foot sole OR either side's knee/shin OR leading knee proximity), (2) NEW
+    2026-08-07 (user request) -- JUST the leading-knee proximity
+    sub-condition of (1), isolated on its own so it can be verified
+    independently of the wrong-side sole/leg conditions it's normally OR'd
+    with in (1). This is the exact "knee contact with a distance calculator"
+    mechanism the user asked to re-find in git history -- confirmed via
+    `git log`: rewards.py:penalize_wrong_foot_ball_contact's leading_knee_touch,
+    introduced in commit c55786c (2026-07-30), the SAME commit that tried
+    and reverted a chin/head penalty. No separate "knee distance" reward
+    function exists or ever existed -- it has always been this one
+    sub-condition inside penalize_wrong_foot_ball_contact.
 
     (1) mirrors penalize_wrong_foot_ball_contact's own detection exactly (same
     "ball_contact"/"leg_ball_contact" sensors + _get_correct_foot_idx) -- does
@@ -550,18 +565,11 @@ def _compute_wrong_foot_contact_flash(env, env_idx: int) -> tuple[float, float]:
     (tried first) plots a signal too sparse for the viewer's autoscale to
     ever show (see docs/BugFixes.md).
 
-    (2) DEBUG 2026-07-28: added after the wrong-foot flash (1) still showed no
-    reaction and the user asked whether the ball might actually be hitting the
-    chin/head instead of a foot -- "ball_contact"/"feet_contact" only match
-    foot geoms, so a head touch is invisible to both and to (1) above. Reads
-    the "head_ball_contact" sensor (goalkeeper_env_cfg.py) directly.
-
-    (1) EXTENDED 2026-07-28 (same day, later): user then spotted an orange
-    MuJoCo contact-point dot between the trailing leg and the ball while (1)
-    still read 0 -- confirmed via a real-checkpoint replay that the shin/knee
-    (not covered by ball_contact's foot[1-4]_collision pattern) genuinely
-    touches the ball, sometimes on the wrong side. Added
-    "leg_ball_contact" (goalkeeper_env_cfg.py).
+    (1) EXTENDED 2026-07-28: user spotted an orange MuJoCo contact-point dot
+    between the trailing leg and the ball while (1) still read 0 -- confirmed
+    via a real-checkpoint replay that the shin/knee (not covered by
+    ball_contact's foot[1-4]_collision pattern) genuinely touches the ball,
+    sometimes on the wrong side. Added "leg_ball_contact" (goalkeeper_env_cfg.py).
 
     (1) REVISED 2026-07-30 (user request, after a live-checkpoint probe found
     the "knee/shin" label was misleading -- nearly every firing was genuinely
@@ -571,20 +579,51 @@ def _compute_wrong_foot_contact_flash(env, env_idx: int) -> tuple[float, float]:
     CORRECT/leading side: KNEE PROXIMITY (distance-based, not contact-sensor
     "found" -- see rewards.py's docstring for why: the contact flag needs
     real geometric overlap and under-fires relative to visible near-misses).
-    Chin stays a separate flash (2) even though it's not currently read by
-    the reward at all (reverted).
 
     leg_ball_contact geom-index order: 0=left_shin, 1=left_knee, 2=right_knee,
     3=right_shin (same as penalize_wrong_foot_ball_contact, rewards.py).
 
-    Both are viewer-only display latches with no effect on training/reward.
+    FIX 2026-08-07 (user request: "i only want the treshold of the chin so
+    revert back again, and ignore the whole head thing, even remove the
+    whole head touch penalty for now"): the head/chin sub-condition (a
+    distance check against the H2 body's head_collision sphere, wired into
+    the return value earlier this same session) is removed entirely,
+    matching the same-day removal from rewards.py:penalize_wrong_foot_ball_
+    contact -- this function must keep mirroring that reward exactly. The
+    "head_ball_contact" P-panel plot / "HD" console flag / "HDdist" readout
+    that read this function's now-removed 3rd return value are removed the
+    same way (see _patch_viewer_wrong_foot_contact_plot and AnalyticsPolicy).
+
+    FIX 2026-08-07 (user request: "implement it in the wrong foot ball
+    contact" -- the new left_shin/right_shin sites, t1_headless.xml/t1.xml):
+    folded in the same leading-shin proximity sub-condition added to
+    rewards.py:penalize_wrong_foot_ball_contact the same day -- this
+    function must keep mirroring that reward exactly (see the FIX above).
+    Not split into its own isolated plot/flash counter (unlike the knee)
+    since it wasn't requested -- only rolled into the combined
+    wrong_touch/"wrong_foot_ball_contact" signal.
+
+    Both remaining signals are viewer-only display latches with no effect
+    on training/reward.
     """
     raw_env = env.unwrapped if hasattr(env, "unwrapped") else env
     from simple_goalkeeper.mdp.rewards import _get_correct_foot_idx
 
     _KNEE_GEOM_RADIUS = 0.06
+    _SHIN_GEOM_RADIUS = 0.05
     _BALL_GEOM_RADIUS = 0.10
-    _KNEE_PROXIMITY_MARGIN = 0.05  # must match rewards.py's default
+    # FIX 2026-08-07: was 0.05, never updated through rewards.py's/
+    # goalkeeper_env_cfg.py's earlier same-day increases -- silently out of
+    # sync with the actual registered penalty for a while, likely why the
+    # plot never visibly spiked before that was caught. Went 0.05->0.10->
+    # 0.15->1.0 (DIAGNOSTIC-ONLY, confirmed the plot pipeline works) -> 0.15
+    # (the real tuned value) -> back to 0.05 (user request: this is the
+    # ORIGINAL default that was actually in effect, unversioned, for the
+    # entire model_10250.pt training run -- watching that checkpoint under
+    # its own true training-time threshold). Must match the value in
+    # goalkeeper_env_cfg.py's penalize_wrong_foot_ball_contact params, not
+    # rewards.py's function default (they can differ; params always wins).
+    _KNEE_PROXIMITY_MARGIN = 0.05
 
     foot_idx = _get_correct_foot_idx(raw_env, "ball")  # (N,) 0=left, 1=right
     wrong_foot_idx = 1 - foot_idx
@@ -611,17 +650,30 @@ def _compute_wrong_foot_contact_flash(env, env_idx: int) -> tuple[float, float]:
     knee_near = dist_to_knee < knee_threshold  # (B, 2)
     leading_knee_touch = knee_near[env_ar, foot_idx]
 
-    wrong_touch = wrong_sole_touch | wrong_leg_touch | leading_knee_touch
+    shin_site_ids = robot.find_sites(["left_shin", "right_shin"])[0]
+    shin_pos_w = robot.data.site_pos_w[:, shin_site_ids, :]  # (B, 2, 3)
+    dist_to_shin = (ball_pos_w.unsqueeze(1) - shin_pos_w).norm(dim=-1)  # (B, 2)
+    shin_threshold = _SHIN_GEOM_RADIUS + _BALL_GEOM_RADIUS + _KNEE_PROXIMITY_MARGIN
+    shin_near = dist_to_shin < shin_threshold  # (B, 2)
+    leading_shin_touch = shin_near[env_ar, foot_idx]
 
-    head_found = raw_env.scene["head_ball_contact"].data.found  # [B, N]
-    head_touch = (head_found > 0).any(dim=-1)
+    wrong_touch = wrong_sole_touch | wrong_leg_touch | leading_knee_touch | leading_shin_touch
 
     if not hasattr(raw_env, "_wrong_foot_flash_counter"):
         raw_env._wrong_foot_flash_counter = torch.zeros(
             raw_env.num_envs, dtype=torch.long, device=raw_env.device
         )
-    if not hasattr(raw_env, "_head_contact_flash_counter"):
-        raw_env._head_contact_flash_counter = torch.zeros(
+    # NEW 2026-08-07 (user request): isolated latch for JUST the leading-knee
+    # distance check (leading_knee_touch) -- the combined wrong_touch/counter
+    # above ORs it together with wrong-side sole/leg conditions, so it alone
+    # can't tell the user whether the SPECIFIC knee-distance mechanism
+    # (rewards.py:penalize_wrong_foot_ball_contact's distance-based leading-
+    # knee sub-check, git c55786c 2026-07-30) is the one firing. Same git
+    # history the user asked to re-confirm: chin was tried and reverted in
+    # that same commit; only the knee-distance check remains live in the
+    # actual reward.
+    if not hasattr(raw_env, "_knee_distance_flash_counter"):
+        raw_env._knee_distance_flash_counter = torch.zeros(
             raw_env.num_envs, dtype=torch.long, device=raw_env.device
         )
     just_reset = raw_env.episode_length_buf <= 1
@@ -631,25 +683,44 @@ def _compute_wrong_foot_contact_flash(env, env_idx: int) -> tuple[float, float]:
     counter[wrong_touch] = _WRONG_FOOT_FLASH_STEPS
     counter[~wrong_touch & ~just_reset] = torch.clamp(counter[~wrong_touch & ~just_reset] - 1, min=0)
 
-    head_counter = raw_env._head_contact_flash_counter
-    head_counter[just_reset] = 0
-    head_counter[head_touch] = _WRONG_FOOT_FLASH_STEPS
-    head_counter[~head_touch & ~just_reset] = torch.clamp(head_counter[~head_touch & ~just_reset] - 1, min=0)
+    knee_counter = raw_env._knee_distance_flash_counter
+    knee_counter[just_reset] = 0
+    knee_counter[leading_knee_touch] = _WRONG_FOOT_FLASH_STEPS
+    knee_counter[~leading_knee_touch & ~just_reset] = torch.clamp(
+        knee_counter[~leading_knee_touch & ~just_reset] - 1, min=0
+    )
 
-    return float(counter[env_idx].item() > 0), float(head_counter[env_idx].item() > 0)
+    return (
+        float(counter[env_idx].item() > 0),
+        float(knee_counter[env_idx].item() > 0),
+    )
 
 
 def _patch_viewer_wrong_foot_contact_plot(native_viewer: "NativeMujocoViewer", env) -> None:
-    """Add two P-panel plots ("wrong_foot_ball_contact"/"head_ball_contact")
+    """Add two P-panel plots ("wrong_foot_ball_contact"/"knee_distance_contact")
     showing the latched raw bad-contact signals (see
     _compute_wrong_foot_contact_flash), alongside the existing per-reward-term
     plots. Mirrors the removed feet-slip patch's structure exactly (see
     _patch_viewer_new_reward_plots and docs/BugFixes.md for its replacement).
+
+    NEW 2026-08-07 (user request): added "knee_distance_contact", isolating
+    JUST the leading-knee proximity check (rewards.py:
+    penalize_wrong_foot_ball_contact's distance-based sub-condition, git
+    c55786c 2026-07-30 -- same commit chin/head was tried and reverted in)
+    from "wrong_foot_ball_contact"'s combined OR of wrong-side-sole/leg/
+    leading-knee -- the combined signal can't tell you WHICH condition
+    fired. See docs/BugFixes.md.
+
+    FIX 2026-08-07 (user request, same day: "remove the whole head touch
+    penalty for now"): dropped the "head_ball_contact" plot -- the reward's
+    head/chin sub-condition it tracked was removed the same way from
+    rewards.py, so this plot no longer corresponds to anything the policy is
+    penalized for.
     """
     orig_setup = native_viewer.setup
     orig_update_reward_figures = native_viewer._update_reward_figures
 
-    _TERM_NAMES = ("wrong_foot_ball_contact", "head_ball_contact")
+    _TERM_NAMES = ("wrong_foot_ball_contact", "knee_distance_contact")
 
     def _patched_setup() -> None:
         orig_setup()
@@ -670,11 +741,11 @@ def _patch_viewer_wrong_foot_contact_plot(native_viewer: "NativeMujocoViewer", e
 
     def _patched_update_reward_figures(viewer_handle: "mujoco.viewer.Handle") -> None:
         if native_viewer._show_plots and native_viewer._term_names and not native_viewer._is_paused:
-            wrong_foot_flash, head_flash = _compute_wrong_foot_contact_flash(env, native_viewer.env_idx)
+            wrong_foot_flash, knee_flash = _compute_wrong_foot_contact_flash(env, native_viewer.env_idx)
             native_viewer._append_point("wrong_foot_ball_contact", wrong_foot_flash)
             native_viewer._write_history_to_figure("wrong_foot_ball_contact")
-            native_viewer._append_point("head_ball_contact", head_flash)
-            native_viewer._write_history_to_figure("head_ball_contact")
+            native_viewer._append_point("knee_distance_contact", knee_flash)
+            native_viewer._write_history_to_figure("knee_distance_contact")
         orig_update_reward_figures(viewer_handle)
 
     native_viewer.setup = _patched_setup
@@ -903,11 +974,50 @@ def _patch_viewer_post_recovery_plots(native_viewer: "NativeMujocoViewer", env) 
     # bumped out same-day 2026-08-06 for `penalize_sharpcontact`, which
     # stays). `postlinvel` was judged the least relevant of the 11 to the
     # current investigation (foot-yaw/post-save-pose instability).
+    #
+    # FIX 2026-08-07 (later same day, user request): added `postshoulderdofpos`
+    # -- the shoulder-scoped sibling of `postupperdofpos` (added 2026-08-06,
+    # never previously promoted to this panel). 12 terms now, exactly at the
+    # display cap -- nothing else needed removing since the list was at 11.
+    #
+    # FIX 2026-08-07 (later same day, user request): swapped
+    # `foot_inner_face_continuous` out for `head_ball_contact` -- this panel
+    # is registered LAST in run_play (after _patch_viewer_wrong_foot_contact_
+    # plot), so its own term_names reordering runs last and wins; since
+    # "head_ball_contact" isn't in _POST_RECOVERY_REWARD_TERMS it was
+    # silently pushed past the 12-slot max_viewports cutoff by this exact
+    # panel, despite _patch_viewer_wrong_foot_contact_plot having genuinely
+    # registered and computed it -- the plot existed and updated every step,
+    # it just was never actually visible. This surfaces the raw latched
+    # chin/head-contact signal (see _compute_wrong_foot_contact_flash) after
+    # user review of model_10250.pt found the policy converged on chin/head
+    # contact as a save method. `foot_inner_face_continuous`'s own target
+    # angle is still separately visible via the "assigned_foot_angle_deg"
+    # custom plot (_patch_viewer_foot_orientation_plot), and its one-shot
+    # sibling `inner_face_orientation_save` stays in this panel -- judged
+    # the least-redundant term to demote. Viewer-only change, no effect on
+    # training/rewards.
+    # FIX 2026-08-07 (user request): same visibility bug as the head_ball_contact
+    # fix above -- "wrong_foot_ball_contact" and "knee_distance_contact" were
+    # ALSO being silently pushed past the 12-slot cutoff by this same panel,
+    # the whole time head_ball_contact was (they were never in this list
+    # either, until now). Demoted `penalize_sharpcontact` (unrelated to the
+    # current wrong-foot/knee/chin-contact investigation) and
+    # `postsave_foot_airtime` (peripheral to it) to make room for both.
+    #
+    # FIX 2026-08-07 (later same day, user request: "ignore the whole head
+    # thing, even remove the whole head touch penalty for now"): dropped
+    # "head_ball_contact" -- the reward's head/chin sub-condition it tracked
+    # was removed the same day from rewards.py:penalize_wrong_foot_ball_
+    # contact. 11 terms now, not backfilled to 12 -- the display cap, not a
+    # requirement to hit exactly (same reasoning as the 2026-08-06 entry
+    # above).
     _POST_RECOVERY_REWARD_TERMS = (
         "postorientation", "postangvel", "penalize_arm_above_shoulder",
-        "postupperdofpos", "postlegdofpos",
-        "postleadfootorientation", "postsave_foot_airtime", "postheadingorientation",
-        "penalize_sharpcontact", "inner_face_orientation_save", "foot_inner_face_continuous",
+        "postupperdofpos", "postshoulderdofpos", "postlegdofpos",
+        "postleadfootorientation", "postheadingorientation",
+        "inner_face_orientation_save",
+        "wrong_foot_ball_contact", "knee_distance_contact",
     )
 
     def _patched_setup() -> None:
