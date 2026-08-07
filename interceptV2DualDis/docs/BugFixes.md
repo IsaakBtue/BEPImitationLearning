@@ -2492,3 +2492,11 @@ Position `z=-0.12` local to each Shank body: matches `left/right_shin_collision`
 **Push:** committed and pushed to `origin/v2-blue-ball-waypoint` per user request ("push it to the github") -- see git log for the commit covering this entry plus the accumulated changes from the rest of this session (yaw-spin fix, plant-speed reward, wrong-foot-contact head/chin/knee/shin history, CLAUDE.md workflow rule, robot asset markers).
 
 ---
+
+## 2026-08-07 (later same day, 18th session) -- shin geom tightened (no re-verification this entry, per user request)
+
+**Fix:** `left/right_shin_vis` cylinder radius 0.05->0.035, half-length 0.10->0.08 (full length 0.20->0.16) -- user: "make the shin geom smaller and a little more tight (circumfrance)." Applied to both `t1.xml` and `t1_headless.xml`. `_SHIN_GEOM_RADIUS` in `rewards.py`'s `penalize_wrong_foot_ball_contact` and `play.py`'s mirror updated to match (0.05->0.035), since that constant is documented as tracking the marker geom's own radius -- this narrows `shin_threshold` from 0.20m to 0.185m.
+
+**Verification:** none this entry -- user explicitly requested "dont do any tests just do these things." Pushed as-is.
+
+---

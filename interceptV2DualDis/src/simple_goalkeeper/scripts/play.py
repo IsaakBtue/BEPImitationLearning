@@ -610,7 +610,7 @@ def _compute_wrong_foot_contact_flash(env, env_idx: int) -> tuple[float, float]:
     from simple_goalkeeper.mdp.rewards import _get_correct_foot_idx
 
     _KNEE_GEOM_RADIUS = 0.06
-    _SHIN_GEOM_RADIUS = 0.05
+    _SHIN_GEOM_RADIUS = 0.035  # FIX 2026-08-07: must match rewards.py's matching constant
     _BALL_GEOM_RADIUS = 0.10
     # FIX 2026-08-07: was 0.05, never updated through rewards.py's/
     # goalkeeper_env_cfg.py's earlier same-day increases -- silently out of

@@ -2876,7 +2876,7 @@ def penalize_wrong_foot_ball_contact(
     radius in the XML (t1_headless.xml).
     """
     _KNEE_GEOM_RADIUS = 0.06
-    _SHIN_GEOM_RADIUS = 0.05
+    _SHIN_GEOM_RADIUS = 0.035  # FIX 2026-08-07: 0.05->0.035, matches left/right_shin_vis's tightened radius (t1_headless.xml)
     _BALL_GEOM_RADIUS = 0.10
 
     foot_idx = _get_correct_foot_idx(env, ball_name)  # (N,) 0=left, 1=right
