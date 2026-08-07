@@ -609,7 +609,10 @@ def goalkeeper_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
         "inner_face_orientation_save": RewardTermCfg(
             func=gk_mdp.inner_face_orientation_save,
             weight=17.36,
-            params={"ball_name": BALL_NAME, "alignment_threshold": 0.7, "asset_cfg": _FEET_CFG},
+            # FIX 2026-08-07 (user request): alignment_threshold 0.7->0.85,
+            # tightened alongside rewards.py's _FOOT_TARGET_ANGLE_DEG 60->45
+            # -- see that constant's docstring and inner_face_orientation_save's.
+            params={"ball_name": BALL_NAME, "alignment_threshold": 0.85, "asset_cfg": _FEET_CFG},
         ),
         "foot_inner_face_continuous": RewardTermCfg(
             func=gk_mdp.foot_inner_face_continuous,
@@ -641,6 +644,16 @@ def goalkeeper_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
         "postsave_foot_airtime": RewardTermCfg(
             func=gk_mdp.postsave_foot_airtime,
             weight=1.0,
+            params={"ball_name": BALL_NAME, "asset_cfg": _FEET_CFG},
+        ),
+        # NEW 2026-08-07 (user request): one-shot bonus for the leading foot
+        # touching down near a controlled 0.1 m/s, instead of slamming into
+        # the ground -- user watched training and saw hard landings. See
+        # rewards.py:postleadfootplantspeed docstring for the Gaussian shape
+        # (reuses foot_clearance's sigma=300 convention) and firing mechanism.
+        "postleadfootplantspeed": RewardTermCfg(
+            func=gk_mdp.postleadfootplantspeed,
+            weight=3.0,
             params={"ball_name": BALL_NAME, "asset_cfg": _FEET_CFG},
         ),
         # NEW 2026-07-28 (user request): whole-body yaw heading recovery --
@@ -742,7 +755,31 @@ def goalkeeper_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
             # meaningfully inflating raw task-reward scale and diluting
             # AMP's real proportional influence on the blended objective.
             # Halved rather than removed -- likely still doing real work.
-            weight=-0.25,
+            # FIX 2026-08-07 (user request): restored -0.5 -- user watched
+            # training and observed the foot visibly rotating right at save
+            # contact, causing an unstable landing; wants foot rotation
+            # penalized more strongly. Reverts the 2026-07-20 halving
+            # deliberately (dilution concern judged secondary to the
+            # landing-instability symptom). See rewards.py:foot_ang_vel_z
+            # (new sibling term, same fix) and docs/BugFixes.md.
+            weight=-0.5,
+            params={"asset_cfg": _FEET_CFG},
+        ),
+        # NEW 2026-08-07 (user request): foot YAW angular velocity, split out
+        # from foot_ang_vel_xy (which excludes Z by construction) mirroring
+        # the existing ang_vel_xy_l2/ang_vel_z_l2 trunk split. Targets the
+        # root-caused mechanism directly: T1's ankle has no yaw DOF, so any
+        # foot-heading rotation (foot_inner_face_continuous/
+        # inner_face_orientation_save pre-save, postleadfootorientation
+        # post-save) goes through Hip_Yaw and reaction-torques the trunk
+        # into a yaw spin (confirmed 2026-08-03, mirror-symmetric
+        # +11.3deg/-5.1deg by save side -- see rewards.py:foot_ang_vel_z and
+        # docs/BugFixes.md). Weight matches foot_ang_vel_xy's restored -0.5
+        # as a first empirical guess (same joint, same sensor, comparable
+        # expected magnitude) -- not yet validated against a live run.
+        "foot_ang_vel_z": RewardTermCfg(
+            func=gk_mdp.foot_ang_vel_z,
+            weight=-0.5,
             params={"asset_cfg": _FEET_CFG},
         ),
         # --- post-save recovery (active only when ball is behind) ---

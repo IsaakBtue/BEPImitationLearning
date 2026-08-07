@@ -32,7 +32,25 @@ _DEFAULT_ROBOT_CFG = SceneEntityCfg("robot")
 # shallower, more forward-leaning block stance. expected_sign flips the Y
 # component: +sin for the left foot's +Y-leaning target, -sin for the right
 # foot's -Y-leaning target.
-_FOOT_TARGET_ANGLE_DEG = 60.0
+#
+# FIX 2026-08-07 (user request): 60 -> 45 deg off forward (45 deg off Y,
+# i.e. a diagonal target, exactly halfway between fully-forward and
+# fully-sideways). Root cause this targets: T1's ankle has no yaw DOF, so
+# ANY commanded foot-heading rotation goes entirely through Hip_Yaw, which
+# reaction-torques the trunk into a whole-body yaw spin (root-caused
+# 2026-08-03, mirror-symmetric +11.3/-5.1 deg drift by save side; a live
+# far-left-region checkpoint replay this session showed the resulting
+# ang_vel_z NOT decaying -- sustained near-constant yaw rate for 20+
+# consecutive steps well past every gating window, i.e. nothing was
+# actively arresting it once the reward windows closed). The 60 deg target
+# demanded more Hip_Yaw excursion than necessary; 45 deg reduces the total
+# commanded rotation (and therefore the reaction torque) while still
+# asking for a genuinely turned, not flat-forward, block posture -- user's
+# own framing: "the landing 90 degrees off is really unstable." Paired
+# with `foot_ang_vel_z` (same session, damps rotation SPEED) -- this
+# reduces the rotation ANGLE being demanded in the first place, a
+# complementary lever on the same root cause.
+_FOOT_TARGET_ANGLE_DEG = 45.0
 _FOOT_TARGET_COS = math.cos(math.radians(_FOOT_TARGET_ANGLE_DEG))
 _FOOT_TARGET_SIN = math.sin(math.radians(_FOOT_TARGET_ANGLE_DEG))
 
@@ -1754,6 +1772,44 @@ def foot_ang_vel_xy(
     return torch.sum(foot_ang_vel_w[:, :, :2] ** 2, dim=-1).sum(dim=-1)
 
 
+def foot_ang_vel_z(
+    env: "ManagerBasedRlEnv",
+    asset_cfg: SceneEntityCfg = _DEFAULT_FEET_CFG,
+) -> torch.Tensor:
+    """Sum of squared foot YAW angular velocity across both feet.
+
+    NEW 2026-08-07 (user request): split out from foot_ang_vel_xy, mirroring
+    the existing ang_vel_xy_l2/ang_vel_z_l2 split for the trunk (that pair's
+    own docstring: "Penalised separately from roll/pitch so the weight can be
+    tuned independently") -- foot_ang_vel_xy has always excluded this
+    component by construction (`foot_ang_vel_w[:, :, :2]`), so foot yaw spin
+    was completely undamped at the reward level before this term existed.
+
+    Root cause this targets: T1's ankle has no yaw DOF (confirmed in
+    t1_headless.xml) -- Hip_Yaw is the ONLY joint that can rotate a foot's
+    heading, and Hip_Yaw is proximal to the trunk, so any foot-yaw rotation
+    (commanded by foot_inner_face_continuous/inner_face_orientation_save
+    pre-save, postleadfootorientation post-save -- see those functions'
+    docstrings) reaction-torques the whole body into a yaw spin (live-
+    confirmed 2026-08-03: mirror-symmetric +11.3deg/-5.1deg drift by save
+    side). The mitigations applied to those terms (airborne gating, window
+    caps, contact-latching) only bound WHEN/HOW LONG the rotation is
+    incentivized -- none of them damped the rotation SPEED itself, so a fast,
+    violent foot-yaw whip at the moment of ground contact went entirely
+    unpenalized. User reported watching training and seeing the foot start
+    rotating right at save contact, causing an unstable landing -- this is
+    the direct physical signature of that gap.
+
+    No G1 equivalent (G1 catches with hands; no foot-orientation-during-catch
+    mechanism of any kind exists there, so no foot-yaw-rate penalty was ever
+    needed). `rewards.py:foot_ang_vel_xy` docstring above documents the sibling
+    split.
+    """
+    robot: Entity = env.scene[asset_cfg.name]
+    foot_ang_vel_w = robot.data.body_link_ang_vel_w[:, asset_cfg.body_ids, :]  # [B, 2, 3]
+    return torch.sum(foot_ang_vel_w[:, :, 2] ** 2, dim=-1)
+
+
 def postorientation(
     env: "ManagerBasedRlEnv",
     ball_name: str,
@@ -2763,24 +2819,32 @@ def inner_face_orientation_save(
     env: "ManagerBasedRlEnv",
     ball_name: str,
     asset_cfg: SceneEntityCfg = _DEFAULT_FEET_CFG,
-    alignment_threshold: float = 0.7,
+    alignment_threshold: float = 0.85,
 ) -> torch.Tensor:
     """One-time bonus when softstop fires and the assigned foot is turned sideways
     (block posture), rotated toward the side it's actually saving on.
 
     Checks that the foot's long axis (toe-heel, local X) is within alignment_threshold
-    of a world-frame target direction 60° off forward / 30° off full-sideways world Y
-    (_FOOT_TARGET_COS/_FOOT_TARGET_SIN) at the save moment — a shallower block posture
-    than the old fully-perpendicular (parallel-to-Y) target.
+    of a world-frame target direction 45° off forward / 45° off full-sideways world Y
+    (_FOOT_TARGET_COS/_FOOT_TARGET_SIN) at the save moment.
 
-    quat_apply(foot_quat, [1,0,0]) · target_w > threshold, target_w = (cos60°, ±sin60°, 0)
-    threshold=0.7 ≈ cos(45°): foot long axis within ~45° of the target direction, in the
+    quat_apply(foot_quat, [1,0,0]) · target_w > threshold, target_w = (cos45°, ±sin45°, 0)
+    threshold=0.85 ≈ cos(31.8°): foot long axis within ~32° of the target direction, in the
     correct (side-matched) direction.
 
     FIX 2026-08-01 (user request): target retargeted from full-sideways (90° off forward,
     parallel to world Y) to 60° off forward (30° off Y) — see _FOOT_TARGET_ANGLE_DEG.
     alignment_threshold left unchanged; it now measures a ~45° cone around the new target
     instead of the old one.
+
+    FIX 2026-08-07 (user request): target further retargeted 60°→45° off forward (see
+    _FOOT_TARGET_ANGLE_DEG's own docstring for the yaw-spin root cause this addresses).
+    alignment_threshold tightened 0.7→0.85 (cone ~45.6°→~31.8°) IN THE SAME FIX — left
+    unchanged, a 45.6° cone around a 45° target would span roughly [-0.6°, 90.6°] off
+    forward, i.e. almost the ENTIRE possible foot-rotation range would satisfy this
+    check regardless of actual orientation, gutting its discriminative power. The
+    tightened cone keeps the check meaningfully selective around the new, shallower
+    target.
 
     FIX 2026-07-10: was `.abs()` on the alignment ("either +Y or -Y direction is a
     valid sideways save"). That reasoning was wrong -- a left-side save needs the
@@ -3349,6 +3413,97 @@ def postsave_foot_airtime(
     ramp = (elapsed + 1.0) / window_steps
 
     return (in_window & airborne).float() * ramp
+
+
+def postleadfootplantspeed(
+    env: "ManagerBasedRlEnv",
+    ball_name: str,
+    asset_cfg: SceneEntityCfg = _DEFAULT_FEET_CFG,
+    target_speed: float = 0.1,
+    sigma: float = 300.0,
+) -> torch.Tensor:
+    """One-shot reward for the leading (assigned) foot's ground-impact speed
+    landing near target_speed (default 0.1 m/s), the instant it first
+    touches down during the post-save window.
+
+    NEW 2026-08-07 (user request): user watched training and saw the
+    assigned foot slamming down hard at landing rather than settling
+    softly. Peaked Gaussian `exp(-sigma*(speed-target_speed)^2)`, same
+    shape and same sigma=300 as `foot_clearance`'s established convention
+    (that function's own docstring: "error = target_magnitude scores
+    ~0.05, half that error scores ~0.47") -- here target_speed IS the
+    literal error-normalizing magnitude (0.1 m/s), so the same sigma=300
+    reused as-is gives the identical, already-validated calibration:
+    landing at 0.0 or 0.2 m/s (error=0.1) scores ~0.05, landing at 0.05 or
+    0.15 m/s (error=0.05) scores ~0.47, landing at exactly 0.1 m/s scores
+    1.0. Deliberately symmetric/peaked (not a monotonic "slower is always
+    better" shape like `cleanstop`'s) -- an unnaturally hovering
+    near-zero-speed touch is also not the desired behavior, only a
+    genuinely controlled ~0.1 m/s plant is.
+
+    Speed is the full 3D linear velocity magnitude of the leading foot at
+    the instant of touchdown (not vertical-only) -- a foot with high
+    lateral/forward speed at contact is equally a "hard landing" concern
+    for stability, and this mirrors the existing codebase's own
+    full-magnitude convention (e.g. blue_ball_landed's assigned_foot_vel).
+    Revisit to isolate the vertical (Z) component specifically if live
+    evidence later shows horizontal speed dominates the measured impact.
+
+    Fires once per save (re-arms on a fresh `behind` rising edge, mirroring
+    `_leading_foot_airborne_latched`'s own re-arm semantics) -- uses its
+    OWN independent contact-edge detection (not sourced from that shared
+    helper) so this term's firing does not depend on call order relative
+    to postlegdofpos/postleadfootorientation/postsave_foot_airtime, which
+    may or may not have already run earlier in the same tick.
+
+    No G1 equivalent (no post-catch landing-speed shaping of any kind
+    exists in legged_robot.py -- G1 catches with hands, never plants a
+    foot as the save effector).
+    """
+    n = env.num_envs
+    if not hasattr(env, "_plant_speed_fired"):
+        env._plant_speed_fired = torch.zeros(n, dtype=torch.bool, device=env.device)
+        env._plant_prev_contact = torch.zeros(n, dtype=torch.bool, device=env.device)
+        env._plant_prev_behind = torch.zeros(n, dtype=torch.bool, device=env.device)
+        env._plant_last_tick = torch.full((n,), -1, dtype=torch.int64, device=env.device)
+
+    just_reset = env.episode_length_buf <= 1
+    behind = _ball_is_behind(env, ball_name)
+    just_became_behind = behind & ~env._plant_prev_behind
+    reset_mask = just_reset | just_became_behind
+    env._plant_speed_fired[reset_mask] = False
+    env._plant_prev_contact[reset_mask] = False
+    env._plant_prev_behind[:] = behind
+
+    robot: Entity = env.scene[asset_cfg.name]
+    foot_idx = _get_correct_foot_idx(env, ball_name)  # (N,) 0=left, 1=right
+    arange_n = torch.arange(n, device=env.device)
+    foot_vel_w = robot.data.body_link_lin_vel_w[:, asset_cfg.body_ids, :]  # (N, 2, 3)
+    leading_vel = foot_vel_w[arange_n, foot_idx]                          # (N, 3)
+    speed = torch.norm(leading_vel, dim=-1)
+
+    contact_sensor: ContactSensor = env.scene["feet_contact"]
+    found = contact_sensor.data.found                                    # (N, 8)
+    left_in_contact = (found[:, :4] > 0).any(dim=-1)
+    right_in_contact = (found[:, 4:] > 0).any(dim=-1)
+    ball_sensor: ContactSensor = env.scene["ball_contact"]
+    ball_found = ball_sensor.data.found                                  # (N, 8)
+    left_touching_ball = (ball_found[:, :4] > 0).any(dim=-1)
+    right_touching_ball = (ball_found[:, 4:] > 0).any(dim=-1)
+    left_in_contact = left_in_contact & ~left_touching_ball
+    right_in_contact = right_in_contact & ~right_touching_ball
+    leading_in_contact = torch.where(foot_idx == 0, left_in_contact, right_in_contact)
+
+    is_first_call_this_tick = env.episode_length_buf != env._plant_last_tick
+    just_touched = leading_in_contact & ~env._plant_prev_contact & is_first_call_this_tick & behind
+    env._plant_prev_contact = torch.where(is_first_call_this_tick, leading_in_contact, env._plant_prev_contact)
+    env._plant_last_tick = torch.where(is_first_call_this_tick, env.episode_length_buf.clone(), env._plant_last_tick)
+
+    fire = just_touched & ~env._plant_speed_fired
+    env._plant_speed_fired |= fire
+
+    reward = torch.exp(-sigma * (speed - target_speed) ** 2)
+    return reward * fire.float()
 
 
 def postheadingorientation(

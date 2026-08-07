@@ -681,16 +681,18 @@ def _patch_viewer_wrong_foot_contact_plot(native_viewer: "NativeMujocoViewer", e
     native_viewer._update_reward_figures = _patched_update_reward_figures
 
 
-_FOOT_TARGET_ANGLE_DEG = 60.0
+_FOOT_TARGET_ANGLE_DEG = 45.0
 """Must match rewards.py's _FOOT_TARGET_ANGLE_DEG (leading-foot block-posture
-target, 2026-08-01). Kept as a separate literal here (viewer-only display,
-no runtime dependency on rewards.py's private constant) purely for the plot
-title -- verify against rewards.py if that constant ever changes."""
+target, 2026-08-01, retargeted 60->45 2026-08-07). Kept as a separate literal
+here (viewer-only display, no runtime dependency on rewards.py's private
+constant) purely for the plot title -- verify against rewards.py if that
+constant ever changes."""
 
-_FOOT_TARGET_TOLERANCE_DEG = 45.57
-"""degrees(acos(0.7)) -- inner_face_orientation_save/foot_inner_face_continuous's
-alignment_threshold=0.7 expressed as an angular tolerance around the target,
-for the plot title. Not itself read by any reward function."""
+_FOOT_TARGET_TOLERANCE_DEG = 31.79
+"""degrees(acos(0.85)) -- inner_face_orientation_save's alignment_threshold
+(0.7->0.85, 2026-08-07, tightened alongside the target-angle change above)
+expressed as an angular tolerance around the target, for the plot title.
+Not itself read by any reward function."""
 
 
 def _compute_assigned_foot_angle_deg(env, env_idx: int) -> float:
@@ -895,8 +897,14 @@ def _patch_viewer_post_recovery_plots(native_viewer: "NativeMujocoViewer", env) 
     # `penalize_arm_above_shoulder` out for `penalize_sharpcontact` --
     # user just retuned that term's force threshold (1700->1800N) and
     # wants to watch it directly in the panel.
+    #
+    # FIX 2026-08-07 (user request): swapped `postlinvel` out for
+    # `penalize_arm_above_shoulder` -- brought back into the panel (was
+    # bumped out same-day 2026-08-06 for `penalize_sharpcontact`, which
+    # stays). `postlinvel` was judged the least relevant of the 11 to the
+    # current investigation (foot-yaw/post-save-pose instability).
     _POST_RECOVERY_REWARD_TERMS = (
-        "postorientation", "postangvel", "postlinvel",
+        "postorientation", "postangvel", "penalize_arm_above_shoulder",
         "postupperdofpos", "postlegdofpos",
         "postleadfootorientation", "postsave_foot_airtime", "postheadingorientation",
         "penalize_sharpcontact", "inner_face_orientation_save", "foot_inner_face_continuous",
