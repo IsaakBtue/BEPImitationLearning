@@ -2211,7 +2211,7 @@ def postshoulderdofpos(
     env: "ManagerBasedRlEnv",
     ball_name: str,
     asset_cfg: SceneEntityCfg = _SHOULDER_JOINT_CFG,
-    during_scale: float = 0.3,
+    during_scale: float = 1.0,
     kernel_scale: float = 0.15,
 ) -> torch.Tensor:
     """Reward shoulder joints returning to default pose. Same exp(-kernel_scale
@@ -2257,20 +2257,14 @@ def postshoulderdofpos(
       tuned against (the OLD 8-joint combined error, up to 7.81 far) -- shoulder
       was in fact the dominant contributor to that old combined error, so this
       is a reasonable starting point, not an arbitrary copy.
-    - `during_scale=0.3` (NOT 1.0, unlike `postupperdofpos`'s current value):
-      deliberately more conservative than elbow's already-tuned 1.0.
-      `postupperdofpos` only reached during_scale=1.0 after a long tuning
-      history (0.3->0.5->0.8->1.0) that happened AFTER shoulder had already
-      been removed from its scope -- that history says nothing about whether
-      full-strength pre-save pull is safe for shoulder specifically. Shoulder
-      is the single largest-excursion counterbalance joint during a dive; a
-      strong pre-save pull risks reintroducing the exact over-suppression that
-      got `arm_torque_limits`/`arm_action_rate_l2`/`arm_action_acc_l2` reverted
-      2026-07-29 (all three fought legitimate dive counterbalance motion).
-      Starting conservative (0.3, matching postupperdofpos's own ORIGINAL
-      starting point before its ramp-up) and raising later if post-save
-      recovery data supports it, rather than assuming elbow's fully-tuned
-      endpoint transfers directly.
+    - `during_scale=1.0` (FIX 2026-08-07, user request; was 0.3): matches
+      `postupperdofpos`'s current, fully-tuned value directly rather than
+      re-running its 0.3->0.5->0.8->1.0 ramp-up history separately for
+      shoulder. Original reasoning for starting conservative (risk of
+      reintroducing the `arm_torque_limits`/`arm_action_rate_l2`/
+      `arm_action_acc_l2` over-suppression reverted 2026-07-29) still applies
+      in principle, but not yet tested at full strength for shoulder
+      specifically -- not yet validated against a live training run.
 
     Weight 5.0, matching `postupperdofpos`'s tier (same "large-excursion arm
     joint needs an undiluted, single-purpose pose-recovery pull" reasoning).

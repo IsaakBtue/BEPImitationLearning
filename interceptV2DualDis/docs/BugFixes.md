@@ -2500,3 +2500,15 @@ Position `z=-0.12` local to each Shank body: matches `left/right_shin_collision`
 **Verification:** none this entry -- user explicitly requested "dont do any tests just do these things." Pushed as-is.
 
 ---
+
+## 2026-08-07 (later same day, 19th session) -- postshoulderdofpos during_scale raised to full strength
+
+**What changed:** `postshoulderdofpos`'s `during_scale` default (`rewards.py`) raised 0.3 -> 1.0 -- user: "change the shoulderdofpos during training from 0.3 to 1.0."
+
+**Why:** `during_scale=0.3` was the deliberately conservative starting point set when this term was first added (2026-08-06) -- `postupperdofpos` only reached its own current `during_scale=1.0` after a separate, already-completed ramp-up (0.3->0.5->0.8->1.0, all AFTER shoulder had been removed from its scope). No live training data from `postshoulderdofpos` itself justified this jump to full strength; it's a direct user-requested parameter change, not a data-driven fix. `kernel_scale=0.15` and `asset_cfg` (4 shoulder joints) unchanged. `during_scale` is a plain float function-default (not a `SceneEntityCfg`), so unlike the `asset_cfg` wiring bugs earlier this session, editing the default is sufficient -- no `params` override exists in `goalkeeper_env_cfg.py`'s registration to also update.
+
+**Verification:** `env -u PYTHONPATH uv run pytest tests/ -q` -- 76/76 pass. Live check on a real `ManagerBasedRlEnv` (4 envs, cuda:0, 60 zero-action steps): `reward_manager.get_term_cfg("postshoulderdofpos")` confirmed no `during_scale` override in `params` (relies on the function default), all rewards finite. Not yet validated against a live training run -- risk flagged in `postshoulderdofpos`'s own docstring: shoulder is the single largest dive-counterbalance joint, so full pre-save strength risks the same over-suppression class that got `arm_torque_limits`/`arm_action_rate_l2`/`arm_action_acc_l2` reverted 2026-07-29 (those penalized movement; this penalizes pose deviation, a different mechanism, but worth watching for the same symptom: footreach/ball_exit/episode-length regression).
+
+**Push:** committed and pushed to `origin/v2-blue-ball-waypoint`, alongside stopping the running `6144_footyawspinfix_2026-08-07` job and launching a new run to validate this change together with the wrong-foot-contact rework from the prior session.
+
+---
