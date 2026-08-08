@@ -2531,6 +2531,8 @@ Position `z=-0.12` local to each Shank body: matches `left/right_shin_collision`
 
 **Visualization:** `_patch_viewer_intercept_vis` (`play.py`) extended to draw an ORANGE sphere (rgba `[1.0, 0.55, 0.0, 0.75]`) at the current orange target whenever `env._blue_wide` (same visibility window as blue's own sphere), recomputed inline from the same formula rather than read from a cached env attribute, matching blue's own established pattern for this marker. No color-switch-on-landed (unlike blue's blue->green graduation) since this subset has no live-ball-tracking phase for the trailing foot. Viewer-only, no training effect.
 
+**Known edge case (not a bug):** `env._blue_wide` can be forced True by region alone (`region_id in {1,3}`) even when `|delta| <= 0.30`, in which case `orange_y` collapses exactly to `start_y` (the env origin's own Y, between the robot's feet) per the formula's own floor -- geometrically sane (`orange_foot_proximity`/`orange_stick_landing` still produce a real gradient toward it, `orange_overshoot_penalty` reads near-zero since the trailing foot naturally sits on the far side), but worth knowing before assuming the orange sphere sitting on the robot's centerline is a bug.
+
 **See also:** `docs/superpowers/specs/2026-08-08-orange-ball-trailing-foot-design.md` (full design), `docs/superpowers/plans/2026-08-08-orange-ball-trailing-foot.md` (implementation plan).
 
 ---

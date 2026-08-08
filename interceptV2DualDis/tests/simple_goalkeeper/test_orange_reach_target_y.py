@@ -57,3 +57,17 @@ def test_orange_target_sign_safe_for_right_side_crossings():
     # delta=-1.00m -> shrunk=-0.70 -> orange_y=-0.35 (NOT -0.65, which a naive
     # `delta - 0.30` without sign handling would produce)
     assert abs(_orange_y(-1.0) - (-0.35)) < 1e-6
+
+
+def test_trailing_idx_is_complement_of_leading_foot_idx():
+    """Guards the single most likely defect in a copy-paste mirror: using
+    foot_idx instead of 1 - foot_idx (targeting the leading foot instead of
+    the trailing one) in any of the 4 orange reward functions."""
+    import torch
+    foot_idx = torch.tensor([0, 1, 0, 1], dtype=torch.long)
+    trailing_idx = 1 - foot_idx
+    assert trailing_idx.tolist() == [1, 0, 1, 0]
+    # Every orange_* function computes trailing_idx this exact way immediately
+    # after calling _get_correct_foot_idx -- this pins the arithmetic itself,
+    # not a specific function (those need a real robot/contact-sensor scene
+    # to exercise end-to-end, impractical to fake in a unit test).
