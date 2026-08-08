@@ -808,17 +808,22 @@ def _patch_viewer_wrong_foot_contact_plot(native_viewer: "NativeMujocoViewer", e
     native_viewer._update_reward_figures = _patched_update_reward_figures
 
 
-_FOOT_TARGET_ANGLE_DEG = 45.0
+_FOOT_TARGET_ANGLE_DEG = 60.0
 """Must match rewards.py's _FOOT_TARGET_ANGLE_DEG (leading-foot block-posture
-target, 2026-08-01, retargeted 60->45 2026-08-07). Kept as a separate literal
-here (viewer-only display, no runtime dependency on rewards.py's private
-constant) purely for the plot title -- verify against rewards.py if that
-constant ever changes."""
+target, 2026-08-01, retargeted 60->45 2026-08-07, reverted 45->60 2026-08-08
+per user request -- back to the original 2026-08-01 value). Kept as a
+separate literal here (viewer-only display, no runtime dependency on
+rewards.py's private constant) purely for the plot title -- verify against
+rewards.py if that constant ever changes."""
 
 _FOOT_TARGET_TOLERANCE_DEG = 31.79
 """degrees(acos(0.85)) -- inner_face_orientation_save's alignment_threshold
-(0.7->0.85, 2026-08-07, tightened alongside the target-angle change above)
-expressed as an angular tolerance around the target, for the plot title.
+(0.7->0.85, 2026-08-07, tightened alongside the target-angle change above).
+FIX 2026-08-08: the target angle reverted 45->60 the same day but
+alignment_threshold was deliberately LEFT at 0.85 per explicit user request
+(not reverted to the 0.7 that was originally calibrated for 60deg) -- this
+tolerance value is therefore no longer the "matching" calibration for the
+current target the way it was on 2026-08-07, a known, requested divergence.
 Not itself read by any reward function."""
 
 

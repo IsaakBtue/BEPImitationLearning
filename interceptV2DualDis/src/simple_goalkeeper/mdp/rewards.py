@@ -50,7 +50,13 @@ _DEFAULT_ROBOT_CFG = SceneEntityCfg("robot")
 # with `foot_ang_vel_z` (same session, damps rotation SPEED) -- this
 # reduces the rotation ANGLE being demanded in the first place, a
 # complementary lever on the same root cause.
-_FOOT_TARGET_ANGLE_DEG = 45.0
+# FIX 2026-08-08 (user request): reverted 45->60 ("back to the 30 degrees
+# from the y axis again" -- this project's off-forward/off-Y convention
+# maps 60 off-forward to 30 off-Y, i.e. the exact 2026-08-01 value, not a
+# new one). alignment_threshold deliberately left at 0.85 (not reverted to
+# 0.7) per explicit user request -- a narrower cone than the original 60deg
+# calibration used, not yet re-validated against a live training run.
+_FOOT_TARGET_ANGLE_DEG = 60.0
 _FOOT_TARGET_COS = math.cos(math.radians(_FOOT_TARGET_ANGLE_DEG))
 _FOOT_TARGET_SIN = math.sin(math.radians(_FOOT_TARGET_ANGLE_DEG))
 
