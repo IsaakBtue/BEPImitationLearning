@@ -144,6 +144,15 @@ class AnalyticsPolicy:
         self._max_settle = 0
         self._ep_was_wide = False
         self._ep_landed = False
+        # NEW 2026-08-08 (user request, final-review follow-up): same
+        # per-episode accumulator pattern for the orange (trailing-foot)
+        # mechanism -- shares blue's own _ep_was_wide (orange is only ever
+        # active when env._blue_wide is true, see rewards.py's
+        # _get_orange_reach_target_y), so only its own min-dist/max-settle/
+        # landed fields are separate.
+        self._min_orange_dist = float("inf")
+        self._max_orange_settle = 0
+        self._ep_orange_landed = False
 
     def toggle(self) -> None:
         self.enabled = not self.enabled
@@ -181,11 +190,19 @@ class AnalyticsPolicy:
                     f"max_settle={self._max_settle}/3 landed={self._ep_landed}"
                     if self._ep_was_wide else " | BLUE narrow-crossing"
                 )
+                # NEW 2026-08-08: orange (trailing-foot) summary, same shape
+                # as blue's -- shares self._ep_was_wide since orange is only
+                # ever active on the same wide crossings blue is.
+                orange_summary = (
+                    f" | ORANGE min_dist={self._min_orange_dist:.2f} "
+                    f"max_settle={self._max_orange_settle}/3 landed={self._ep_orange_landed}"
+                    if self._ep_was_wide else " | ORANGE narrow-crossing"
+                )
                 print(
                     f"\n[EpEnd] terminated_by={','.join(fired) or 'none'} | "
                     f"min_base={self._min_base_h:.2f} "
                     f"min_Lsh={self._min_lsh_h:.2f} min_Rsh={self._min_rsh_h:.2f}"
-                    f"{blue_summary}",
+                    f"{blue_summary}{orange_summary}",
                     file=stderr,
                 )
             self._ep += 1
@@ -196,6 +213,9 @@ class AnalyticsPolicy:
             self._max_settle = 0
             self._ep_was_wide = False
             self._ep_landed = False
+            self._min_orange_dist = float("inf")
+            self._max_orange_settle = 0
+            self._ep_orange_landed = False
         self._prev_ep_buf = ep_buf.clone()
 
         # DEBUG 2026-07-28: called unconditionally (before the enabled-gate
@@ -263,9 +283,21 @@ class AnalyticsPolicy:
                 self._min_blue_dist = min(self._min_blue_dist, dist_t[0].item())
             if settle_t is not None:
                 self._max_settle = max(self._max_settle, int(settle_t[0].item()))
+            # NEW 2026-08-08: orange (trailing-foot) accumulator, same
+            # wide-gate as blue's above (rewards.py's env._orange_dbg_* is
+            # only ever set inside the same env._blue_wide-gated branch).
+            orange_dist_t = getattr(env, "_orange_dbg_dist", None)
+            orange_settle_t = getattr(env, "_orange_dbg_settle", None)
+            if orange_dist_t is not None:
+                self._min_orange_dist = min(self._min_orange_dist, orange_dist_t[0].item())
+            if orange_settle_t is not None:
+                self._max_orange_settle = max(self._max_orange_settle, int(orange_settle_t[0].item()))
         landed_t = getattr(env, "_blue_landed", None)
         if landed_t is not None and bool(landed_t[0].item()):
             self._ep_landed = True
+        orange_landed_t = getattr(env, "_orange_landed", None)
+        if orange_landed_t is not None and bool(orange_landed_t[0].item()):
+            self._ep_orange_landed = True
 
         ball_speed = bv.norm().item()
 

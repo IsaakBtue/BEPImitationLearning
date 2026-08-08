@@ -810,6 +810,21 @@ def _get_orange_reach_target_y(
         )
         env._orange_landed |= newly_landed
 
+        # NEW 2026-08-08 (user request, final-review follow-up): minimal live
+        # diagnostics -- mirrors blue's own env._blue_dbg_dist/_speed/_contact/
+        # _settle/_foot_idx (rewards.py's _get_reach_target_y), scoped to just
+        # the fields play.py's per-episode accumulator needs (not blue's full
+        # temporary per-step debug dump, which was explicitly marked
+        # TEMPORARY/for-removal cruft, not part of this function's permanent
+        # design). Lets a real training/play run explain a low orange landing
+        # rate (distance vs. speed vs. contact vs. settle-count) instead of
+        # only seeing the final _orange_landed flag.
+        env._orange_dbg_dist = dist_to_orange
+        env._orange_dbg_speed = foot_speed
+        env._orange_dbg_contact = foot_in_contact
+        env._orange_dbg_settle = env._orange_settle_count.clone()
+        env._orange_dbg_foot_idx = trailing_idx
+
         _ORANGE_LANDING_FREE_STEP_THRESHOLD = 10
         env._orange_landed_was_free = torch.where(
             newly_landed,

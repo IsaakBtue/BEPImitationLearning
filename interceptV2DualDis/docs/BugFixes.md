@@ -2536,3 +2536,15 @@ Position `z=-0.12` local to each Shank body: matches `left/right_shin_collision`
 **See also:** `docs/superpowers/specs/2026-08-08-orange-ball-trailing-foot-design.md` (full design), `docs/superpowers/plans/2026-08-08-orange-ball-trailing-foot.md` (implementation plan).
 
 ---
+
+## 2026-08-08 (same day, follow-up) -- orange live diagnostics added
+
+**Context:** the orange trailing-foot mechanism (previous entry) reuses blue's exact settle-count/leaky-decrement landing gate, which blue's own history shows fired at only 0.7-4% genuine-landing rate for a long time before its causes (distance vs. speed vs. contact vs. settle count) were made visible via `env._blue_dbg_*` fields and play.py's per-episode BLUE summary. Orange shipped without any equivalent -- a final whole-branch code review flagged this as a Minor, non-blocking gap that would nonetheless make a low orange landing rate hard to explain during a real validation run. User explicitly requested adding it now rather than waiting for evidence it's needed.
+
+**Fix:** minimal mirror of blue's diagnostics (not blue's full temporary per-step debug dump, which was explicitly marked TEMPORARY/for-removal cruft in blue's own code -- only the fields play.py's per-episode accumulator needs):
+- `rewards.py`'s `_get_orange_reach_target_y` now caches `env._orange_dbg_dist`, `_orange_dbg_speed`, `_orange_dbg_contact`, `_orange_dbg_settle`, `_orange_dbg_foot_idx` alongside the existing `_orange_landed`/`_orange_settle_count` state, inside the same `robot is not None and feet_contact is not None` branch.
+- `play.py`'s `PolicyWrapper` gained `_min_orange_dist`/`_max_orange_settle`/`_ep_orange_landed` per-episode accumulators, updated in the same per-step block that already updates blue's (both share the identical `env._blue_wide` gate, since orange is only ever active on the same wide crossings blue is -- no separate `_ep_orange_was_wide` flag needed). The `[EpEnd]` summary line now prints an `ORANGE min_dist=... max_settle=.../3 landed=...` segment alongside the existing `BLUE` one.
+
+**Verification:** `env -u PYTHONPATH uv run pytest tests/ -q` -- 81/81 pass (unchanged, no new test file -- this is diagnostic/viewer-adjacent, not behavior-changing). Live check on a real `ManagerBasedRlEnv` (8 envs, cpu, 15 zero-action steps): all 5 new `_orange_dbg_*` fields resolve with the expected shapes/dtypes (`(8,)` float32/float32/bool/int64/int64) after calling `orange_ball_landed` once to force a fresh `_get_orange_reach_target_y` call. `play.py` still parses (`ast.parse`) and imports cleanly. Not yet exercised in a real multi-episode play session or training run -- the per-episode accumulator logic itself (min/max tracking, reset-on-episode-boundary) is a direct structural copy of blue's already-working equivalent, not new logic.
+
+---
