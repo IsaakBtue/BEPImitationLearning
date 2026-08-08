@@ -2562,3 +2562,15 @@ Also updated: the 4 formula unit tests in `tests/simple_goalkeeper/test_orange_r
 **Verification:** `env -u PYTHONPATH uv run pytest tests/ -q` -- 81/81 pass (5 orange-formula tests updated in place, not added -- same count as before). Not yet validated against a live training run -- this is a direct user-requested parameter change, not data-driven.
 
 ---
+
+## 2026-08-08 (still later same day, follow-up 3) -- orange target shrink constant adjusted 0.60m -> 0.50m (user request)
+
+**Context:** user: "change it to 50" (the shrink constant, immediately following the 0.30->0.60 change above).
+
+**Fix:** `shrunk = sign(delta) * max(|delta| - 0.60, 0.0)` -> `shrunk = sign(delta) * max(|delta| - 0.50, 0.0)` in `_get_orange_reach_target_y` (`rewards.py`), `play.py`'s independently-recomputed viewer mirror, and the 4 formula unit tests (`tests/simple_goalkeeper/test_orange_reach_target_y.py`) and `CLAUDE.md`'s orange Divergences row, same pattern as the prior two edits this session.
+
+**Side effect worth noting:** 0.50 is exactly `_get_reach_target_y`'s own `wide_threshold` (the `|lateral| > 0.5` distance check `env._blue_wide` uses). This means every *distance-triggered* wide crossing now gets `shrunk > 0` by construction (`|delta| > 0.5` implies `|delta| - 0.50 > 0`), closing the "0.5 < |delta| <= 0.6 floors to start_y" gap the 0.60m constant introduced (see the previous entry's "Interaction to note"). A *region-forced* wide crossing (`region_id in {1,3}`) can still have `|delta| <= 0.5` and floor to `start_y` -- that part of the earlier note still applies, unchanged by this edit.
+
+**Verification:** `env -u PYTHONPATH uv run pytest tests/ -q` -- 81/81 pass. Not yet validated against a live training run -- direct user-requested parameter change, not data-driven.
+
+---

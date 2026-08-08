@@ -1,12 +1,12 @@
 """Tests for _get_orange_reach_target_y's target-position formula.
 
 NEW 2026-08-08: trailing-foot ("orange") mirror of _get_reach_target_y's
-midpoint targeting, using a different formula -- shrink |delta| by 0.60m
+midpoint targeting, using a different formula -- shrink |delta| by 0.50m
 (sign-safe) before halving, instead of blue's plain halve. See
 docs/superpowers/specs/2026-08-08-orange-ball-trailing-foot-design.md for the
 original 0.30m derivation; FIX 2026-08-08 (user request, "the orange ball
-needs to be way further than the blue ball") raised it to 0.60m same day --
-see docs/BugFixes.md.
+needs to be way further than the blue ball") raised it to 0.60m same day,
+then adjusted to 0.50m later the same day -- see docs/BugFixes.md.
 """
 import torch
 
@@ -40,25 +40,25 @@ def _orange_y(crossing_delta: float) -> float:
     return result[0].item()
 
 
-def test_orange_target_shrinks_positive_delta_by_060_then_halves():
-    # delta=+1.00m -> shrunk=0.40 -> orange_y=0.20 (blue's own midpoint would be 0.50)
-    assert abs(_orange_y(1.0) - 0.20) < 1e-6
+def test_orange_target_shrinks_positive_delta_by_050_then_halves():
+    # delta=+1.00m -> shrunk=0.50 -> orange_y=0.25 (blue's own midpoint would be 0.50)
+    assert abs(_orange_y(1.0) - 0.25) < 1e-6
 
 
 def test_orange_target_shrinks_moderate_positive_delta():
-    # delta=+0.80m -> shrunk=0.20 -> orange_y=0.10
-    assert abs(_orange_y(0.8) - 0.10) < 1e-6
+    # delta=+0.80m -> shrunk=0.30 -> orange_y=0.15
+    assert abs(_orange_y(0.8) - 0.15) < 1e-6
 
 
-def test_orange_target_floors_at_start_y_when_delta_below_060():
+def test_orange_target_floors_at_start_y_when_delta_below_050():
     # delta=+0.40m -> shrunk clamped to 0.0 -> orange_y collapses to start_y (0.0)
     assert abs(_orange_y(0.4) - 0.0) < 1e-6
 
 
 def test_orange_target_sign_safe_for_right_side_crossings():
-    # delta=-1.00m -> shrunk=-0.40 -> orange_y=-0.20 (NOT -0.80, which a naive
-    # `delta - 0.60` without sign handling would produce)
-    assert abs(_orange_y(-1.0) - (-0.20)) < 1e-6
+    # delta=-1.00m -> shrunk=-0.50 -> orange_y=-0.25 (NOT -0.90, which a naive
+    # `delta - 0.50` without sign handling would produce)
+    assert abs(_orange_y(-1.0) - (-0.25)) < 1e-6
 
 
 def test_trailing_idx_is_complement_of_leading_foot_idx():
