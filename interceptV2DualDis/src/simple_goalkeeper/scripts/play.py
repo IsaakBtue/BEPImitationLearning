@@ -1068,12 +1068,24 @@ def _patch_viewer_post_recovery_plots(native_viewer: "NativeMujocoViewer", env) 
     # contact. 11 terms now, not backfilled to 12 -- the display cap, not a
     # requirement to hit exactly (same reasoning as the 2026-08-06 entry
     # above).
+    # FIX 2026-08-08 (user request): "turn on rewards i need to watch out for"
+    # for the (re-opened, still-unresolved per a fresh model_17250.pt replay
+    # this session) leading-foot yaw-spin investigation. Swapped out
+    # "wrong_foot_ball_contact"/"knee_distance_contact" (a separate, orthogonal
+    # investigation from an earlier session) for the three reward terms that
+    # directly measure/damp the spin itself and were never in this panel
+    # despite being exactly what the current investigation needs to watch:
+    # "foot_ang_vel_xy"/"foot_ang_vel_z" (the two rate-damping penalties added
+    # 2026-08-07 specifically for this issue) and "ang_vel_z" (whole-body yaw
+    # rate). "postleadfootorientation"/"postheadingorientation"/
+    # "inner_face_orientation_save" were already present and stay. See
+    # docs/BugFixes.md for the fresh replay evidence this responds to.
     _POST_RECOVERY_REWARD_TERMS = (
         "postorientation", "postangvel", "penalize_arm_above_shoulder",
         "postupperdofpos", "postshoulderdofpos", "postlegdofpos",
         "postleadfootorientation", "postheadingorientation",
         "inner_face_orientation_save",
-        "wrong_foot_ball_contact", "knee_distance_contact",
+        "foot_ang_vel_xy", "foot_ang_vel_z", "ang_vel_z",
     )
 
     def _patched_setup() -> None:
