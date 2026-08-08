@@ -1377,6 +1377,122 @@ def blue_trunk_drive(
     return drive * active.float()
 
 
+def orange_foot_proximity(
+    env: "ManagerBasedRlEnv",
+    ball_name: str,
+    asset_cfg: SceneEntityCfg = _DEFAULT_FEET_CFG,
+    sigma: float = 5.0,
+) -> torch.Tensor:
+    """Trailing-foot mirror of foot_proximity -- dense exp(-sigma*dist) pull of
+    the TRAILING (non-assigned) foot toward the orange target. Wide-crossings
+    only (env._blue_wide) -- unlike foot_proximity, which has no such gate
+    because _get_reach_target_y itself switches targets on narrow crossings;
+    _get_orange_reach_target_y never switches, so this function gates
+    explicitly instead. See
+    docs/superpowers/specs/2026-08-08-orange-ball-trailing-foot-design.md.
+    """
+    robot: Entity = env.scene[asset_cfg.name]
+    orange_y = _get_orange_reach_target_y(env, ball_name, asset_cfg=asset_cfg)
+    goal_x_w = env.scene.env_origins[:, 0]
+    env_z = env.scene.env_origins[:, 2]
+    target_point = torch.stack([goal_x_w, orange_y, env_z + 0.10], dim=-1)   # (N, 3)
+
+    foot_pos_w = robot.data.body_link_pos_w[:, asset_cfg.body_ids, :]        # (N, 2, 3)
+    foot_idx = _get_correct_foot_idx(env, ball_name)
+    trailing_idx = 1 - foot_idx
+    foot_pos_active = foot_pos_w[torch.arange(env.num_envs, device=env.device), trailing_idx]
+    dist = torch.norm(foot_pos_active - target_point, dim=-1)
+
+    behind = _ball_is_behind(env, ball_name)
+    return torch.exp(-sigma * dist) * env._blue_wide.float() * (~behind).float()
+
+
+def orange_ball_landed(
+    env: "ManagerBasedRlEnv",
+    ball_name: str,
+    asset_cfg: SceneEntityCfg = _DEFAULT_FEET_CFG,
+) -> torch.Tensor:
+    """Trailing-foot mirror of blue_ball_landed -- one-shot bonus when the
+    trailing foot genuinely lands at the orange target. See
+    docs/superpowers/specs/2026-08-08-orange-ball-trailing-foot-design.md.
+    """
+    _get_orange_reach_target_y(env, ball_name, asset_cfg=asset_cfg)  # ensure _orange_landed_genuine is fresh
+
+    if not hasattr(env, "_orange_landed_bonus_flag"):
+        env._orange_landed_bonus_flag = torch.zeros(env.num_envs, dtype=torch.bool, device=env.device)
+
+    just_reset = env.episode_length_buf <= 1
+    env._orange_landed_bonus_flag[just_reset] = False
+
+    fired = env._orange_landed_genuine & ~env._orange_landed_bonus_flag
+    env._orange_landed_bonus_flag |= fired
+    return fired.float()
+
+
+def orange_overshoot_penalty(
+    env: "ManagerBasedRlEnv",
+    ball_name: str,
+    asset_cfg: SceneEntityCfg = _DEFAULT_FEET_CFG,
+    landing_radius: float = 0.08,
+    max_overshoot: float = 0.5,
+) -> torch.Tensor:
+    """Trailing-foot mirror of blue_overshoot_penalty -- penalizes the
+    trailing foot for advancing past the orange target, toward the true
+    crossing point, before landing there. See
+    docs/superpowers/specs/2026-08-08-orange-ball-trailing-foot-design.md.
+    """
+    orange_y = _get_orange_reach_target_y(env, ball_name, asset_cfg=asset_cfg)
+
+    full_y = _get_ball_crossing_y(env, ball_name)                 # (N,) world Y
+    start_y = env.scene.env_origins[:, 1]                         # (N,) world Y
+    direction = torch.sign(full_y - start_y)
+
+    robot: Entity = env.scene[asset_cfg.name]
+    foot_pos_w = robot.data.body_link_pos_w[:, asset_cfg.body_ids, :]  # (N, 2, 3)
+    foot_idx = _get_correct_foot_idx(env, ball_name)
+    trailing_idx = 1 - foot_idx
+    arange_n = torch.arange(env.num_envs, device=env.device)
+    assigned_foot_y = foot_pos_w[arange_n, trailing_idx, 1]            # (N,)
+
+    signed_progress = direction * (assigned_foot_y - orange_y)
+    overshoot = torch.clamp(signed_progress - landing_radius, min=0.0, max=max_overshoot)
+
+    phase1_active = env._blue_wide & ~env._orange_landed_genuine
+    return overshoot * phase1_active.float()
+
+
+def orange_stick_landing(
+    env: "ManagerBasedRlEnv",
+    ball_name: str,
+    asset_cfg: SceneEntityCfg = _DEFAULT_FEET_CFG,
+    dist_sigma: float = 8.0,
+    speed_sigma: float = 1.5,
+) -> torch.Tensor:
+    """Trailing-foot mirror of blue_stick_landing -- dense reward for the
+    trailing foot being simultaneously CLOSE to and SLOW near the orange
+    target on a wide, unlanded crossing. See
+    docs/superpowers/specs/2026-08-08-orange-ball-trailing-foot-design.md.
+    """
+    orange_y = _get_orange_reach_target_y(env, ball_name, asset_cfg=asset_cfg)
+    goal_x_w = env.scene.env_origins[:, 0]
+    target_xy = torch.stack([goal_x_w, orange_y], dim=-1)              # (N, 2)
+
+    robot: Entity = env.scene[asset_cfg.name]
+    foot_pos_w = robot.data.body_link_pos_w[:, asset_cfg.body_ids, :]      # (N, 2, 3)
+    foot_vel_w = robot.data.body_link_lin_vel_w[:, asset_cfg.body_ids, :]  # (N, 2, 3)
+    foot_idx = _get_correct_foot_idx(env, ball_name)
+    trailing_idx = 1 - foot_idx
+    arange_n = torch.arange(env.num_envs, device=env.device)
+    assigned_foot_pos = foot_pos_w[arange_n, trailing_idx]              # (N, 3)
+    assigned_foot_vel = foot_vel_w[arange_n, trailing_idx]              # (N, 3)
+
+    dist = torch.norm(assigned_foot_pos[:, :2] - target_xy, dim=-1)
+    speed = torch.norm(assigned_foot_vel[:, :2], dim=-1)
+
+    phase1_active = env._blue_wide & ~env._orange_landed_genuine
+    return torch.exp(-dist_sigma * dist) * torch.exp(-speed_sigma * speed) * phase1_active.float()
+
+
 def stopball(
     env: "ManagerBasedRlEnv",
     ball_name: str,
