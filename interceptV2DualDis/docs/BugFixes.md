@@ -2548,3 +2548,17 @@ Position `z=-0.12` local to each Shank body: matches `left/right_shin_collision`
 **Verification:** `env -u PYTHONPATH uv run pytest tests/ -q` -- 81/81 pass (unchanged, no new test file -- this is diagnostic/viewer-adjacent, not behavior-changing). Live check on a real `ManagerBasedRlEnv` (8 envs, cpu, 15 zero-action steps): all 5 new `_orange_dbg_*` fields resolve with the expected shapes/dtypes (`(8,)` float32/float32/bool/int64/int64) after calling `orange_ball_landed` once to force a fresh `_get_orange_reach_target_y` call. `play.py` still parses (`ast.parse`) and imports cleanly. Not yet exercised in a real multi-episode play session or training run -- the per-episode accumulator logic itself (min/max tracking, reset-on-episode-boundary) is a direct structural copy of blue's already-working equivalent, not new logic.
 
 ---
+
+## 2026-08-08 (later same day, follow-up 2) -- orange target shrink constant raised 0.30m -> 0.60m (user request)
+
+**Context:** user: "the orange ball needs to be way further than the blue ball so subtract 60 from it instead of 30." Direct request to widen the gap between blue's and orange's targets.
+
+**Fix:** in the target formula (`_get_orange_reach_target_y`, `rewards.py`), `shrunk = sign(delta) * max(|delta| - 0.30, 0.0)` -> `shrunk = sign(delta) * max(|delta| - 0.60, 0.0)`, `orange_y = start_y + shrunk / 2.0` unchanged. Net effect: orange moves from 15cm short of blue's own midpoint (in delta-magnitude terms) to 30cm short. Worked examples (start_y=0): delta=+1.00m -> orange_y now +0.20m (was +0.35m; blue stays +0.50m); delta=+0.80m -> +0.10m (was, at the old constant, delta=+0.40m -> +0.05m -- picked a different moderate example since 0.40m now floors to 0 under the new 0.60m threshold); delta<=0.60m in magnitude -> orange_y collapses to `start_y` (was <=0.30m). Same constant updated in `play.py`'s independently-recomputed viewer-sphere mirror (`abs(delta) - 0.30` -> `abs(delta) - 0.60`) so the marker stays in sync with the reward, per that code's own established "recompute inline, don't cache" rule.
+
+Also updated: the 4 formula unit tests in `tests/simple_goalkeeper/test_orange_reach_target_y.py` (new expected values 0.20/0.10/0.0/-0.20, and the "moderate positive delta" test's input changed from 0.40m to 0.80m since 0.40m no longer exercises a non-trivial shrink under the new constant); `CLAUDE.md`'s orange Divergences row (formula + "30cm short of blue" description).
+
+**Interaction to note (not addressed, just flagging):** `env._blue_wide`'s own threshold is `|lateral| > 0.5` (or region-forced) -- crossings with `0.5 < |delta| <= 0.6` are still "wide" but now floor to `orange_y = start_y` under the new 0.60m constant (previously only `|delta| <= 0.3` floored). This narrows the band of wide crossings that get a genuinely non-trivial orange target. Not raised as a concern by the user; noted here in case a live run shows an unexpectedly large fraction of wide episodes with a degenerate (start_y) orange target.
+
+**Verification:** `env -u PYTHONPATH uv run pytest tests/ -q` -- 81/81 pass (5 orange-formula tests updated in place, not added -- same count as before). Not yet validated against a live training run -- this is a direct user-requested parameter change, not data-driven.
+
+---

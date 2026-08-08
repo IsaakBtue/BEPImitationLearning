@@ -546,7 +546,7 @@ def _patch_viewer_intercept_vis(native_viewer: "NativeMujocoViewer", env) -> Non
             start_y = float(origins[1])
             delta = cross_y - start_y
             sign = 1.0 if delta >= 0 else -1.0
-            shrunk = sign * max(abs(delta) - 0.30, 0.0)
+            shrunk = sign * max(abs(delta) - 0.60, 0.0)  # FIX 2026-08-08 (user request): 0.30 -> 0.60
             orange_y = start_y + shrunk / 2.0
             _add_sphere(goal_x, orange_y, sphere_z, 0.08, [1.0, 0.55, 0.0, 0.75])
             _add_line(

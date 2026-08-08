@@ -700,13 +700,15 @@ def _get_orange_reach_target_y(
     radius/speed, free-landing classification).
 
     Target formula (confirmed with user via worked examples, 2026-08-08
-    design spec):
+    design spec; constant raised 0.30->0.60 same day per user request --
+    "the orange ball needs to be way further than the blue ball" -- see
+    docs/BugFixes.md):
         delta = full_y - start_y                          (signed)
-        shrunk = sign(delta) * max(|delta| - 0.30, 0.0)    (30cm off the top, sign-safe)
+        shrunk = sign(delta) * max(|delta| - 0.60, 0.0)    (60cm off the top, sign-safe)
         orange_y = start_y + shrunk / 2.0
 
-    Equivalently: blue's own midpoint, 15cm short of it in delta-magnitude
-    terms -- NOT a plain `delta - 0.30` (that would push the target further
+    Equivalently: blue's own midpoint, 30cm short of it in delta-magnitude
+    terms -- NOT a plain `delta - 0.60` (that would push the target further
     OUT, not in, for right-side/negative-delta crossings).
 
     Reuses env._blue_wide (set by _get_reach_target_y, which every existing
@@ -737,7 +739,7 @@ def _get_orange_reach_target_y(
     wide = getattr(env, "_blue_wide", torch.zeros_like(delta, dtype=torch.bool))
     env._orange_wide = wide
 
-    shrunk = torch.sign(delta) * (delta.abs() - 0.30).clamp(min=0.0)
+    shrunk = torch.sign(delta) * (delta.abs() - 0.60).clamp(min=0.0)
     orange_y = start_y + shrunk / 2.0
 
     n = env.num_envs
