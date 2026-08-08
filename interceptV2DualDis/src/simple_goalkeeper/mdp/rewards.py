@@ -687,6 +687,138 @@ def _get_reach_target_y(
     return torch.where(phase1_active, half_y, full_y)
 
 
+def _get_orange_reach_target_y(
+    env: "ManagerBasedRlEnv",
+    ball_name: str,
+    asset_cfg: SceneEntityCfg = _DEFAULT_FEET_CFG,
+    landing_radius: float = 0.15,
+    landing_speed_threshold: float = 1.0,
+) -> torch.Tensor:
+    """Trailing-foot ("orange") mirror of _get_reach_target_y -- see that
+    function's docstring for the full blue-ball-waypoint mechanism history
+    this reuses (leaky settle-count decrement, curriculum-eased landing
+    radius/speed, free-landing classification).
+
+    Target formula (confirmed with user via worked examples, 2026-08-08
+    design spec):
+        delta = full_y - start_y                          (signed)
+        shrunk = sign(delta) * max(|delta| - 0.30, 0.0)    (30cm off the top, sign-safe)
+        orange_y = start_y + shrunk / 2.0
+
+    Equivalently: blue's own midpoint, 15cm short of it in delta-magnitude
+    terms -- NOT a plain `delta - 0.30` (that would push the target further
+    OUT, not in, for right-side/negative-delta crossings).
+
+    Reuses env._blue_wide (set by _get_reach_target_y, which every existing
+    wide-gated reward already calls first in the reward-manager's term
+    order) directly as the wide/narrow gate -- "wide" is a property of the
+    ball's crossing geometry, not which foot is being tracked, so no
+    separate wide/region computation is added here. Defensive fallback to
+    all-False if _blue_wide isn't set yet (should not happen in the real
+    term order).
+
+    Keyed to the TRAILING foot (1 - _get_correct_foot_idx), not the leading
+    one. Unlike blue, this function does NOT graduate to a second/live-ball
+    target once landed -- the landing-focused subset gives the trailing foot
+    one target for the whole wide-crossing window, no live-ball-tracking
+    phase (see design spec's "Explicitly out of scope" section).
+
+    Maintains its own state namespace (env._orange_*), entirely separate
+    from env._blue_*'s -- never reads or writes any env._blue_* field except
+    the read-only env._blue_wide gate above.
+
+    See docs/superpowers/specs/2026-08-08-orange-ball-trailing-foot-design.md.
+    """
+    full_y = _get_ball_crossing_y(env, ball_name)                 # (N,) world Y
+    start_y = env.scene.env_origins[:, 1]                         # (N,) world Y
+    delta = full_y - start_y
+    wide = getattr(env, "_blue_wide", torch.zeros_like(delta, dtype=torch.bool))
+
+    shrunk = torch.sign(delta) * (delta.abs() - 0.30).clamp(min=0.0)
+    orange_y = start_y + shrunk / 2.0
+
+    n = env.num_envs
+    if not hasattr(env, "_orange_was_airborne"):
+        env._orange_was_airborne = torch.zeros(n, dtype=torch.bool, device=env.device)
+        env._orange_landed = torch.zeros(n, dtype=torch.bool, device=env.device)
+        env._orange_settle_count = torch.zeros(n, dtype=torch.int64, device=env.device)
+        env._orange_landed_was_free = torch.zeros(n, dtype=torch.bool, device=env.device)
+        env._orange_landed_genuine = torch.zeros(n, dtype=torch.bool, device=env.device)
+        env._orange_last_settle_step = torch.full((n,), -1, dtype=torch.int64, device=env.device)
+    just_reset = env.episode_length_buf <= 1
+    env._orange_was_airborne[just_reset] = False
+    env._orange_landed[just_reset] = False
+    env._orange_settle_count[just_reset] = 0
+    env._orange_landed_was_free[just_reset] = False
+    env._orange_landed_genuine[just_reset] = False
+
+    d = float(min(max(getattr(env, "_ball_difficulty", 1.0), 0.0), 1.0))
+    landing_radius = 0.20 + (landing_radius - 0.20) * d
+    env._orange_landing_radius_current = landing_radius
+
+    _EASY_LANDING_SPEED_THRESHOLD = 2.0
+    landing_speed_threshold = (
+        _EASY_LANDING_SPEED_THRESHOLD + (landing_speed_threshold - _EASY_LANDING_SPEED_THRESHOLD) * d
+    )
+    env._orange_landing_speed_threshold_current = landing_speed_threshold
+
+    try:
+        robot: Entity = env.scene[asset_cfg.name]
+        feet_contact: ContactSensor = env.scene["feet_contact"]
+    except KeyError:
+        robot = None
+        feet_contact = None
+
+    if robot is not None and feet_contact is not None:
+        foot_pos_w = robot.data.body_link_pos_w[:, asset_cfg.body_ids, :]      # (N, 2, 3)
+        foot_vel_w = robot.data.body_link_lin_vel_w[:, asset_cfg.body_ids, :]  # (N, 2, 3)
+        foot_idx = _get_correct_foot_idx(env, ball_name)                      # (N,)
+        trailing_idx = 1 - foot_idx
+        arange_n = torch.arange(n, device=env.device)
+        assigned_foot_pos = foot_pos_w[arange_n, trailing_idx]                # (N, 3)
+        assigned_foot_vel = foot_vel_w[arange_n, trailing_idx]                # (N, 3)
+
+        found = feet_contact.data.found                                      # (N, 8)
+        left_in_contact = (found[:, :4] > 0).any(dim=-1)
+        right_in_contact = (found[:, 4:] > 0).any(dim=-1)
+        foot_in_contact = torch.where(trailing_idx == 0, left_in_contact, right_in_contact)
+
+        currently_airborne = ~foot_in_contact
+        env._orange_was_airborne |= currently_airborne
+
+        goal_x_w = env.scene.env_origins[:, 0]
+        target_point_xy = torch.stack([goal_x_w, orange_y], dim=-1)          # (N, 2)
+        dist_to_orange = torch.norm(assigned_foot_pos[:, :2] - target_point_xy, dim=-1)
+        foot_speed = torch.norm(assigned_foot_vel[:, :2], dim=-1)
+
+        candidate = wide & env._orange_was_airborne & foot_in_contact & (dist_to_orange < landing_radius)
+        is_first_call_this_tick = env.episode_length_buf != env._orange_last_settle_step
+        env._orange_last_settle_step = env.episode_length_buf.clone()
+        _ORANGE_SETTLE_STEPS = 3
+        env._orange_settle_count = torch.where(
+            candidate,
+            torch.where(is_first_call_this_tick, env._orange_settle_count + 1, env._orange_settle_count),
+            torch.where(is_first_call_this_tick, (env._orange_settle_count - 1).clamp(min=0), env._orange_settle_count),
+        )
+        newly_landed = (
+            (env._orange_settle_count >= _ORANGE_SETTLE_STEPS)
+            & (foot_speed < landing_speed_threshold)
+            & ~env._orange_landed
+        )
+        env._orange_landed |= newly_landed
+
+        _ORANGE_LANDING_FREE_STEP_THRESHOLD = 10
+        env._orange_landed_was_free = torch.where(
+            newly_landed,
+            env.episode_length_buf < _ORANGE_LANDING_FREE_STEP_THRESHOLD,
+            env._orange_landed_was_free,
+        )
+
+    env._orange_landed_genuine = env._orange_landed & ~env._orange_landed_was_free
+
+    return orange_y
+
+
 def footreach(
     env: "ManagerBasedRlEnv",
     ball_name: str,
