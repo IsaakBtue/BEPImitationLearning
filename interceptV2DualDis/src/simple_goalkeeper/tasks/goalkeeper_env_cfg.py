@@ -371,6 +371,36 @@ def goalkeeper_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
                 "ep_len_divisor":  50,
             },
         )
+        # NEW 2026-08-08: same curriculum shape as the blue_* terms above,
+        # base_weight halved (conservative first pass) -- see
+        # docs/superpowers/specs/2026-08-08-orange-ball-trailing-foot-design.md.
+        cfg.curriculum["orange_ball_landed_curriculum"] = CurriculumTermCfg(
+            func=gk_mdp.reward_curriculum_ep_len,
+            params={
+                "reward_name": "orange_ball_landed",
+                "base_weight": 5.0,
+                "update_interval": 500,
+                "ep_len_divisor":  50,
+            },
+        )
+        cfg.curriculum["orange_overshoot_penalty_curriculum"] = CurriculumTermCfg(
+            func=gk_mdp.reward_curriculum_ep_len,
+            params={
+                "reward_name": "orange_overshoot_penalty",
+                "base_weight": -30.0,
+                "update_interval": 500,
+                "ep_len_divisor":  50,
+            },
+        )
+        cfg.curriculum["orange_stick_landing_curriculum"] = CurriculumTermCfg(
+            func=gk_mdp.reward_curriculum_ep_len,
+            params={
+                "reward_name": "orange_stick_landing",
+                "base_weight": 4.0,
+                "update_interval": 500,
+                "ep_len_divisor":  50,
+            },
+        )
         # Correct-foot-save quality bonuses: weights double at cu >= 3 (ep_len ≈ 144 steps).
         # Only makes sense once the robot already saves reliably (cu=3 = footreach fully ramped).
         # One entry per reward, same pattern as reward_curriculum_ep_len.
@@ -731,6 +761,32 @@ def goalkeeper_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
         "blue_trunk_drive": RewardTermCfg(
             func=gk_mdp.blue_trunk_drive,
             weight=5.0,
+            params={"ball_name": BALL_NAME, "asset_cfg": _FEET_CFG},
+        ),
+        # --- trailing-foot ("orange") mirror of the blue waypoint above,
+        # landing-focused subset (2026-08-08). See rewards.py's
+        # _get_orange_reach_target_y/orange_ball_landed/orange_overshoot_penalty/
+        # orange_stick_landing docstrings and
+        # docs/superpowers/specs/2026-08-08-orange-ball-trailing-foot-design.md.
+        # Weights are half of blue's own (conservative first pass, unvalidated). ---
+        "orange_foot_proximity": RewardTermCfg(
+            func=gk_mdp.orange_foot_proximity,
+            weight=2.5,
+            params={"ball_name": BALL_NAME, "sigma": 5.0, "asset_cfg": _FEET_CFG},
+        ),
+        "orange_ball_landed": RewardTermCfg(
+            func=gk_mdp.orange_ball_landed,
+            weight=5.0,
+            params={"ball_name": BALL_NAME, "asset_cfg": _FEET_CFG},
+        ),
+        "orange_overshoot_penalty": RewardTermCfg(
+            func=gk_mdp.orange_overshoot_penalty,
+            weight=-30.0,
+            params={"ball_name": BALL_NAME, "asset_cfg": _FEET_CFG},
+        ),
+        "orange_stick_landing": RewardTermCfg(
+            func=gk_mdp.orange_stick_landing,
+            weight=4.0,
             params={"ball_name": BALL_NAME, "asset_cfg": _FEET_CFG},
         ),
         # --- active stepping: reward lifting feet during approach ---
