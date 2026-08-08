@@ -2529,6 +2529,8 @@ Position `z=-0.12` local to each Shank body: matches `left/right_shin_collision`
 
 **Verification:** `env -u PYTHONPATH uv run pytest tests/ -q` -- 80/80 pass (76 existing + 4 new `_get_orange_reach_target_y` formula tests). Live check on a real `ManagerBasedRlEnv` (4 envs, cpu, 10 zero-action steps): all 4 new reward functions return finite `(4,)` tensors when called directly; reward manager resolves all 4 registered terms with the expected initial weights (2.5, 5.0, -30.0, 4.0) and a full env `.step()` completes with no exceptions. **Not yet validated against a live training run** -- next checkpoint after a fresh run should be compared against a pre-change run for whether the trailing-foot-stationary symptom actually improves, and the conservative (halved) weights may need retuning once there's live evidence, consistent with this project's convention for every other new reward term.
 
+**Visualization:** `_patch_viewer_intercept_vis` (`play.py`) extended to draw an ORANGE sphere (rgba `[1.0, 0.55, 0.0, 0.75]`) at the current orange target whenever `env._blue_wide` (same visibility window as blue's own sphere), recomputed inline from the same formula rather than read from a cached env attribute, matching blue's own established pattern for this marker. No color-switch-on-landed (unlike blue's blue->green graduation) since this subset has no live-ball-tracking phase for the trailing foot. Viewer-only, no training effect.
+
 **See also:** `docs/superpowers/specs/2026-08-08-orange-ball-trailing-foot-design.md` (full design), `docs/superpowers/plans/2026-08-08-orange-ball-trailing-foot.md` (implementation plan).
 
 ---

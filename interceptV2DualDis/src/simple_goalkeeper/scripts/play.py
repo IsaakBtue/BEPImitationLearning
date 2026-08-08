@@ -499,6 +499,30 @@ def _patch_viewer_intercept_vis(native_viewer: "NativeMujocoViewer", env) -> Non
                 0.008, [0.1, 1.0, 0.2, 0.6],
             )
 
+        # NEW 2026-08-08: orange sphere -- trailing-foot ("orange") mirror of
+        # the blue midpoint above, recomputed inline the same way blue's own
+        # mid_y is (not read from a cached env attribute) so this marker can't
+        # drift out of sync with what orange_foot_proximity/orange_ball_landed/
+        # orange_overshoot_penalty/orange_stick_landing (rewards.py) actually
+        # target. See rewards.py:_get_orange_reach_target_y and
+        # docs/superpowers/specs/2026-08-08-orange-ball-trailing-foot-design.md.
+        # No color-switch-on-landed (unlike blue->green): the landing-focused
+        # subset has no live-ball-tracking phase for the trailing foot to
+        # graduate into, so a single static orange sphere is shown for the
+        # whole wide-crossing window regardless of env._orange_landed.
+        if wide:
+            start_y = float(origins[1])
+            delta = cross_y - start_y
+            sign = 1.0 if delta >= 0 else -1.0
+            shrunk = sign * max(abs(delta) - 0.30, 0.0)
+            orange_y = start_y + shrunk / 2.0
+            _add_sphere(goal_x, orange_y, sphere_z, 0.08, [1.0, 0.55, 0.0, 0.75])
+            _add_line(
+                np.array([goal_x, orange_y, floor_z], dtype=np.float64),
+                np.array([goal_x, orange_y, sphere_z], dtype=np.float64),
+                0.008, [1.0, 0.55, 0.0, 0.6],
+            )
+
     native_viewer._update_debug_visualizers = _patched_update
 
 
