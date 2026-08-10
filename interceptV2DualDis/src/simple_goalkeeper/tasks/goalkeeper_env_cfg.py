@@ -823,7 +823,15 @@ def goalkeeper_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
             # deliberately (dilution concern judged secondary to the
             # landing-instability symptom). See rewards.py:foot_ang_vel_z
             # (new sibling term, same fix) and docs/BugFixes.md.
-            weight=-0.5,
+            # FIX 2026-08-10 (user request, model_11250.pt replay): -0.5 ->
+            # -3.0 (6x). User reported persistent heel-down/toes-up rotation
+            # throughout the episode ("no where in the episode i want that
+            # kind of movement") -- this term's pitch component is exactly
+            # that motion. -0.5 was judged insufficient. Risk: dilution
+            # concern from the 2026-07-20 fix reasserts itself at 6x the
+            # original magnitude; watch AMP's proportional reward share on
+            # the next run. Not yet validated against a live training run.
+            weight=-3.0,
             params={"asset_cfg": _FEET_CFG},
         ),
         # NEW 2026-08-07 (user request): foot YAW angular velocity, split out

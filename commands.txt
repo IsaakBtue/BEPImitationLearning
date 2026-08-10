@@ -1,1 +1,3 @@
-uv run sgk_play Mjlab-BeyondAMP-Goalkeeper-T1-MultiDisc-WithOverlay --checkpoint-file logs/rsl_rl/intercept_simple_goalkeeper_multidisc/2026-08-07_10-20-21_6144_footyawspinfix_2026-08-07/model_10250.pt
+cd /home/isaak/BEPImitationlearning/interceptV2DualDis
+uv run sgk_play Mjlab-BeyondAMP-Goalkeeper-T1-MultiDisc-WithOverlay \
+    --checkpoint-file logs/rsl_rl/intercept_simple_goalkeeper_multidisc/2026-08-08_11-09-32_6144_orangetrailingfoot_2026-08-08/model_11250.pt

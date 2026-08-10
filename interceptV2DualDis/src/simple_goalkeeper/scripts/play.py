@@ -808,13 +808,15 @@ def _patch_viewer_wrong_foot_contact_plot(native_viewer: "NativeMujocoViewer", e
     native_viewer._update_reward_figures = _patched_update_reward_figures
 
 
-_FOOT_TARGET_ANGLE_DEG = 60.0
+_FOOT_TARGET_ANGLE_DEG = 75.0
 """Must match rewards.py's _FOOT_TARGET_ANGLE_DEG (leading-foot block-posture
 target, 2026-08-01, retargeted 60->45 2026-08-07, reverted 45->60 2026-08-08
-per user request -- back to the original 2026-08-01 value). Kept as a
-separate literal here (viewer-only display, no runtime dependency on
-rewards.py's private constant) purely for the plot title -- verify against
-rewards.py if that constant ever changes."""
+per user request -- back to the original 2026-08-01 value; retargeted again
+60->75 2026-08-10 per user request, "15 degrees from the y axis", after a
+model_11250.pt replay found the foot almost not rotating toward the target
+at all). Kept as a separate literal here (viewer-only display, no runtime
+dependency on rewards.py's private constant) purely for the plot title --
+verify against rewards.py if that constant ever changes."""
 
 _FOOT_TARGET_TOLERANCE_DEG = 31.79
 """degrees(acos(0.85)) -- inner_face_orientation_save's alignment_threshold
@@ -1085,12 +1087,23 @@ def _patch_viewer_post_recovery_plots(native_viewer: "NativeMujocoViewer", env) 
     # rate). "postleadfootorientation"/"postheadingorientation"/
     # "inner_face_orientation_save" were already present and stay. See
     # docs/BugFixes.md for the fresh replay evidence this responds to.
+    # FIX 2026-08-10 (user request, "enable all the leading foot orientation
+    # rewards"): swapped "ang_vel_z" (whole-body yaw rate, least foot-specific
+    # of the 12, and redundant with foot_ang_vel_z which already covers foot-
+    # level yaw) for "foot_inner_face_continuous" -- the pre-save continuous
+    # sibling of inner_face_orientation_save/postleadfootorientation, bumped
+    # out of this panel on 2026-08-07 and never restored. This completes the
+    # full leading-foot-orientation reward family in one panel:
+    # foot_inner_face_continuous (pre-save), inner_face_orientation_save
+    # (save-moment one-shot), postleadfootorientation (post-save), plus the
+    # two rotation-rate penalties foot_ang_vel_xy/foot_ang_vel_z. Still 12
+    # terms, still fits max_viewports with no overflow.
     _POST_RECOVERY_REWARD_TERMS = (
         "postorientation", "postangvel", "penalize_arm_above_shoulder",
         "postupperdofpos", "postshoulderdofpos", "postlegdofpos",
         "postleadfootorientation", "postheadingorientation",
-        "inner_face_orientation_save",
-        "foot_ang_vel_xy", "foot_ang_vel_z", "ang_vel_z",
+        "inner_face_orientation_save", "foot_inner_face_continuous",
+        "foot_ang_vel_xy", "foot_ang_vel_z",
     )
 
     def _patched_setup() -> None:

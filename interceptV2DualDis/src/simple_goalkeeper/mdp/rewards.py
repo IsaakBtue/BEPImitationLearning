@@ -56,7 +56,18 @@ _DEFAULT_ROBOT_CFG = SceneEntityCfg("robot")
 # new one). alignment_threshold deliberately left at 0.85 (not reverted to
 # 0.7) per explicit user request -- a narrower cone than the original 60deg
 # calibration used, not yet re-validated against a live training run.
-_FOOT_TARGET_ANGLE_DEG = 60.0
+#
+# FIX 2026-08-10 (user request, model_11250.pt replay): 60->75 ("revert
+# back to 15 degrees from the y axis") -- user observed the leading foot
+# almost not rotating in Z toward the commanded angle at all. This makes
+# the target MORE extreme (closer to full-sideways), the opposite direction
+# of every prior yaw-spin-motivated fix (60->45->60) -- deliberate: a
+# shallower target gives a high "do nothing" reward even at zero rotation
+# (cos(60deg)=0.5), supplying little gradient to actually turn the foot;
+# 75deg (cos(75deg)=0.26 at zero rotation) punishes staying put harder.
+# alignment_threshold (0.85) left unchanged, not re-examined as part of
+# this fix. Not yet validated against a live training run.
+_FOOT_TARGET_ANGLE_DEG = 75.0
 _FOOT_TARGET_COS = math.cos(math.radians(_FOOT_TARGET_ANGLE_DEG))
 _FOOT_TARGET_SIN = math.sin(math.radians(_FOOT_TARGET_ANGLE_DEG))
 
@@ -2048,6 +2059,12 @@ def foot_ang_vel_xy(
     Penalises active foot rotation in XY (heel-first landings, ankle twist during
     dives). Orthogonal to feetorientation: that measures static tilt; this measures
     how fast the foot is rotating into or out of a tilt.
+
+    FIX 2026-08-10 (user request, model_11250.pt replay): weight -0.5->-3.0
+    (goalkeeper_env_cfg.py) -- user observed persistent heel-down/toes-up
+    rotation throughout the episode ("no where in the episode i want that
+    kind of movement"), the pitch component of this exact term. Not yet
+    validated against a live training run.
     """
     robot: Entity = env.scene[asset_cfg.name]
     foot_ang_vel_w = robot.data.body_link_ang_vel_w[:, asset_cfg.body_ids, :]  # [B, 2, 3]
