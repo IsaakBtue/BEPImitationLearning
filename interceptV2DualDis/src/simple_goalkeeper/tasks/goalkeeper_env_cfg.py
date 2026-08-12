@@ -362,11 +362,31 @@ def goalkeeper_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
         # why an asymmetric curriculum among these terms caused problems
         # before). base_weight=5.0 is an initial, unvalidated guess --
         # matches this term's static play-mode weight (cu=0 baseline).
+        # FIX 2026-08-12 (user request, far-region post-landing speed
+        # investigation): base_weight 5.0 -> 10.0 (peak 12.5 -> 25.0, now
+        # matching footreach's own peak weight exactly). Root cause: live
+        # P-panel diagnostics showed the assigned foot's world-Y position
+        # freezing after a genuine blue landing on wide crossings --
+        # footreach's own velocity-amplified reach_rew*vel_sigma branch is
+        # gated on `ball_x_local <= 1.5` (rewards.py's `phase1_mask`),
+        # UNCONDITIONAL on env._blue_landed_genuine, so between "landed at
+        # blue" and "ball within 1.5m" blue_trunk_drive was the ONLY active
+        # speed incentive (confirmed via an independent subagent review,
+        # cross-checked against G1 upstream: no G1 precedent for either this
+        # term or a landing-conditioned phase1_mask relaxation). Doubling the
+        # weight was chosen over relaxing phase1_mask itself (the other
+        # candidate fix) because loosening phase1_mask would extend
+        # footreach's already-unguarded (no "close AND slow" counter-term)
+        # vel_sigma amplification into a much longer window -- this project
+        # has twice already had to fix a live oscillation-farming exploit of
+        # exactly that unguarded mechanism (near_stick_reach/blue_stick_landing,
+        # see their docstrings) -- so the weight bump is the lower-risk lever
+        # to test first. Not yet validated against a live training run.
         cfg.curriculum["blue_trunk_drive_curriculum"] = CurriculumTermCfg(
             func=gk_mdp.reward_curriculum_ep_len,
             params={
                 "reward_name": "blue_trunk_drive",
-                "base_weight": 5.0,
+                "base_weight": 10.0,
                 "update_interval": 500,
                 "ep_len_divisor":  50,
             },
@@ -758,9 +778,14 @@ def goalkeeper_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
         # once ball_x_local <= 1.5m, leaving no locomotion incentive for the
         # (often much longer) window between a genuine blue landing and the
         # ball finally closing in. See rewards.py:blue_trunk_drive docstring.
+        # FIX 2026-08-12: weight 5.0 -> 10.0, matching the curriculum's
+        # base_weight bump above (blue_trunk_drive_curriculum) -- keeps the
+        # cu=0 static weight and the curriculum's cu=0 baseline in sync, per
+        # this file's own stated invariant ("matches this term's static
+        # play-mode weight").
         "blue_trunk_drive": RewardTermCfg(
             func=gk_mdp.blue_trunk_drive,
-            weight=5.0,
+            weight=10.0,
             params={"ball_name": BALL_NAME, "asset_cfg": _FEET_CFG},
         ),
         # --- trailing-foot ("orange") mirror of the blue waypoint above,

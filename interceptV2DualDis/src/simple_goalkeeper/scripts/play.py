@@ -869,6 +869,139 @@ def _compute_assigned_foot_angle_deg(env, env_idx: int) -> float:
     return float(angle_deg[env_idx].item())
 
 
+def _compute_blue_overshoot_margin(env, env_idx: int, landing_radius: float = 0.08) -> float:
+    """Raw, UNCLAMPED margin behind `blue_overshoot_penalty`'s own hinge
+    (rewards.py) for the single env at env_idx: `signed_progress -
+    landing_radius`. Negative = short of the blue midpoint (by that many
+    meters, past the landing-radius deadband); 0 = right at the hinge; the
+    reward itself only reads the clamped `max(margin, 0)` part.
+
+    NEW 2026-08-12 (user request): `blue_overshoot_penalty`'s own plot
+    reads flat 0 the whole time other terms are visibly moving. That's
+    ambiguous by construction -- unlike a continuous term (footreach,
+    blue_stick_landing), this reward is `clamp(x, min=0)`: it is
+    EXACTLY, identically 0.0 for the entire region short of the hinge, not
+    just small -- so "flat 0" is indistinguishable on the reward plot alone
+    between "genuinely never approaches blue" (expected if the policy is
+    risk-averse) and "the position computation itself is stuck/broken."
+    This plot exposes the pre-clamp value so real (if small) approach
+    progress is visible as movement even while the reward stays at 0.
+
+    Must be kept in sync with `blue_overshoot_penalty`'s own geometry
+    (rewards.py) -- same desync risk as any other duplicated-math diagnostic
+    in this file (see `_compute_assigned_foot_angle_deg`'s docstring for the
+    established pattern this follows).
+    """
+    raw_env = env.unwrapped if hasattr(env, "unwrapped") else env
+    from simple_goalkeeper.mdp.rewards import _get_ball_crossing_y, _get_correct_foot_idx
+
+    full_y = _get_ball_crossing_y(raw_env, "ball")                 # (N,) world Y
+    start_y = raw_env.scene.env_origins[:, 1]                      # (N,) world Y
+    half_y = start_y + (full_y - start_y) / 2.0
+    direction = torch.sign(full_y - start_y)
+
+    robot = raw_env.scene["robot"]
+    foot_ids = robot.find_bodies(["left_foot_link", "right_foot_link"])[0]
+    foot_pos_w = robot.data.body_link_pos_w[:, foot_ids, :]        # (N, 2, 3)
+    foot_idx = _get_correct_foot_idx(raw_env, "ball")              # (N,)
+    assigned_foot_y = foot_pos_w[env_idx, int(foot_idx[env_idx].item()), 1]
+
+    signed_progress = direction[env_idx] * (assigned_foot_y - half_y[env_idx])
+    margin = signed_progress - landing_radius
+    return float(margin.item())
+
+
+def _patch_viewer_blue_overshoot_margin_plot(native_viewer: "NativeMujocoViewer", env) -> None:
+    """Add a "blue_overshoot_margin_m" P-panel plot (see
+    _compute_blue_overshoot_margin), promoted to an always-visible front
+    slot. Same structural pattern as _patch_viewer_foot_orientation_plot.
+    NEW 2026-08-12 (user request) -- diagnostic for the flat-0
+    blue_overshoot_penalty plot investigation.
+    """
+    orig_setup = native_viewer.setup
+    orig_update_reward_figures = native_viewer._update_reward_figures
+
+    _NAME = "blue_overshoot_margin_m"
+
+    def _patched_setup() -> None:
+        orig_setup()
+        from mjlab.viewer.native.viewer import make_empty_figure
+        cfg = native_viewer._plot_cfg
+        native_viewer._figures[_NAME] = make_empty_figure(
+            f"{_NAME} (0=hinge, neg=short of blue)",
+            cfg.grid_size, cfg.init_yrange, cfg.history, cfg.background_alpha,
+        )
+        native_viewer._histories[_NAME] = deque(maxlen=cfg.history)
+        native_viewer._yrange[_NAME] = cfg.init_yrange
+        native_viewer._scale[_NAME] = 1.0
+        rest = [n for n in native_viewer._term_names]
+        native_viewer._term_names = [_NAME] + rest
+
+    def _patched_update_reward_figures(viewer_handle: "mujoco.viewer.Handle") -> None:
+        if native_viewer._show_plots and native_viewer._term_names and not native_viewer._is_paused:
+            margin = _compute_blue_overshoot_margin(env, native_viewer.env_idx)
+            native_viewer._append_point(_NAME, margin)
+            native_viewer._write_history_to_figure(_NAME)
+        orig_update_reward_figures(viewer_handle)
+
+    native_viewer.setup = _patched_setup
+    native_viewer._update_reward_figures = _patched_update_reward_figures
+
+
+def _patch_viewer_blue_landed_flags_plot(native_viewer: "NativeMujocoViewer", env) -> None:
+    """Add "blue_landed" and "blue_landed_was_free" P-panel plots (0.0/1.0
+    step functions), both always-visible front slots.
+
+    NEW 2026-08-12 (user request) -- direct evidence for whether the
+    blue-overshoot-still-negative-after-the-viz-switched-green mystery is
+    actually the `_blue_landed_was_free` desync (viz reads the loose
+    `_blue_landed`, every reward gate reads the strict `_blue_landed_genuine
+    = _blue_landed & ~_blue_landed_was_free`) or something else. NOTE: play
+    mode disables RSI by default (`goalkeeper_env_cfg.py`, "RSI disabled in
+    play mode... Always starting from standing" -- popped unless `--no-rsi
+    False`), so `_blue_landed_was_free`'s `episode_length_buf < 10` early-
+    landing trigger, which was calibrated against RSI's mid-motion donor
+    starts, may rarely or never fire from a standing-pose reset -- these two
+    plots will show directly whether it's firing at all in this session,
+    rather than assuming.
+    """
+    orig_setup = native_viewer.setup
+    orig_update_reward_figures = native_viewer._update_reward_figures
+
+    _NAMES = ("blue_landed", "blue_landed_was_free")
+
+    def _patched_setup() -> None:
+        orig_setup()
+        from mjlab.viewer.native.viewer import make_empty_figure
+        cfg = native_viewer._plot_cfg
+        for name in _NAMES:
+            native_viewer._figures[name] = make_empty_figure(
+                name, cfg.grid_size, cfg.init_yrange, cfg.history, cfg.background_alpha,
+            )
+            native_viewer._histories[name] = deque(maxlen=cfg.history)
+            native_viewer._yrange[name] = cfg.init_yrange
+            native_viewer._scale[name] = 1.0
+        rest = [n for n in native_viewer._term_names]
+        native_viewer._term_names = list(_NAMES) + rest
+
+    def _patched_update_reward_figures(viewer_handle: "mujoco.viewer.Handle") -> None:
+        if native_viewer._show_plots and native_viewer._term_names and not native_viewer._is_paused:
+            raw_env = env.unwrapped if hasattr(env, "unwrapped") else env
+            idx = native_viewer.env_idx
+            landed_t = getattr(raw_env, "_blue_landed", None)
+            was_free_t = getattr(raw_env, "_blue_landed_was_free", None)
+            landed_v = float(landed_t[idx].item()) if landed_t is not None else 0.0
+            was_free_v = float(was_free_t[idx].item()) if was_free_t is not None else 0.0
+            native_viewer._append_point("blue_landed", landed_v)
+            native_viewer._write_history_to_figure("blue_landed")
+            native_viewer._append_point("blue_landed_was_free", was_free_v)
+            native_viewer._write_history_to_figure("blue_landed_was_free")
+        orig_update_reward_figures(viewer_handle)
+
+    native_viewer.setup = _patched_setup
+    native_viewer._update_reward_figures = _patched_update_reward_figures
+
+
 def _patch_viewer_foot_orientation_plot(native_viewer: "NativeMujocoViewer", env) -> None:
     """Add an "assigned_foot_angle_deg" P-panel plot (see
     _compute_assigned_foot_angle_deg), promoted to an always-visible front
@@ -1115,6 +1248,36 @@ def _patch_viewer_post_recovery_plots(native_viewer: "NativeMujocoViewer", env) 
     native_viewer.setup = _patched_setup
 
 
+def _patch_viewer_blue_overshoot_plot(native_viewer: "NativeMujocoViewer", env) -> None:
+    """Promote `blue_overshoot_penalty` (rewards.py) into the always-visible
+    front slot. NEW 2026-08-12 (user request) -- investigating a suspected
+    false-positive source: this term has no RSI-freshness guard (unlike its
+    sibling `_blue_landed_was_free`, which excludes suspiciously-early
+    landings from paying out landing bonuses), so a mid-episode RSI reset
+    that happens to place the assigned foot already past the blue midpoint
+    can fire a negative reward on the very first step(s) of an episode,
+    before the policy has taken any action. Watching this term live is the
+    first step to confirming that.
+
+    Same mechanism as `_patch_viewer_new_reward_plots` (ordinary reward-term
+    figure, just reordered to the front) -- `blue_overshoot_penalty` already
+    has its own auto-created figure, no custom raw plot needed. Registered
+    AFTER `_patch_viewer_post_recovery_plots` in run_play so this promotion
+    wins final ordering; this pushes the last (12th) post-recovery term
+    (`foot_ang_vel_z`) out of the visible cap.
+    """
+    orig_setup = native_viewer.setup
+
+    _NAME = "blue_overshoot_penalty"
+
+    def _patched_setup() -> None:
+        orig_setup()
+        rest = [n for n in native_viewer._term_names if n != _NAME]
+        native_viewer._term_names = [_NAME] + rest
+
+    native_viewer.setup = _patched_setup
+
+
 def run_play(task_id: str, cfg: PlayConfig) -> None:
     configure_torch_backends()
     device = cfg.device or ("cuda:0" if torch.cuda.is_available() else "cpu")
@@ -1314,6 +1477,9 @@ def run_play(task_id: str, cfg: PlayConfig) -> None:
         _patch_viewer_foot_orientation_plot(native_viewer, env)
         _patch_viewer_postsave_airtime_plot(native_viewer, env)
         _patch_viewer_post_recovery_plots(native_viewer, env)
+        _patch_viewer_blue_overshoot_plot(native_viewer, env)
+        _patch_viewer_blue_overshoot_margin_plot(native_viewer, env)
+        _patch_viewer_blue_landed_flags_plot(native_viewer, env)
         native_viewer.run()
     elif resolved_viewer == "viser":
         ViserPlayViewer(env, final_policy).run()

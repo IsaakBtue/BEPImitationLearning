@@ -1259,6 +1259,24 @@ def blue_overshoot_penalty(
     dominate the return.
 
     Zero on narrow crossings and once genuinely landed.
+
+    FIX 2026-08-12 (user request): added an episode-freshness guard,
+    `env.episode_length_buf >= _BLUE_OVERSHOOT_FREE_STEP_THRESHOLD`. Unlike
+    every landing-BONUS consumer (`blue_ball_landed`, `stopball`/`softstop`'s
+    `landing_ok`), this penalty had no exclusion for a landing-adjacent
+    position that's an artifact of where training's RSI (`reset_from_motion_
+    data`, 80% of training resets, mid-motion donor poses by construction --
+    see _get_reach_target_y's own `_blue_landed_was_free` classification,
+    same `episode_length_buf<10` threshold, same rationale) happens to drop
+    the assigned foot, rather than the policy's own approach. Without this,
+    an episode whose RSI donor frame starts the foot already past the blue
+    hinge earns a negative reward on step 0/1, before any action has been
+    taken -- exactly the false-positive class `_blue_landed_was_free` exists
+    to exclude for the landing bonuses, just never mirrored here for the
+    penalty. (Play mode disables RSI by default -- `goalkeeper_env_cfg.py`,
+    "Always starting from standing" -- so this guard has no visible effect
+    when watching a policy play; it only matters during training.) Not yet
+    validated against a live training run.
     """
     _get_reach_target_y(env, ball_name, asset_cfg=asset_cfg)  # ensure _blue_wide/_blue_landed fresh
 
@@ -1278,7 +1296,13 @@ def blue_overshoot_penalty(
 
     # FIX 2026-07-24: env._blue_landed -> env._blue_landed_genuine -- a free
     # landing must not silence this penalty either. See _get_reach_target_y.
-    phase1_active = env._blue_wide & ~env._blue_landed_genuine
+    # FIX 2026-08-12: added the episode-freshness term -- mirrors
+    # _get_reach_target_y's own `_blue_landed_was_free` threshold (10 steps),
+    # duplicated here (not imported) since that constant is locally scoped
+    # inside that function; kept numerically identical deliberately.
+    _BLUE_OVERSHOOT_FREE_STEP_THRESHOLD = 10
+    fresh_enough = env.episode_length_buf >= _BLUE_OVERSHOOT_FREE_STEP_THRESHOLD
+    phase1_active = env._blue_wide & ~env._blue_landed_genuine & fresh_enough
     return overshoot * phase1_active.float()
 
 
@@ -3733,6 +3757,34 @@ def postleadfootorientation(
     well after the real landing (confirmed by the user watching the P-panel
     plot). Now sourced from `_leading_foot_airborne_latched`, which latches
     to "landed" permanently on first genuine contact and cannot reopen.
+
+    FIX 2026-08-12 (user request, root-caused this session): gate changed
+    from `_ball_is_behind(env, ball_name)` to `env._softstop_flag` directly.
+    `foot_inner_face_continuous`'s 2026-08-06 gate change (`~softstop_fired`,
+    see that function's docstring) broke the "exactly complementary, at most
+    one active" invariant this function's own docstring above still
+    (incorrectly) asserts: `_ball_is_behind` is a compound OR of
+    `ball_x<0 | softstop_flag | sb_flag`, and `sb_flag` (stopball's earlier,
+    easier delta_vx>1.0 threshold) or `ball_x<0` can both flip True well
+    before `softstop_flag` (full velocity reversal) does. In that gap --
+    confirmed real, not hypothetical, since `_ball_is_behind` is explicitly
+    documented to fire on partial deflections `softstop` itself wouldn't --
+    this term was pulling the assigned foot back toward forward (0 deg)
+    while `foot_inner_face_continuous` was still actively pulling the SAME
+    foot toward the save-angle target (was 60/75 deg off forward) on the
+    same step: two reward terms fighting over the same foot's heading,
+    netting out near forward regardless of the target angle -- the reported
+    symptom ("foot just slightly off the x axis") that motivated this fix.
+    Keying off `_softstop_flag` directly instead of `_ball_is_behind`
+    restores the clean handoff `foot_inner_face_continuous`'s own docstring
+    already assumed existed. Side effect: `_postsave_airtime_window`'s
+    20-step window still starts counting from `_ball_is_behind`'s (earlier)
+    rising edge, not softstop's, so the effective window this term can now
+    be active in is shorter by however many steps elapse between the two --
+    acceptable (bounds how long the reaction-torque risk this window exists
+    to limit can fire, same direction as the window's own purpose), not
+    re-widened as part of this fix. Not yet validated against a live
+    training run.
     """
     robot: Entity = env.scene[asset_cfg.name]
     foot_quat_w = robot.data.body_link_quat_w[:, asset_cfg.body_ids, :]  # (N, 2, 4)
@@ -3751,11 +3803,11 @@ def postleadfootorientation(
 
     alignment = (leading_long_w * robot_forward_w).sum(dim=-1)  # (N,) in [-1, 1]
 
-    behind = _ball_is_behind(env, ball_name)
+    softstop_fired = getattr(env, "_softstop_flag", torch.zeros(env.num_envs, dtype=torch.bool, device=env.device))
     airborne = _leading_foot_airborne_latched(env, ball_name)
     in_window = _postsave_airtime_window(env, ball_name, window_steps)
 
-    return alignment * behind.float() * airborne.float() * in_window.float()
+    return alignment * softstop_fired.float() * airborne.float() * in_window.float()
 
 
 def postsave_foot_airtime(
