@@ -1,3 +1,2 @@
-cd /home/isaak/BEPImitationlearning/interceptV2DualDis
-uv run sgk_play Mjlab-BeyondAMP-Goalkeeper-T1-MultiDisc-WithOverlay \
-    --checkpoint-file logs/rsl_rl/intercept_simple_goalkeeper_multidisc/2026-08-08_11-09-32_6144_orangetrailingfoot_2026-08-08/model_11250.pt
+cd /home/robocup/IsaakB/BEPImitationLearning/interceptV2DualDis
+uv run sgk_train Mjlab-BeyondAMP-Goalkeeper-T1-MultiDisc --num-envs 6144 --agent.run-name 6144_footorient75heelpitch6x_2026-08-10

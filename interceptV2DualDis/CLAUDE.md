@@ -1,5 +1,11 @@
 # SimpleGoalKeeper — CLAUDE.md
 
+## Response Style
+
+- Keep answers short.
+- Use bullet points, not prose.
+- Just tell the user what to do — skip explanation/rationale unless asked.
+
 ## Phase 1 Scope
 
 **Phase 1 focuses exclusively on foot-based goalkeeping.** The robot must intercept incoming balls using its feet only. There are no hand rewards, no arm-specific observations, and no hand-related AMP body names.
