@@ -667,7 +667,11 @@ def goalkeeper_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
             # FIX 2026-08-07 (user request): alignment_threshold 0.7->0.85,
             # tightened alongside rewards.py's _FOOT_TARGET_ANGLE_DEG 60->45
             # -- see that constant's docstring and inner_face_orientation_save's.
-            params={"ball_name": BALL_NAME, "alignment_threshold": 0.85, "asset_cfg": _FEET_CFG},
+            # FIX 2026-08-13 (user request): reverted 0.85->0.7, back to the
+            # value that trained model_17250.pt, alongside _FOOT_TARGET_ANGLE_DEG's
+            # matching 75->60 revert (rewards.py) and foot_ang_vel_z's new
+            # post-save-only gate. See docs/BugFixes.md.
+            params={"ball_name": BALL_NAME, "alignment_threshold": 0.7, "asset_cfg": _FEET_CFG},
         ),
         "foot_inner_face_continuous": RewardTermCfg(
             func=gk_mdp.foot_inner_face_continuous,
@@ -871,10 +875,16 @@ def goalkeeper_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
         # docs/BugFixes.md). Weight matches foot_ang_vel_xy's restored -0.5
         # as a first empirical guess (same joint, same sensor, comparable
         # expected magnitude) -- not yet validated against a live run.
+        # FIX 2026-08-13 (user request): gated to post-save-window-elapsed
+        # only (was unconditional) -- an unconditional yaw-rate penalty
+        # fights the yaw rotation foot_inner_face_continuous/
+        # inner_face_orientation_save (pre-save) and postleadfootorientation
+        # (post-save window) need to actually aim/recover the foot. See
+        # rewards.py:foot_ang_vel_z and docs/BugFixes.md.
         "foot_ang_vel_z": RewardTermCfg(
             func=gk_mdp.foot_ang_vel_z,
             weight=-0.5,
-            params={"asset_cfg": _FEET_CFG},
+            params={"ball_name": BALL_NAME, "asset_cfg": _FEET_CFG},
         ),
         # --- post-save recovery (active only when ball is behind) ---
         "postorientation": RewardTermCfg(

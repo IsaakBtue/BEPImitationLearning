@@ -67,7 +67,18 @@ _DEFAULT_ROBOT_CFG = SceneEntityCfg("robot")
 # 75deg (cos(75deg)=0.26 at zero rotation) punishes staying put harder.
 # alignment_threshold (0.85) left unchanged, not re-examined as part of
 # this fix. Not yet validated against a live training run.
-_FOOT_TARGET_ANGLE_DEG = 75.0
+#
+# FIX 2026-08-13 (user request): reverted 75->60 -- back to the exact value
+# that trained model_17250.pt (the checkpoint the user confirmed correctly
+# rotated the foot; verified via git history this was the actual value in
+# effect when that run launched, commit 65d6852). Applied together with
+# foot_ang_vel_z's new post-save-only gate (see that function's docstring)
+# and alignment_threshold's matching revert (goalkeeper_env_cfg.py) -- the
+# combined hypothesis is the steeper/tighter 75deg+0.85 target plus an
+# unconditional yaw-rate penalty made "don't rotate" locally optimal where
+# the baseline run's easier target + no pre-save yaw penalty made rotating
+# clearly worth it. Not yet validated against a live training run.
+_FOOT_TARGET_ANGLE_DEG = 60.0
 _FOOT_TARGET_COS = math.cos(math.radians(_FOOT_TARGET_ANGLE_DEG))
 _FOOT_TARGET_SIN = math.sin(math.radians(_FOOT_TARGET_ANGLE_DEG))
 
@@ -2097,9 +2108,12 @@ def foot_ang_vel_xy(
 
 def foot_ang_vel_z(
     env: "ManagerBasedRlEnv",
+    ball_name: str,
     asset_cfg: SceneEntityCfg = _DEFAULT_FEET_CFG,
+    window_steps: int = 20,
 ) -> torch.Tensor:
-    """Sum of squared foot YAW angular velocity across both feet.
+    """Sum of squared foot YAW angular velocity across both feet, active only
+    AFTER the shared post-save window has elapsed.
 
     NEW 2026-08-07 (user request): split out from foot_ang_vel_xy, mirroring
     the existing ang_vel_xy_l2/ang_vel_z_l2 split for the trunk (that pair's
@@ -2123,6 +2137,26 @@ def foot_ang_vel_z(
     rotating right at save contact, causing an unstable landing -- this is
     the direct physical signature of that gap.
 
+    FIX 2026-08-13 (user request, root-caused this session): originally
+    unconditional (always active, including pre-save). That directly fights
+    foot_inner_face_continuous/inner_face_orientation_save's pre-save aiming
+    rotation and postleadfootorientation's post-save recovery rotation --
+    both REQUIRE yaw angular velocity (T1's ankle has no yaw DOF, per this
+    function's own docstring above) to do their job at all, so an
+    unconditional yaw-rate penalty taxes exactly the motion those terms are
+    trying to produce, on top of the target-angle/threshold tightening from
+    the same investigation (rewards.py's _FOOT_TARGET_ANGLE_DEG,
+    goalkeeper_env_cfg.py's inner_face_orientation_save alignment_threshold,
+    both reverted same day -- see docs/BugFixes.md). Gated to only apply
+    once the shared post-save window (_postsave_airtime_window, same
+    window postleadfootorientation/postsave_foot_airtime/
+    postheadingorientation already use, default 20 steps) has ELAPSED --
+    i.e. zero during pre-save aiming, zero during the post-save window where
+    postleadfootorientation is actively rotating the foot back to forward,
+    and only active once that recovery should already be complete, to catch
+    genuine lingering/residual spin without taxing the rotations those other
+    terms need to produce.
+
     No G1 equivalent (G1 catches with hands; no foot-orientation-during-catch
     mechanism of any kind exists there, so no foot-yaw-rate penalty was ever
     needed). `rewards.py:foot_ang_vel_xy` docstring above documents the sibling
@@ -2130,7 +2164,13 @@ def foot_ang_vel_z(
     """
     robot: Entity = env.scene[asset_cfg.name]
     foot_ang_vel_w = robot.data.body_link_ang_vel_w[:, asset_cfg.body_ids, :]  # [B, 2, 3]
-    return torch.sum(foot_ang_vel_w[:, :, 2] ** 2, dim=-1)
+    raw = torch.sum(foot_ang_vel_w[:, :, 2] ** 2, dim=-1)
+
+    in_window = _postsave_airtime_window(env, ball_name, window_steps)
+    has_window = env._psa_window_start >= 0
+    post_window_active = has_window & ~in_window
+
+    return raw * post_window_active.float()
 
 
 def postorientation(
