@@ -1103,7 +1103,7 @@ def _patch_viewer_post_recovery_plots(native_viewer: "NativeMujocoViewer", env) 
         "postupperdofpos", "postshoulderdofpos", "postlegdofpos",
         "postleadfootorientation", "postheadingorientation",
         "inner_face_orientation_save", "foot_inner_face_continuous",
-        "foot_ang_vel_xy", "foot_ang_vel_z",
+        "foot_ang_vel_xy",
     )
 
     def _patched_setup() -> None:
@@ -1188,7 +1188,6 @@ def _patch_viewer_all_footorientation_plots(native_viewer: "NativeMujocoViewer",
         "postleadfootorientation",
         "trailing_foot_forward_continuous",
         "foot_ang_vel_xy",
-        "foot_ang_vel_z",
     )
 
     def _patched_setup() -> None:

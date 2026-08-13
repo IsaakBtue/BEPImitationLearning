@@ -2106,71 +2106,15 @@ def foot_ang_vel_xy(
     return torch.sum(foot_ang_vel_w[:, :, :2] ** 2, dim=-1).sum(dim=-1)
 
 
-def foot_ang_vel_z(
-    env: "ManagerBasedRlEnv",
-    ball_name: str,
-    asset_cfg: SceneEntityCfg = _DEFAULT_FEET_CFG,
-    window_steps: int = 20,
-) -> torch.Tensor:
-    """Sum of squared foot YAW angular velocity across both feet, active only
-    AFTER the shared post-save window has elapsed.
-
-    NEW 2026-08-07 (user request): split out from foot_ang_vel_xy, mirroring
-    the existing ang_vel_xy_l2/ang_vel_z_l2 split for the trunk (that pair's
-    own docstring: "Penalised separately from roll/pitch so the weight can be
-    tuned independently") -- foot_ang_vel_xy has always excluded this
-    component by construction (`foot_ang_vel_w[:, :, :2]`), so foot yaw spin
-    was completely undamped at the reward level before this term existed.
-
-    Root cause this targets: T1's ankle has no yaw DOF (confirmed in
-    t1_headless.xml) -- Hip_Yaw is the ONLY joint that can rotate a foot's
-    heading, and Hip_Yaw is proximal to the trunk, so any foot-yaw rotation
-    (commanded by foot_inner_face_continuous/inner_face_orientation_save
-    pre-save, postleadfootorientation post-save -- see those functions'
-    docstrings) reaction-torques the whole body into a yaw spin (live-
-    confirmed 2026-08-03: mirror-symmetric +11.3deg/-5.1deg drift by save
-    side). The mitigations applied to those terms (airborne gating, window
-    caps, contact-latching) only bound WHEN/HOW LONG the rotation is
-    incentivized -- none of them damped the rotation SPEED itself, so a fast,
-    violent foot-yaw whip at the moment of ground contact went entirely
-    unpenalized. User reported watching training and seeing the foot start
-    rotating right at save contact, causing an unstable landing -- this is
-    the direct physical signature of that gap.
-
-    FIX 2026-08-13 (user request, root-caused this session): originally
-    unconditional (always active, including pre-save). That directly fights
-    foot_inner_face_continuous/inner_face_orientation_save's pre-save aiming
-    rotation and postleadfootorientation's post-save recovery rotation --
-    both REQUIRE yaw angular velocity (T1's ankle has no yaw DOF, per this
-    function's own docstring above) to do their job at all, so an
-    unconditional yaw-rate penalty taxes exactly the motion those terms are
-    trying to produce, on top of the target-angle/threshold tightening from
-    the same investigation (rewards.py's _FOOT_TARGET_ANGLE_DEG,
-    goalkeeper_env_cfg.py's inner_face_orientation_save alignment_threshold,
-    both reverted same day -- see docs/BugFixes.md). Gated to only apply
-    once the shared post-save window (_postsave_airtime_window, same
-    window postleadfootorientation/postsave_foot_airtime/
-    postheadingorientation already use, default 20 steps) has ELAPSED --
-    i.e. zero during pre-save aiming, zero during the post-save window where
-    postleadfootorientation is actively rotating the foot back to forward,
-    and only active once that recovery should already be complete, to catch
-    genuine lingering/residual spin without taxing the rotations those other
-    terms need to produce.
-
-    No G1 equivalent (G1 catches with hands; no foot-orientation-during-catch
-    mechanism of any kind exists there, so no foot-yaw-rate penalty was ever
-    needed). `rewards.py:foot_ang_vel_xy` docstring above documents the sibling
-    split.
-    """
-    robot: Entity = env.scene[asset_cfg.name]
-    foot_ang_vel_w = robot.data.body_link_ang_vel_w[:, asset_cfg.body_ids, :]  # [B, 2, 3]
-    raw = torch.sum(foot_ang_vel_w[:, :, 2] ** 2, dim=-1)
-
-    in_window = _postsave_airtime_window(env, ball_name, window_steps)
-    has_window = env._psa_window_start >= 0
-    post_window_active = has_window & ~in_window
-
-    return raw * post_window_active.float()
+# REMOVED 2026-08-13 (user request): foot_ang_vel_z (foot YAW angular-
+# velocity penalty, NEW 2026-08-07, gated post-save-only 2026-08-13 earlier
+# this same session) deleted outright -- had no equivalent in
+# model_17250.pt's (airbornelatchfix) training code at all. Removed
+# alongside foot_ang_vel_xy's weight revert (-3.0 -> -0.25,
+# goalkeeper_env_cfg.py) and postleadfootorientation's gate revert (below)
+# to isolate whether these reward-config differences, not training
+# maturity, explain the leading-foot rotation gap vs baseline. See
+# docs/BugFixes.md.
 
 
 def postorientation(
@@ -3825,6 +3769,16 @@ def postleadfootorientation(
     to limit can fire, same direction as the window's own purpose), not
     re-widened as part of this fix. Not yet validated against a live
     training run.
+
+    FIX 2026-08-13 (user request): reverted `env._softstop_flag` back to
+    `_ball_is_behind(env, ball_name)` -- back to the exact gate active when
+    model_17250.pt (airbornelatchfix) trained (this fix postdates that run).
+    Reopens the `foot_inner_face_continuous` contradiction the 2026-08-12
+    fix above closed -- a deliberate, informed tradeoff: done together with
+    foot_ang_vel_xy's weight revert and foot_ang_vel_z's removal (same
+    commit) to isolate whether these reward-config differences, not
+    training maturity, explain the leading-foot rotation gap vs baseline.
+    See docs/BugFixes.md.
     """
     robot: Entity = env.scene[asset_cfg.name]
     foot_quat_w = robot.data.body_link_quat_w[:, asset_cfg.body_ids, :]  # (N, 2, 4)
@@ -3843,11 +3797,11 @@ def postleadfootorientation(
 
     alignment = (leading_long_w * robot_forward_w).sum(dim=-1)  # (N,) in [-1, 1]
 
-    softstop_fired = getattr(env, "_softstop_flag", torch.zeros(env.num_envs, dtype=torch.bool, device=env.device))
+    behind = _ball_is_behind(env, ball_name)
     airborne = _leading_foot_airborne_latched(env, ball_name)
     in_window = _postsave_airtime_window(env, ball_name, window_steps)
 
-    return alignment * softstop_fired.float() * airborne.float() * in_window.float()
+    return alignment * behind.float() * airborne.float() * in_window.float()
 
 
 def postsave_foot_airtime(

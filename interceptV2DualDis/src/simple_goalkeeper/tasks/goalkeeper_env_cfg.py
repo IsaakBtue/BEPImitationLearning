@@ -860,32 +860,25 @@ def goalkeeper_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
             # concern from the 2026-07-20 fix reasserts itself at 6x the
             # original magnitude; watch AMP's proportional reward share on
             # the next run. Not yet validated against a live training run.
-            weight=-3.0,
+            # FIX 2026-08-13 (user request): reverted -3.0 -> -0.25, back to
+            # the exact value active when model_17250.pt (airbornelatchfix)
+            # trained -- isolating whether the 12x weight increase was
+            # suppressing the leading-foot yaw rotation baseline achieved,
+            # alongside foot_ang_vel_z's full removal and
+            # postleadfootorientation's gate revert (same commit). See
+            # docs/BugFixes.md.
+            weight=-0.25,
             params={"asset_cfg": _FEET_CFG},
         ),
-        # NEW 2026-08-07 (user request): foot YAW angular velocity, split out
-        # from foot_ang_vel_xy (which excludes Z by construction) mirroring
-        # the existing ang_vel_xy_l2/ang_vel_z_l2 trunk split. Targets the
-        # root-caused mechanism directly: T1's ankle has no yaw DOF, so any
-        # foot-heading rotation (foot_inner_face_continuous/
-        # inner_face_orientation_save pre-save, postleadfootorientation
-        # post-save) goes through Hip_Yaw and reaction-torques the trunk
-        # into a yaw spin (confirmed 2026-08-03, mirror-symmetric
-        # +11.3deg/-5.1deg by save side -- see rewards.py:foot_ang_vel_z and
-        # docs/BugFixes.md). Weight matches foot_ang_vel_xy's restored -0.5
-        # as a first empirical guess (same joint, same sensor, comparable
-        # expected magnitude) -- not yet validated against a live run.
-        # FIX 2026-08-13 (user request): gated to post-save-window-elapsed
-        # only (was unconditional) -- an unconditional yaw-rate penalty
-        # fights the yaw rotation foot_inner_face_continuous/
-        # inner_face_orientation_save (pre-save) and postleadfootorientation
-        # (post-save window) need to actually aim/recover the foot. See
-        # rewards.py:foot_ang_vel_z and docs/BugFixes.md.
-        "foot_ang_vel_z": RewardTermCfg(
-            func=gk_mdp.foot_ang_vel_z,
-            weight=-0.5,
-            params={"ball_name": BALL_NAME, "asset_cfg": _FEET_CFG},
-        ),
+        # REMOVED 2026-08-13 (user request): foot_ang_vel_z (foot YAW
+        # angular-velocity penalty, added 2026-08-07) deleted outright, not
+        # just reweighted -- it had no equivalent in model_17250.pt's
+        # (airbornelatchfix) training code at all. Removed together with
+        # foot_ang_vel_xy's revert above and postleadfootorientation's gate
+        # revert (rewards.py) to isolate whether these three reward-config
+        # differences, not training maturity, explain the leading-foot
+        # rotation gap vs baseline. See rewards.py (function deleted) and
+        # docs/BugFixes.md.
         # --- post-save recovery (active only when ball is behind) ---
         "postorientation": RewardTermCfg(
             func=gk_mdp.postorientation,

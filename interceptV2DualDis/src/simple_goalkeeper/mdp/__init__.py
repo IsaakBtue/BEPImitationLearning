@@ -4,7 +4,7 @@ from .events import init_motion_loader, reset_from_motion_data, reset_ball_local
 from .regions import REGION_NAMES, assign_static_regions, randomize_region_on_reset, reset_ball_rolling_by_region, ball_state_gt, region_id_gt
 from .rewards import (
     ball_vx_reduction, posture, ang_vel_xy_l2, ang_vel_z_l2,
-    stayonline, noretreat, feetorientation, foot_ang_vel_xy, foot_ang_vel_z, deviation_waist_joint,
+    stayonline, noretreat, feetorientation, foot_ang_vel_xy, deviation_waist_joint,
     footreach, foot_proximity, near_stick_reach, stopball, softstop, success, single_foot_save, cleanstop, foot_clearance,
     airborne_at_save, inner_face_orientation_save, foot_inner_face_continuous,
     trailing_foot_forward_continuous, postleadfootorientation, postsave_foot_airtime, postheadingorientation,

@@ -2704,3 +2704,20 @@ Two candidate fixes were identified: (A) raise `blue_trunk_drive`'s weight (this
 **Verification:** `ast.parse` on both changed files -- no syntax errors. No other callers of `foot_ang_vel_z` found (`grep -rn "foot_ang_vel_z" tests/` -- empty, no test hardcodes its old signature). **Test suite NOT run** (explicit user instruction to skip). Not validated against a live training run -- next training launch will be the first real test of this combined change.
 
 ---
+
+## 2026-08-13 (same session) -- full revert to isolate reward-config differences from training maturity
+
+**Context:** user visually confirmed the leading-foot rotation is genuinely worse on the current run (`model_7750.pt`) than baseline (`model_17250.pt`), not just less mature -- rejected the "just needs more iterations" framing. Asked to revert `foot_ang_vel_xy`/`foot_ang_vel_z` and `postleadfootorientation`'s gate back to baseline's exact state, to isolate whether these three reward-config differences (not training maturity) explain the gap.
+
+**Fix:**
+1. `goalkeeper_env_cfg.py`: `foot_ang_vel_xy` weight -3.0 -> -0.25 -- the exact value active when `model_17250.pt` trained.
+2. `foot_ang_vel_z` **removed entirely** (function deleted from `rewards.py`, registration deleted from `goalkeeper_env_cfg.py`) -- this term had no equivalent at all in baseline's training code, so "revert" means it doesn't exist, not a reweight.
+3. `postleadfootorientation`'s gate (`rewards.py`) reverted `env._softstop_flag` -> `_ball_is_behind(env, ball_name)` -- the exact gate baseline trained under. **Known, accepted regression:** this reopens the `foot_inner_face_continuous` contradiction the 2026-08-12 fix (same file, "postleadfootorientation gate fixed" entry) closed -- done deliberately, as part of isolating reward-config vs maturity, not an oversight.
+4. `play.py`: removed `foot_ang_vel_z` from both P-panel term lists (`_POST_RECOVERY_REWARD_TERMS`, `_ALL_FOOTORIENTATION_TERMS`) -- harmless to leave (filtered by membership check) but cleaned up since the term no longer exists.
+5. **Caught before push:** `mdp/__init__.py` explicitly re-exported `foot_ang_vel_z` by name -- deleting the function without fixing this import would have broken the entire package import (`ImportError` at startup, not a subtle bug). Fixed in the same commit.
+
+**Net effect:** `foot_ang_vel_xy`, `foot_ang_vel_z`, `postleadfootorientation`'s gate, `_FOOT_TARGET_ANGLE_DEG`, and `inner_face_orientation_save`'s `alignment_threshold` are now ALL back to their exact `model_17250.pt`-training-time values. The only remaining known differences vs baseline's training code are outside this reward family (e.g. the 2026-08-12 `blue_overshoot_penalty` RSI-freshness guard, `blue_trunk_drive` weight doubling -- unrelated mechanisms, not reverted).
+
+**Verification:** `ast.parse` on all 4 changed files -- no syntax errors. `env -u PYTHONPATH uv run pytest tests/ -q` -- 81/81 pass (would have caught the `mdp/__init__.py` import breakage above). Not yet validated against a live training run -- next run is the actual test of whether reward-config or maturity explains the gap.
+
+---
