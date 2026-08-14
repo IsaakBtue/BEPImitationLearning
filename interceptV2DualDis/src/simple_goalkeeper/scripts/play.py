@@ -578,17 +578,26 @@ def _patch_viewer_intercept_vis(native_viewer: "NativeMujocoViewer", env) -> Non
 
         # NEW 2026-08-15: red sphere -- trailing-foot second-stage mirror,
         # recomputed inline the same way orange's own orange_y is (not read
-        # from a cached env attribute), anchored at cross_y (green) and
-        # shrunk backward -- see rewards.py:_get_red_reach_target_y for why
-        # the anchor flips relative to orange's start_y anchor. Only shown
-        # once env._red_active (both blue and orange genuinely landed) --
-        # unlike blue/orange, red isn't a real target before that gate opens.
+        # from a cached env attribute). Only shown once env._red_active
+        # (both blue and orange genuinely landed) -- unlike blue/orange, red
+        # isn't a real target before that gate opens.
+        #
+        # FIX 2026-08-15 (user request, "just like -0.4 away from green
+        # ball full_Y because it is way too close now"): the original
+        # shrink-then-halve formula (mirrored from orange, anchored at
+        # cross_y) collapsed to near-zero distance from green for crossings
+        # just over the 0.5m wide threshold. Replaced with a flat 0.4m
+        # offset -- FIX (same day, live-checked): an uncapped 0.4m offset
+        # can place red before blue for crossings under ~0.8m total
+        # distance, so it's clamped to never exceed blue's own distance
+        # from green (|delta|/2). See rewards.py:_get_red_reach_target_y's
+        # docstring for the live numbers behind both fixes.
         if wide and red_active:
             start_y = float(origins[1])
             delta = cross_y - start_y
             sign = 1.0 if delta >= 0 else -1.0
-            red_shrunk = sign * max(abs(delta) - 0.50, 0.0)
-            red_y = cross_y - red_shrunk / 2.0
+            red_offset = min(0.4, abs(delta) / 2.0)
+            red_y = cross_y - sign * red_offset
             _add_sphere(goal_x, red_y, sphere_z, 0.08, [0.9, 0.1, 0.1, 0.75])
             _add_line(
                 np.array([goal_x, red_y, floor_z], dtype=np.float64),

@@ -890,21 +890,32 @@ def _get_red_reach_target_y(
     orange: a literal copy of orange's start_y-anchored shrink formula tops
     out AT blue as its constant shrinks to zero, so it can never place a
     point past blue toward green. Anchoring at full_y and shrinking backward
-    instead gives, algebraically (whenever |delta| > 0.50, the same
-    constant orange uses):
-        red_y = full_y - sign(delta)*max(|delta|-0.50,0)/2
-              == half_y + sign(delta)*0.25   (blue + 0.25m toward green)
-    Symmetric with orange's own closed form (blue - 0.25m toward start) --
-    blue sits exactly centered between orange and red. 0.50 reused
-    (not shrunk further) so the 0.25m gap clears blue's own landing radius
-    (curriculum-eased, max 0.20m) at every difficulty level; a smaller
-    constant risks red's and blue's landing zones overlapping. User-
-    confirmed via AskUserQuestion (2026-08-15): weights equal to orange
+    instead was the first attempt, but that formula's distance from green
+    (`max(|delta|-0.50,0)/2`) scales with the total crossing distance --
+    live-checked (2026-08-15, real `model_39750.pt` rollout) it collapsed to
+    as little as 0.029m from green for crossings just barely over the 0.5m
+    wide threshold, nowhere near the intended "behind green" gap. FIX
+    (same day, user request, "just like -0.4 away from green ball full_Y"):
+    replaced with a flat offset, CLAMPED to never exceed blue's own distance
+    from green (`|delta|/2`):
+        red_offset = min(RED_OFFSET_FROM_GREEN, |delta|/2)   (0.4m cap)
+        red_y = full_y - sign(delta) * red_offset
+    Live-checked again (2026-08-15) with the plain uncapped 0.4m offset: for
+    a real crossing with |delta|=0.711m (a common "just barely wide"
+    crossing -- blue's own distance from green there is only 0.356m), the
+    uncapped version placed red BEFORE blue (closer to start), inverting the
+    intended start<orange<blue<red<green order. User confirmed via
+    AskUserQuestion to clamp rather than accept the inversion -- for
+    |delta| &gt;= 0.8m (blue's distance from green &gt;= 0.4m) this clamp never
+    engages and red gets the full 0.4m gap requested; for smaller wide
+    crossings red collapses onto blue's own position instead of passing it
+    (a degenerate "red==blue" case, same class as orange's own
+    collapse-to-start_y degenerate case above, not a new failure mode).
+    User-confirmed via AskUserQuestion (2026-08-15): weights equal to orange
     (not a further quarter-of-blue halving -- red's extra landing-gate
     already limits false credit relative to orange's ungated single stage),
-    SHRINK_RED=0.50, and capped at red for the rest of the episode (no
-    further graduation to live green, mirroring orange's own design
-    exactly).
+    and capped at red for the rest of the episode (no further graduation to
+    live green, mirroring orange's own design exactly).
 
     Not yet validated against a live training run.
     """
@@ -914,8 +925,9 @@ def _get_red_reach_target_y(
     wide = getattr(env, "_blue_wide", torch.zeros_like(delta, dtype=torch.bool))
     env._red_wide = wide
 
-    red_shrunk = torch.sign(delta) * (delta.abs() - 0.50).clamp(min=0.0)
-    red_y = full_y - red_shrunk / 2.0
+    RED_OFFSET_FROM_GREEN = 0.4
+    red_offset = torch.clamp(delta.abs() / 2.0, max=RED_OFFSET_FROM_GREEN)
+    red_y = full_y - torch.sign(delta) * red_offset
 
     # Gate: settle progress can only accrue once BOTH upstream landings are
     # genuine. Defensive getattr fallback (all-False) mirrors orange's own

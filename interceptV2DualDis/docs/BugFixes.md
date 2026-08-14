@@ -2776,3 +2776,24 @@ Algebraically equivalent (whenever `|delta| > 0.50`) to `red_y = half_y + sign(d
 - **Not yet validated against a live training run** (per explicit user instruction -- training happens after this gets pushed, not part of this session's work).
 
 ---
+
+## 2026-08-15 (same session) -- red-ball target formula: shrink-based -> flat 0.4m offset, then clamped
+
+**Context:** user watched the viewer and reported "the location of red ball is totally off." Live-checked with a real `model_39750.pt` rollout (script: check_red_position.py, scratchpad, not committed) rather than guessing -- confirmed red's distance from green collapsed to as little as **0.029m** for crossings just barely over the 0.5m wide threshold, nowhere near the intended "behind green" gap. Root cause: the original formula (`red_y = full_y - sign(delta)*max(|delta|-0.50,0)/2`) makes red's distance from green scale with the total crossing distance |delta| -- correct for orange's own degenerate-collapse behavior (by design), wrong for red's "always a meaningful gap from green" intent.
+
+**Fix 1 (flat offset):** user requested "just like -0.4 away from green ball full_Y" -- replaced with `red_y = full_y - sign(delta) * 0.4`, distance-independent.
+
+**Fix 2 (clamp, same session, live-checked again):** the flat 0.4m offset alone was found -- again via a real rollout, not speculation -- to invert the intended ordering for crossings under ~0.8m total distance: one real example had `|delta|=0.711m`, where blue's own distance from green is only `|delta|/2=0.356m`, so the uncapped 0.4m red offset placed red at `-4.311` vs blue at `-4.356` (start=`-4.0`) -- i.e. `start < orange < red < blue < green`, red sitting BEFORE blue instead of past it. User confirmed via `AskUserQuestion` to clamp rather than accept the inversion: `red_offset = min(0.4, |delta|/2)`. For `|delta| >= 0.8m` (blue's own distance from green >= 0.4m) the clamp is a no-op and red gets the full requested 0.4m gap; for narrower wide crossings red collapses onto blue's own position instead of overshooting past it (same "degenerate collapse" class as orange's own start_y-collapse case, not a new failure mode).
+
+**Changed:**
+1. `rewards.py:_get_red_reach_target_y` -- formula replaced (see above), docstring rewritten with both live findings.
+2. `scripts/play.py` -- inline red-sphere mirror updated to match exactly (`red_offset = min(0.4, abs(delta)/2.0)`).
+3. `tests/simple_goalkeeper/test_red_reach_target_y.py` -- all formula tests rewritten for the new formula; added `test_red_target_at_exactly_080_gets_the_full_offset` (boundary, clamp is a no-op) and `test_red_target_clamps_to_blue_position_below_080` (clamp engaged, red collapses onto blue's own computed position) -- the latter directly encodes the ordering-inversion bug this clamp fixes, using the real numbers that exposed it.
+
+**Verification:**
+- `ast.parse` on all 3 changed files -- no syntax errors.
+- Full suite: `env -u PYTHONPATH uv run pytest tests/ -q` -- **90/90 pass**.
+- Live rollout re-check (same `model_39750.pt` checkpoint, same script) after each fix: first confirmed the flat-offset fix gives a real, non-collapsing 0.4m gap (e.g. `full_y=-4.711, red_y=-4.311` before the clamp existed -- wait, exactly the inversion case); after the clamp, re-ran and confirmed `red_y` now exactly equals `blue_y` whenever `|delta|<0.8` (multiple live examples, e.g. `blue_y=5.704, red_y=5.704`) -- no inversion observed across the re-check.
+- **Not yet validated against a live training run.**
+
+---
