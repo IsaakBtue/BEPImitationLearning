@@ -538,21 +538,42 @@ def _patch_viewer_intercept_vis(native_viewer: "NativeMujocoViewer", env) -> Non
         # orange_overshoot_penalty/orange_stick_landing (rewards.py) actually
         # target. See rewards.py:_get_orange_reach_target_y and
         # docs/superpowers/specs/2026-08-08-orange-ball-trailing-foot-design.md.
-        # No color-switch-on-landed (unlike blue->green): the landing-focused
-        # subset has no live-ball-tracking phase for the trailing foot to
-        # graduate into, so a single static orange sphere is shown for the
-        # whole wide-crossing window regardless of env._orange_landed.
-        if wide:
+        #
+        # FIX 2026-08-15 (user request, "orange ball now doesn't disappear
+        # the same way blue does, so how do i know it worked?"): the
+        # original 2026-08-08 design deliberately never changed color on
+        # landing, reasoned as "no live-ball-tracking phase to graduate
+        # into" -- true when written, but "red" (below) now IS that
+        # graduation target, so the original reasoning no longer holds and
+        # the lack of any landed-state feedback is a genuine viewer gap, not
+        # a considered design choice anymore. Now 3 visual states:
+        #   1. unlanded (env._orange_landed_genuine False): original orange,
+        #      [1.0, 0.55, 0.0].
+        #   2. landed but red not yet active (orange done, waiting on blue):
+        #      distinct gold/landed color, [1.0, 0.85, 0.0], so a genuine
+        #      landing is visible immediately even if blue hasn't landed
+        #      yet and red can't activate.
+        #   3. red active: orange sphere hidden entirely (red, below, is the
+        #      active target now) -- mirrors blue's own "one active target
+        #      sphere at a time" pattern instead of leaving a stale marker
+        #      onscreen once its job is done.
+        red_active_t = getattr(raw_env, "_red_active", None)
+        red_active = bool(red_active_t[0].item()) if red_active_t is not None else False
+        orange_landed_t = getattr(raw_env, "_orange_landed_genuine", None)
+        orange_landed = bool(orange_landed_t[0].item()) if orange_landed_t is not None else False
+        if wide and not red_active:
             start_y = float(origins[1])
             delta = cross_y - start_y
             sign = 1.0 if delta >= 0 else -1.0
             shrunk = sign * max(abs(delta) - 0.50, 0.0)  # FIX 2026-08-08 (user request): 0.30 -> 0.60 -> 0.50
             orange_y = start_y + shrunk / 2.0
-            _add_sphere(goal_x, orange_y, sphere_z, 0.08, [1.0, 0.55, 0.0, 0.75])
+            orange_color = [1.0, 0.85, 0.0, 0.75] if orange_landed else [1.0, 0.55, 0.0, 0.75]
+            orange_line_color = [1.0, 0.85, 0.0, 0.6] if orange_landed else [1.0, 0.55, 0.0, 0.6]
+            _add_sphere(goal_x, orange_y, sphere_z, 0.08, orange_color)
             _add_line(
                 np.array([goal_x, orange_y, floor_z], dtype=np.float64),
                 np.array([goal_x, orange_y, sphere_z], dtype=np.float64),
-                0.008, [1.0, 0.55, 0.0, 0.6],
+                0.008, orange_line_color,
             )
 
         # NEW 2026-08-15: red sphere -- trailing-foot second-stage mirror,
@@ -562,8 +583,6 @@ def _patch_viewer_intercept_vis(native_viewer: "NativeMujocoViewer", env) -> Non
         # the anchor flips relative to orange's start_y anchor. Only shown
         # once env._red_active (both blue and orange genuinely landed) --
         # unlike blue/orange, red isn't a real target before that gate opens.
-        red_active_t = getattr(raw_env, "_red_active", None)
-        red_active = bool(red_active_t[0].item()) if red_active_t is not None else False
         if wide and red_active:
             start_y = float(origins[1])
             delta = cross_y - start_y
