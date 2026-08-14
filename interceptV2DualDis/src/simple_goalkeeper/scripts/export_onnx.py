@@ -147,10 +147,20 @@ def _load_env(task_id: str, device: str):
 
     env_cfg = load_env_cfg(task_id, play=True)
     agent_cfg = load_rl_cfg(task_id)
-    assert isinstance(agent_cfg, AMPRunnerCfg)
+    assert isinstance(agent_cfg, (AMPRunnerCfg, dict))
     env_cfg.scene.num_envs = 1
     env = ManagerBasedRlEnv(cfg=env_cfg, device=device)
-    env_wrapped = AMPEnvWrapper(env, clip_actions=agent_cfg.clip_actions, motion_dataset=agent_cfg.amp_data)
+    if isinstance(agent_cfg, dict):
+        # Multi-disc tasks (e.g. Mjlab-BeyondAMP-Goalkeeper-T1-MultiDisc) register a
+        # plain dict rl_cfg consumed by HimAMPOnPolicyRunner instead of the stock
+        # AMPOnPolicyRunner -- mirrors play.py's run_play is_multidisc branch.
+        # clip_actions has no override in the dict (keeps mjlab's own default,
+        # None, same value used at training time); motion_dataset is a
+        # per-region dict the single-dataset wrapper path can't consume and is
+        # unused here anyway (this export path never reads AMP motion data).
+        env_wrapped = AMPEnvWrapper(env, clip_actions=None, motion_dataset=None)
+    else:
+        env_wrapped = AMPEnvWrapper(env, clip_actions=agent_cfg.clip_actions, motion_dataset=agent_cfg.amp_data)
     return env, env_wrapped, env_cfg
 
 
@@ -232,7 +242,15 @@ def export_checkpoint(
 
         actor_group = env_cfg.observations["actor"]
         history_length = actor_group.history_length
-        term_names = list(actor_group.terms.keys())
+
+        # NOTE: group_obs_term_dim["actor"] is a list positionally aligned with
+        # ObservationManager's own active_terms["actor"] (both built by the same
+        # single pass over group_cfg.terms.items() in observation_manager.py,
+        # skipping None-valued terms) -- it is NOT keyed by term name. Must use
+        # active_terms for term_names (not actor_group.terms.keys(), which can
+        # include a None-valued term the manager itself skipped) so the name
+        # list and the size list line up index-for-index.
+        term_names = list(env.unwrapped.observation_manager.active_terms["actor"])
         term_scales = [(actor_group.terms[n].scale if actor_group.terms[n].scale is not None else 1.0)
                        for n in term_names]
 
@@ -242,7 +260,28 @@ def export_checkpoint(
                 "observation_manager has no group_obs_term_dim -- cannot derive per-term obs sizes "
                 "automatically. Check mjlab's ObservationManager API (may have been renamed)."
             )
-        term_sizes = [int(torch.tensor(term_dims_lookup["actor"][n]).prod().item()) for n in term_names]
+        actor_term_dims = term_dims_lookup["actor"]
+        assert len(actor_term_dims) == len(term_names), (
+            f"group_obs_term_dim['actor'] has {len(actor_term_dims)} entries but active_terms['actor'] "
+            f"has {len(term_names)} -- ObservationManager's internal bookkeeping changed since this "
+            f"export path was written, positional alignment can no longer be trusted."
+        )
+        # group_obs_term_dim reports the HISTORY-FLATTENED per-term size (e.g.
+        # base_ang_vel: 3 per frame * history_length(10) = 30) when the group
+        # applies uniform history stacking with flatten_history_dim=True (both
+        # true here -- observation_manager.py inserts history_length into
+        # obs_dims before flattening whenever group_cfg.history_length is set).
+        # HimInterceptExportWrapper's own offset math (`pos += sz *
+        # history_length`) expects the single-FRAME size instead, so divide it
+        # back out here rather than double-multiplying by history_length below.
+        flat_term_dims = [int(torch.tensor(dims).prod().item()) for dims in actor_term_dims]
+        term_sizes = []
+        for name, flat_dim in zip(term_names, flat_term_dims):
+            assert flat_dim % history_length == 0, (
+                f"Term '{name}' has flattened dim {flat_dim}, not divisible by "
+                f"history_length={history_length} -- history stacking assumption broken."
+            )
+            term_sizes.append(flat_dim // history_length)
         num_one_step_obs = sum(term_sizes)
         print(f"[INFO] obs terms (order matches training concat order): "
               f"{list(zip(term_names, term_sizes, term_scales))}")
