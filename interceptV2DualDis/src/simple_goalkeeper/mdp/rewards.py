@@ -867,6 +867,156 @@ def _get_orange_reach_target_y(
     return orange_y
 
 
+def _get_red_reach_target_y(
+    env: "ManagerBasedRlEnv",
+    ball_name: str,
+    asset_cfg: SceneEntityCfg = _DEFAULT_FEET_CFG,
+    landing_radius: float = 0.15,
+    landing_speed_threshold: float = 1.0,
+) -> torch.Tensor:
+    """Trailing-foot ("red") second-stage mirror of _get_orange_reach_target_y --
+    see that function's docstring for the shared leaky-settle-count/curriculum/
+    free-landing mechanism this reuses verbatim.
+
+    NEW 2026-08-15 (user request): closes the gap orange's own docstring
+    explicitly flags ("does NOT graduate to a second/live-ball target once
+    landed") -- red is that second target for the trailing foot, active only
+    once BOTH the leading foot has genuinely landed at blue AND the trailing
+    foot has genuinely landed at orange (`env._blue_landed_genuine &
+    env._orange_landed_genuine`, cached as `env._red_active`) -- the
+    literal two-condition AND the user asked for.
+
+    Target formula -- anchored at `full_y` (green), NOT `start_y` like
+    orange: a literal copy of orange's start_y-anchored shrink formula tops
+    out AT blue as its constant shrinks to zero, so it can never place a
+    point past blue toward green. Anchoring at full_y and shrinking backward
+    instead gives, algebraically (whenever |delta| > 0.50, the same
+    constant orange uses):
+        red_y = full_y - sign(delta)*max(|delta|-0.50,0)/2
+              == half_y + sign(delta)*0.25   (blue + 0.25m toward green)
+    Symmetric with orange's own closed form (blue - 0.25m toward start) --
+    blue sits exactly centered between orange and red. 0.50 reused
+    (not shrunk further) so the 0.25m gap clears blue's own landing radius
+    (curriculum-eased, max 0.20m) at every difficulty level; a smaller
+    constant risks red's and blue's landing zones overlapping. User-
+    confirmed via AskUserQuestion (2026-08-15): weights equal to orange
+    (not a further quarter-of-blue halving -- red's extra landing-gate
+    already limits false credit relative to orange's ungated single stage),
+    SHRINK_RED=0.50, and capped at red for the rest of the episode (no
+    further graduation to live green, mirroring orange's own design
+    exactly).
+
+    Not yet validated against a live training run.
+    """
+    full_y = _get_ball_crossing_y(env, ball_name)                 # (N,) world Y
+    start_y = env.scene.env_origins[:, 1]                         # (N,) world Y
+    delta = full_y - start_y
+    wide = getattr(env, "_blue_wide", torch.zeros_like(delta, dtype=torch.bool))
+    env._red_wide = wide
+
+    red_shrunk = torch.sign(delta) * (delta.abs() - 0.50).clamp(min=0.0)
+    red_y = full_y - red_shrunk / 2.0
+
+    # Gate: settle progress can only accrue once BOTH upstream landings are
+    # genuine. Defensive getattr fallback (all-False) mirrors orange's own
+    # defensive read of env._blue_wide -- should not trigger in the real
+    # term order (red's RewardTermCfg entries are registered after both
+    # blue's and orange's, so both flags are already fresh this tick).
+    zeros = torch.zeros_like(delta, dtype=torch.bool)
+    red_active = getattr(env, "_blue_landed_genuine", zeros) & getattr(env, "_orange_landed_genuine", zeros)
+    env._red_active = red_active
+
+    n = env.num_envs
+    if not hasattr(env, "_red_was_airborne"):
+        env._red_was_airborne = torch.zeros(n, dtype=torch.bool, device=env.device)
+        env._red_landed = torch.zeros(n, dtype=torch.bool, device=env.device)
+        env._red_settle_count = torch.zeros(n, dtype=torch.int64, device=env.device)
+        env._red_landed_was_free = torch.zeros(n, dtype=torch.bool, device=env.device)
+        env._red_landed_genuine = torch.zeros(n, dtype=torch.bool, device=env.device)
+        env._red_last_settle_step = torch.full((n,), -1, dtype=torch.int64, device=env.device)
+    just_reset = env.episode_length_buf <= 1
+    env._red_was_airborne[just_reset] = False
+    env._red_landed[just_reset] = False
+    env._red_settle_count[just_reset] = 0
+    env._red_landed_was_free[just_reset] = False
+    env._red_landed_genuine[just_reset] = False
+
+    d = float(min(max(getattr(env, "_ball_difficulty", 1.0), 0.0), 1.0))
+    landing_radius = 0.20 + (landing_radius - 0.20) * d
+    env._red_landing_radius_current = landing_radius
+
+    _EASY_LANDING_SPEED_THRESHOLD = 2.0
+    landing_speed_threshold = (
+        _EASY_LANDING_SPEED_THRESHOLD + (landing_speed_threshold - _EASY_LANDING_SPEED_THRESHOLD) * d
+    )
+    env._red_landing_speed_threshold_current = landing_speed_threshold
+
+    try:
+        robot: Entity = env.scene[asset_cfg.name]
+        feet_contact: ContactSensor = env.scene["feet_contact"]
+    except KeyError:
+        robot = None
+        feet_contact = None
+
+    if robot is not None and feet_contact is not None:
+        foot_pos_w = robot.data.body_link_pos_w[:, asset_cfg.body_ids, :]      # (N, 2, 3)
+        foot_vel_w = robot.data.body_link_lin_vel_w[:, asset_cfg.body_ids, :]  # (N, 2, 3)
+        foot_idx = _get_correct_foot_idx(env, ball_name)                      # (N,)
+        trailing_idx = 1 - foot_idx
+        arange_n = torch.arange(n, device=env.device)
+        assigned_foot_pos = foot_pos_w[arange_n, trailing_idx]                # (N, 3)
+        assigned_foot_vel = foot_vel_w[arange_n, trailing_idx]                # (N, 3)
+
+        found = feet_contact.data.found                                      # (N, 8)
+        left_in_contact = (found[:, :4] > 0).any(dim=-1)
+        right_in_contact = (found[:, 4:] > 0).any(dim=-1)
+        foot_in_contact = torch.where(trailing_idx == 0, left_in_contact, right_in_contact)
+
+        currently_airborne = ~foot_in_contact
+        env._red_was_airborne |= currently_airborne
+
+        goal_x_w = env.scene.env_origins[:, 0]
+        target_point_xy = torch.stack([goal_x_w, red_y], dim=-1)             # (N, 2)
+        dist_to_red = torch.norm(assigned_foot_pos[:, :2] - target_point_xy, dim=-1)
+        foot_speed = torch.norm(assigned_foot_vel[:, :2], dim=-1)
+
+        candidate = (
+            wide & red_active & env._red_was_airborne & foot_in_contact
+            & (dist_to_red < landing_radius)
+        )
+        is_first_call_this_tick = env.episode_length_buf != env._red_last_settle_step
+        env._red_last_settle_step = env.episode_length_buf.clone()
+        _RED_SETTLE_STEPS = 3
+        env._red_settle_count = torch.where(
+            candidate,
+            torch.where(is_first_call_this_tick, env._red_settle_count + 1, env._red_settle_count),
+            torch.where(is_first_call_this_tick, (env._red_settle_count - 1).clamp(min=0), env._red_settle_count),
+        )
+        newly_landed = (
+            (env._red_settle_count >= _RED_SETTLE_STEPS)
+            & (foot_speed < landing_speed_threshold)
+            & ~env._red_landed
+        )
+        env._red_landed |= newly_landed
+
+        env._red_dbg_dist = dist_to_red
+        env._red_dbg_speed = foot_speed
+        env._red_dbg_contact = foot_in_contact
+        env._red_dbg_settle = env._red_settle_count.clone()
+        env._red_dbg_foot_idx = trailing_idx
+
+        _RED_LANDING_FREE_STEP_THRESHOLD = 10
+        env._red_landed_was_free = torch.where(
+            newly_landed,
+            env.episode_length_buf < _RED_LANDING_FREE_STEP_THRESHOLD,
+            env._red_landed_was_free,
+        )
+
+    env._red_landed_genuine = env._red_landed & ~env._red_landed_was_free
+
+    return red_y
+
+
 def footreach(
     env: "ManagerBasedRlEnv",
     ball_name: str,
@@ -1570,6 +1720,129 @@ def orange_stick_landing(
     speed = torch.norm(assigned_foot_vel[:, :2], dim=-1)
 
     phase1_active = env._orange_wide & ~env._orange_landed_genuine
+    return torch.exp(-dist_sigma * dist) * torch.exp(-speed_sigma * speed) * phase1_active.float()
+
+
+def red_foot_proximity(
+    env: "ManagerBasedRlEnv",
+    ball_name: str,
+    asset_cfg: SceneEntityCfg = _DEFAULT_FEET_CFG,
+    sigma: float = 5.0,
+) -> torch.Tensor:
+    """Trailing-foot mirror of orange_foot_proximity, for the "red" second
+    waypoint -- dense exp(-sigma*dist) pull toward red, active only once
+    env._red_active (both blue and orange genuinely landed). See
+    _get_red_reach_target_y's docstring for the full mechanism/formula.
+
+    Not yet validated against a live training run.
+    """
+    robot: Entity = env.scene[asset_cfg.name]
+    red_y = _get_red_reach_target_y(env, ball_name, asset_cfg=asset_cfg)
+    goal_x_w = env.scene.env_origins[:, 0]
+    env_z = env.scene.env_origins[:, 2]
+    target_point = torch.stack([goal_x_w, red_y, env_z + 0.10], dim=-1)   # (N, 3)
+
+    foot_pos_w = robot.data.body_link_pos_w[:, asset_cfg.body_ids, :]        # (N, 2, 3)
+    foot_idx = _get_correct_foot_idx(env, ball_name)
+    trailing_idx = 1 - foot_idx
+    foot_pos_active = foot_pos_w[torch.arange(env.num_envs, device=env.device), trailing_idx]
+    dist = torch.norm(foot_pos_active - target_point, dim=-1)
+
+    behind = _ball_is_behind(env, ball_name)
+    return torch.exp(-sigma * dist) * env._red_wide.float() * env._red_active.float() * (~behind).float()
+
+
+def red_ball_landed(
+    env: "ManagerBasedRlEnv",
+    ball_name: str,
+    asset_cfg: SceneEntityCfg = _DEFAULT_FEET_CFG,
+) -> torch.Tensor:
+    """Trailing-foot mirror of orange_ball_landed -- one-shot bonus when the
+    trailing foot genuinely lands at red. No extra gate needed here beyond
+    env._red_landed_genuine itself -- that flag can only become true after
+    env._red_active by construction (see _get_red_reach_target_y's
+    `candidate` line).
+
+    Not yet validated against a live training run.
+    """
+    _get_red_reach_target_y(env, ball_name, asset_cfg=asset_cfg)  # ensure _red_landed_genuine is fresh
+
+    if not hasattr(env, "_red_landed_bonus_flag"):
+        env._red_landed_bonus_flag = torch.zeros(env.num_envs, dtype=torch.bool, device=env.device)
+
+    just_reset = env.episode_length_buf <= 1
+    env._red_landed_bonus_flag[just_reset] = False
+
+    fired = env._red_landed_genuine & ~env._red_landed_bonus_flag
+    env._red_landed_bonus_flag |= fired
+    return fired.float()
+
+
+def red_overshoot_penalty(
+    env: "ManagerBasedRlEnv",
+    ball_name: str,
+    asset_cfg: SceneEntityCfg = _DEFAULT_FEET_CFG,
+    landing_radius: float = 0.08,
+    max_overshoot: float = 0.5,
+) -> torch.Tensor:
+    """Trailing-foot mirror of orange_overshoot_penalty -- penalizes the
+    trailing foot for advancing past red, toward the true crossing point,
+    before landing there. Gated additionally on env._red_active (unlike
+    orange_overshoot_penalty, which has no upstream landing gate) so this
+    can't fire before the trailing foot is even allowed to target red.
+
+    Not yet validated against a live training run.
+    """
+    red_y = _get_red_reach_target_y(env, ball_name, asset_cfg=asset_cfg)
+
+    full_y = _get_ball_crossing_y(env, ball_name)                 # (N,) world Y
+    start_y = env.scene.env_origins[:, 1]                         # (N,) world Y
+    direction = torch.sign(full_y - start_y)
+
+    robot: Entity = env.scene[asset_cfg.name]
+    foot_pos_w = robot.data.body_link_pos_w[:, asset_cfg.body_ids, :]  # (N, 2, 3)
+    foot_idx = _get_correct_foot_idx(env, ball_name)
+    trailing_idx = 1 - foot_idx
+    arange_n = torch.arange(env.num_envs, device=env.device)
+    assigned_foot_y = foot_pos_w[arange_n, trailing_idx, 1]            # (N,)
+
+    signed_progress = direction * (assigned_foot_y - red_y)
+    overshoot = torch.clamp(signed_progress - landing_radius, min=0.0, max=max_overshoot)
+
+    phase1_active = env._red_wide & env._red_active & ~env._red_landed_genuine
+    return overshoot * phase1_active.float()
+
+
+def red_stick_landing(
+    env: "ManagerBasedRlEnv",
+    ball_name: str,
+    asset_cfg: SceneEntityCfg = _DEFAULT_FEET_CFG,
+    dist_sigma: float = 8.0,
+    speed_sigma: float = 1.5,
+) -> torch.Tensor:
+    """Trailing-foot mirror of orange_stick_landing -- dense reward for the
+    trailing foot being simultaneously CLOSE to and SLOW near red, gated
+    additionally on env._red_active (see red_overshoot_penalty's docstring).
+
+    Not yet validated against a live training run.
+    """
+    red_y = _get_red_reach_target_y(env, ball_name, asset_cfg=asset_cfg)
+    goal_x_w = env.scene.env_origins[:, 0]
+    target_xy = torch.stack([goal_x_w, red_y], dim=-1)              # (N, 2)
+
+    robot: Entity = env.scene[asset_cfg.name]
+    foot_pos_w = robot.data.body_link_pos_w[:, asset_cfg.body_ids, :]      # (N, 2, 3)
+    foot_vel_w = robot.data.body_link_lin_vel_w[:, asset_cfg.body_ids, :]  # (N, 2, 3)
+    foot_idx = _get_correct_foot_idx(env, ball_name)
+    trailing_idx = 1 - foot_idx
+    arange_n = torch.arange(env.num_envs, device=env.device)
+    assigned_foot_pos = foot_pos_w[arange_n, trailing_idx]              # (N, 3)
+    assigned_foot_vel = foot_vel_w[arange_n, trailing_idx]              # (N, 3)
+
+    dist = torch.norm(assigned_foot_pos[:, :2] - target_xy, dim=-1)
+    speed = torch.norm(assigned_foot_vel[:, :2], dim=-1)
+
+    phase1_active = env._red_wide & env._red_active & ~env._red_landed_genuine
     return torch.exp(-dist_sigma * dist) * torch.exp(-speed_sigma * speed) * phase1_active.float()
 
 

@@ -555,6 +555,28 @@ def _patch_viewer_intercept_vis(native_viewer: "NativeMujocoViewer", env) -> Non
                 0.008, [1.0, 0.55, 0.0, 0.6],
             )
 
+        # NEW 2026-08-15: red sphere -- trailing-foot second-stage mirror,
+        # recomputed inline the same way orange's own orange_y is (not read
+        # from a cached env attribute), anchored at cross_y (green) and
+        # shrunk backward -- see rewards.py:_get_red_reach_target_y for why
+        # the anchor flips relative to orange's start_y anchor. Only shown
+        # once env._red_active (both blue and orange genuinely landed) --
+        # unlike blue/orange, red isn't a real target before that gate opens.
+        red_active_t = getattr(raw_env, "_red_active", None)
+        red_active = bool(red_active_t[0].item()) if red_active_t is not None else False
+        if wide and red_active:
+            start_y = float(origins[1])
+            delta = cross_y - start_y
+            sign = 1.0 if delta >= 0 else -1.0
+            red_shrunk = sign * max(abs(delta) - 0.50, 0.0)
+            red_y = cross_y - red_shrunk / 2.0
+            _add_sphere(goal_x, red_y, sphere_z, 0.08, [0.9, 0.1, 0.1, 0.75])
+            _add_line(
+                np.array([goal_x, red_y, floor_z], dtype=np.float64),
+                np.array([goal_x, red_y, sphere_z], dtype=np.float64),
+                0.008, [0.9, 0.1, 0.1, 0.6],
+            )
+
     native_viewer._update_debug_visualizers = _patched_update
 
 
@@ -1188,6 +1210,16 @@ def _patch_viewer_all_footorientation_plots(native_viewer: "NativeMujocoViewer",
         "postleadfootorientation",
         "trailing_foot_forward_continuous",
         "foot_ang_vel_xy",
+        # NEW 2026-08-15 (user request): ankle_pitch_vel is the new
+        # always-on Ankle_Pitch-specific joint_vel_l2 penalty
+        # (goalkeeper_env_cfg.py) added alongside foot_ang_vel_xy above --
+        # probe evidence (docs/BugFixes.md, 2026-08-15) found Ankle_Pitch's
+        # own joint velocity, not the whole-body world-frame sum
+        # foot_ang_vel_xy measures, actually leads the leading foot's
+        # pre-save pitch spike. Placed right after foot_ang_vel_xy so both
+        # rotation-rate dampers are visible side by side. 9 terms total,
+        # still well under the 12-slot cap.
+        "ankle_pitch_vel",
     )
 
     def _patched_setup() -> None:

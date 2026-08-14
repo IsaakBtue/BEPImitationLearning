@@ -2721,3 +2721,58 @@ Two candidate fixes were identified: (A) raise `blue_trunk_drive`'s weight (this
 **Verification:** `ast.parse` on all 4 changed files -- no syntax errors. `env -u PYTHONPATH uv run pytest tests/ -q` -- 81/81 pass (would have caught the `mdp/__init__.py` import breakage above). Not yet validated against a live training run -- next run is the actual test of whether reward-config or maturity explains the gap.
 
 ---
+
+## 2026-08-15 -- NEW "red" waypoint: trailing-foot second stage, gated on blue AND orange both landed
+
+**Context:** user asked to close a gap orange's own docstring already flagged ("does NOT graduate to a second/live-ball target once landed") -- a third waypoint for the trailing foot, active only once the leading foot has genuinely landed at blue AND the trailing foot has genuinely landed at orange, positioned "behind the green ball" (short of the true crossing point, not all the way to it). Reuses the orange reward-function shapes per user request ("maybe you can reuse a lot of the rewards already that are available for orange ball"). Plan drafted by a dispatched subagent, reviewed and 3 open questions resolved via `AskUserQuestion` before any code was written, per this file's Change Approval Workflow.
+
+**Design decision caught during planning (not a bug, a correctness fix to the plan itself before implementation):** a literal copy of `_get_orange_reach_target_y`'s formula, anchored at `start_y` and shrinking toward it, mathematically tops out AT blue as its shrink constant approaches zero -- it can never place a point past blue toward green. Red's formula instead anchors at `full_y` (green) and shrinks backward:
+```python
+delta = full_y - start_y
+red_shrunk = torch.sign(delta) * (delta.abs() - 0.50).clamp(min=0.0)
+red_y = full_y - red_shrunk / 2.0
+```
+Algebraically equivalent (whenever `|delta| > 0.50`) to `red_y = half_y + sign(delta)*0.25` -- i.e. **blue + 0.25m toward green**, the mirror image of orange's own **blue − 0.25m toward start**. Blue sits exactly centered between orange and red. `SHRINK_RED=0.50` (same constant orange uses, not a smaller one) confirmed via `AskUserQuestion` -- keeps the 0.25m gap clear of blue's own landing radius (curriculum-eased, max 0.20m) at every difficulty level.
+
+**User-confirmed decisions (`AskUserQuestion`, 3 questions):**
+1. **Weights equal to orange's own** (not a further quarter-of-blue halving) -- red's extra landing-gate (requires both blue and orange genuinely landed first) already limits false-credit risk relative to orange's single, ungated stage.
+2. **`SHRINK_RED=0.50`** (same as orange) -- see anchor-flip reasoning above.
+3. **Capped at red for the rest of the episode** -- no further graduation to live-ball tracking, mirroring orange's own explicitly-documented design (it never graduates either).
+
+**Fix (all changes applied together, tests run):**
+1. `rewards.py`: new `_get_red_reach_target_y` (after `_get_orange_reach_target_y`) -- own state namespace (`env._red_was_airborne/_landed/_settle_count/_landed_was_free/_landed_genuine/_last_settle_step`), same leaky-settle-count/curriculum-eased-radius-and-speed/free-landing mechanism as orange, `env._red_wide` reused directly from `env._blue_wide` (same pattern orange uses). New: `env._red_active = getattr(env,"_blue_landed_genuine",zeros) & getattr(env,"_orange_landed_genuine",zeros)`, ANDed into the settle `candidate` condition itself (not just gating the reward terms) so red's state machine cannot accrue settle progress before both upstream landings are genuine.
+2. `rewards.py`: 4 new reward functions -- `red_foot_proximity`, `red_ball_landed`, `red_overshoot_penalty`, `red_stick_landing` -- direct mirrors of the 4 `orange_*` functions (same formulas, same trailing-foot targeting via `1 - _get_correct_foot_idx`), each additionally multiplying/ANDing by `env._red_active` where orange's own gating logic appears (the one structural diff from a blind mirror -- orange has no upstream landing gate, so needed none).
+3. `mdp/__init__.py`: exported the 4 new functions (mirrors the exact `foot_ang_vel_z`-forgotten-export class of bug from the 2026-08-13 entry above -- checked this time before, not after, hitting an `ImportError`).
+4. `goalkeeper_env_cfg.py`: `RewardTermCfg` registration for all 4 terms (inserted immediately after the orange block), weights equal to orange's (`red_foot_proximity=2.5` flat/no-curriculum, `red_ball_landed=5.0`, `red_overshoot_penalty=-30.0`, `red_stick_landing=4.0`) -- exact mirror of orange's own registration pattern. 3 new `CurriculumTermCfg` entries (`red_ball_landed_curriculum`/`red_overshoot_penalty_curriculum`/`red_stick_landing_curriculum`, same `reward_curriculum_ep_len`/`update_interval=500`/`ep_len_divisor=50` shape, `base_weight` matching the static weights) -- no curriculum entry for `red_foot_proximity`, matching neither `foot_proximity` nor `orange_foot_proximity` having one.
+5. `play.py`: viewer-only red sphere (diagnostic, no approval needed) -- mirrors the orange sphere block, recomputed inline (not read from a cached attribute) so it can't drift out of sync with the actual reward target, gated on `env._red_active` (unlike blue/orange, red isn't a real target before that gate opens, so no sphere is shown until then). Color `[0.9, 0.1, 0.1, 0.75]` (red, vs. orange's `[1.0, 0.55, 0.0, 0.75]`).
+
+**Verification:**
+- `ast.parse` on all 4 changed files -- no syntax errors.
+- New `tests/simple_goalkeeper/test_red_reach_target_y.py` (9 tests, mirrors `test_orange_reach_target_y.py`'s structure): formula correctness at `delta=1.0/0.8/0.4/-1.0` (confirms `red_y=0.75/0.65/0.40/-0.75` respectively -- the `0.4` case confirms the degenerate collapse lands on `full_y`, not `start_y` like orange's equivalent case), the AND-gate (`env._red_active` false when either/both of `_blue_landed_genuine`/`_orange_landed_genuine` are false or missing, true only when both true), and `env._red_wide` correctly reusing `env._blue_wide` directly rather than recomputing.
+- Full suite: `env -u PYTHONPATH uv run pytest tests/ -q` -- **90/90 pass** (81 pre-existing + 9 new).
+- Live headless smoke test (300 steps, 8 envs, zero policy, real `ManagerBasedRlEnv` + reward manager): all 4 `red_*` terms registered and active in the reward manager's term list, ran with no exceptions, `env._red_wide` correctly varies per-env while `env._red_active`/`_red_landed_genuine` correctly stayed all-False for the whole run (no genuine blue+orange landing occurred under a zero policy, as expected).
+- **Not yet validated against a live training run** -- like every `blue_*`/`orange_*` term before it, this needs a real training run to confirm the gate/formula produce the intended behavior under a learning policy, not just a zero-action sanity check.
+
+**Documentation:** added the "Red ball second waypoint" row to `CLAUDE.md`'s "Divergences from G1 Upstream" table and 4 new rows to the "Reward Design" table (same commit).
+
+---
+
+## 2026-08-15 (same session) -- new `ankle_pitch_vel`: always-on, ankle-specific rotation-rate penalty
+
+**Context:** follow-up to the joint-level probe (see the artifact/findings from earlier this session) which found the leading foot's pre-save pitch spike is genuinely `Ankle_Pitch`-driven (-1.76 rad/s at the exact spike peak, largest of the 3 sagittal joints and the only one whose sign matches the world-frame spike; also the biggest relative jump from its own baseline, 2.56x vs. Knee_Pitch's 1.93x and Hip_Pitch's 1.65x). User explicitly rejected gating this to the pre-save window: "no need to gate, i never want this type of tilt behavior" -- always-on penalty, no time-window restriction.
+
+**Fix:**
+1. `goalkeeper_env_cfg.py`: new `_ANKLE_PITCH_CFG = SceneEntityCfg("robot", joint_names=("Left_Ankle_Pitch", "Right_Ankle_Pitch"))`.
+2. `goalkeeper_env_cfg.py`: new `RewardTermCfg` `ankle_pitch_vel`, reusing the existing built-in `mjlab_mdp.joint_vel_l2` (no new function needed in `rewards.py`) -- same mechanism/pattern as the existing `arm_dof_vel` term, scoped to just the 2 ankle-pitch joints, weight `-0.1`, **unconditional, no gate** (per explicit user request). Additive alongside the still-active `foot_ang_vel_xy` (-0.25, unchanged) rather than a replacement -- `foot_ang_vel_xy` measures whole-body world-frame angular velocity (conflates ankle-local rotation with Hip_Pitch/Knee_Pitch-driven leg-swing propagation, the exact reason the earlier `-3.0` attempt killed legitimate reach/swing motion too, see the 2026-08-13 revert entry above); this new term reads the LOCAL `Ankle_Pitch` joint's own velocity directly, so it structurally cannot touch the hip/knee motion a genuine dive/reach needs.
+3. `Ankle_Roll` deliberately excluded: the same probe found roll's world-frame spike is actually more `Hip_Roll`-driven on average (bigger magnitude and bigger relative jump than `Ankle_Roll` over the roll-spike window) and only ~1/3 of pitch's total magnitude -- an ankle-specific roll penalty wouldn't target the right joint on this evidence.
+4. `play.py`: added `"ankle_pitch_vel"` to `_ALL_FOOTORIENTATION_TERMS` (the last-registered, and therefore authoritative, P-panel term-ordering patch -- see that function's own docstring), right after `foot_ang_vel_xy` so both rotation-rate dampers are visible side by side in the native viewer's P-panel. 9 terms total, still under the 12-slot cap.
+
+**Weight:** `-0.1` is a first empirical guess, same "unvalidated, watch next run" status `arm_dof_vel`'s own docstring carries -- not derived from a principled calibration against the probe's rad/s values, since Ankle_Pitch's own joint-space velocity isn't directly comparable in scale to `foot_ang_vel_xy`'s world-frame body angular velocity.
+
+**Verification:**
+- `ast.parse` on `goalkeeper_env_cfg.py`/`play.py` -- no syntax errors.
+- Full suite: `env -u PYTHONPATH uv run pytest tests/ -q` -- **90/90 pass** (no new unit tests added -- `joint_vel_l2` is an existing, already-tested mjlab built-in; the only new surface area is the `RewardTermCfg` registration itself, which the live smoke test below covers).
+- Live headless smoke test (60 steps, 8 envs, random small actions, real `ManagerBasedRlEnv` + reward manager): `ankle_pitch_vel` confirmed present in `reward_manager.active_terms` and produced finite, sensibly-scaled per-env episode sums (e.g. `-0.02` to `-0.20` range across 8 envs) with no exceptions.
+- **Not yet validated against a live training run** (per explicit user instruction -- training happens after this gets pushed, not part of this session's work).
+
+---

@@ -59,6 +59,16 @@ _ARM_HEIGHT_CFG = SceneEntityCfg(
     body_names=("AL2", "AR2", "left_hand_link", "right_hand_link"),
 )
 _RECOVERY_WAIST_CFG = SceneEntityCfg("robot", joint_names=("Waist",))
+# NEW 2026-08-15 (user request): scopes joint_vel_l2 to just the 2
+# Ankle_Pitch joints -- see docs/BugFixes.md for the probe evidence
+# (Ankle_Pitch's own joint velocity, not Hip_Pitch/Knee_Pitch, leads the
+# leading foot's pre-save world-pitch spike, -1.76 rad/s at the exact
+# spike peak vs. Knee_Pitch +1.46/Hip_Pitch +0.63, and the largest relative
+# jump from its own baseline at 2.56x). Ankle_Roll deliberately excluded --
+# the same probe found roll's world-frame spike is actually more
+# Hip_Roll-driven on average and only ~1/3 of pitch's magnitude, so an
+# ankle-specific roll penalty wouldn't target the right joint.
+_ANKLE_PITCH_CFG = SceneEntityCfg("robot", joint_names=("Left_Ankle_Pitch", "Right_Ankle_Pitch"))
 # FIX 2026-07-22: see postlegdofpos's docstring (rewards.py) -- G1 has no
 # leg-recovery reward to port because its legs aren't the catching limb;
 # SGK's legs are, so this fills the gap that left them with no post-save
@@ -416,6 +426,39 @@ def goalkeeper_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
             func=gk_mdp.reward_curriculum_ep_len,
             params={
                 "reward_name": "orange_stick_landing",
+                "base_weight": 4.0,
+                "update_interval": 500,
+                "ep_len_divisor":  50,
+            },
+        )
+        # NEW 2026-08-15: "red" second-stage trailing-foot waypoint, active
+        # only once both blue and orange are genuinely landed (see
+        # _get_red_reach_target_y). Weights equal to orange's own (user
+        # confirmed via AskUserQuestion -- red's extra landing-gate already
+        # limits false credit relative to orange's ungated single stage, so
+        # a further quarter-of-blue halving wasn't applied).
+        cfg.curriculum["red_ball_landed_curriculum"] = CurriculumTermCfg(
+            func=gk_mdp.reward_curriculum_ep_len,
+            params={
+                "reward_name": "red_ball_landed",
+                "base_weight": 5.0,
+                "update_interval": 500,
+                "ep_len_divisor":  50,
+            },
+        )
+        cfg.curriculum["red_overshoot_penalty_curriculum"] = CurriculumTermCfg(
+            func=gk_mdp.reward_curriculum_ep_len,
+            params={
+                "reward_name": "red_overshoot_penalty",
+                "base_weight": -30.0,
+                "update_interval": 500,
+                "ep_len_divisor":  50,
+            },
+        )
+        cfg.curriculum["red_stick_landing_curriculum"] = CurriculumTermCfg(
+            func=gk_mdp.reward_curriculum_ep_len,
+            params={
+                "reward_name": "red_stick_landing",
                 "base_weight": 4.0,
                 "update_interval": 500,
                 "ep_len_divisor":  50,
@@ -815,6 +858,32 @@ def goalkeeper_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
         ),
         "orange_stick_landing": RewardTermCfg(
             func=gk_mdp.orange_stick_landing,
+            weight=4.0,
+            params={"ball_name": BALL_NAME, "asset_cfg": _FEET_CFG},
+        ),
+        # --- trailing-foot second waypoint ("red"), active only once both
+        # blue and orange are genuinely landed. See rewards.py's
+        # _get_red_reach_target_y/red_ball_landed/red_overshoot_penalty/
+        # red_stick_landing docstrings. Weights equal to orange's own
+        # (user-confirmed 2026-08-15, not a further halving -- red's own
+        # landing gate already limits false credit). ---
+        "red_foot_proximity": RewardTermCfg(
+            func=gk_mdp.red_foot_proximity,
+            weight=2.5,
+            params={"ball_name": BALL_NAME, "sigma": 5.0, "asset_cfg": _FEET_CFG},
+        ),
+        "red_ball_landed": RewardTermCfg(
+            func=gk_mdp.red_ball_landed,
+            weight=5.0,
+            params={"ball_name": BALL_NAME, "asset_cfg": _FEET_CFG},
+        ),
+        "red_overshoot_penalty": RewardTermCfg(
+            func=gk_mdp.red_overshoot_penalty,
+            weight=-30.0,
+            params={"ball_name": BALL_NAME, "asset_cfg": _FEET_CFG},
+        ),
+        "red_stick_landing": RewardTermCfg(
+            func=gk_mdp.red_stick_landing,
             weight=4.0,
             params={"ball_name": BALL_NAME, "asset_cfg": _FEET_CFG},
         ),
@@ -1246,6 +1315,25 @@ def goalkeeper_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
             func=mjlab_mdp.joint_vel_l2,
             weight=-5e-3,
             params={"asset_cfg": _RECOVERY_ARM_CFG},
+        ),
+        # NEW 2026-08-15 (user request, "I never want this type of tilt
+        # behavior" -- no gating, always active): same joint_vel_l2
+        # mechanism as arm_dof_vel above, scoped to just the 2 Ankle_Pitch
+        # joints (_ANKLE_PITCH_CFG). Additive alongside foot_ang_vel_xy
+        # (unchanged, -0.25) rather than a replacement -- foot_ang_vel_xy
+        # measures world-frame body angular velocity (conflates ankle-local
+        # rotation with hip/knee-driven leg-swing propagation, the exact
+        # reason the earlier -3.0 attempt killed legitimate rotation too);
+        # this term reads the LOCAL ankle joint's own velocity directly, so
+        # it can't touch Hip_Pitch/Knee_Pitch's genuine reach/swing motion.
+        # Weight -0.1 is a first empirical guess (same "unvalidated, watch
+        # next run" status as arm_dof_vel's own docstring) -- not derived
+        # from a principled calibration against the probe's rad/s values.
+        # See docs/BugFixes.md, 2026-08-15.
+        "ankle_pitch_vel": RewardTermCfg(
+            func=mjlab_mdp.joint_vel_l2,
+            weight=-0.1,
+            params={"asset_cfg": _ANKLE_PITCH_CFG},
         ),
     }
 
