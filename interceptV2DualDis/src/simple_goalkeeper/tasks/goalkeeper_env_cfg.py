@@ -942,11 +942,13 @@ def goalkeeper_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
             # steepening this bounded reward's drop-off would also help.
             # Raised 5.0 -> 40.0 (same ~11deg tilt now scores ~23%, was ~83%
             # -- chosen via AskUserQuestion from 20/40/leave-as-is/custom).
-            # Passed
-            # explicitly rather than left as the function default, matching
-            # this codebase's convention for auditable per-term overrides.
+            # Passed explicitly rather than left as the function default,
+            # matching this codebase's convention for auditable per-term
+            # overrides. FIX 2026-08-15 (same day, user request, "make
+            # sigma even bigger"): 40.0 -> 80.0 (same ~11deg tilt now
+            # scores ~5%, chosen via AskUserQuestion from 80/150/custom).
             # See docs/BugFixes.md, 2026-08-15.
-            params={"asset_cfg": _FEET_CFG, "sigma": 40.0},
+            params={"asset_cfg": _FEET_CFG, "sigma": 80.0},
         ),
         # REMOVED 2026-08-15 (user request): foot_ang_vel_xy deleted outright
         # (function + this registration + mdp/__init__.py export), not just

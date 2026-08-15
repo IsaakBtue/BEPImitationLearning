@@ -2974,8 +2974,8 @@ Both flags can be set False individually to see the unpinned/unparked behavior i
 
 **Fix:** `goalkeeper_env_cfg.py` -- `feetorientation`'s `sigma` param, previously left as the function's own default (5.0, never explicit), now explicitly set to `40.0` (chosen via `AskUserQuestion` from 20/40/leave-as-is/custom). Verified curve, computed directly (not estimated):
 
-| tilt | sigma=5 (old) | sigma=40 (new) |
-|------|---------------|-----------------|
+| tilt | sigma=5 (old) | sigma=40 |
+|------|---------------|-----------|
 | 5deg | 96% | 74% |
 | 11deg | 83% | 23% |
 | 20deg | 56% | 1% |
@@ -2983,10 +2983,21 @@ Both flags can be set False individually to see the unpinned/unparked behavior i
 
 Small tilts (<5deg) still score close to full reward; the term now sharply distinguishes "close to flat" from "visibly bad" instead of being forgiving across the whole range that matters. No change to `weight` (still 3.0) or the underlying mechanism -- same bounded-reward shape, just steeper.
 
+**FIX (same day, user request, "make sigma even bigger"):** `40.0 -> 80.0` (chosen via `AskUserQuestion` from 80/150/custom). Updated curve:
+
+| tilt | sigma=40 | sigma=80 (final) |
+|------|-----------|-------------------|
+| 2deg | ~99% | 90.7% |
+| 5deg | 74% | 54.5% |
+| 11deg | 23% | 5.4% |
+| 20deg | 1% | 0.0% |
+
+At sigma=80, only tilts under ~5deg score meaningfully; by 11deg the reward is nearly gone.
+
 **Verification:**
 - `ast.parse` on `goalkeeper_env_cfg.py` -- no syntax errors.
-- Full suite: `env -u PYTHONPATH uv run pytest tests/ -q` -- **90/90 pass**.
-- Curve values above computed directly in Python (`math.exp`), not estimated.
+- Full suite: `env -u PYTHONPATH uv run pytest tests/ -q` -- **90/90 pass** (re-run after the 80.0 change too).
+- All curve values above computed directly in Python (`math.exp`), not estimated.
 - **Not yet validated against a live training run.**
 
 ---
