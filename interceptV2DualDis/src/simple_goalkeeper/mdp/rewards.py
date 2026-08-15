@@ -9,7 +9,7 @@ import torch
 from mjlab.entity import Entity
 from mjlab.managers.scene_entity_config import SceneEntityCfg
 from mjlab.sensor import BuiltinSensor, ContactSensor
-from mjlab.utils.lab_api.math import quat_apply, quat_inv
+from mjlab.utils.lab_api.math import quat_apply, quat_apply_inverse, quat_inv
 
 from simple_goalkeeper.robots.t1_constants import (
     ANKLE_ACTUATOR,
@@ -298,6 +298,66 @@ def _get_correct_foot_idx(env: "ManagerBasedRlEnv", ball_name: str) -> torch.Ten
                            torch.zeros(env.num_envs, dtype=torch.long, device=env.device),
                            torch.ones(env.num_envs, dtype=torch.long, device=env.device))
     return foot_idx
+
+
+_SOLE_ZONE_LOCAL_POS = (0.0125, 0.0, -0.032)
+"""Must match left_sole_vis/right_sole_vis's `pos` in t1_headless.xml exactly
+(both feet use the identical local offset). Same "duplicated, must-match-XML
+constant" class as scripts/play.py's own copy of these two values -- keep
+both in sync if the XML geom ever moves."""
+
+_SOLE_ZONE_HALF_SIZE = (0.065, 0.03, 0.005)
+"""Must match left_sole_vis/right_sole_vis's `size` (box half-extents) in
+t1_headless.xml exactly. See _SOLE_ZONE_LOCAL_POS above."""
+
+_SOLE_ZONE_BALL_RADIUS = 0.10
+"""Ball radius for the sphere-vs-box check below. Matches the existing
+`_BALL_GEOM_RADIUS`/`_BALL_GEOM_RADIUS` convention already used elsewhere in
+this file and in scripts/play.py's own copy of this constant."""
+
+
+def _sole_ball_contact_per_foot(
+    env: "ManagerBasedRlEnv",
+    ball_name: str,
+    asset_cfg: SceneEntityCfg = _DEFAULT_FEET_CFG,
+) -> torch.Tensor:
+    """(N, 2) bool: does the ball's sphere genuinely overlap [left, right]
+    `_sole_vis` marker box's EXACT geometry (pos/size), vectorized across all
+    envs.
+
+    NEW 2026-08-15 (user request): "if the contact is detected between the
+    sole of the foot and the ball that the reward for cleanstop is not
+    given, because i only want to save with the side of the feet." Reuses
+    the identical literal sphere-vs-box check `scripts/play.py`'s
+    `_compute_sole_ball_contact` uses for its P-panel diagnostic (added the
+    same session, per the user's explicit "the red marker is not cosmetic i
+    wanted to use that geom quite literally") -- same geometry, same
+    reasoning, now also driving a training-affecting gate, not just a
+    viewer plot. Deliberately NOT read from a `ball_contact` ContactSensorCfg
+    (the real, larger `foot[1-4]_collision` capsules) -- that sensor's
+    footprint is bigger than the marker box the user explicitly wants used
+    literally; reusing it here would silently gate on a different, larger
+    zone than what the user actually specified.
+    """
+    robot: Entity = env.scene[asset_cfg.name]
+    ball: Entity = env.scene[ball_name]
+    foot_pos_w = robot.data.body_link_pos_w[:, asset_cfg.body_ids, :]    # (N, 2, 3)
+    foot_quat_w = robot.data.body_link_quat_w[:, asset_cfg.body_ids, :]  # (N, 2, 4)
+    ball_pos_w = ball.data.root_link_pos_w  # (N, 3)
+
+    device = foot_pos_w.device
+    box_center = torch.tensor(_SOLE_ZONE_LOCAL_POS, device=device, dtype=torch.float32)
+    box_half = torch.tensor(_SOLE_ZONE_HALF_SIZE, device=device, dtype=torch.float32)
+
+    rel_w = ball_pos_w.unsqueeze(1) - foot_pos_w  # (N, 2, 3)
+    n = env.num_envs
+    local = quat_apply_inverse(
+        foot_quat_w.reshape(n * 2, 4), rel_w.reshape(n * 2, 3)
+    ).reshape(n, 2, 3)
+    offset = local - box_center
+    closest_offset = torch.clamp(offset, -box_half, box_half)
+    dist = (offset - closest_offset).norm(dim=-1)  # (N, 2)
+    return dist <= _SOLE_ZONE_BALL_RADIUS
 
 
 def _ball_is_behind(env: "ManagerBasedRlEnv", ball_name: str) -> torch.Tensor:
@@ -2241,10 +2301,38 @@ def softstop(
     if not hasattr(env, "_softstop_flag"):
         env._softstop_flag = torch.zeros(env.num_envs, dtype=torch.bool, device=env.device)
         env._softstop_correct_foot = torch.zeros(env.num_envs, dtype=torch.bool, device=env.device)
+        # NEW 2026-08-15 (user request): "if the contact is detected between
+        # the sole of the foot and the ball that the reward for cleanstop is
+        # not given... only want to save with the side of the feet."
+        # Computed HERE (not inside cleanstop/single_foot_save themselves)
+        # specifically because `asset_cfg` is only genuinely resolved on
+        # THIS function's own registered params (goalkeeper_env_cfg.py
+        # passes asset_cfg=_FEET_CFG for softstop; cleanstop/single_foot_save
+        # take no asset_cfg param at all) -- see
+        # .claude/skills/reward-shaping-scene-entity-cfg. Passing softstop's
+        # own already-resolved `asset_cfg` through to
+        # _sole_ball_contact_per_foot avoids ever needing an unresolved
+        # default SceneEntityCfg.
+        #
+        # FIX 2026-08-15 (same day, user report: "when sole ball contact is
+        # hit i still see a spike in cleanstop how come"): the first version
+        # only captured sole contact at the EXACT tick softstop fired --
+        # missed sole contact happening a step or two before/after that
+        # instant, including anywhere in cleanstop's own settle window
+        # (multiple ticks of low ball speed AFTER softstop fires, before
+        # cleanstop actually pays out). Replaced with a per-EPISODE latch,
+        # updated every call (not just when `fired`) and OR'd in, matching
+        # the user's confirmed intent (`AskUserQuestion`: whole-episode latch
+        # vs. softstop-to-cleanstop window only vs. custom -- user picked
+        # whole-episode) -- any sole touch by the assigned foot at ANY point
+        # in the episode permanently blocks cleanstop/single_foot_save for
+        # the rest of it.
+        env._episode_sole_contact = torch.zeros(env.num_envs, dtype=torch.bool, device=env.device)
 
     just_reset = env.episode_length_buf <= 1
     env._softstop_flag[just_reset] = False
     env._softstop_correct_foot[just_reset] = False
+    env._episode_sole_contact[just_reset] = False
 
     in_front = ball_x_local > -0.3
 
@@ -2270,6 +2358,13 @@ def softstop(
         & same_step_as_stopball & landing_ok & ~env._softstop_flag
     )
     env._softstop_correct_foot[fired] = correct_foot_contact[fired]
+
+    # Computed and latched EVERY call, unconditional on `fired` -- see the
+    # 2026-08-15 FIX comment above for why (episode-wide latch, not a
+    # single-instant capture).
+    sole_per_foot = _sole_ball_contact_per_foot(env, ball_name, asset_cfg=asset_cfg)  # (N, 2)
+    assigned_sole_contact_now = sole_per_foot[torch.arange(env.num_envs, device=env.device), foot_idx]
+    env._episode_sole_contact |= assigned_sole_contact_now
 
     env._softstop_flag |= fired
     return fired.float()
@@ -2450,7 +2545,11 @@ def single_foot_save(
     both_recorded = (env._sfs_sb_step >= 0) & (env._sfs_ss_step >= 0)
     within_window = (env._sfs_sb_step - env._sfs_ss_step).abs() <= window
     correct_foot = getattr(env, "_softstop_correct_foot", torch.zeros(env.num_envs, dtype=torch.bool, device=env.device))
-    fired = both_recorded & within_window & correct_foot & ~env._sfs_flag
+    # NEW 2026-08-15 (user request, "also gate single_foot_save"): same
+    # episode-wide sole-contact gate as cleanstop -- see that function's own
+    # comment and softstop()'s latching of env._episode_sole_contact.
+    sole_contact = getattr(env, "_episode_sole_contact", torch.zeros(env.num_envs, dtype=torch.bool, device=env.device))
+    fired = both_recorded & within_window & correct_foot & ~sole_contact & ~env._sfs_flag
     env._sfs_flag |= fired
     return fired.float()
 
@@ -4618,7 +4717,17 @@ def cleanstop(
         return torch.zeros(env.num_envs, device=env.device)
 
     correct_foot = getattr(env, "_softstop_correct_foot", torch.zeros(env.num_envs, dtype=torch.bool, device=env.device))
-    eligible = softstop_fired & correct_foot & ~env._cleanstop_flag
+    # NEW 2026-08-15 (user request): "if the contact is detected between the
+    # sole of the foot and the ball that the reward for cleanstop is not
+    # given... only want to save with the side of the feet." Latched in
+    # softstop() (see that function's own comment for why -- asset_cfg
+    # resolution) across the WHOLE episode, not just softstop's own firing
+    # instant -- FIX 2026-08-15 (user report, "still see a spike in
+    # cleanstop"): the original single-instant capture missed sole contact
+    # happening before softstop fired or during cleanstop's own settle
+    # window afterward.
+    sole_contact = getattr(env, "_episode_sole_contact", torch.zeros(env.num_envs, dtype=torch.bool, device=env.device))
+    eligible = softstop_fired & correct_foot & ~sole_contact & ~env._cleanstop_flag
     below = ball_speed < speed_threshold
 
     env._cleanstop_settle_count[eligible & below] += 1

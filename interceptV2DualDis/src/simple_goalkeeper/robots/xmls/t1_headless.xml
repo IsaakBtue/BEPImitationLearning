@@ -197,29 +197,19 @@
                     <geom name="left_inner_vis" type="box" size="0.035 0.015 0.018" pos="-0.005 -0.055 -0.012"
                       rgba="0 0.6 1 0.85" contype="0" conaffinity="0" group="2"/>
                     <!-- NEW 2026-08-15 (user request): visual-only sole marker -- red rectangle
-                         spanning between the 4 foot1-4 sole capsules, sitting right at the
-                         capsules' own bottom surface (centerline Z=-0.01, radius 0.02 -> surface
-                         at -0.03; box centred -0.032, a slight overlap so there's no visible
-                         floating gap) so the ball's actual position relative to the sole zone is
-                         visible in the viewer -- purely diagnostic, contype/conaffinity=0 like
-                         left_inner_vis above, no physics/training effect.
-                         FIX 2026-08-15 (same day, user request, "moved up... a bit shorter"):
-                         pos_z -0.05->-0.032; size shrunk to 0.065x0.03 -- turned out to UNDERSIZE
-                         the marker relative to the REAL capsule footprint (X: -0.08 to 0.105;
-                         Y, accounting for the capsules' own 0.02 radius: -0.05 to 0.05), not just
-                         the smaller visual foot mesh -- any genuine contact near the toe/heel/
-                         outer edge fell outside the shrunk box, matching the user's next report
-                         ("ball and square not touching"). Live-verified via body_link_pos_w +
-                         quat_apply at the standing pose (not assumed): confirmed the true capsule
-                         surface sits close to this box's own position/height, so the mismatch was
-                         X/Y coverage, not Z. FIX 2026-08-15 (this fix): size restored to exactly
-                         match the real capsule footprint (half-width X=0.0925 from center 0.0125,
-                         covering -0.08 to 0.105; half-width Y=0.05, covering the capsules' own
-                         radius-inclusive -0.05 to 0.05) -- geometric accuracy over cosmetic size,
-                         since a marker smaller than the real collision zone is misleading by
-                         construction for this diagnostic's purpose. Z (pos/thickness) unchanged
-                         from the prior fix. -->
-                    <geom name="left_sole_vis" type="box" size="0.0925 0.05 0.005" pos="0.0125 0 -0.032"
+                         at the bottom of the sole (centerline Z=-0.01, radius 0.02 -> capsule
+                         surface at -0.03; box centred -0.032, a slight overlap so there's no
+                         visible floating gap) so the ball's actual position relative to the sole
+                         zone is visible in the viewer -- purely diagnostic, contype/conaffinity=0
+                         like left_inner_vis above, no physics/training effect.
+                         FIX 2026-08-15 (user request, "moved up... a bit shorter"): pos_z
+                         -0.05->-0.032; size 0.065x0.03. A follow-up attempt to enlarge this to
+                         match the full capsule footprint exactly (0.0925x0.05) was REVERTED same
+                         day per explicit user request ("you broken the red geometry i liked the
+                         other on better i just want the bottom") -- user prefers this smaller
+                         size; do not re-enlarge without being asked again. Z position (the actual
+                         "bottom" placement) is what mattered and stays as fixed. -->
+                    <geom name="left_sole_vis" type="box" size="0.065 0.03 0.005" pos="0.0125 0 -0.032"
                       rgba="1 0 0 0.85" contype="0" conaffinity="0" group="2"/>
                     <site name="left_foot"/>
                   </body>
@@ -279,11 +269,10 @@
                       rgba="0 0.6 1 0.85" contype="0" conaffinity="0" group="2"/>
                     <!-- NEW 2026-08-15 (user request): visual-only sole marker, mirrors
                          left_sole_vis above (same local geometry, right_foot_link's own capsule
-                         fromto extents are identical to left's). FIX 2026-08-15 (same day, "moved
-                         up... a bit shorter", then "ball and square not touching"): see
-                         left_sole_vis's own comment for the full reasoning -- size restored to
-                         match the real capsule footprint exactly (was undersized). -->
-                    <geom name="right_sole_vis" type="box" size="0.0925 0.05 0.005" pos="0.0125 0 -0.032"
+                         fromto extents are identical to left's). See left_sole_vis's own comment
+                         for the size history -- reverted to the smaller 0.065x0.03 per explicit
+                         user request, do not re-enlarge without being asked again. -->
+                    <geom name="right_sole_vis" type="box" size="0.065 0.03 0.005" pos="0.0125 0 -0.032"
                       rgba="1 0 0 0.85" contype="0" conaffinity="0" group="2"/>
                     <site name="right_foot"/>
                   </body>

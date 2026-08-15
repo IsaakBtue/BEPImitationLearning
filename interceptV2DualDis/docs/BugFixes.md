@@ -3088,3 +3088,50 @@ Verified via `mujoco.MjSpec(...).compile()` -- both geoms resolve at `size=[0.09
 - Not visually confirmed in a real display this session (same reason as above -- avoided contending with the user's own live session).
 
 ---
+
+## 2026-08-15 (same session) -- new `sole_ball_contact` P-panel plot promoted; `cleanstop`/`single_foot_save` gated on sole-of-foot save contact
+
+**Context:** user, having confirmed the `sole_ball_contact` diagnostic was finally accurate: "i want you to make it so if the contact is detected between the sol of the foot and the ball that the reward for cleanstop is not given, because i only want to save with the side of the feet." Confirmed scope via `AskUserQuestion` (cleanstop-only vs. also `single_foot_save` -- user picked "also gate single_foot_save").
+
+**Fix, round 1 (`rewards.py`):**
+1. New `_sole_ball_contact_per_foot(env, ball_name, asset_cfg)` -- vectorized (N,2) version of `scripts/play.py`'s `_compute_sole_ball_contact`, same literal sphere-vs-box check against `left/right_sole_vis`'s exact `pos`/`size` (duplicated constants `_SOLE_ZONE_LOCAL_POS`/`_SOLE_ZONE_HALF_SIZE`/`_SOLE_ZONE_BALL_RADIUS`, must stay in sync with `t1_headless.xml` and `play.py`'s own copies). Deliberately NOT the real (larger) `ball_contact` sensor -- user explicitly said the marker box should be used "quite literally," and that sensor's footprint is bigger than the box.
+2. Per `.claude/skills/reward-shaping-scene-entity-cfg` (loaded and followed before writing this): `cleanstop`/`single_foot_save` take no `asset_cfg` param at all, so calling the new helper from inside either would need an unresolved default `SceneEntityCfg` -- instead, computed inside `softstop()`, which already receives a genuinely-resolved `asset_cfg` (registered with `params={"asset_cfg": _FEET_CFG, ...}` in `goalkeeper_env_cfg.py`), reused directly. Verified live (not assumed) that `_FEET_CFG.body_ids` resolves to `[left_foot_link, right_foot_link]` order before indexing into it positionally.
+3. `softstop()` captured a new `env._softstop_sole_contact[fired] = ...` at the exact tick softstop fires; `cleanstop`/`single_foot_save` gated on `~env._softstop_sole_contact`.
+
+**FIX, round 2 (same session, user report: "when sole ball contact is hit i still see a spike in cleanstop how come"):** root cause -- the round-1 capture only checked sole contact at the EXACT instant softstop fired, missing contact a step or two before/after, including anywhere in cleanstop's own multi-tick settle window (settle_steps consecutive low-speed ticks AFTER softstop fires, before cleanstop actually pays out). Confirmed via `AskUserQuestion` (whole-episode latch vs. softstop-to-cleanstop window only vs. custom -- user picked whole-episode). Rewrote: `env._softstop_sole_contact` renamed `env._episode_sole_contact`, now computed and OR'd in EVERY call to `softstop()` (not gated on `fired`), latched for the rest of the episode once True, reset only on `just_reset`. Any sole touch by the assigned foot at any point in the episode now permanently blocks `cleanstop`/`single_foot_save` for the rest of it.
+
+**Verification:**
+- `ast.parse` on `rewards.py` -- no syntax errors.
+- Full suite: `env -u PYTHONPATH uv run pytest tests/ -q` -- **90/90 pass** (re-run after both rounds).
+- Live scoping check (real env, real `reward_manager.get_term_cfg("softstop").params["asset_cfg"]`, per the skill's own recommended verification pattern, not a standalone unresolved import): `body_ids=[17, 23]`, `body_names=['left_foot_link', 'right_foot_link']` -- confirmed the assumed [left, right] column order is correct before relying on it.
+- Direct gating test (real env, hand-crafted `env._softstop_flag`/`_softstop_correct_foot`/`_episode_sole_contact` state, calling `rewards.single_foot_save`/`rewards.cleanstop` directly against the REAL unwrapped env -- first attempt mistakenly called them against the AMPEnvWrapper-wrapped `env`, which silently no-ops `getattr` lookups for dynamically-set attributes since the wrapper doesn't proxy them, giving a false "0.0 for everything" result; corrected to use `env.unwrapped`, matching how the real reward manager actually calls these functions): `single_foot_save` returned exactly `[1.0, 0.0]` for `(sole_contact=False, sole_contact=True)` envs; `cleanstop` (with `speed_threshold` set trivially high to bypass an unrelated stale-ball-velocity-read artifact of teleporting the ball without an intervening `env.step()`) returned a small nonzero value for the non-sole env and exactly `0.0` for the sole-contact env.
+- **Not yet validated against a live training run.**
+- **Not pushed yet per explicit user instruction ("dont push until i tell you to") -- committed/documented locally only, awaiting go-ahead.**
+
+---
+
+## 2026-08-15 (same session) -- `sole_vis` size REVERTED again: user preferred the smaller box, only wanted the Z position fixed
+
+**Context:** user rejected the full-footprint-size fix above outright: "you broken the red geometry i liked the other on better i just want the bottom." Clarifies the actual intent -- the earlier "not touching" complaint was resolved by (or at least didn't require) the size change; the position fix (`pos_z -0.05->-0.032`, landing at the real capsule surface) was the part that mattered. The size enlargement to match the exact capsule footprint was an unrequested, unwanted change layered on top.
+
+**Fix:** `left_sole_vis`/`right_sole_vis` `size` reverted `0.0925 0.05 0.005 -> 0.065 0.03 0.005` (back to the smaller box) on both feet. `pos="0.0125 0 -0.032"` (the Z fix) left unchanged -- that part was correct and wanted. Comments updated to flag this explicitly: do not re-enlarge to match the full capsule footprint without being asked again.
+
+**Verification:**
+- `mujoco.MjSpec(...).compile()` -- both geoms confirmed back at `size=[0.065, 0.03, 0.005]`, `pos=[0.0125, 0, -0.032]`.
+- Full suite: `env -u PYTHONPATH uv run pytest tests/ -q` -- **90/90 pass**.
+
+---
+
+## 2026-08-15 (same session) -- `sole_ball_contact` REWRITTEN: user wanted the marker box used "quite literally," not the older (bigger) capsule sensor
+
+**Context:** user reported the plot "still firing without the yellow ball touching with 0 distance the red geom" -- the exact symptom expected once the marker was reverted smaller than the real `foot[1-4]_collision` capsules the underlying `ball_contact` sensor actually tracks (see the two entries above: capsule footprint ~18.5x10cm vs. the marker's ~13x6cm). Presented this as a 3-way `AskUserQuestion` (detection is correct/marker is cosmetic vs. resize marker to match vs. resize detection to match) -- user picked neither hedge: "the red marker is not cosmetic i wanted to use that geom quite literally."
+
+**Fix (`play.py`):** `_compute_sole_ball_contact` rewritten from a `ball_contact` ContactSensorCfg lookup (the real, bigger capsules) to a direct sphere(ball)-vs-box(`left/right_sole_vis`) geometric distance check, using the marker's own exact `pos`/`size` (`_SOLE_VIS_LOCAL_POS`/`_SOLE_VIS_HALF_SIZE`, new module constants -- must be kept in sync with `t1_headless.xml` if the geom ever moves/resizes, same "duplicated XML-matching constant" class as `_SHIN_GEOM_RADIUS`/`_KNEE_PROXIMITY_MARGIN`). Deliberately NOT implemented as a new `ContactSensorCfg` / NOT making the box an actual colliding geom (`contype`/`conaffinity` stay `0`) -- that would touch real physics/training behavior; this stays a pure viewer-side computation using `quat_apply_inverse` to transform the ball into each foot's local frame, then a standard sphere-vs-AABB clamp-and-distance test (exact, since the box is axis-aligned in that local frame).
+
+**Verification:**
+- `ast.parse` on `play.py` -- no syntax errors.
+- Full suite: `env -u PYTHONPATH uv run pytest tests/ -q` -- **90/90 pass**.
+- Live numerical test (CPU, real env, ball teleported to known positions relative to the box via `write_root_link_pose_to_sim` + a `env.step()` to propagate the write before reading): ball at the box's exact center -> `1.0`; ball 1m away -> `0.0`; ball comfortably inside the box (2cm from center, well under the 10cm ball radius) -> `1.0`; ball comfortably outside (30cm from center) -> `0.0`. A tight edge-case test (9cm from center, just inside the 10cm radius) initially read `0.0` -- root-caused to genuine robot foot drift (~4cm) during the single physics step between placing the ball and reading the result, not a bug in the distance math itself; confirmed by widening the margin, not by assuming.
+- **Not pushed yet per explicit user instruction ("dont push until i tell you to") -- committed/documented locally only, awaiting go-ahead.**
+
+---

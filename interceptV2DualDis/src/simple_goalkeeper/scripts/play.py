@@ -1046,27 +1046,83 @@ def _patch_viewer_foot_orientation_plot(native_viewer: "NativeMujocoViewer", env
     native_viewer._update_reward_figures = _patched_update_reward_figures
 
 
+_SOLE_VIS_LOCAL_POS = (0.0125, 0.0, -0.032)
+"""Must match left_sole_vis/right_sole_vis's `pos` in t1_headless.xml exactly
+(both feet use the identical local offset, per that file's own comments)."""
+
+_SOLE_VIS_HALF_SIZE = (0.065, 0.03, 0.005)
+"""Must match left_sole_vis/right_sole_vis's `size` (MuJoCo box half-extents)
+in t1_headless.xml exactly. Same "duplicated, must-match-XML constant" class
+as this file's own `_SHIN_GEOM_RADIUS`/`_KNEE_PROXIMITY_MARGIN` -- update
+here if the XML geom ever changes size/position."""
+
+
 def _compute_sole_ball_contact(env, env_idx: int) -> float:
-    """1.0 if the ball is in genuine contact with either foot's SOLE
-    (bottom) capsule geoms, 0.0 otherwise, for the single env at env_idx.
+    """1.0 if the ball's sphere genuinely overlaps either foot's
+    `left_sole_vis`/`right_sole_vis` marker box, 0.0 otherwise, for the
+    single env at env_idx.
 
     NEW 2026-08-15 (user request): "the robot learned to tilt its foot and
     save the ball with the bottom of its foot" -- an exploit where the sole
-    (rather than a proper blocking face) traps the ball. Reuses the existing
-    `ball_contact` ContactSensorCfg (goalkeeper_env_cfg.py) directly, no new
-    sensor needed -- confirmed by reading the XML that `left/right_foot[1-4]
-    _collision` (the sensor's exact primary pattern) ARE the sole: 4 capsules
-    per foot, all at the same local Z (-0.01), forming a flat plate under the
-    foot -- there is no separate toe/heel/edge geom to distinguish from. Live-
-    verified via `sensor.primary_names` (not assumed from the regex) that
-    columns 0-3 are left foot, 4-7 are right foot, matching the `[:, :4]`/
-    `[:, 4:]` split this codebase's rewards.py already uses for the same
-    sensor (e.g. blue_ball_landed's debug touching-ball check).
+    (rather than a proper blocking face) traps the ball.
+
+    REWRITTEN 2026-08-15 (same day, user request): the first version reused
+    the existing `ball_contact` ContactSensorCfg (the real `foot[1-4]
+    _collision` capsules) directly -- user reported this fired even when the
+    ball visually showed 0 overlap with the (deliberately smaller, per an
+    explicit request) red marker box. Root cause: NOT a sensor bug -- the
+    real capsules' footprint (X: -0.10 to 0.125, Y: ~-0.05 to 0.05 accounting
+    for their own radius) is genuinely bigger than the marker box the user
+    asked to keep small (X: -0.0525 to 0.0775, Y: -0.03 to 0.03), so contact
+    near the toe/heel/outer edge could fire the sensor while visibly missing
+    the box. User clarified the intent directly: "the red marker is not
+    cosmetic i wanted to use that geom quite literally" -- i.e. the graph
+    should track exactly this box's geometry, not the older, larger capsule
+    sensor. Rewritten as a direct sphere(ball)-vs-box(marker) distance check
+    using the box's own exact `pos`/`size` (`_SOLE_VIS_LOCAL_POS`/
+    `_SOLE_VIS_HALF_SIZE` above) -- deliberately NOT a new MuJoCo
+    ContactSensorCfg / not making the box an actual colliding geom (contype/
+    conaffinity stay 0), since that would touch real physics/training
+    behavior; this stays a pure viewer-side geometric computation, matching
+    the box "quite literally" without any physics-engine involvement.
+
+    Algorithm: transform the ball's world-frame center into each foot link's
+    local frame (quat_apply_inverse(foot_quat_w, ball_pos_w - foot_pos_w)),
+    clamp to the box's local AABB (center +/- half-size) to get the closest
+    point on the box, then check if that point is within `_BALL_GEOM_RADIUS`
+    of the ball's (local-frame) center -- standard sphere-vs-AABB distance
+    test, exact for a box that's axis-aligned in this local frame (which it
+    is, per the XML: `left_sole_vis`/`right_sole_vis` have no rotation).
     """
+    # Local, not module-level -- mirrors _compute_wrong_foot_contact_flash's
+    # own identically-named local constant (same value, kept separate/
+    # duplicated rather than promoted to module scope, since that function
+    # already documents this "must match rewards.py" duplication pattern).
+    _BALL_GEOM_RADIUS = 0.10
+
+    from mjlab.utils.lab_api.math import quat_apply_inverse
+
     raw_env = env.unwrapped if hasattr(env, "unwrapped") else env
-    ball_contact = raw_env.scene["ball_contact"]
-    found = ball_contact.data.found[env_idx]  # (8,): left_foot1-4, right_foot1-4
-    return 1.0 if bool((found > 0).any()) else 0.0
+    robot = raw_env.scene["robot"]
+    ball = raw_env.scene["ball"]
+    foot_ids = robot.find_bodies(["left_foot_link", "right_foot_link"])[0]
+    foot_pos_w = robot.data.body_link_pos_w[env_idx, foot_ids, :]      # (2, 3)
+    foot_quat_w = robot.data.body_link_quat_w[env_idx, foot_ids, :]    # (2, 4)
+    ball_pos_w = ball.data.root_link_pos_w[env_idx]                   # (3,)
+
+    device = foot_pos_w.device
+    box_center = torch.tensor(_SOLE_VIS_LOCAL_POS, device=device, dtype=torch.float32)
+    box_half = torch.tensor(_SOLE_VIS_HALF_SIZE, device=device, dtype=torch.float32)
+
+    for i in range(2):
+        rel_w = (ball_pos_w - foot_pos_w[i]).unsqueeze(0)
+        local = quat_apply_inverse(foot_quat_w[i].unsqueeze(0), rel_w)[0]
+        offset = local - box_center
+        closest_offset = torch.clamp(offset, -box_half, box_half)
+        dist = (offset - closest_offset).norm()
+        if float(dist.item()) <= _BALL_GEOM_RADIUS:
+            return 1.0
+    return 0.0
 
 
 def _patch_viewer_sole_contact_and_stop_plots(native_viewer: "NativeMujocoViewer", env) -> None:
