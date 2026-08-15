@@ -1007,6 +1007,84 @@ def _patch_viewer_foot_orientation_plot(native_viewer: "NativeMujocoViewer", env
     native_viewer._update_reward_figures = _patched_update_reward_figures
 
 
+def _compute_sole_ball_contact(env, env_idx: int) -> float:
+    """1.0 if the ball is in genuine contact with either foot's SOLE
+    (bottom) capsule geoms, 0.0 otherwise, for the single env at env_idx.
+
+    NEW 2026-08-15 (user request): "the robot learned to tilt its foot and
+    save the ball with the bottom of its foot" -- an exploit where the sole
+    (rather than a proper blocking face) traps the ball. Reuses the existing
+    `ball_contact` ContactSensorCfg (goalkeeper_env_cfg.py) directly, no new
+    sensor needed -- confirmed by reading the XML that `left/right_foot[1-4]
+    _collision` (the sensor's exact primary pattern) ARE the sole: 4 capsules
+    per foot, all at the same local Z (-0.01), forming a flat plate under the
+    foot -- there is no separate toe/heel/edge geom to distinguish from. Live-
+    verified via `sensor.primary_names` (not assumed from the regex) that
+    columns 0-3 are left foot, 4-7 are right foot, matching the `[:, :4]`/
+    `[:, 4:]` split this codebase's rewards.py already uses for the same
+    sensor (e.g. blue_ball_landed's debug touching-ball check).
+    """
+    raw_env = env.unwrapped if hasattr(env, "unwrapped") else env
+    ball_contact = raw_env.scene["ball_contact"]
+    found = ball_contact.data.found[env_idx]  # (8,): left_foot1-4, right_foot1-4
+    return 1.0 if bool((found > 0).any()) else 0.0
+
+
+def _patch_viewer_sole_contact_and_stop_plots(native_viewer: "NativeMujocoViewer", env) -> None:
+    """Add a "sole_ball_contact" raw P-panel plot (0/1, see
+    _compute_sole_ball_contact) and promote `cleanstop`/`softstop` into the
+    always-visible front slots.
+
+    NEW 2026-08-15 (user request): user watched training and found the
+    policy learned to deflect the ball with the SOLE of the foot (a tilted-
+    foot exploit) rather than a genuine block -- wants this visible live,
+    plus the two save-quality bonuses (`cleanstop`/`softstop`) that should
+    correlate with it (a sole-trap save is exactly the kind of "technically
+    stopped the ball" event those two are meant to reward/penalize the
+    quality of). Same raw-custom-plot pattern as
+    `_patch_viewer_foot_orientation_plot` (sole_ball_contact) combined with
+    the ordinary-reward-term promotion pattern (`cleanstop`/`softstop` already
+    have their own auto-created figures, just need moving to the front).
+
+    Registered LAST in run_play (after every other panel patch, including
+    `_patch_viewer_all_footorientation_plots`) so its reorder is the final
+    word -- same "last registered wins" mechanism that function's own
+    docstring documents. Brings the guaranteed-visible front slots to 11
+    (8 from `_ALL_FOOTORIENTATION_TERMS` + these 3), still under the 12-slot
+    `max_viewports` cap.
+    """
+    orig_setup = native_viewer.setup
+    orig_update_reward_figures = native_viewer._update_reward_figures
+
+    _RAW_NAME = "sole_ball_contact"
+    _PROMOTED = (_RAW_NAME, "cleanstop", "softstop")
+
+    def _patched_setup() -> None:
+        orig_setup()
+        from mjlab.viewer.native.viewer import make_empty_figure
+        cfg = native_viewer._plot_cfg
+        native_viewer._figures[_RAW_NAME] = make_empty_figure(
+            f"{_RAW_NAME} (0/1, either foot's sole touching ball)",
+            cfg.grid_size, cfg.init_yrange, cfg.history, cfg.background_alpha,
+        )
+        native_viewer._histories[_RAW_NAME] = deque(maxlen=cfg.history)
+        native_viewer._yrange[_RAW_NAME] = cfg.init_yrange
+        native_viewer._scale[_RAW_NAME] = 1.0
+        rest = [n for n in native_viewer._term_names if n not in _PROMOTED]
+        promoted = [n for n in _PROMOTED if n in native_viewer._term_names or n == _RAW_NAME]
+        native_viewer._term_names = promoted + rest
+
+    def _patched_update_reward_figures(viewer_handle: "mujoco.viewer.Handle") -> None:
+        if native_viewer._show_plots and native_viewer._term_names and not native_viewer._is_paused:
+            contact = _compute_sole_ball_contact(env, native_viewer.env_idx)
+            native_viewer._append_point(_RAW_NAME, contact)
+            native_viewer._write_history_to_figure(_RAW_NAME)
+        orig_update_reward_figures(viewer_handle)
+
+    native_viewer.setup = _patched_setup
+    native_viewer._update_reward_figures = _patched_update_reward_figures
+
+
 def _patch_viewer_postupperdofpos_plot(native_viewer: "NativeMujocoViewer", env) -> None:
     """Promote `postupperdofpos` (arm post-save recovery reward) into the
     always-visible front P-panel slots.
@@ -1650,6 +1728,7 @@ def run_play(task_id: str, cfg: PlayConfig) -> None:
         _patch_viewer_postsave_airtime_plot(native_viewer, env)
         _patch_viewer_post_recovery_plots(native_viewer, env)
         _patch_viewer_all_footorientation_plots(native_viewer, env)
+        _patch_viewer_sole_contact_and_stop_plots(native_viewer, env)
         native_viewer.run()
     elif resolved_viewer == "viser":
         ViserPlayViewer(env, final_policy).run()

@@ -3019,3 +3019,23 @@ At sigma=80, only tilts under ~5deg score meaningfully; by 11deg the reward is n
 - **Not yet validated against a live training run.**
 
 ---
+
+## 2026-08-15 (same session) -- new `sole_ball_contact` P-panel plot (0/1) + `cleanstop`/`softstop` promoted
+
+**Context:** user reported watching training and finding the policy learned to tilt its foot and deflect the ball with the SOLE (bottom) rather than a genuine block -- asked for a live 0/1 graph of sole-vs-ball contact in the MuJoCo viewer, plus `cleanstop`/`softstop` visible alongside it (the two save-quality bonuses most relevant to judging whether a sole-trap "save" is actually clean).
+
+**Investigation before writing any code (per the `debugging-mujoco-contact-sensors` skill):** read `t1_headless.xml` directly rather than assuming -- `left/right_foot[1-4]_collision` (4 capsules per foot, `fromto` all at local Z=-0.01, spanning the same X/Y footprint) ARE the flat sole plate; there is no separate toe/heel/edge geom to distinguish a "sole" touch from any other kind of foot-ball contact. This means the EXISTING `ball_contact` `ContactSensorCfg` (`goalkeeper_env_cfg.py`, primary pattern `^(left|right)_foot[1-4]_collision$`) already IS exactly the "sole touches ball" signal -- no new sensor needed, just a viewer plot exposing it. Live-verified (not assumed from the regex) via `sensor.primary_names`: columns 0-3 = left foot's 4 capsules, columns 4-7 = right's, matching the `[:, :4]`/`[:, 4:]` split `rewards.py` already uses for this same sensor elsewhere (e.g. `blue_ball_landed`'s debug touching-ball check) -- reused, not reinvented.
+
+**Fix (`play.py`, viewer/diagnostic-only, no reward-affecting code -- no pre-approval needed):**
+1. New `_compute_sole_ball_contact(env, env_idx)` -- reads `ball_contact.data.found[env_idx]` (8 values), returns `1.0` if any capsule (either foot) shows genuine contact, else `0.0`.
+2. New `_patch_viewer_sole_contact_and_stop_plots` -- adds a raw custom "sole_ball_contact" plot (same pattern `_patch_viewer_foot_orientation_plot`'s `assigned_foot_angle_deg` plot already established: `make_empty_figure` + `_append_point`/`_write_history_to_figure` each frame) and promotes `cleanstop`/`softstop` (ordinary reward terms, just need moving to the front) alongside it.
+3. Registered as the LAST call in `run_play`'s native-viewer patch chain (after `_patch_viewer_all_footorientation_plots`), so its reorder is the final word -- same "last registered wins" mechanism that function's own docstring documents. Brings the guaranteed-visible front-slot count to 11 (8 from `_ALL_FOOTORIENTATION_TERMS` + these 3), still under the 12-slot `max_viewports` cap.
+
+**Verification:**
+- `ast.parse` on `play.py` -- no syntax errors.
+- Full suite: `env -u PYTHONPATH uv run pytest tests/ -q` -- **90/90 pass**.
+- Live sensor check (CPU, real env construction): `ball_contact.primary_names` confirmed `['left_foot1_collision', ..., 'left_foot4_collision', 'right_foot1_collision', ..., 'right_foot4_collision']`, `found` shape `(N, 8)` -- matches the assumed split exactly, not just trusted from the regex.
+- Live headless smoke test (CPU, 4 envs, 60 random-action steps): `cleanstop`/`softstop` confirmed present in `reward_manager.active_terms`; `_compute_sole_ball_contact` returned valid floats every step (all `0.0` over this random-action run -- expected, a non-policy random action essentially never produces a genuine save/sole-touch); no exceptions.
+- Did not verify visually in a real display this session (GPU busy with the user's own several concurrently-running `sgk_play` sessions, same contention issue as the earlier `scripted_yaw` entries) -- user should confirm the plot renders and reacts as expected.
+
+---
