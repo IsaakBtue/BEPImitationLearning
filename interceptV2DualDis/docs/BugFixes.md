@@ -2821,3 +2821,29 @@ Algebraically equivalent (whenever `|delta| > 0.50`) to `red_y = half_y + sign(d
 - **Not yet validated against a live training run.**
 
 ---
+
+## 2026-08-15 (same session) -- new `sequence_promptness`: reward the whole blue->orange->red->save relay for margin, not just completion
+
+**Context:** user asked for an incentive to make the robot "reach the ball position earlier" -- the existing landing bonuses (`blue_ball_landed`/`orange_ball_landed`/`red_ball_landed`) pay the same flat amount whether a stage completes with the ball still far away or barely in time; there was no reward for margin/hustle across the sequence.
+
+**Design iteration (via `AskUserQuestion` + a follow-up free-text answer, not a single-shot spec):**
+1. First proposal: 3 separate one-shot "promptness" bonuses (blue/orange/red), each paid immediately at its own landing, scaled by `ball_x_local` remaining at that moment.
+2. User's free-text answer changed the design materially: "why not green also? but could we cap it too? because it would cause instability also commit it only when done." Three changes: (a) include the actual save event ("green") as a 4th stage, not just the 3 waypoint landings; (b) cap the payout; (c) don't pay out per-stage -- defer everything to a single payout gated on the save genuinely happening, so a policy that rushes the relay but fails to save gets nothing.
+
+**Fix:** new `sequence_promptness` (`rewards.py`):
+1. `promptness_now = clamp(ball_x_local / 1.5, 0, 1)` -- reuses `footreach`'s own existing "ball still far" 1.5m boundary as the reference, no new magic constant.
+2. Caches this value into `env._seq_blue_promptness`/`_orange_promptness`/`_red_promptness`/`_save_promptness` the instant each respective stage genuinely completes (`env._blue_landed_genuine`/`_orange_landed_genuine`/`_red_landed_genuine` first becoming true, and `env._sb_flag` first becoming true for the save) -- each captured independently, not all evaluated at save time.
+3. Pays out exactly once, at the exact tick the save fires: `total = (blue + orange + red + save) / 4`. A stage that never happened (e.g. red never activating, or orange never landing) contributes 0 to the average rather than being excluded from it -- this is the intended shaping, rewarding completing the WHOLE relay, not just the save itself.
+4. Cap: satisfied structurally, not via a separate clamp -- each component is already bounded `[0,1]`, so the 4-way average is inherently bounded `[0,1]` regardless of how many stages fired. With weight 3.0 (user-confirmed), max payout is 3.0.
+5. Wide crossings only (`env._blue_wide`) -- narrow crossings have no blue/orange/red concept and are unrelated to the double-step slowness problem this addresses; the term is exactly 0 there.
+6. `stopball`'s own `landing_ok` gate (`~env._blue_wide | env._blue_landed_genuine`) already guarantees blue is genuinely landed before a wide crossing's save can fire at all -- so the blue component is always captured by save-time; orange/red are optional, scoring 0 if skipped.
+
+**Registration:** `mdp/__init__.py` export added; `goalkeeper_env_cfg.py` `RewardTermCfg` inserted AFTER `stopball`/`blue_ball_landed`/`orange_ball_landed`/`red_ball_landed`/`trailing_foot_reach` (registration order matters here -- this term reads all of their cached genuine-landed/save flags, which must already be fresh this tick). Weight `3.0`.
+
+**Verification:**
+- `ast.parse` on all 3 changed files -- no syntax errors.
+- Full suite: `env -u PYTHONPATH uv run pytest tests/ -q` -- **90/90 pass** (no new unit tests, same rationale as `trailing_foot_reach` above -- this function reads real robot/ball/contact-sensor scene state unconditionally).
+- Live headless smoke test with the real trained checkpoint (`model_39750.pt`, 128 envs, 3000 steps): confirmed registered (index 28 of 61 active reward terms, weight 3.0) and fired **15 times** across the run with sane, bounded per-stage values, e.g. `blue=0.45 orange=0.23 red=0.00 save=0.03 total=0.18` and `blue=0.39 orange=0.00 red=0.00 save=0.05 total=0.11` -- `red` stayed 0 in every observed firing (expected: this checkpoint predates `red`'s existence, essentially never reaches it), `orange` fired in some but not all (also expected: not every wide-crossing save goes through a genuine orange landing on this old checkpoint), `blue` and `save` both nonzero every time (expected: `stopball`'s own `landing_ok` gate guarantees blue by save-time). No exceptions, no NaN/inf, every observed `total` correctly bounded in `[0,1]`.
+- **Not yet validated against a live training run.**
+
+---

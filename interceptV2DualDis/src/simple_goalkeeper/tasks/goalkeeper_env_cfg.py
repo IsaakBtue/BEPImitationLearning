@@ -900,6 +900,20 @@ def goalkeeper_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
             weight=10.0,
             params={"ball_name": BALL_NAME, "reach_th": 0.3, "sigma": 5.0, "asset_cfg": _FEET_CFG},
         ),
+        # NEW 2026-08-15 (user request): one-shot bonus for completing the
+        # WHOLE blue->orange->red->save relay with margin to spare, paid out
+        # only at the save itself (not per-stage, deliberately -- see
+        # rewards.py:sequence_promptness docstring for why). Registered
+        # AFTER stopball/blue/orange/red's own terms above so
+        # env._sb_flag/_blue_landed_genuine/_orange_landed_genuine/
+        # _red_landed_genuine are all fresh this tick. Weight 3.0
+        # (user-confirmed via AskUserQuestion) -- a nudge on top of the
+        # existing landing/save bonuses, not a dominant signal.
+        "sequence_promptness": RewardTermCfg(
+            func=gk_mdp.sequence_promptness,
+            weight=3.0,
+            params={"ball_name": BALL_NAME, "promptness_ref": 1.5, "asset_cfg": _FEET_CFG},
+        ),
         # --- active stepping: reward lifting feet during approach ---
         "foot_clearance": RewardTermCfg(
             func=gk_mdp.foot_clearance,

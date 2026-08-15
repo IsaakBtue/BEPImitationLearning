@@ -1829,6 +1829,114 @@ def trailing_foot_reach(
     return reach_rew * vel_sigma * env._orange_wide.float() * (~behind).float() * (~done).float()
 
 
+def sequence_promptness(
+    env: "ManagerBasedRlEnv",
+    ball_name: str,
+    asset_cfg: SceneEntityCfg = _DEFAULT_FEET_CFG,
+    promptness_ref: float = 1.5,
+) -> torch.Tensor:
+    """One-shot bonus rewarding a WIDE crossing's full blue->orange->red->save
+    relay happening with margin to spare, not just barely in time -- direct
+    answer to the user's "make the whole blue ball etc earlier" request.
+
+    NEW 2026-08-15 (user request). Caches each stage's "spare distance"
+    (ball_x_local remaining, clamped to [0,1] against `promptness_ref`) the
+    instant it genuinely completes -- blue landing, orange landing, red
+    landing, AND the save itself (env._sb_flag first firing) -- but only
+    PAYS OUT once, at the exact tick the save genuinely happens, as the
+    average of whichever stages actually occurred (0 for a stage that never
+    happened, e.g. red never activating, or orange never landing).
+
+    Deliberately deferred-payout, not 3-4 separate immediate one-shot
+    bonuses (the original proposal) -- user's own reasoning: paying out
+    promptness at each stage independently would reward a policy that
+    blitzes blue/orange/red fast but then fails to actually save; only a
+    genuinely completed save should earn credit for having been prompt
+    along the way. This also means blue/orange/red's own promptness values
+    are computed and cached long before payout, but never returned as
+    reward on their own -- only folded into this term's single payout tick.
+
+    Cap: each cached component is already clamp(ball_x_local/promptness_ref,
+    0, 1), and the average of up to 4 such values is inherently bounded in
+    [0,1] -- no separate cap logic needed (user's own "could we cap it too"
+    concern is satisfied structurally, not via an extra clamp on the sum).
+
+    promptness_ref=1.5 reuses footreach's own existing "ball still far"
+    phase boundary rather than introducing a new magic constant.
+
+    Wide crossings only (env._blue_wide) -- narrow crossings have no
+    blue/orange/red concept, unrelated to the double-step slowness problem
+    this addresses; this term is exactly 0 there.
+
+    landing_ok (stopball's own gate, `~env._blue_wide | env._blue_landed_
+    genuine`) already guarantees blue is genuinely landed by the time a wide
+    crossing's save can fire at all -- so the blue component is always
+    captured by save-time on a wide crossing; orange/red are optional,
+    scoring 0 if skipped, which is the intended "reward completing the
+    WHOLE relay" shaping.
+
+    Not yet validated against a live training run.
+    """
+    # Defensive freshness calls -- registration order already guarantees
+    # these are fresh (this term is registered after stopball/blue/orange/
+    # red's own terms in goalkeeper_env_cfg.py), but every other multi-stage
+    # reader in this file (e.g. blue_overshoot_penalty) makes the same
+    # belt-and-suspenders call rather than relying on registration order
+    # alone.
+    _get_reach_target_y(env, ball_name, asset_cfg=asset_cfg)
+    _get_orange_reach_target_y(env, ball_name, asset_cfg=asset_cfg)
+    _get_red_reach_target_y(env, ball_name, asset_cfg=asset_cfg)
+
+    ball: Entity = env.scene[ball_name]
+    ball_x_local = ball.data.root_link_pos_w[:, 0] - env.scene.env_origins[:, 0]
+    promptness_now = (ball_x_local / promptness_ref).clamp(0.0, 1.0)
+
+    n = env.num_envs
+    if not hasattr(env, "_seq_blue_promptness"):
+        env._seq_blue_promptness = torch.zeros(n, device=env.device)
+        env._seq_orange_promptness = torch.zeros(n, device=env.device)
+        env._seq_red_promptness = torch.zeros(n, device=env.device)
+        env._seq_save_promptness = torch.zeros(n, device=env.device)
+        env._seq_blue_captured = torch.zeros(n, dtype=torch.bool, device=env.device)
+        env._seq_orange_captured = torch.zeros(n, dtype=torch.bool, device=env.device)
+        env._seq_red_captured = torch.zeros(n, dtype=torch.bool, device=env.device)
+        env._seq_paid = torch.zeros(n, dtype=torch.bool, device=env.device)
+    just_reset = env.episode_length_buf <= 1
+    env._seq_blue_promptness[just_reset] = 0.0
+    env._seq_orange_promptness[just_reset] = 0.0
+    env._seq_red_promptness[just_reset] = 0.0
+    env._seq_save_promptness[just_reset] = 0.0
+    env._seq_blue_captured[just_reset] = False
+    env._seq_orange_captured[just_reset] = False
+    env._seq_red_captured[just_reset] = False
+    env._seq_paid[just_reset] = False
+
+    newly_blue = env._blue_landed_genuine & ~env._seq_blue_captured
+    env._seq_blue_promptness = torch.where(newly_blue, promptness_now, env._seq_blue_promptness)
+    env._seq_blue_captured |= newly_blue
+
+    newly_orange = env._orange_landed_genuine & ~env._seq_orange_captured
+    env._seq_orange_promptness = torch.where(newly_orange, promptness_now, env._seq_orange_promptness)
+    env._seq_orange_captured |= newly_orange
+
+    newly_red = env._red_landed_genuine & ~env._seq_red_captured
+    env._seq_red_promptness = torch.where(newly_red, promptness_now, env._seq_red_promptness)
+    env._seq_red_captured |= newly_red
+
+    sb_flag = getattr(env, "_sb_flag", torch.zeros(n, dtype=torch.bool, device=env.device))
+    newly_saved = sb_flag & ~env._seq_paid
+    env._seq_save_promptness = torch.where(newly_saved, promptness_now, env._seq_save_promptness)
+
+    total = (
+        env._seq_blue_promptness + env._seq_orange_promptness
+        + env._seq_red_promptness + env._seq_save_promptness
+    ) / 4.0
+
+    fired = newly_saved & env._blue_wide
+    env._seq_paid |= fired
+    return fired.float() * total
+
+
 def red_foot_proximity(
     env: "ManagerBasedRlEnv",
     ball_name: str,
