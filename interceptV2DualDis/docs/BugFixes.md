@@ -3152,3 +3152,115 @@ Verified via `mujoco.MjSpec(...).compile()` -- both geoms resolve at `size=[0.09
 - Statistical check (200k samples, real constants from both files, hardest difficulty `d=1.0`): branch-detection check confirmed `True` (correct one-sided routing, not the broken two-sided fallback); sign stayed positive for `left_near` in 100% of samples (no accidental side-flip); magnitude ranged `[0.00056, 0.49999]` (matches `inner~=0`, `outer=0.5` at `d=1`); median `0.354` vs. uniform's expected `0.250` (confirms the outer-favoring skew); only `~1%` of samples landed in the bottom 10% of the range vs. `~10%` expected under plain uniform sampling (confirms center values are now genuinely rare, matching the user's stated intent).
 - **Not yet validated against a live training run.**
 - **Not pushed yet -- awaiting go-ahead, per the standing "dont push until i tell you to" instruction.**
+
+---
+
+## 2026-08-15 — `postorientation` home-frame target changed to 15 deg forward lean
+
+**What changed:** `postorientation` (`rewards.py`) target changed from dead-vertical (`grav_b[:, :2] == (0, 0)`) to a 15 deg forward lean (`grav_b[:, 0] == sin(15deg) ~ 0.259`, `grav_b[:, 1] == 0`). Reward shape (`exp(-3.0 * err)`, weight +3.0, always active) unchanged. New module constant `_HOME_LEAN_TARGET = math.sin(math.radians(15.0))`.
+
+**Why it was wrong (for the user's stated goal):** User observed the robot habitually leaning forward post-save and judged that stance more stable than the fully upright target `postorientation` was actively pulling it toward. The reward was fighting the robot's own natural, apparently-more-stable equilibrium instead of encoding it as the target.
+
+**Correct value:** 15 deg forward lean (`AskUserQuestion`: offered ~8deg/~15deg/custom, user picked ~15deg). Scope kept always-active rather than gated to post-save only (`AskUserQuestion`: offered always-active/post-save-only, user picked always-active — avoids reintroducing the pre-2026-07-20 backward-lean-during-approach drift this reward's always-active gating was originally added to fix, see the row above in this file and `CLAUDE.md`'s Reward Design table).
+
+**Sign derivation (not yet render-verified):** `grav_b = R_world_to_body . (0,0,-1)`. Per this project's Frame Convention (body X = forward, robot faces world +X, upright => `grav_b[:,:2]=(0,0)`), a forward pitch by theta about the body Y axis gives `grav_b[:,0] = sin(theta) > 0`. Confirm via `sgk_play` on the next checkpoint that the resulting stance reads as forward, not backward, lean before trusting this sign on a longer run.
+
+**Evidence:** User-reported visual observation of post-save posture during play; no live training run yet with the new target.
+
+**Not yet validated against a live training run.**
+
+---
+
+## 2026-08-15 — `red_foot_proximity` gate fixed: was dead-on-arrival (`~behind` -> `~env._red_landed_genuine`)
+
+**What changed:** `red_foot_proximity`'s (`rewards.py`) gate changed from `env._red_wide.float() * env._red_active.float() * (~behind).float()` to `env._red_wide.float() * env._red_active.float() * (~env._red_landed_genuine).float()`, where `behind = _ball_is_behind(env, ball_name)`. Matches the gate its two siblings `red_overshoot_penalty`/`red_stick_landing` already used (`_red_wide & _red_active & ~_red_landed_genuine`) -- this term was the one outlier among the four `red_*` reward functions.
+
+**Why it was wrong:** `env._red_active` requires BOTH `env._blue_landed_genuine` AND `env._orange_landed_genuine` to already be true (`_get_red_reach_target_y`'s `candidate` line) -- which structurally only happens once the ball has already deflected off the leading/trailing feet, i.e. after `behind` has very likely already flipped True. The old `(~behind)` factor was therefore plausibly dead-on-arrival: by the time `_red_active` could ever turn True, `(~behind)` was already False for most envs, so this term could almost never pay out a nonzero reward. User's own observation matched exactly: the trailing foot didn't visibly stay planted near the ball after a save even though this term exists to reward precisely that.
+
+**Correct value:** Gate on `~env._red_landed_genuine` (active until the trailing foot genuinely lands at red, then stops) instead of `~behind` -- the same "active until landed" pattern already proven correct by `red_overshoot_penalty`/`red_stick_landing`, which never had this bug.
+
+**Evidence:** Code inspection of all 4 `red_*` reward functions confirmed only `red_foot_proximity` carried the extra `(~behind)` factor; the other three already used `~_red_landed_genuine`. Not runtime-verified with a live tensor trace (no training run since this fix). **Not yet validated against a live training run.**
+
+---
+
+## 2026-08-15 — Leading-foot inner-face target retargeted 60 deg -> 50 deg (physical reach limit)
+
+**What changed:** `_FOOT_TARGET_ANGLE_DEG` (`rewards.py`) changed from `60.0` to `50.0`. Feeds `inner_face_orientation_save` and `foot_inner_face_continuous` (both derive their target vector from this one constant), no other code touched.
+
+**Why it was wrong:** T1's ankle has no yaw DOF (confirmed in `t1_headless.xml`), so `Hip_Yaw` is the only joint that can rotate the leading foot's heading toward the reward's target. FK analysis (grid-search over `Hip_Yaw`'s full `[-1, 1]` rad range, rendered before/after; numbers below are independently reproducible from this repo's data/code alone -- the "Inner-Face Reach Limit" render/schematic itself was published as an external claude.ai Artifact, not a repo file, so it isn't a dependency for verifying these findings) found:
+- Raw joint hard limit: `+/-1.000 rad = +/-57.30 deg`.
+- From a true neutral stance (`HOME_KEYFRAME`), maxing out `Hip_Yaw` only sweeps the foot `+/-54.17 deg` off forward — kinematic coupling loses a further ~3 deg beyond the raw joint limit.
+- From an actual save-landing pose (`LeftStep_own`/`Rightstep_own`'s last frame), the best-alignment search fell `10.84 deg` short of the exact 60 deg target vector.
+
+60 deg was never fully reachable. No amount of training can close that gap — it's a kinematic ceiling, not a reward-shaping problem.
+
+**Why not 45 deg instead:** considered and rejected. Same direction as the 2026-08-10 fix (see the row above / `CLAUDE.md` Reward Design table): a shallower target raises the "do nothing" reward at zero rotation (`cos(45deg)=0.71` vs `cos(60deg)=0.50`), which is exactly what caused the foot to "almost not rotate at all" before 75 deg was tried. 45 deg would reintroduce a worse version of that same problem while only fixing reachability.
+
+**Correct value:** 50 deg — inside the ~54.17 deg physical ceiling with margin (not pinned at the hard joint limit, which carries its own reaction-torque risk, see the Hip_Yaw-reaction-torque entries elsewhere in this file), while staying steeper than 45 deg (`cos(50deg)=0.64`) so the do-nothing gradient doesn't regress as far.
+
+**Evidence:** Rendered top-down before/after images (MuJoCo FK, both `LeftStep_own`/`Rightstep_own` last frames and a clean neutral-stance isolation), grid-search over the full `Hip_Yaw` range maximizing alignment with `foot_inner_face_continuous`'s exact target vector formula (`rewards.py:4048-4054`). Left/right results were exact mirror images in both tests, consistent with the corrected `LeftStep_own` mirror (see the mirror-tool entry above) and the reward's symmetric formula.
+
+**Not yet validated against a live training run.**
+
+---
+
+## 2026-08-15 — `LeftStep_own_booster_t1.npz` re-mirrored from `Rightstep_own_booster_t1.npz` (36 -> 53 frames)
+
+**What changed:** `LeftStep_own_booster_t1.npz` regenerated via `sgk_mirror --input-file Rightstep_own_booster_t1.npz --output-file LeftStep_own_booster_t1.npz` (`scripts/mirror_motion.py`, self-inverse L<->R joint/quat mirror + full FK re-fit for `body_pos_w`/`body_quat_w`, matching `pkl_to_npz.py`'s own Pass 2). Frame count `36 -> 53` (0.72s -> 1.06s @ 50fps), now matching `Rightstep_own_booster_t1.npz`'s 53 frames exactly (mirroring is self-inverse and duration-preserving, so any correctly-mirrored pair must match).
+
+**Why it was wrong:** `LeftStep_own_booster_t1.npz` (36 frames) and `Rightstep_own_booster_t1.npz` (53 frames) were NOT duration-matched, unlike every other left/right clip pair in this project's motion set (double-step variants are all matched: 51/51, 36/36, 61/61). No `sgk_mirror` provenance for these two files found in git log -- they were likely independently hand-captured rather than one being a true mirror of the other. Left as a suspected root cause of documented left/right training-convergence asymmetry in `foot_inner_face_continuous`/`inner_face_orientation_save` (mirror-symmetric yaw-drift investigation, see the Divergences table's Hip_Yaw-reaction-torque entries) -- `left_near`'s AMP discriminator (`REGION_MOTION_FILES`, `goalkeeper_multidisc_amp_cfg.py:261-284`) was trained against a shorter, unverified-as-mirrored single clip while `right_near`'s was trained against the longer, canonical one.
+
+**Correct value:** `Rightstep_own_booster_t1.npz` kept as the canonical/untouched source (per user request, "the rightstep-own booster the correct one and leave it be"); `LeftStep_own_booster_t1.npz` regenerated as its exact mirror.
+
+**Evidence:** Post-mirror frame count matches Rightstep (53/53). Command tested headlessly via `sgk_play ... --agent zero --no-terminations True --motion-file ...` on both the old and new files before and after (no parse/load errors, only a benign GLFW/Wayland warning). Old (pre-mirror) content recoverable via `git show HEAD:.../LeftStep_own_booster_t1.npz` (untouched at HEAD, since this is the first change made to this file this session). **Not yet validated against a live training run.**
+
+---
+
+## 2026-08-15 — Near-region AMP clips (LeftStep_own/Rightstep_own) retargeted to a 50 deg leading-foot heading
+
+**What changed:** `LeftStep_own_booster_t1.npz`'s `Left_Hip_Yaw` and `Rightstep_own_booster_t1.npz`'s `Right_Hip_Yaw` (the leading/assigned foot in each clip) smoothly retargeted so the clip's final held pose reaches a ~50 deg robot-local foot heading, matching `foot_inner_face_continuous`/`inner_face_orientation_save`'s new `_FOOT_TARGET_ANGLE_DEG=50` (see the row above). `Left_Hip_Yaw`: `+21.07deg -> +44.15deg` (final frame), robot-local foot azimuth `+49.99deg` (0.01 deg residual). `Right_Hip_Yaw` mirrored exactly: `-21.07deg -> -44.15deg`, azimuth `-49.99deg`. No other joint touched RELATIVE TO THE POST-MIRROR BASELINE (verified: max change on all other joints across all frames = 0.0). **Important disambiguation (added after a same-day audit flagged this entry as misleading):** git HEAD for `LeftStep_own_booster_t1.npz` predates BOTH this retarget AND the earlier same-day mirror fix (see the mirror-fix entry immediately above/near this one) — HEAD is the original 36-frame, un-mirrored, un-retargeted clip. The "no other joint touched" claim is true relative to the POST-MIRROR (53-frame) state, not raw git HEAD; diffing this file against git HEAD directly will show the mirror's L/R joint-slot swap too, not just the Hip_Yaw retarget, and is expected to. `Rightstep_own_booster_t1.npz` was never mirrored (already canonical), so for that file "vs git HEAD" and "vs pre-retarget" are the same comparison. The `motions/*_pre50deg_backup.npz` files that made the original in-session verification possible were deleted afterward (2026-08-15, user request, "we can always pull it back in the github history") — re-verified post-deletion by reconstructing the post-mirror/pre-retarget baseline via `sgk_mirror` sourced from `git show HEAD:.../Rightstep_own_booster_t1.npz`, diffing against the current file: confirms only joint index 11 (`Left_Hip_Yaw`) differs, grounded-mask unchanged, no NaN -- same result as the original in-session check.
+
+**Why it was wrong:** `REGION_MOTION_FILES` (`goalkeeper_multidisc_amp_cfg.py:261-284`) pins the `left_near`/`right_near` AMP discriminators to exactly these two single-file clips — each discriminator's entire style prior for the near region. Before this fix, that prior held the leading foot at its OLD landing heading (~21 deg off forward), while the reward simultaneously demanded a 60deg-then-50deg block posture — the discriminator would have penalized the policy for deviating from the ~21deg reference toward the reward's target, fighting the reward instead of reinforcing it.
+
+**Correct value:** Retarget derived from a robot-local-azimuth grid search over the assigned foot's `Hip_Yaw` (full `[-1,1]` rad range) on each clip's last frame, blended in via a smoothstep ramp over the whole clip (0 at frame 0, full offset at the final frame) so `joint_pos`/`joint_vel` stay continuous — no discontinuity, no other joint perturbed. Robot-local azimuth (not `foot_inner_face_continuous`'s raw 3D dot-product alignment) was used as the search target: this specific frame carries its own incidental Z-tilt (~0.2-0.37 in the foot's local long-axis vector, from the reaching motion's Hip_Roll/Ankle state) that the 3D metric would conflate with genuine azimuth error; azimuth alone is the intuitive "degrees off forward" quantity actually being retargeted.
+
+**Both assigned feet are airborne (reaching), never grounded, for the entirety of both clips** (`left_foot_link` z range `[0.068, 0.094]` in `LeftStep_own`, `right_foot_link` same range in `Rightstep_own`; grounded threshold is `0.033`) — confirmed before editing. This is why the edit was safe without any flat-foot Newton-solve or stance-preserving IK: there is no ground-contact invariant to break, unlike the position-correction cases documented earlier in this file. The trailing (grounded, ~0.030m) foot in each clip was never touched.
+
+**Two false starts before landing on the above (both caught before being trusted, not shipped):**
+1. First attempt set `Hip_Yaw`'s raw joint VALUE equal to `50 deg` directly, conflating "joint angle" with "resulting foot heading" — these only coincide at Hip_Yaw=0 from a neutral pose. On this clip's actual (non-neutral) final pose, `Hip_Yaw=50deg` produced a foot heading of `+64.05deg` off forward, a large overshoot.
+2. Second attempt grid-searched the exact 3D dot-product alignment (matching `foot_inner_face_continuous`'s own reward formula) instead of azimuth. This found `Hip_Yaw=+52.51deg` gave the best 3D alignment (residual 14.69deg) — worse than the *60deg* target's own residual (10.84deg) at the same joint value, which is backwards for a less demanding target. Root cause: the 3D metric is sensitive to this frame's incidental Z-tilt, which doesn't track target angle monotonically. Switched to plain robot-local azimuth (this file's final approach), which resolved cleanly to 0.01deg residual.
+
+**Evidence:** `grounded-mask changed anywhere: False` for both clips (foot-grounded/airborne timing preserved exactly), `max joint_pos change on OTHER joints: 0.00e+00` (only the intended joint touched), no NaN, peak `|joint_vel|` on the retargeted joint rose modestly (`1.990 -> 2.261/2.329 rad/s` across the two false starts and final version — not a spike), left/right results exact mirrors in every run.
+
+**Not yet validated against a live training run.**
+
+---
+
+## 2026-08-15 — foot_inner_face_continuous overshoot penalty steepened (0.00333 -> 0.03)
+
+**What changed:** `_FOOT_OVERSHOOT_SIGMA` (`rewards.py`) changed from `0.00333` to `0.03`. Same formula (`exp(-sigma * overshoot_err**2)`), applied only on the overshoot side (foot rotated past the target, on the correct side) exactly as before -- only the steepness constant changed.
+
+**Why it was wrong:** This sigma was calibrated on 2026-08-05 for the target angle in effect at the time (60deg): error = target_magnitude (the 30deg gap back to the OLD 90deg value) scores ~0.05. Today's session retargeted `_FOOT_TARGET_ANGLE_DEG` 60deg -> 50deg (see the row above), but left `_FOOT_OVERSHOOT_SIGMA` untouched. At the new 50deg target, the equivalent "drifted back to the old target" overshoot is only 10deg (60-50), not 30deg -- reusing 0.00333 at that smaller gap gives `exp(-0.00333*10^2) = 0.72`, a ~28% drop, nowhere near "drastic." User explicitly asked for a prominent, drastic drop when the foot overshoots toward the old 60deg value.
+
+**Correct value:** `0.03`, solved the same way the original was: `exp(-sigma*10^2) = 0.05` -> `sigma = -ln(0.05)/100 ~= 0.02996`, rounded to the same clean-fraction style as the original (`0.00333 = 3/900`; `0.03 = 3/100`). Verified: `exp(-0.03*10^2)=0.0498` (~0.05 at the 50->60deg gap), `exp(-0.03*5^2)=0.472` (~0.47 at half that gap) -- same shape/philosophy as the 2026-08-05 fix, just re-anchored to the smaller reference distance.
+
+**Evidence:** Direct computation (`math.exp`), no live checkpoint yet. **Not yet validated against a live training run.**
+
+---
+
+## 2026-08-15 — Green (final-approach) foot target offset 5cm outward for inner-foot saves
+
+**What changed:** New `_INNER_FOOT_TARGET_OFFSET = 0.05` and `_get_foot_block_offset(env, ball_name)` (`rewards.py`) returning a signed `±0.05m` offset, sign matching which side the ball crosses on (outward, away from center). Wired into exactly 3 places:
+1. `_get_reach_target_y`'s return line — `full_y` -> `full_y + offset` in the `phase1_active=False` (green) branch only; `half_y` (blue midpoint) untouched.
+2. `footreach`'s live-ball switch — `live_y` -> `live_y + offset` when `ball_close`.
+3. `foot_proximity`'s identical live-ball switch.
+
+`play.py`'s green-sphere visualizer (`_patch_...` debug-vis function) updated to match: the ground rod stays pinned to the true, unmodified `env._ball_crossing_y`, while the sphere moves to `crossing_y + offset`, decoupling "where the ball actually lands" from "where the foot should aim." New viewer-only constant `_INNER_FOOT_TARGET_OFFSET` mirrors the reward-side one (must be kept in sync, same discipline as `_FOOT_TARGET_ANGLE_DEG`). Also caught and fixed `play.py`'s `_FOOT_TARGET_ANGLE_DEG` (still `75.0`, stale since the 2026-08-13 revert and this session's 2026-08-15 retarget to `50.0`) while in the area.
+
+**Why:** user wants the leading foot to save with its INNER edge rather than dead center, which means the aim point needs to sit slightly past the ball's true crossing line, not exactly on it — an intentional overshoot.
+
+**Why the scope stayed this narrow (not "all rewards" as originally requested):** initial investigation found `_get_ball_crossing_y` has 11 call sites split between two unrelated roles — pure direction/foot-side-selection (`_get_correct_foot_idx`, `footreach`'s own overshoot-kill-switch, `red_overshoot_penalty`'s direction sign) which must stay on real ball data, and actual target-Y construction (blue/orange/red waypoints, `blue_stick_landing`'s midpoint). User then explicitly scoped the request down to green only. Blue midpoint, orange, red, `success`, `stopball`, `stayonline`, and region-estimator ground truth are all deliberately untouched — confirmed by re-reading each site, not assumed.
+
+**Correct value:** `0.05m` (5cm), direction = away from center (`sign(crossing_y - start_y)`, defaulting outward on the zero-crossing edge case).
+
+**Evidence:** `ast.parse` on both changed files — no syntax errors. Full suite: `env -u PYTHONPATH uv run pytest tests/ -q` — **90/90 pass**. `play.py` change is viewer-only (no training effect). **Not yet validated against a live training run** for the reward-side change.

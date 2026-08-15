@@ -1,4 +1,12 @@
-# Relaunch training to pick up the 3 new always-on penalties
-# (ankle_pitch_pos=-5.0, ankle_roll_pos=-5.0, ankle_roll_vel=-1.0):
+# LEFT -- current near-region clip (mirrored + 50deg-retargeted), live in
+# motions/data/, the only version AMP's left_near discriminator ever trains on.
 cd /home/isaak/BEPImitationlearning/interceptV2DualDis
-uv run sgk_train Mjlab-BeyondAMP-Goalkeeper-T1-MultiDisc --num-envs 4096
+uv run sgk_play Mjlab-BeyondAMP-Goalkeeper-T1-MultiDisc-WithOverlay \
+  --agent zero --no-terminations True \
+  --motion-file src/simple_goalkeeper/motions/data/LeftStep_own_booster_t1.npz
+
+# RIGHT -- current near-region clip (mirror of the above).
+cd /home/isaak/BEPImitationlearning/interceptV2DualDis
+uv run sgk_play Mjlab-BeyondAMP-Goalkeeper-T1-MultiDisc-WithOverlay \
+  --agent zero --no-terminations True \
+  --motion-file src/simple_goalkeeper/motions/data/Rightstep_own_booster_t1.npz

@@ -564,10 +564,10 @@ def _patch_viewer_intercept_vis(native_viewer: "NativeMujocoViewer", env) -> Non
         landed_t = getattr(raw_env, "_blue_landed", None)
         wide = bool(wide_t[0].item()) if wide_t is not None else False
         landed = bool(landed_t[0].item()) if landed_t is not None else False
+        start_y = float(origins[1])
 
         if wide and not landed:
             # Phase 1: BLUE sphere at the midpoint — half the distance, half as far.
-            start_y = float(origins[1])
             mid_y = start_y + (cross_y - start_y) / 2.0
             _add_sphere(goal_x, mid_y, sphere_z, 0.08, [0.15, 0.4, 1.0, 0.75])
             _add_line(
@@ -576,8 +576,27 @@ def _patch_viewer_intercept_vis(native_viewer: "NativeMujocoViewer", env) -> Non
                 0.008, [0.15, 0.4, 1.0, 0.6],
             )
         else:
-            # Phase 2 (or narrow crossing): GREEN sphere at the full crossing point.
-            _add_sphere(goal_x, cross_y, sphere_z, 0.08, [0.1, 1.0, 0.2, 0.75])
+            # Phase 2 (or narrow crossing): GREEN sphere at the foot's aim point
+            # (the true crossing point + a small outward offset, see
+            # _INNER_FOOT_TARGET_OFFSET), decoupled from the rod below it.
+            #
+            # NEW 2026-08-15 (user request): previously the rod (ground-truth
+            # marker for the ball's actual calculated landing spot) and the
+            # sphere (what a human reads as "where to put the foot") sat at
+            # the exact same Y, conflating two different things. User wants
+            # to save with the INNER part of the foot rather than dead
+            # center, which means slightly overshooting outward past the
+            # ball's true line -- so the rod now stays pinned to the real,
+            # unmodified crossing_y (still an honest ball-physics marker),
+            # while the sphere moves to crossing_y + _INNER_FOOT_TARGET_OFFSET
+            # (outward, away from center) to show the actual foot-placement
+            # target. See rewards.py's matching `_get_foot_block_offset` helper
+            # -- this marker must stay in sync with whatever the reward
+            # terms actually optimize for, same discipline as the
+            # blue/orange/red spheres already follow.
+            outward_sign = 1.0 if (cross_y - start_y) >= 0.0 else -1.0
+            foot_target_y = cross_y + outward_sign * _INNER_FOOT_TARGET_OFFSET
+            _add_sphere(goal_x, foot_target_y, sphere_z, 0.08, [0.1, 1.0, 0.2, 0.75])
             _add_line(
                 np.array([goal_x, cross_y, floor_z], dtype=np.float64),
                 np.array([goal_x, cross_y, sphere_z], dtype=np.float64),
@@ -948,15 +967,28 @@ def _patch_viewer_wrong_foot_contact_plot(native_viewer: "NativeMujocoViewer", e
     native_viewer._update_reward_figures = _patched_update_reward_figures
 
 
-_FOOT_TARGET_ANGLE_DEG = 75.0
+_FOOT_TARGET_ANGLE_DEG = 50.0
 """Must match rewards.py's _FOOT_TARGET_ANGLE_DEG (leading-foot block-posture
 target, 2026-08-01, retargeted 60->45 2026-08-07, reverted 45->60 2026-08-08
 per user request -- back to the original 2026-08-01 value; retargeted again
 60->75 2026-08-10 per user request, "15 degrees from the y axis", after a
 model_11250.pt replay found the foot almost not rotating toward the target
-at all). Kept as a separate literal here (viewer-only display, no runtime
-dependency on rewards.py's private constant) purely for the plot title --
-verify against rewards.py if that constant ever changes."""
+at all. FIX 2026-08-13: reverted 75->60. FIX 2026-08-15: retargeted 60->50 --
+FK/render analysis found Hip_Yaw's physical reach ceiling (~54.17deg from
+neutral) is below 60deg; see rewards.py's _FOOT_TARGET_ANGLE_DEG docstring
+and docs/BugFixes.md). Kept as a separate literal here (viewer-only display,
+no runtime dependency on rewards.py's private constant) purely for the plot
+title -- verify against rewards.py if that constant ever changes."""
+
+_INNER_FOOT_TARGET_OFFSET = 0.05
+"""Must match rewards.py's _get_foot_block_offset helper (NEW 2026-08-15, user
+request). User wants to save with the INNER part of the foot rather than
+dead center, which means the foot's aim point should sit slightly further
+out (away from center) than the ball's true calculated crossing point --
+this offset is that gap, in meters. Used only to draw the green sphere at
+the actual foot-aim point while the rod stays pinned to the true, unmodified
+ball crossing_y -- see the green-sphere block below. Verify against
+rewards.py if that constant ever changes."""
 
 _FOOT_TARGET_TOLERANCE_DEG = 31.79
 """degrees(acos(0.85)) -- inner_face_orientation_save's alignment_threshold

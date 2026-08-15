@@ -78,7 +78,24 @@ _DEFAULT_ROBOT_CFG = SceneEntityCfg("robot")
 # unconditional yaw-rate penalty made "don't rotate" locally optimal where
 # the baseline run's easier target + no pre-save yaw penalty made rotating
 # clearly worth it. Not yet validated against a live training run.
-_FOOT_TARGET_ANGLE_DEG = 60.0
+#
+# FIX 2026-08-15 (user request): 60 -> 50 deg off forward. Root cause:
+# rendered-image + FK analysis (docs/superpowers -- see the 2026-08-15
+# "Inner-Face Reach Limit" artifact) found T1's Hip_Yaw -- the ONLY DOF that
+# can rotate the foot's heading, since the ankle has no yaw axis -- physically
+# tops out at +/-57.30 deg (hard joint range) and only sweeps the foot
+# +/-54.17 deg off forward from a neutral stance (kinematic coupling loses a
+# further ~3 deg beyond the raw joint limit). 60 deg was never fully
+# reachable; the foot could get to within ~5.8 deg of it at best (neutral
+# stance) and off a real save-landing pose the gap measured 10.84 deg. 45 deg
+# was considered and rejected: it's the same direction as the 2026-08-10 fix
+# above (a shallower target raises the do-nothing reward -- cos(45deg)=0.71
+# vs cos(60deg)=0.50 -- which is exactly what made the foot barely rotate
+# before 75deg was tried). 50 deg sits inside the ~54.17 deg physical ceiling
+# with margin (not pinned at the hard limit) while staying steeper than 45deg
+# (cos(50deg)=0.64) so the do-nothing gradient doesn't regress as far. Not yet
+# validated against a live training run.
+_FOOT_TARGET_ANGLE_DEG = 50.0
 _FOOT_TARGET_COS = math.cos(math.radians(_FOOT_TARGET_ANGLE_DEG))
 _FOOT_TARGET_SIN = math.sin(math.radians(_FOOT_TARGET_ANGLE_DEG))
 
@@ -103,7 +120,20 @@ _FOOT_TARGET_SIN = math.sin(math.radians(_FOOT_TARGET_ANGLE_DEG))
 # "rotated the wrong way"; cos's asymmetric shape around a non-90deg target
 # already does distinguish them, and a symmetric Gaussian rescale would
 # have erased that distinction).
-_FOOT_OVERSHOOT_SIGMA = 0.00333
+#
+# FIX 2026-08-15 (user request): 0.00333 -> 0.03, following the target
+# retarget 60->50 (see _FOOT_TARGET_ANGLE_DEG above). The original value was
+# calibrated so error = target_magnitude (the 30deg gap from the then-target
+# 60deg back to the old 90deg value) scores ~0.05 -- at the NEW 50deg target,
+# reusing 0.00333 would score the equivalent "one full step back" overshoot
+# (50->60deg, a 10deg gap -- 60 being the OLD target, the exact drift this
+# term exists to punish) at exp(-0.00333*10^2)=0.72, only a ~28% drop: far
+# too gentle to read as "drastic." Same steepness convention, rescaled to the
+# new, smaller reference gap: error=10deg scores ~0.05 (exp(-0.03*10^2)=0.05),
+# half that error (5deg) scores ~0.47 -- identical calibration philosophy to
+# the 2026-08-05 fix above, just re-anchored to the new target's own "back to
+# the old target" distance instead of the old target's.
+_FOOT_OVERSHOOT_SIGMA = 0.03
 _DEFAULT_KNEE_CFG = SceneEntityCfg("robot", body_names=("Shank_Left", "Shank_Right"))
 # FIX 2026-08-03 (user request, G1-comparison finding): postupperdofpos's ONLY
 # consumer. Was Shoulder_Pitch/Roll + Elbow_Pitch/Yaw x2 sides (8 joints) --
@@ -423,6 +453,39 @@ def _get_ball_crossing_y(env: "ManagerBasedRlEnv", ball_name: str) -> torch.Tens
             t_cross = ball_x_local[just_reset] / (-bvx)
             env._ball_crossing_y[just_reset] = ball_pos_w[just_reset, 1] + bvy * t_cross
     return env._ball_crossing_y
+
+
+_INNER_FOOT_TARGET_OFFSET = 0.05
+"""NEW 2026-08-15 (user request). User wants to save with the INNER part of
+the leading foot rather than dead center, which means slightly overshooting
+outward (away from center) relative to the ball's true calculated crossing
+point. Applied ONLY to the GREEN target -- the full/final crossing point
+footreach and foot_proximity converge on, both the frozen far-field value
+(_get_reach_target_y's phase1_active=False branch) and the live-ball value
+they switch to inside the last 0.5m (both would otherwise silently erase the
+offset right at the moment it matters most for contact). Deliberately NOT
+applied to: the blue midpoint (a pre-position waypoint, not the save point),
+orange/red (separate trailing-foot waypoint system), _get_ball_crossing_y
+itself (the true ball prediction -- success/stopball/stayonline/region
+ground truth/the play.py rod marker all correctly keep reading the real,
+unmodified value), or any direction-only usage (_get_correct_foot_idx,
+footreach's own overshoot-kill-switch, red_overshoot_penalty's direction
+sign). Must match play.py's _INNER_FOOT_TARGET_OFFSET (viewer-only green
+sphere marker) -- verify both if this ever changes."""
+
+
+def _get_foot_block_offset(env: "ManagerBasedRlEnv", ball_name: str) -> torch.Tensor:
+    """Signed Y offset pushing the GREEN foot-aim target outward (away from
+    center) by _INNER_FOOT_TARGET_OFFSET. Add this to whatever base Y value
+    a caller is already using (frozen crossing point or live ball position)
+    -- see _INNER_FOOT_TARGET_OFFSET's own docstring for exactly which
+    callers should and shouldn't use this.
+    """
+    crossing_y = _get_ball_crossing_y(env, ball_name)
+    start_y = env.scene.env_origins[:, 1]
+    sign = torch.sign(crossing_y - start_y)
+    sign = torch.where(sign == 0, torch.ones_like(sign), sign)  # dead-center: default outward
+    return sign * _INNER_FOOT_TARGET_OFFSET
 
 
 def _get_reach_target_y(
@@ -772,7 +835,10 @@ def _get_reach_target_y(
     env._blue_landed_genuine = env._blue_landed & ~env._blue_landed_was_free
 
     phase1_active = wide & ~env._blue_landed_genuine
-    return torch.where(phase1_active, half_y, full_y)
+    # NEW 2026-08-15 (user request): GREEN (full-crossing, phase1_active=False)
+    # branch only -- half_y (blue midpoint) deliberately untouched. See
+    # _INNER_FOOT_TARGET_OFFSET's docstring.
+    return torch.where(phase1_active, half_y, full_y + _get_foot_block_offset(env, ball_name))
 
 
 def _get_orange_reach_target_y(
@@ -1215,7 +1281,10 @@ def footreach(
     ball_close = (ball_x_local < 0.5) & (~env._blue_wide | env._blue_landed_genuine)
 
     # Switch from frozen (two-stage) target to live ball Y/Z when ball is within 0.5 m.
-    target_y = torch.where(ball_close, live_y, reach_target_y)
+    # NEW 2026-08-15 (user request): offset the live-ball target too, or the
+    # green offset silently vanishes right at the final approach into
+    # contact -- see _INNER_FOOT_TARGET_OFFSET's docstring.
+    target_y = torch.where(ball_close, live_y + _get_foot_block_offset(env, ball_name), reach_target_y)
     target_z = torch.where(ball_close, live_z, floor_z_w + 0.10)
 
     crossing_point = torch.stack(
@@ -1410,7 +1479,9 @@ def foot_proximity(
     ball_close = (ball_x_local < 0.5) & (~env._blue_wide | env._blue_landed_genuine)
     live_y = ball_pos_w[:, 1]
     live_z = ball_pos_w[:, 2]
-    target_y = torch.where(ball_close, live_y, reach_target_y)
+    # NEW 2026-08-15 (user request): see footreach's matching fix and
+    # _INNER_FOOT_TARGET_OFFSET's docstring.
+    target_y = torch.where(ball_close, live_y + _get_foot_block_offset(env, ball_name), reach_target_y)
     target_z = torch.where(ball_close, live_z, env_z + 0.10)
 
     crossing_point = torch.stack(
@@ -2008,7 +2079,19 @@ def red_foot_proximity(
     env._red_active (both blue and orange genuinely landed). See
     _get_red_reach_target_y's docstring for the full mechanism/formula.
 
-    Not yet validated against a live training run.
+    FIX 2026-08-15 (user request): gate changed from `(~behind)` to
+    `(~env._red_landed_genuine)`, matching red_overshoot_penalty/
+    red_stick_landing's `phase1_active` pattern (their gate has always been
+    `_red_wide & _red_active & ~_red_landed_genuine`, no `behind` involved).
+    `_red_active` itself requires blue AND orange to have already genuinely
+    landed, which structurally only happens once the ball has already
+    deflected -- so `behind` is very likely already True by the time
+    `_red_active` first turns True, making the old `(~behind)` gate
+    dead-on-arrival: this term could almost never fire a nonzero reward.
+    Root cause of the user's complaint that the trailing foot doesn't
+    visibly stay planted near the ball after a save even though this term
+    exists to reward exactly that. Not yet validated against a live
+    training run.
     """
     robot: Entity = env.scene[asset_cfg.name]
     red_y = _get_red_reach_target_y(env, ball_name, asset_cfg=asset_cfg)
@@ -2022,8 +2105,7 @@ def red_foot_proximity(
     foot_pos_active = foot_pos_w[torch.arange(env.num_envs, device=env.device), trailing_idx]
     dist = torch.norm(foot_pos_active - target_point, dim=-1)
 
-    behind = _ball_is_behind(env, ball_name)
-    return torch.exp(-sigma * dist) * env._red_wide.float() * env._red_active.float() * (~behind).float()
+    return torch.exp(-sigma * dist) * env._red_wide.float() * env._red_active.float() * (~env._red_landed_genuine).float()
 
 
 def red_ball_landed(
@@ -2697,18 +2779,30 @@ def feetorientation(
 # docs/BugFixes.md.
 
 
+# FIX 2026-08-15 (user request): target changed from dead-vertical (0,0) to a
+# 15 deg forward lean. User observed the robot habitually leaning forward
+# post-save and judged that stance more stable than the fully upright target
+# this reward previously enforced -- baking the lean into the target instead
+# of fighting it. Sign derived from this project's own Frame Convention (body
+# X = forward, robot faces world +X): grav_b = R_world_to_body . (0,0,-1), a
+# forward pitch by theta gives grav_b[:,0] = sin(theta) > 0. Not yet
+# render-verified against a live checkpoint -- confirm via sgk_play that the
+# resulting lean reads as forward, not backward, before trusting this sign.
+_HOME_LEAN_TARGET = math.sin(math.radians(15.0))  # ~0.259
+
+
 def postorientation(
     env: "ManagerBasedRlEnv",
     ball_name: str,
 ) -> torch.Tensor:
-    """Upright posture reward — always active.
+    """Posture reward targeting a slight forward lean — always active.
 
     AMP only sees joint_pos/joint_vel, not root orientation, so it cannot push
-    the root upright. Gating on ball-is-behind means no upright signal during
+    the root toward this target. Gating on ball-is-behind means no signal during
     ball approach (80% of episode), causing the policy to drift into backward lean.
     """
     grav_b = env.scene["robot"].data.projected_gravity_b
-    err = torch.sum(grav_b[:, :2] ** 2, dim=1)
+    err = (grav_b[:, 0] - _HOME_LEAN_TARGET) ** 2 + grav_b[:, 1] ** 2
     return torch.exp(-3.0 * err)
 
 
