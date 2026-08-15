@@ -3039,3 +3039,21 @@ At sigma=80, only tilts under ~5deg score meaningfully; by 11deg the reward is n
 - Did not verify visually in a real display this session (GPU busy with the user's own several concurrently-running `sgk_play` sessions, same contention issue as the earlier `scripted_yaw` entries) -- user should confirm the plot renders and reacts as expected.
 
 ---
+
+## 2026-08-15 (same session) -- new `left_sole_vis`/`right_sole_vis` markers: visual red rectangle at the bottom of each sole
+
+**Context:** user reported the `sole_ball_contact` P-panel plot from the entry above "doesn't work" and asked for a direct visual aid instead: "make a custom geom that is red and at the bottom of the sole just a rectangle have it inbetween the sauges geom with 4 cm to spare and lower." Matches this codebase's own `debugging-mujoco-contact-sensors` skill guidance directly: don't trust a contact boolean alone when it's in question -- add a real visual/geometric cross-check.
+
+**Fix (`t1_headless.xml`, both feet):** new `left_sole_vis`/`right_sole_vis` box geoms, same purely-visual pattern already established by `left_inner_vis`/`right_inner_vis`/`right_shin_vis` in this exact file (`contype="0" conaffinity="0"`, `group="2"` -- zero physics/collision effect, rendering-only). Geometry chosen to match the user's spec:
+- Spans between the 4 sole capsules' own footprint: X center `0.0125` (midpoint of the capsules' `-0.08` to `0.105` fromto range), Y center `0` with half-width `0.03` (matching `left/right_foot1`/`foot2`'s own `+-0.03` Y offsets) -- "in between the gauge geoms."
+- Positioned `pos_z=-0.05`, i.e. **4cm below** the capsules' own centerline (`-0.01`) -- "4cm to spare and lower."
+- Thin (`size_z=0.005`, 1cm total thickness) red box (`rgba="1 0 0 0.85"`), same alpha convention as the existing vis markers.
+
+**Verification:**
+- XML well-formedness: Python's `xml.etree.ElementTree` reports a parse error at line 161 (a `--` inside a comment, technically invalid strict XML) -- confirmed via `git show HEAD:...` that this is PRE-EXISTING in the committed file, unrelated to this change, and MuJoCo's own parser already tolerates it fine (this file is actively used in training/play today).
+- **Real consumer check:** `mujoco.MjSpec.from_file(...).compile()` -- compiles successfully (55 total geoms). Both new geoms confirmed present with the intended resolved properties: `pos=[0.0125, 0, -0.05]`, `size=[0.09, 0.03, 0.005]`, `rgba=[1,0,0,0.85]`, `contype=0`, `conaffinity=0`.
+- Full suite: `env -u PYTHONPATH uv run pytest tests/ -q` -- **90/90 pass**.
+- Live headless smoke test (CPU, 4 envs, 20 random-action steps, real `ManagerBasedRlEnv` construction): `ball_contact` sensor's `primary_names` confirmed unaffected (still exactly the same 8 `foot[1-4]_collision` geoms, unchanged order) -- the new vis geoms don't match that sensor's pattern and can't physically contact anything regardless (`contype=0`). Both new geoms resolve correctly via `robot.find_geoms(...)` by name. No exceptions.
+- **Not visually confirmed in a real display this session** (GPU busy with the user's own concurrently-running sessions) -- user should look for the red rectangles at the bottom of each foot in the viewer and confirm the position/size reads correctly; nudge `pos`/`size` in `t1_headless.xml` if not.
+
+---
