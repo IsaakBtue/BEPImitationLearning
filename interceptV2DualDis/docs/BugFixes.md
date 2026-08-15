@@ -2797,3 +2797,27 @@ Algebraically equivalent (whenever `|delta| > 0.50`) to `red_y = half_y + sign(d
 - **Not yet validated against a live training run.**
 
 ---
+
+## 2026-08-15 (same session) -- new `trailing_foot_reach`: general urgency reward for the orange->red sequence
+
+**Context:** user reported the double-step (blue+orange) sequence is slow. Traced why: `footreach` (leading foot) has a `vel_sigma` speed-multiplier mechanism (1x-10x reward for moving toward the target) that gives the leading foot real urgency; the trailing foot's equivalents (`orange_foot_proximity`/`red_foot_proximity`) are flat `exp(-sigma*dist)` pulls with no speed incentive at all, and `blue_trunk_drive` only rewards whole-body trunk velocity, not the trailing foot specifically -- the trailing foot genuinely had no urgency mechanism. User asked for a `footreach`-equivalent for the trailing foot, but explicitly NOT a literal port -- `footreach` is "ball focused" (its phase1/phase2 split gates on `ball_x_local`, and phase2 switches to live-ball tracking), neither of which fits the trailing foot's job (reach a fixed waypoint, never track the live ball, per orange's/red's own explicitly-documented "capped, no live-ball graduation" design).
+
+**Fix:** new `trailing_foot_reach` (`rewards.py`), a general foot-target reach reward:
+1. Target auto-switches `orange_y -> red_y` via `env._red_active` (mirrors `_get_reach_target_y`'s own `blue_y -> full_y` switch), so one function covers the whole double-step sequence instead of two separate ball-specific rewards.
+2. Sigmoid reach reward (`footreach`'s exact `1 - sigmoid(sigma*(dist-reach_th))` shape) x `vel_sigma` (`footreach`'s exact `1+3*clamp(vel_toward,0,3)` shape) -- same urgency mechanism, no phase gate at all (always active while wide and not done -- no ball-position concept needed since the target itself, not ball proximity, is what's relevant here).
+3. No live-ball tracking -- never reads ball position beyond `_ball_is_behind`'s gate, unlike `footreach`.
+4. Decel-zone near whichever target is currently active (same shape as `footreach`'s `blue_decel_zone`), using the orange/red landing radius (numerically identical, both curriculum-ease from the same 0.15m default) as the floor -- so `vel_sigma` decays to neutral right at the target instead of rewarding blowing through it.
+5. Zero once fully done (`env._red_active & env._red_landed_genuine`) -- no reward for lingering at red after landing.
+6. Deliberately NOT ported: `footreach`'s overshoot-kill flag (a fix for a ball-impact-impulse false positive specific to `footreach`'s own live-training history) and its near-region-oscillation vel_sigma neutralization (irrelevant here -- `env._orange_wide` is already always False on narrow crossings, so this reward is zero there by construction, unlike `footreach` which needed an explicit guard). Per explicit user instruction: only port these reactively if the same failure mode is actually observed on the trailing foot, not preemptively.
+
+**Weight:** `10.0`, matching `footreach`'s own weight (user-confirmed) -- this is the direct trailing-foot analog of `footreach` itself, not of the smaller flat `foot_proximity`/`orange_foot_proximity` terms.
+
+**Registration:** `mdp/__init__.py` export added; `goalkeeper_env_cfg.py` `RewardTermCfg` inserted after `red_stick_landing`, same `params` shape as `footreach`'s own registration (`ball_name`, `reach_th=0.3`, `sigma=5.0`, `asset_cfg`).
+
+**Verification:**
+- `ast.parse` on all 3 changed files -- no syntax errors.
+- Full suite: `env -u PYTHONPATH uv run pytest tests/ -q` -- **90/90 pass** (no new unit tests -- this function unconditionally reads `robot.data.body_link_pos_w`/`feet_contact`, no `robot=None` fallback branch to test in isolation the way `_get_orange_reach_target_y`/`_get_red_reach_target_y` do; matches this codebase's own established precedent that `footreach`/`orange_foot_proximity` -- both real-scene-dependent in the same way -- have no dedicated unit test files either, validated via live checkpoint replay instead).
+- Live headless smoke test with the real trained checkpoint (`model_39750.pt`, 64 envs, 1500 steps): `trailing_foot_reach` confirmed present in `reward_manager.active_terms`, computed with no exceptions, and registered genuinely nonzero episode sums (not silently zero the whole run).
+- **Not yet validated against a live training run.**
+
+---

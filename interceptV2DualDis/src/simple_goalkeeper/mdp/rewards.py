@@ -1735,6 +1735,100 @@ def orange_stick_landing(
     return torch.exp(-dist_sigma * dist) * torch.exp(-speed_sigma * speed) * phase1_active.float()
 
 
+def trailing_foot_reach(
+    env: "ManagerBasedRlEnv",
+    ball_name: str,
+    asset_cfg: SceneEntityCfg = _DEFAULT_FEET_CFG,
+    reach_th: float = 0.3,
+    sigma: float = 5.0,
+) -> torch.Tensor:
+    """General foot-target reach reward for the trailing foot's orange->red
+    waypoint sequence -- gives the trailing foot the same urgency mechanism
+    footreach already gives the leading foot (sigmoid reach reward x a
+    velocity-toward-target multiplier, up to 10x), closing the gap that made
+    the double-step sequence slow: orange_foot_proximity/red_foot_proximity
+    are flat exp(-sigma*dist) pulls with no speed incentive at all, and
+    blue_trunk_drive only rewards whole-body trunk velocity, not the
+    trailing foot specifically.
+
+    NEW 2026-08-15 (user request, "make a general foot target reward, so
+    not footreach alike because it is ball focused but the fixes implement
+    for the trailing foot here"). Deliberately NOT a literal footreach port:
+
+    - No phase1 (ball_x_local > 1.5m) / phase2 split. footreach's phase1
+      exists to withhold the speed multiplier until the ball is close
+      enough to matter -- a ball-position concept. This reward's target
+      (orange or red) is relevant for the whole wide-crossing window
+      regardless of ball position, so it's always sigmoid-reach x vel_sigma,
+      no phase gate.
+    - No live-ball tracking switch. footreach switches its target to the
+      live ball once ball_x_local < 0.5m (the leading foot's actual
+      interception job). The trailing foot's job is capped at its own
+      waypoint by design (orange's own docstring: "does NOT graduate to a
+      second/live-ball target"; red mirrors this) -- this reward never
+      reads live ball position at all.
+    - Auto-switches target orange_y -> red_y via env._red_active (mirrors
+      _get_reach_target_y's own blue_y -> full_y switch on
+      env._blue_landed_genuine), so ONE function covers the whole
+      double-step sequence rather than two separate ball-specific rewards.
+    - Decel-zone near whichever target is currently active (same shape as
+      footreach's own blue_decel_zone), using the orange/red landing radius
+      (numerically identical -- both curriculum-ease from the same 0.15m
+      default) as the floor, so vel_sigma decays toward neutral right at
+      the target instead of rewarding carrying speed through it.
+
+    Deliberately NOT ported (per explicit user request -- only port fixes
+    if the same failure mode is actually observed on the trailing foot,
+    not preemptively): footreach's overshoot-kill flag (a fix for a
+    ball-impact-impulse false-positive specific to footreach's own
+    live-training history) and its near-region-oscillation vel_sigma
+    neutralization (narrow crossings have no orange/red concept at all --
+    env._orange_wide is always False there, so this reward is already zero
+    for narrow crossings by construction, unlike footreach which needed an
+    explicit narrow-region guard).
+
+    Zero once the trailing foot's job is fully done (env._red_active &
+    env._red_landed_genuine) -- no reward for lingering at red after
+    genuinely landing there.
+
+    Not yet validated against a live training run.
+    """
+    orange_y = _get_orange_reach_target_y(env, ball_name, asset_cfg=asset_cfg)
+    red_y = _get_red_reach_target_y(env, ball_name, asset_cfg=asset_cfg)
+    red_active = env._red_active
+    target_y = torch.where(red_active, red_y, orange_y)
+
+    robot: Entity = env.scene[asset_cfg.name]
+    foot_pos_w = robot.data.body_link_pos_w[:, asset_cfg.body_ids, :]      # (N, 2, 3)
+    foot_vel_w = robot.data.body_link_lin_vel_w[:, asset_cfg.body_ids, :]  # (N, 2, 3)
+    foot_idx = _get_correct_foot_idx(env, ball_name)
+    trailing_idx = 1 - foot_idx
+    arange_n = torch.arange(env.num_envs, device=env.device)
+    assigned_foot_pos = foot_pos_w[arange_n, trailing_idx]                 # (N, 3)
+    assigned_foot_vel_y = foot_vel_w[arange_n, trailing_idx, 1]            # (N,)
+
+    goal_x_w = env.scene.env_origins[:, 0]
+    floor_z_w = env.scene.env_origins[:, 2]
+    target_point = torch.stack([goal_x_w, target_y, floor_z_w + 0.10], dim=-1)  # (N, 3)
+    dist_to_target = torch.norm(assigned_foot_pos - target_point, dim=-1)       # (N,)
+    reach_rew = 1.0 - 1.0 / (1.0 + torch.exp(-sigma * (dist_to_target - reach_th)))
+
+    lateral_error = target_y - assigned_foot_pos[:, 1]
+    vel_toward = torch.where(lateral_error > 0, assigned_foot_vel_y, -assigned_foot_vel_y)
+    vel_sigma = 1.0 + 3.0 * vel_toward.clamp(0.0, 3.0)
+
+    current_landed_genuine = torch.where(red_active, env._red_landed_genuine, env._orange_landed_genuine)
+    approaching = env._orange_wide & ~current_landed_genuine
+    _DECEL_ZONE = 0.30
+    _DECEL_FLOOR = float(getattr(env, "_orange_landing_radius_current", 0.08))
+    decay_frac = ((dist_to_target - _DECEL_FLOOR) / (_DECEL_ZONE - _DECEL_FLOOR)).clamp(0.0, 1.0)
+    vel_sigma = torch.where(approaching, 1.0 + (vel_sigma - 1.0) * decay_frac, vel_sigma)
+
+    done = red_active & env._red_landed_genuine
+    behind = _ball_is_behind(env, ball_name)
+    return reach_rew * vel_sigma * env._orange_wide.float() * (~behind).float() * (~done).float()
+
+
 def red_foot_proximity(
     env: "ManagerBasedRlEnv",
     ball_name: str,

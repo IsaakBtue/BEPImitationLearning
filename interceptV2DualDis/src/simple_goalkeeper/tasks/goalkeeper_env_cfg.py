@@ -887,6 +887,19 @@ def goalkeeper_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
             weight=4.0,
             params={"ball_name": BALL_NAME, "asset_cfg": _FEET_CFG},
         ),
+        # NEW 2026-08-15 (user request): trailing-foot analog of footreach's
+        # urgency mechanism (sigmoid reach x up-to-10x velocity multiplier),
+        # auto-switching orange->red, WITHOUT footreach's ball-position
+        # gating/live-ball-tracking (see rewards.py:trailing_foot_reach
+        # docstring for the full reasoning). Weight 10.0 matches footreach's
+        # own weight -- this is the direct trailing-foot analog of that
+        # term, not of the smaller flat foot_proximity/orange_foot_proximity
+        # terms.
+        "trailing_foot_reach": RewardTermCfg(
+            func=gk_mdp.trailing_foot_reach,
+            weight=10.0,
+            params={"ball_name": BALL_NAME, "reach_th": 0.3, "sigma": 5.0, "asset_cfg": _FEET_CFG},
+        ),
         # --- active stepping: reward lifting feet during approach ---
         "foot_clearance": RewardTermCfg(
             func=gk_mdp.foot_clearance,

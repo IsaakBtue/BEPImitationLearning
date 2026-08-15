@@ -18,6 +18,7 @@ from .rewards import (
     blue_ball_landed, blue_overshoot_penalty, blue_stick_landing, blue_trunk_drive,
     orange_foot_proximity, orange_ball_landed, orange_overshoot_penalty, orange_stick_landing,
     red_foot_proximity, red_ball_landed, red_overshoot_penalty, red_stick_landing,
+    trailing_foot_reach,
     angular_momentum_penalty,
 )
 from .commands import GhostMotionCommand, GhostMotionCommandCfg
