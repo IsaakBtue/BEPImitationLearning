@@ -3062,4 +3062,29 @@ At sigma=80, only tilts under ~5deg score meaningfully; by 11deg the reward is n
 
 Verified via `mujoco.MjSpec(...).compile()` again after the change -- both geoms resolve at the new `pos=[0.0125, 0, -0.032]`, `size=[0.065, 0.03, 0.005]`. Full suite `env -u PYTHONPATH uv run pytest tests/ -q` -- 90/90 pass. Still not visually confirmed in a real display.
 
+**FIX (same session, later, user request, "yellow ball and red square not touching"):** user reported the mismatch directly. Root-caused via live geometry query (`body_link_pos_w` + `quat_apply` at the standing pose, real `ManagerBasedRlEnv`, not assumption): the PRIOR "shorter" fix (0.09->0.065 half-width X, implicitly also narrower Y at 0.03) undersized the marker relative to the REAL capsule footprint, not just the visible foot mesh -- true capsule extents are X: -0.08 to 0.105 (half-width 0.0925 from center 0.0125) and, accounting for the capsules' own 0.02 radius, Y: -0.05 to 0.05 (half-width 0.05). The shrunk box (13cm x 6cm) missed ~2.75cm at the toe/heel and ~2cm on each outer edge versus the true 18.5cm x 10cm collision footprint -- any genuine contact near those edges fell outside the marker, explaining the reported non-touching. Restored `size` to `0.0925 0.05 0.005` (matching the real capsule footprint exactly) on both `left_sole_vis`/`right_sole_vis`; `pos_z` (-0.032, from the prior fix) unchanged. Documented as a deliberate geometric-accuracy-over-cosmetic-size tradeoff: a marker smaller than the real collision zone is misleading by construction for this diagnostic's purpose, even if it "looks bigger" than the visible foot mesh.
+
+Verified via `mujoco.MjSpec(...).compile()` -- both geoms resolve at `size=[0.0925, 0.05, 0.005]`. Full suite -- 90/90 pass. Did not re-verify visually this session (an active `sgk_play` session was running live in the foreground at the time -- avoided launching a competing GPU process that would interfere with it).
+
+---
+
+## 2026-08-15 (same session) -- new `shin_contact` P-panel plot (isolated shin-only signal)
+
+**Context:** user asked to add "the shins contact penalty" to the viewer, alongside the sole-contact/cleanstop/softstop work above.
+
+**Investigation:** `_compute_wrong_foot_contact_flash` (`play.py`) already tracks a combined `wrong_touch` signal (wrong-side sole OR wrong-side leg [shin+knee combined] OR leading-knee proximity OR leading-shin proximity) and an isolated `knee_distance_contact` (leading-knee proximity only) -- but no isolated shin-only signal existed. `leg_ball_contact`'s column order (already documented in this function's own docstring): `[left_shin, left_knee, right_knee, right_shin]` -- `wrong_leg_touch` reads columns per-side as a pair (shin OR knee combined), never isolating shin alone.
+
+**Fix (`play.py`):**
+1. New `wrong_shin_only_touch` -- reads JUST `leg_found[:, 0]`/`leg_found[:, 3]` (shin columns only, never 1/2 which are knee) for the wrong side.
+2. New `shin_touch = wrong_shin_only_touch | leading_shin_touch` -- combines BOTH live shin mechanisms that actually feed `rewards.py:penalize_wrong_foot_ball_contact` (wrong-side shin contact + leading-side shin proximity, the latter already computed earlier in this function but never exposed as its own plot). Unlike `knee_distance_contact` (which only ever tracked the leading-side proximity check, since wrong-side knee has no isolated plot), this combines both mechanisms since both genuinely matter for "the shin penalty" as a whole.
+3. New `_shin_flash_counter` latch state, same `_WRONG_FOOT_FLASH_STEPS`-step hold pattern as the existing `counter`/`knee_counter`.
+4. Function now returns a 3-tuple `(wrong_foot_flash, knee_flash, shin_flash)` -- both call sites updated: `AnalyticsPolicy.__init__`/`.update` (new `self._shin_flash`, new `SH✓`/`SH·` console flag alongside `WF`/`KN`) and `_patch_viewer_wrong_foot_contact_plot` (new `"shin_contact"` figure + promotion).
+5. **Slot-cutoff fix, found while wiring this up:** `_patch_viewer_wrong_foot_contact_plot` runs BEFORE the two later, higher-priority patches (`_patch_viewer_all_footorientation_plots`, `_patch_viewer_sole_contact_and_stop_plots`) that don't know about `wrong_foot_ball_contact`/`knee_distance_contact`/`shin_contact` -- without explicit inclusion, all three would land past the 12-slot `max_viewports` cap after the later patches' own reorders (the same "silently pushed past the cutoff" failure class this file has hit before, e.g. the 2026-08-07 entries). Added `"shin_contact"` to `_patch_viewer_sole_contact_and_stop_plots`'s own `_PROMOTED` tuple (the genuinely last-registered patch) to guarantee it survives -- `wrong_foot_ball_contact`/`knee_distance_contact` were NOT guaranteed the same way (not requested this time) and may now fall out of the visible set. Guaranteed-visible front slots now exactly 12 (8 footorientation + `sole_ball_contact`/`cleanstop`/`softstop`/`shin_contact`), AT the cap.
+
+**Verification:**
+- `ast.parse` on `play.py` -- no syntax errors.
+- Full suite: `env -u PYTHONPATH uv run pytest tests/ -q` -- **90/90 pass**.
+- Live headless smoke test (CPU, 2 envs, 30 random-action steps): `_compute_wrong_foot_contact_flash` returns a valid 3-tuple of floats every step, no exceptions.
+- Not visually confirmed in a real display this session (same reason as above -- avoided contending with the user's own live session).
+
 ---

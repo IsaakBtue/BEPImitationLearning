@@ -180,6 +180,7 @@ class AnalyticsPolicy:
         self._prev_ep_buf: "torch.Tensor | None" = None
         self._wf_flash = 0.0
         self._knee_flash = 0.0
+        self._shin_flash = 0.0
         # FIX 2026-07-22 (research: shank_height vs base_height termination
         # tuning): per-episode running minimums, so a deep-lunge episode's
         # worst height is captured even though the live status line
@@ -277,7 +278,7 @@ class AnalyticsPolicy:
         # call (_patch_viewer_wrong_foot_contact_plot) only runs while
         # _show_plots is True, which made it an unreliable ground-truth
         # source for confirming whether contact is actually being detected.
-        self._wf_flash, self._knee_flash = _compute_wrong_foot_contact_flash(env, 0)
+        self._wf_flash, self._knee_flash, self._shin_flash = _compute_wrong_foot_contact_flash(env, 0)
 
         if not self.enabled:
             return actions
@@ -391,7 +392,8 @@ class AnalyticsPolicy:
             f"{'SS✓' if softstop_fired else 'SS·'} "
             f"{'CS✓' if cleanstop_fired else 'CS·'} "
             f"{'WF✓' if self._wf_flash else 'WF·'} "
-            f"{'KN✓' if self._knee_flash else 'KN·'}"
+            f"{'KN✓' if self._knee_flash else 'KN·'} "
+            f"{'SH✓' if self._shin_flash else 'SH·'}"
         )
         lf_tag = f"{'G' if lf_contact else 'A'}{lf_slip:.2f}"
         rf_tag = f"{'G' if rf_contact else 'A'}{rf_slip:.2f}"
@@ -700,7 +702,7 @@ spike is computed correctly but clipped out of the plotted range entirely,
 looking like no reaction. 15 steps clears that floor with margin."""
 
 
-def _compute_wrong_foot_contact_flash(env, env_idx: int) -> tuple[float, float]:
+def _compute_wrong_foot_contact_flash(env, env_idx: int) -> tuple[float, float, float]:
     """Raw "bad ball contact" signals for the viewer's P-panel, each latched
     high for _WRONG_FOOT_FLASH_STEPS steps after a detected touch: (1) any
     ball contact penalize_wrong_foot_ball_contact treats as bad (wrong-side
@@ -816,6 +818,23 @@ def _compute_wrong_foot_contact_flash(env, env_idx: int) -> tuple[float, float]:
 
     wrong_touch = wrong_sole_touch | wrong_leg_touch | leading_knee_touch | leading_shin_touch
 
+    # NEW 2026-08-15 (user request, "put in the viewer the shins contact
+    # penalty"): isolated shin-only signal, mirroring knee_distance_contact's
+    # pattern -- leg_ball_contact's columns are [left_shin, left_knee,
+    # right_knee, right_shin] (see docstring above), so this reads JUST
+    # indices 0/3 (shin), never 1/2 (knee), unlike wrong_leg_touch above
+    # which combines both. Combines BOTH live shin mechanisms that actually
+    # feed rewards.py:penalize_wrong_foot_ball_contact -- wrong-side shin
+    # CONTACT (contact-sensor "found") and leading-side shin PROXIMITY
+    # (distance-based, leading_shin_touch, already computed above) -- unlike
+    # knee_distance_contact, which only ever tracked the leading-side
+    # proximity check (wrong-side knee has no separate isolated plot, only
+    # folded into the combined wrong_touch signal above).
+    wrong_shin_only_touch = torch.stack(
+        [leg_found[:, 0] > 0, leg_found[:, 3] > 0], dim=-1
+    )[env_ar, wrong_foot_idx]
+    shin_touch = wrong_shin_only_touch | leading_shin_touch
+
     if not hasattr(raw_env, "_wrong_foot_flash_counter"):
         raw_env._wrong_foot_flash_counter = torch.zeros(
             raw_env.num_envs, dtype=torch.long, device=raw_env.device
@@ -847,9 +866,21 @@ def _compute_wrong_foot_contact_flash(env, env_idx: int) -> tuple[float, float]:
         knee_counter[~leading_knee_touch & ~just_reset] - 1, min=0
     )
 
+    if not hasattr(raw_env, "_shin_flash_counter"):
+        raw_env._shin_flash_counter = torch.zeros(
+            raw_env.num_envs, dtype=torch.long, device=raw_env.device
+        )
+    shin_counter = raw_env._shin_flash_counter
+    shin_counter[just_reset] = 0
+    shin_counter[shin_touch] = _WRONG_FOOT_FLASH_STEPS
+    shin_counter[~shin_touch & ~just_reset] = torch.clamp(
+        shin_counter[~shin_touch & ~just_reset] - 1, min=0
+    )
+
     return (
         float(counter[env_idx].item() > 0),
         float(knee_counter[env_idx].item() > 0),
+        float(shin_counter[env_idx].item() > 0),
     )
 
 
@@ -873,11 +904,17 @@ def _patch_viewer_wrong_foot_contact_plot(native_viewer: "NativeMujocoViewer", e
     head/chin sub-condition it tracked was removed the same way from
     rewards.py, so this plot no longer corresponds to anything the policy is
     penalized for.
+
+    NEW 2026-08-15 (user request, "put in the viewer the shins contact
+    penalty"): added "shin_contact", isolating JUST the shin-specific
+    sub-conditions (see _compute_wrong_foot_contact_flash's own docstring)
+    from the combined "wrong_foot_ball_contact" signal, same reasoning as
+    knee_distance_contact's own addition.
     """
     orig_setup = native_viewer.setup
     orig_update_reward_figures = native_viewer._update_reward_figures
 
-    _TERM_NAMES = ("wrong_foot_ball_contact", "knee_distance_contact")
+    _TERM_NAMES = ("wrong_foot_ball_contact", "knee_distance_contact", "shin_contact")
 
     def _patched_setup() -> None:
         orig_setup()
@@ -891,18 +928,20 @@ def _patch_viewer_wrong_foot_contact_plot(native_viewer: "NativeMujocoViewer", e
             native_viewer._yrange[name] = cfg.init_yrange
             native_viewer._scale[name] = 1.0
         # Front of the list -- same reasoning as the other promotions above:
-        # this task's 41 active reward terms exceed max_viewports (12), so
+        # this task's 61 active reward terms exceed max_viewports (12), so
         # anything not moved to the front is silently never rendered.
         rest = [n for n in native_viewer._term_names]
         native_viewer._term_names = list(_TERM_NAMES) + rest
 
     def _patched_update_reward_figures(viewer_handle: "mujoco.viewer.Handle") -> None:
         if native_viewer._show_plots and native_viewer._term_names and not native_viewer._is_paused:
-            wrong_foot_flash, knee_flash = _compute_wrong_foot_contact_flash(env, native_viewer.env_idx)
+            wrong_foot_flash, knee_flash, shin_flash = _compute_wrong_foot_contact_flash(env, native_viewer.env_idx)
             native_viewer._append_point("wrong_foot_ball_contact", wrong_foot_flash)
             native_viewer._write_history_to_figure("wrong_foot_ball_contact")
             native_viewer._append_point("knee_distance_contact", knee_flash)
             native_viewer._write_history_to_figure("knee_distance_contact")
+            native_viewer._append_point("shin_contact", shin_flash)
+            native_viewer._write_history_to_figure("shin_contact")
         orig_update_reward_figures(viewer_handle)
 
     native_viewer.setup = _patched_setup
@@ -1049,15 +1088,26 @@ def _patch_viewer_sole_contact_and_stop_plots(native_viewer: "NativeMujocoViewer
     Registered LAST in run_play (after every other panel patch, including
     `_patch_viewer_all_footorientation_plots`) so its reorder is the final
     word -- same "last registered wins" mechanism that function's own
-    docstring documents. Brings the guaranteed-visible front slots to 11
-    (8 from `_ALL_FOOTORIENTATION_TERMS` + these 3), still under the 12-slot
-    `max_viewports` cap.
+    docstring documents. Brings the guaranteed-visible front slots to
+    exactly 12 (8 from `_ALL_FOOTORIENTATION_TERMS` + these 4), AT the
+    `max_viewports` cap -- no more room without dropping something.
+
+    FIX 2026-08-15 (same day, user request, "put in the viewer the shins
+    contact penalty"): added "shin_contact" to `_PROMOTED` -- without this,
+    it (and `wrong_foot_ball_contact`/`knee_distance_contact`, all three
+    only promoted by the EARLIER `_patch_viewer_wrong_foot_contact_plot`)
+    would land at positions 11-13 after this later patch's own reorder and
+    get silently pushed past the 12-slot cutoff -- the exact failure mode
+    this file's own comments have flagged happening before. Only
+    `shin_contact` is guaranteed here since it's the one actually requested
+    this time; `wrong_foot_ball_contact`/`knee_distance_contact` may now
+    fall out of the visible set.
     """
     orig_setup = native_viewer.setup
     orig_update_reward_figures = native_viewer._update_reward_figures
 
     _RAW_NAME = "sole_ball_contact"
-    _PROMOTED = (_RAW_NAME, "cleanstop", "softstop")
+    _PROMOTED = (_RAW_NAME, "cleanstop", "softstop", "shin_contact")
 
     def _patched_setup() -> None:
         orig_setup()
