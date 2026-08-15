@@ -3001,3 +3001,21 @@ At sigma=80, only tilts under ~5deg score meaningfully; by 11deg the reward is n
 - **Not yet validated against a live training run.**
 
 ---
+
+## 2026-08-15 (same session) -- `ankle_pitch_pos`/`ankle_roll_pos` dropped ("bullshit"): wrong target for landing flatness; `feetorientation` weight raised instead
+
+**Context:** user reconsidered the positional penalties added earlier this session: "this is maybe wrong, because i want the foot to land flat on the ground everytime so this doesn't necessarily mean the ankle pitch and roll pos needs to be home angle." Correct diagnosis, confirmed: `ankle_pitch_pos`/`ankle_roll_pos` pulled the ankle toward its OWN default joint angle (`deviation_waist_joint`'s mechanism, `sum((joint_pos-default)^2)`), which is only equivalent to "foot flat on the ground" when the rest of the leg (hip, knee) is ALSO at its default standing pose. During a real dive/reach -- exactly when landing flat matters -- hip/knee are off-default, and the ankle legitimately needs to differ from ITS default to compensate and keep the foot level. The two position penalties could therefore actively fight genuine landing flatness rather than help it. `feetorientation` (gravity-vs-foot-Z, already steepened this session) measures the real world-frame outcome regardless of joint configuration and is the correct lever for this specific goal. User: "drop the _pos because they are bullshit but i want you to increase the feetorientation reward."
+
+**Fix (`goalkeeper_env_cfg.py`, `play.py`):**
+1. `ankle_pitch_pos`/`ankle_roll_pos` `RewardTermCfg` registrations deleted outright (not just reweighted). `ankle_pitch_vel`/`ankle_roll_vel` (velocity, not position) kept unchanged -- "don't actively rotate the ankle fast" doesn't have the same default-angle mismatch problem as a positional target does.
+2. `deviation_waist_joint` function itself NOT touched/deleted -- still actively used by its original `deviation_waist_joint` `RewardTermCfg` registration (the actual waist-joint regularizer, weight -0.001, unrelated to this fix).
+3. `feetorientation` weight `3.0 -> 6.0` (2x, chosen via `AskUserQuestion` from 6.0/10.0/custom) -- now that the position penalties aren't diluting/fighting it, give it more say in the combined objective. `sigma` (already 80.0 from the prior fix this session) unchanged.
+4. `play.py`: `ankle_pitch_pos`/`ankle_roll_pos` removed from `_ALL_FOOTORIENTATION_TERMS` (P-panel promotion list); `ankle_roll_vel`/`ankle_pitch_vel` kept.
+
+**Verification:**
+- `ast.parse` on both changed files -- no syntax errors.
+- Full suite: `env -u PYTHONPATH uv run pytest tests/ -q` -- **90/90 pass**.
+- Live headless smoke test (CPU, 4 envs, 20 random-action steps): confirmed `reward_manager.active_terms` now has **61 active terms** (down from 63); `ankle_pitch_pos`/`ankle_roll_pos` absent; `ankle_roll_vel`/`ankle_pitch_vel` present; `feetorientation`'s registered `RewardTermCfg` reads `weight=6.0`, `params["sigma"]=80.0`; ran with no exceptions.
+- **Not yet validated against a live training run.**
+
+---

@@ -1299,13 +1299,10 @@ def _patch_viewer_all_footorientation_plots(native_viewer: "NativeMujocoViewer",
         # whole-body world-frame sum foot_ang_vel_xy used to measure,
         # actually leads the leading foot's pre-save pitch spike.
         "ankle_pitch_vel",
-        # NEW 2026-08-15 (user request, "basically never want pitch/roll"):
-        # the two new positional penalties + ankle_roll_vel (goalkeeper_env_cfg.py)
-        # -- brings this list to exactly 12, AT the cap documented above, not
-        # over it. If a future term needs a slot here, something in this list
-        # must be dropped first.
-        "ankle_pitch_pos",
-        "ankle_roll_pos",
+        # REMOVED 2026-08-15 (user request, "drop the _pos"): ankle_pitch_pos/
+        # ankle_roll_pos deleted from the reward manager entirely (see
+        # goalkeeper_env_cfg.py) -- removed from this panel too. ankle_roll_vel
+        # kept (velocity term, unaffected by the same-default-angle problem).
         "ankle_roll_vel",
     )
 

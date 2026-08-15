@@ -934,7 +934,22 @@ def goalkeeper_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
         ),
         "feetorientation": RewardTermCfg(
             func=gk_mdp.feetorientation,
-            weight=3.0,
+            # FIX 2026-08-15 (same session, user request): 3.0 -> 6.0 (2x,
+            # chosen via AskUserQuestion from 6.0/10.0/custom) -- follow-up
+            # to dropping ankle_pitch_pos/ankle_roll_pos (see below): those
+            # pulled the ankle toward its OWN default joint angle, which
+            # user correctly identified as the wrong target for "I want the
+            # foot flat on the ground every time" -- the ankle legitimately
+            # needs to differ from its default to keep the foot flat when
+            # hip/knee are off-default mid-dive, so the position penalties
+            # could actively fight genuine flattening. feetorientation
+            # measures the real world-frame outcome (flat relative to
+            # gravity) regardless of joint configuration, so it's the
+            # correct lever for this goal -- raising its weight (on top of
+            # the earlier sigma steepening 5->80) gives it more say in the
+            # combined objective now that the ankle terms aren't diluting/
+            # fighting it. See docs/BugFixes.md, 2026-08-15.
+            weight=6.0,
             # FIX 2026-08-15 (user request): sigma was the function's own
             # default (5.0), never explicitly set here -- user noticed a
             # visually "pretty bad" ~11deg one-foot tilt still scored ~83%
@@ -1370,29 +1385,20 @@ def goalkeeper_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
             weight=-1.0,
             params={"asset_cfg": _ANKLE_PITCH_CFG},
         ),
-        # NEW 2026-08-15 (user request, "basically never want pitch/roll in my
-        # training"): feetorientation (+3.0, gravity-vs-foot-Z alignment) is a
-        # REWARD for flat feet, diluted across all 61 active terms -- not a
-        # dedicated penalty. These three add sharp, always-on, undiluted
-        # gradient directly against pitch/roll, joint-local so they can't
-        # touch legitimate hip/knee-driven reach motion. Same "no gate, ever"
-        # policy as ankle_pitch_vel above, per the same explicit user
-        # instruction. See docs/BugFixes.md.
-        # ankle_pitch_pos/ankle_roll_pos reuse the existing generic
-        # deviation_waist_joint function (sum((joint_pos-default)^2), no
-        # waist-specific logic despite the name) -- same "reuse an existing
-        # scoped-by-asset_cfg mechanism, no new function" pattern as
-        # ankle_pitch_vel/arm_dof_vel reusing joint_vel_l2.
-        "ankle_pitch_pos": RewardTermCfg(
-            func=gk_mdp.deviation_waist_joint,
-            weight=-5.0,
-            params={"asset_cfg": _ANKLE_PITCH_CFG},
-        ),
-        "ankle_roll_pos": RewardTermCfg(
-            func=gk_mdp.deviation_waist_joint,
-            weight=-5.0,
-            params={"asset_cfg": _ANKLE_ROLL_CFG},
-        ),
+        # REMOVED 2026-08-15 (same session, user request, "drop the _pos
+        # because they are bullshit"): ankle_pitch_pos/ankle_roll_pos
+        # deleted outright -- user correctly identified they pulled the
+        # ankle toward its OWN default joint angle, which is the wrong
+        # target for "I want the foot flat on the ground every time": the
+        # ankle legitimately needs to differ from its default to keep the
+        # foot flat when hip/knee are off-default mid-dive, so these could
+        # actively fight genuine landing flatness rather than help it.
+        # feetorientation (weight raised 3.0->6.0 in the same fix, above)
+        # measures the real world-frame outcome instead and is the correct
+        # lever for that goal. ankle_pitch_vel/ankle_roll_vel (velocity,
+        # not position) are unaffected -- "don't actively rotate the ankle
+        # fast" doesn't have the same default-angle mismatch problem. See
+        # docs/BugFixes.md, 2026-08-15.
         "ankle_roll_vel": RewardTermCfg(
             func=mjlab_mdp.joint_vel_l2,
             weight=-1.0,
