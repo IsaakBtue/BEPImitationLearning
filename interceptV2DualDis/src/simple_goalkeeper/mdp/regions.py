@@ -37,9 +37,21 @@ _REGION_Y_START_RANGE: dict[int, tuple[float, float]] = {
     3: (-0.3, 0.0),    # right_far
 }
 _REGION_Y_END_RANGE: dict[int, tuple[float, float]] = {
-    0: (0.15, 0.5),    # left_near: crosses on the left, under 0.5 m
+    # FIX 2026-08-15 (user request): near-region inner floor 0.15 -> 1e-4
+    # (effectively 0, "i want it a little rare to be in the center because
+    # there is nothing much to learn from those" -- floor lowered, rarity
+    # handled by events.py's skewed sampling, not by this bound). NOT a
+    # literal 0.0 -- events.py's reset_ball_rolling uses
+    # `y_end_range[0] * y_end_range[1] > 0` to detect a one-sided
+    # (region-conditioned) range vs. the plain two-sided dead-zone
+    # mechanism; an exact 0.0 endpoint makes that product 0, failing the
+    # `>0` check and silently routing left_near/right_near into the WRONG
+    # branch (the two-sided mechanism's random 50/50 side flip, which would
+    # break region-conditioning). 1e-4 (0.1mm) is physically negligible but
+    # keeps the sign-product check working with a large margin.
+    0: (1e-4, 0.5),    # left_near: crosses on the left, under 0.5 m
     1: (0.5, 1.0),     # left_far: crosses on the left, at/above 0.5 m
-    2: (-0.5, -0.15),  # right_near
+    2: (-0.5, -1e-4),  # right_near
     3: (-1.0, -0.5),   # right_far
 }
 # FIX 2026-08-01: far outer bound narrowed 1.3 -> 1.1 (user request), kept

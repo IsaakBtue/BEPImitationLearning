@@ -3135,3 +3135,20 @@ Verified via `mujoco.MjSpec(...).compile()` -- both geoms resolve at `size=[0.09
 - **Not pushed yet per explicit user instruction ("dont push until i tell you to") -- committed/documented locally only, awaiting go-ahead.**
 
 ---
+
+## 2026-08-15 (same session) -- near-region `y_end` inner floor lowered to ~0, skewed toward the outer range
+
+**Context:** this was discussed earlier the same session (example probability curves shown, `p=0.6`/`p=0.35` offered) but the conversation moved on before a value was picked; user asked "did we ever implement that" and confirmed the design when re-asked: floor `0.0m` (was going to be `0.05m`), skew exponent a milder custom `0.5` ("i want it a little rare to be in the center because there is nothing much to learn from those").
+
+**Gotcha found before implementing:** `events.py:reset_ball_rolling` uses `y_end_range[0] * y_end_range[1] > 0` to distinguish a one-sided (region-conditioned) range from the plain two-sided dead-zone mechanism. A literal `0.0` endpoint makes that product exactly `0`, which fails the `>0` check and silently routes `left_near`/`right_near` into the WRONG branch -- the two-sided mechanism's random 50/50 side flip, which would break region-conditioning (a "left_near" episode could sample a right-side target, decorrelating the region_estimator's ground truth from the actual ball trajectory -- the exact failure class the 2026-07-06 fix in this same function already had to fix once before). Used `1e-4` (0.1mm, physically negligible) instead of a literal `0.0` to keep the sign-product check working with a large margin.
+
+**Fix:**
+1. `regions.py`: `_REGION_Y_END_RANGE`'s near-region entries (`left_near`, `right_near`) floor lowered `0.15 -> 1e-4` (was previously curriculum-independent and fixed at 0.15 for ALL difficulty levels, per the 2026-07-18 fix documented earlier in this same dict's history).
+2. `events.py`: new `is_near_region_branch` flag, `True` only inside the near-region `else` branch (not the `y_end_outer_frac` override or `use_far_travel_curriculum`/far branches -- both stay plain uniform, per the user's explicit "for the near region" scoping). When set, `mag` sampling changed from plain `sample_uniform(inner, outer, ...)` to a power-transform skew: `u ~ Uniform(0,1)`, `mag = inner + (outer-inner) * u**0.5`.
+
+**Verification:**
+- `ast.parse` on both changed files -- no syntax errors.
+- Full suite: `env -u PYTHONPATH uv run pytest tests/ -q` -- **90/90 pass**.
+- Statistical check (200k samples, real constants from both files, hardest difficulty `d=1.0`): branch-detection check confirmed `True` (correct one-sided routing, not the broken two-sided fallback); sign stayed positive for `left_near` in 100% of samples (no accidental side-flip); magnitude ranged `[0.00056, 0.49999]` (matches `inner~=0`, `outer=0.5` at `d=1`); median `0.354` vs. uniform's expected `0.250` (confirms the outer-favoring skew); only `~1%` of samples landed in the bottom 10% of the range vs. `~10%` expected under plain uniform sampling (confirms center values are now genuinely rare, matching the user's stated intent).
+- **Not yet validated against a live training run.**
+- **Not pushed yet -- awaiting go-ahead, per the standing "dont push until i tell you to" instruction.**

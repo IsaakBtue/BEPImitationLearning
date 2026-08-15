@@ -1089,6 +1089,12 @@ def reset_ball_rolling(
         lo = min(abs(y_end_range[0]), abs(y_end_range[1]))
         hi = max(abs(y_end_range[0]), abs(y_end_range[1]))
         sign_val = 1.0 if y_end_range[1] > 0 else -1.0
+        # FIX 2026-08-15 (user request, near-region-only skewed sampling):
+        # True only in the near-region `else` branch below, False for the
+        # `y_end_outer_frac` override and `use_far_travel_curriculum` (far)
+        # branches -- both left as plain uniform, per the user's explicit
+        # "for the near region" scoping.
+        is_near_region_branch = False
         if y_end_outer_frac is not None:
             inner = lo + (hi - lo) * max(0.0, min(1.0, y_end_outer_frac))
             outer = hi
@@ -1114,14 +1120,32 @@ def reset_ball_rolling(
             # separate decoupled signal needed here -- near doesn't require
             # a genuine multi-step skill, so there's no "races ball_difficulty"
             # concern the way there was for far) advances from 0 to 1.
-            # inner stays fixed at lo (0.15 for near): unlike far's inner,
-            # this is a deliberate leg-clearance dead-zone minimum inherited
-            # from the two-sided branch's own _Y_INNER constant below, not a
-            # partition artifact -- it should never shrink toward 0.
+            # inner stays fixed at lo -- FIX 2026-08-15 (user request):
+            # regions.py's _REGION_Y_END_RANGE near-region lo lowered
+            # 0.15 -> 1e-4 (effectively 0; see that file's own comment for
+            # why not a literal 0.0), so `inner` now allows the target to
+            # land almost exactly at center.
             inner = lo
             outer_seed = lo + _G1_STEP_OUTER_FRAC * (hi - lo)
             outer = outer_seed + (hi - outer_seed) * d
-        mag = sample_uniform(inner, outer, (n,), env.device)
+            is_near_region_branch = True
+        if is_near_region_branch:
+            # FIX 2026-08-15 (user request): "i want it a little rare to be
+            # in the center because there is nothing much to learn from
+            # those." Was a plain uniform sample over [inner, outer] --
+            # replaced with a power-transform skew (u~Uniform(0,1),
+            # mag=inner+(outer-inner)*u**0.5) that biases density toward the
+            # outer/harder end. p=0.5 chosen via AskUserQuestion (offered
+            # 0.6/0.35/custom -- user picked a milder custom 0.5, "a little
+            # rare," not the aggressive 0.35 option). Only applied to the
+            # near-region branch (`is_near_region_branch`, set just above)
+            # -- far regions (use_far_travel_curriculum) and the one-sided-
+            # outer-frac override (y_end_outer_frac) are unaffected, per
+            # explicit "for the near region" scoping.
+            u = sample_uniform(0.0, 1.0, (n,), env.device)
+            mag = inner + (outer - inner) * u.pow(0.5)
+        else:
+            mag = sample_uniform(inner, outer, (n,), env.device)
         y_end = sign_val * mag
     else:
         # Two-sided dead zone for y_end (mirrors G1's ±0.2 m minimum offset).
