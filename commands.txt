@@ -1,2 +1,4 @@
-cd /home/robocup/IsaakB/BEPImitationLearning/interceptV2DualDis
-uv run sgk_train Mjlab-BeyondAMP-Goalkeeper-T1-MultiDisc --num-envs 6144 --agent.run-name 6144_footorient75heelpitch6x_2026-08-10
+# Relaunch training to pick up the 3 new always-on penalties
+# (ankle_pitch_pos=-5.0, ankle_roll_pos=-5.0, ankle_roll_vel=-1.0):
+cd /home/isaak/BEPImitationlearning/interceptV2DualDis
+uv run sgk_train Mjlab-BeyondAMP-Goalkeeper-T1-MultiDisc --num-envs 4096

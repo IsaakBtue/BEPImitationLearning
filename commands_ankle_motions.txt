@@ -1,0 +1,20 @@
+# Hip_Yaw motion sample (Z-axis foot rotation -- the only joint that can do this, T1 ankle has no yaw DOF):
+cd /home/isaak/BEPImitationlearning/interceptV2DualDis
+uv run sgk_play Mjlab-BeyondAMP-Goalkeeper-T1-MultiDisc \
+    --agent scripted_yaw --num-envs 1 --force-region left_near \
+    --scripted-yaw-joint Left_Hip_Yaw --scripted-yaw-deg 30 --no-terminations True
+
+# Ankle_Pitch motion sample (drives ankle_pitch_vel/ankle_pitch_pos directly -- should react strongly):
+uv run sgk_play Mjlab-BeyondAMP-Goalkeeper-T1-MultiDisc \
+    --agent scripted_yaw --num-envs 1 --force-region left_near \
+    --scripted-yaw-joint Left_Ankle_Pitch --scripted-yaw-deg 15 --no-terminations True
+
+# Ankle_Roll motion sample (drives ankle_roll_vel/ankle_roll_pos directly -- not read by the pitch terms):
+uv run sgk_play Mjlab-BeyondAMP-Goalkeeper-T1-MultiDisc \
+    --agent scripted_yaw --num-envs 1 --force-region left_near \
+    --scripted-yaw-joint Left_Ankle_Roll --scripted-yaw-deg 15 --no-terminations True
+
+# All 3: root eagerly pinned from step 1, pinned pose lifted 0.4m so feet clear the ground
+# (--scripted-yaw-lift-height to change). P-panel now shows all 4 pitch/roll terms:
+# ankle_pitch_vel, ankle_pitch_pos, ankle_roll_pos, ankle_roll_vel.
+# If a run misbehaves, check `ps aux | grep sgk_play` -- concurrent sessions compete for the GPU.

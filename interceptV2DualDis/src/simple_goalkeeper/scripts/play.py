@@ -33,6 +33,16 @@ Usage:
     # this task's own 4-motion AMP dataset (REGION_MOTION_FILES):
     uv run sgk_play Mjlab-BeyondAMP-Goalkeeper-T1-MultiDisc-WithOverlay \\
         --checkpoint-file logs/rsl_rl/intercept_simple_goalkeeper_multidisc/<run>/model_5250.pt
+
+    # Motion-sample probe: scripted Left_Hip_Yaw sine sweep (the only joint
+    # that can rotate a foot about world Z -- T1's ankle has no yaw DOF), no
+    # policy involved. --force-region left_near pins the ball to the left so
+    # the P-panel's assigned-foot plots (foot_ang_vel_xy, ankle_pitch_vel,
+    # feetorientation, foot_inner_face_continuous, ...) track this foot and
+    # show the reward response live as the hip sweeps +/-30deg:
+    uv run sgk_play Mjlab-BeyondAMP-Goalkeeper-T1-MultiDisc \\
+        --agent scripted_yaw --num-envs 1 --force-region left_near \\
+        --scripted-yaw-deg 30 --no-terminations True
 """
 from __future__ import annotations
 
@@ -64,8 +74,49 @@ from simple_goalkeeper.rsl_rl_multi.him_amp_on_policy_runner import (
 
 @dataclass(frozen=True)
 class PlayConfig:
-    agent: Literal["zero", "random", "trained"] = "trained"
+    agent: Literal["zero", "random", "trained", "scripted_yaw"] = "trained"
     checkpoint_file: str | None = None
+    scripted_yaw_joint: str = "Left_Hip_Yaw"
+    """--agent scripted_yaw only: which joint to drive. T1's ankle has no yaw
+    DOF (confirmed in t1_headless.xml) -- Hip_Yaw is the only joint that can
+    rotate a foot's heading, so a pure foot-Z-rotation motion sample is
+    necessarily a Hip_Yaw sweep, not a foot-local joint. Use --force-region
+    left_near/left_far so the ball-assigned foot matches this side (the
+    P-panel's foot-orientation plots are gated to the assigned/leading foot)."""
+    scripted_yaw_deg: float = 30.0
+    """--agent scripted_yaw only: peak commanded joint angle, degrees, both
+    directions (a symmetric +/- sweep, not a one-sided ramp)."""
+    scripted_yaw_period_steps: int = 100
+    """--agent scripted_yaw only: steps per full sine cycle (dt=0.02s, so 100
+    = 2s/cycle). Ramps with episode_length_buf, so it repeats every episode
+    with no manual restart needed to watch the P-panel plots respond again."""
+    scripted_yaw_pin_root: bool = True
+    """--agent scripted_yaw only: freeze the robot's root pose/velocity every
+    step (re-written back to its post-reset value after each env.step()).
+    Live-verified (2026-08-15) necessary: rotating a PLANTED, weight-bearing
+    foot's Hip_Yaw against ground friction reaction-torques the whole robot
+    over within ~1.5 sine cycles regardless of the ball -- the same failure
+    class `postleadfootorientation`'s airborne-only gate exists for. Pinning
+    isolates the reward response to the foot rotation itself from this
+    unrelated balance failure. Set False to see the (unstable) unpinned
+    behavior instead."""
+    scripted_yaw_park_ball: bool = True
+    """--agent scripted_yaw only: teleport the ball far away (and hold it
+    there) every step so it can never roll into the robot mid-sweep. On by
+    default so the motion sample stays isolated to the foot -- set False to
+    let the ball behave normally (e.g. to test foot-rotation rewards during
+    a real approach)."""
+    scripted_yaw_lift_height: float = 0.4
+    """--agent scripted_yaw only: extra root-Z offset (metres) added to the
+    pinned root height, so both feet clear the ground entirely. Live-verified
+    (2026-08-15) necessary: pinning the ROOT alone still leaves the foot free
+    to stay in ground contact, which fights the scripted rotation with real
+    contact/friction forces at the foot itself (the root pin only stops the
+    TRUNK from tipping, it can't stop the foot from being "limited by the
+    ground" locally). Lifting the whole pinned pose 0.4m clears T1's ~0.66m
+    standing height comfortably clear of the floor, so the leg swings freely
+    with no contact of any kind. Set to 0.0 to keep the feet grounded instead
+    (e.g. to specifically study ground-contact effects)."""
     motion_file: str | None = None
     """Optional NPZ motion file for the WithOverlay task (overrides default)."""
     amp_eye_view: bool = False
@@ -1237,17 +1288,25 @@ def _patch_viewer_all_footorientation_plots(native_viewer: "NativeMujocoViewer",
         "inner_face_orientation_save",
         "postleadfootorientation",
         "trailing_foot_forward_continuous",
-        "foot_ang_vel_xy",
+        # REMOVED 2026-08-15 (user request, "drop foot_ang_vel_xy"):
+        # foot_ang_vel_xy deleted entirely (goalkeeper_env_cfg.py/rewards.py/
+        # mdp/__init__.py) -- superseded by ankle_pitch_vel/ankle_roll_vel
+        # below, see docs/BugFixes.md.
         # NEW 2026-08-15 (user request): ankle_pitch_vel is the new
         # always-on Ankle_Pitch-specific joint_vel_l2 penalty
-        # (goalkeeper_env_cfg.py) added alongside foot_ang_vel_xy above --
-        # probe evidence (docs/BugFixes.md, 2026-08-15) found Ankle_Pitch's
-        # own joint velocity, not the whole-body world-frame sum
-        # foot_ang_vel_xy measures, actually leads the leading foot's
-        # pre-save pitch spike. Placed right after foot_ang_vel_xy so both
-        # rotation-rate dampers are visible side by side. 9 terms total,
-        # still well under the 12-slot cap.
+        # (goalkeeper_env_cfg.py) -- probe evidence (docs/BugFixes.md,
+        # 2026-08-15) found Ankle_Pitch's own joint velocity, not the
+        # whole-body world-frame sum foot_ang_vel_xy used to measure,
+        # actually leads the leading foot's pre-save pitch spike.
         "ankle_pitch_vel",
+        # NEW 2026-08-15 (user request, "basically never want pitch/roll"):
+        # the two new positional penalties + ankle_roll_vel (goalkeeper_env_cfg.py)
+        # -- brings this list to exactly 12, AT the cap documented above, not
+        # over it. If a future term needs a slot here, something in this list
+        # must be dropped first.
+        "ankle_pitch_pos",
+        "ankle_roll_pos",
+        "ankle_roll_vel",
     )
 
     def _patched_setup() -> None:
@@ -1389,12 +1448,147 @@ def run_play(task_id: str, cfg: PlayConfig) -> None:
     else:
         env = AMPEnvWrapper(env, clip_actions=agent_cfg.clip_actions, motion_dataset=agent_cfg.amp_data)
 
-    DUMMY_MODE = cfg.agent in {"zero", "random"}
+    DUMMY_MODE = cfg.agent in {"zero", "random", "scripted_yaw"}
     if DUMMY_MODE:
         action_shape: tuple[int, ...] = env.unwrapped.action_space.shape
         if cfg.agent == "zero":
             def policy(obs: torch.Tensor) -> torch.Tensor:
                 return torch.zeros(action_shape, device=device)
+        elif cfg.agent == "scripted_yaw":
+            # Motion-sample probe (2026-08-15, user request): "make a motion
+            # sample that only rotates the foot in the z axis" to watch the
+            # P-panel reward graphs respond. All other joints stay at 0
+            # action (= default_joint_pos, per JointPositionAction's
+            # use_default_offset=True) -- only the resolved Hip_Yaw action
+            # index is driven, so the hip genuinely does move (as the user
+            # anticipated -- "probably it has to also move then the hip
+            # etc"), but nothing else is scripted; any other joint motion
+            # visible is the physics' own reaction (e.g. balance response),
+            # not commanded. No reward-affecting code touched -- viewer/CLI
+            # addition only, see CLAUDE.md's Change Approval Workflow.
+            import math as _yaw_math
+
+            raw_env_for_yaw = env.unwrapped
+            joint_pos_term = raw_env_for_yaw.action_manager.get_term("joint_pos")
+            if cfg.scripted_yaw_joint not in joint_pos_term.target_names:
+                raise ValueError(
+                    f"--scripted-yaw-joint {cfg.scripted_yaw_joint!r} not found in "
+                    f"action term's target_names: {joint_pos_term.target_names}"
+                )
+            yaw_idx = joint_pos_term.target_names.index(cfg.scripted_yaw_joint)
+            yaw_scale = joint_pos_term.scale
+            yaw_scale_val = (
+                float(yaw_scale[0, yaw_idx].item())
+                if torch.is_tensor(yaw_scale)
+                else float(yaw_scale)
+            )
+            yaw_amplitude_rad = _yaw_math.radians(cfg.scripted_yaw_deg)
+            yaw_amplitude_action = yaw_amplitude_rad / yaw_scale_val
+            print(
+                f"[INFO] scripted_yaw: joint={cfg.scripted_yaw_joint!r} "
+                f"action_idx={yaw_idx} action_scale={yaw_scale_val:.4f} rad/unit -- "
+                f"+/-{cfg.scripted_yaw_deg:.1f}deg -> action amplitude "
+                f"{yaw_amplitude_action:.3f}, period={cfg.scripted_yaw_period_steps} steps",
+                file=sys.stderr,
+            )
+
+            def policy(obs: torch.Tensor) -> torch.Tensor:
+                action = torch.zeros(action_shape, device=device)
+                step = raw_env_for_yaw.episode_length_buf.to(torch.float32)
+                phase = 2.0 * torch.pi * (step / cfg.scripted_yaw_period_steps)
+                action[:, yaw_idx] = yaw_amplitude_action * torch.sin(phase)
+                return action
+
+            # Root-pin + ball-park (both live-verified 2026-08-15 necessary,
+            # see docs/BugFixes.md): the standing pose alone is stable, but a
+            # planted foot's Hip_Yaw sweep alone reliably tips the robot over
+            # within ~1.5 cycles from ground-friction reaction torque -- ruled
+            # out the ball as the cause first (parked it, still fell at the
+            # same timing), then confirmed pinning the root fixes it (foot
+            # keeps rotating, height/tilt stay exactly constant). Both are
+            # applied via a monkey-patched env.step/env.reset rather than
+            # inside `policy` itself, since policy only returns an action --
+            # it has no hook to run code AFTER physics has advanced.
+            n_yaw = raw_env_for_yaw.num_envs
+            _pin_pose = {"pose": None}
+
+            def _capture_pin_pose() -> None:
+                robot_entity = raw_env_for_yaw.scene["robot"]
+                pos = robot_entity.data.root_link_pos_w.clone()
+                pos[:, 2] += cfg.scripted_yaw_lift_height
+                _pin_pose["pose"] = torch.cat([pos, robot_entity.data.root_link_quat_w.clone()], dim=-1)
+
+            # Live-verified 2026-08-15 (see docs/BugFixes.md): NativeMujocoViewer
+            # steps the sim for a while BEFORE its first real env.reset() (some
+            # kind of pre-render/priming window -- ~120 steps observed). Lazily
+            # capturing the pin pose only inside the reset hook left that whole
+            # window unprotected (`_pin_pose["pose"] is None`, pinning a no-op),
+            # so the scripted action ran completely unpinned and the robot fell
+            # for real during it -- confirmed via a `pin_target_h=nan` trace the
+            # entire time it was falling, snapping to stable the instant the
+            # first real reset finally fired. Capturing eagerly here, using
+            # whatever state exists right now (construction-time state is
+            # already a valid standing pose -- confirmed by this same trace:
+            # height read exactly 0.663m, right, from step 1), closes that gap.
+            # The reset hook below still re-captures on every subsequent real
+            # reset, so a manual reset (key-press, episode boundary) still gets
+            # a fresh pin pose rather than reusing this first one forever.
+            _capture_pin_pose()
+
+            def _park_ball_state() -> None:
+                if not cfg.scripted_yaw_park_ball:
+                    return
+                ball_entity = raw_env_for_yaw.scene["ball"]
+                park_pos = (
+                    torch.tensor([[10.0, 10.0, 5.0]], device=device).expand(n_yaw, -1)
+                    + raw_env_for_yaw.scene.env_origins
+                )
+                park_quat = torch.tensor([[1.0, 0.0, 0.0, 0.0]], device=device).expand(n_yaw, -1)
+                ball_entity.write_root_link_pose_to_sim(torch.cat([park_pos, park_quat], dim=-1))
+                ball_entity.write_root_link_velocity_to_sim(torch.zeros(n_yaw, 6, device=device))
+
+            def _pin_root_state() -> None:
+                if not cfg.scripted_yaw_pin_root or _pin_pose["pose"] is None:
+                    return
+                robot_entity = raw_env_for_yaw.scene["robot"]
+                robot_entity.write_root_link_pose_to_sim(_pin_pose["pose"])
+                robot_entity.write_root_link_velocity_to_sim(torch.zeros(n_yaw, 6, device=device))
+
+            _orig_yaw_reset = env.reset
+            _orig_yaw_step = env.step
+
+            def _patched_yaw_reset(*args, **kwargs):
+                result = _orig_yaw_reset(*args, **kwargs)
+                _capture_pin_pose()
+                _park_ball_state()
+                _pin_root_state()
+                return result
+
+            _yaw_diag_counter = {"n": 0}
+
+            def _patched_yaw_step(actions: torch.Tensor):
+                result = _orig_yaw_step(actions)
+                _park_ball_state()
+                _pin_root_state()
+                _yaw_diag_counter["n"] += 1
+                if _yaw_diag_counter["n"] % 100 == 0:
+                    robot_entity = raw_env_for_yaw.scene["robot"]
+                    h = float(robot_entity.data.root_link_pos_w[0, 2] - raw_env_for_yaw.scene.env_origins[0, 2])
+                    tilt = float(robot_entity.data.projected_gravity_b[0, :2].norm())
+                    print(
+                        f"[INFO] scripted_yaw diag: step={_yaw_diag_counter['n']} height={h:.3f} tilt={tilt:.3f} "
+                        f"(pinned -> should stay ~constant; drift here means pin/park broke again)",
+                        file=sys.stderr,
+                    )
+                return result
+
+            env.reset = _patched_yaw_reset
+            env.step = _patched_yaw_step
+            print(
+                f"[INFO] scripted_yaw: pin_root={cfg.scripted_yaw_pin_root} "
+                f"park_ball={cfg.scripted_yaw_park_ball}",
+                file=sys.stderr,
+            )
         else:
             def policy(obs: torch.Tensor) -> torch.Tensor:
                 return 2 * torch.rand(action_shape, device=device) - 1

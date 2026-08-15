@@ -69,6 +69,9 @@ _RECOVERY_WAIST_CFG = SceneEntityCfg("robot", joint_names=("Waist",))
 # Hip_Roll-driven on average and only ~1/3 of pitch's magnitude, so an
 # ankle-specific roll penalty wouldn't target the right joint.
 _ANKLE_PITCH_CFG = SceneEntityCfg("robot", joint_names=("Left_Ankle_Pitch", "Right_Ankle_Pitch"))
+# NEW 2026-08-15 (user request): sibling of _ANKLE_PITCH_CFG above, for
+# ankle_roll_vel/ankle_roll_pos -- see those RewardTermCfg entries below.
+_ANKLE_ROLL_CFG = SceneEntityCfg("robot", joint_names=("Left_Ankle_Roll", "Right_Ankle_Roll"))
 # FIX 2026-07-22: see postlegdofpos's docstring (rewards.py) -- G1 has no
 # leg-recovery reward to port because its legs aren't the catching limb;
 # SGK's legs are, so this fills the gap that left them with no post-save
@@ -932,49 +935,42 @@ def goalkeeper_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
         "feetorientation": RewardTermCfg(
             func=gk_mdp.feetorientation,
             weight=3.0,
-            params={"asset_cfg": _FEET_CFG},
+            # FIX 2026-08-15 (user request): sigma was the function's own
+            # default (5.0), never explicitly set here -- user noticed a
+            # visually "pretty bad" ~11deg one-foot tilt still scored ~83%
+            # of max reward (exp(-5*sin^2(11deg))=0.83) and asked whether
+            # steepening this bounded reward's drop-off would also help.
+            # Raised 5.0 -> 40.0 (same ~11deg tilt now scores ~23%, was ~83%
+            # -- chosen via AskUserQuestion from 20/40/leave-as-is/custom).
+            # Passed
+            # explicitly rather than left as the function default, matching
+            # this codebase's convention for auditable per-term overrides.
+            # See docs/BugFixes.md, 2026-08-15.
+            params={"asset_cfg": _FEET_CFG, "sigma": 40.0},
         ),
-        "foot_ang_vel_xy": RewardTermCfg(
-            func=gk_mdp.foot_ang_vel_xy,
-            # FIX 2026-07-20 (reward-weight audit): was -0.5. No G1
-            # equivalent; live-measured real per-step magnitude (-1.80) was
-            # meaningfully inflating raw task-reward scale and diluting
-            # AMP's real proportional influence on the blended objective.
-            # Halved rather than removed -- likely still doing real work.
-            # FIX 2026-08-07 (user request): restored -0.5 -- user watched
-            # training and observed the foot visibly rotating right at save
-            # contact, causing an unstable landing; wants foot rotation
-            # penalized more strongly. Reverts the 2026-07-20 halving
-            # deliberately (dilution concern judged secondary to the
-            # landing-instability symptom). See rewards.py:foot_ang_vel_z
-            # (new sibling term, same fix) and docs/BugFixes.md.
-            # FIX 2026-08-10 (user request, model_11250.pt replay): -0.5 ->
-            # -3.0 (6x). User reported persistent heel-down/toes-up rotation
-            # throughout the episode ("no where in the episode i want that
-            # kind of movement") -- this term's pitch component is exactly
-            # that motion. -0.5 was judged insufficient. Risk: dilution
-            # concern from the 2026-07-20 fix reasserts itself at 6x the
-            # original magnitude; watch AMP's proportional reward share on
-            # the next run. Not yet validated against a live training run.
-            # FIX 2026-08-13 (user request): reverted -3.0 -> -0.25, back to
-            # the exact value active when model_17250.pt (airbornelatchfix)
-            # trained -- isolating whether the 12x weight increase was
-            # suppressing the leading-foot yaw rotation baseline achieved,
-            # alongside foot_ang_vel_z's full removal and
-            # postleadfootorientation's gate revert (same commit). See
-            # docs/BugFixes.md.
-            weight=-0.25,
-            params={"asset_cfg": _FEET_CFG},
-        ),
+        # REMOVED 2026-08-15 (user request): foot_ang_vel_xy deleted outright
+        # (function + this registration + mdp/__init__.py export), not just
+        # reweighted -- superseded by ankle_pitch_vel/ankle_roll_vel, which
+        # read each ankle joint's own local velocity directly instead of the
+        # whole-body world-frame foot angular velocity this term measured.
+        # The world-frame read conflated genuine ankle rotation with
+        # hip/knee-driven leg-swing propagation (confirmed live via the
+        # scripted_yaw motion-sample tooling: this term reacted even to a
+        # "pure" Hip_Yaw sweep) -- the exact reason its own -3.0 (6x)
+        # attempt on 2026-08-10 had to be reverted (killed legitimate
+        # reach/dive motion too). Its only unique remaining contribution
+        # (penalizing hip/knee-driven foot rotation) was that same failure
+        # mode, not a benefit. See rewards.py (function deleted) and
+        # docs/BugFixes.md.
         # REMOVED 2026-08-13 (user request): foot_ang_vel_z (foot YAW
         # angular-velocity penalty, added 2026-08-07) deleted outright, not
         # just reweighted -- it had no equivalent in model_17250.pt's
         # (airbornelatchfix) training code at all. Removed together with
-        # foot_ang_vel_xy's revert above and postleadfootorientation's gate
-        # revert (rewards.py) to isolate whether these three reward-config
-        # differences, not training maturity, explain the leading-foot
-        # rotation gap vs baseline. See rewards.py (function deleted) and
-        # docs/BugFixes.md.
+        # foot_ang_vel_xy's revert above (superseded outright 2026-08-15,
+        # see above) and postleadfootorientation's gate revert (rewards.py)
+        # to isolate whether these three reward-config differences, not
+        # training maturity, explain the leading-foot rotation gap vs
+        # baseline. See rewards.py (function deleted) and docs/BugFixes.md.
         # --- post-save recovery (active only when ball is behind) ---
         "postorientation": RewardTermCfg(
             func=gk_mdp.postorientation,
@@ -1357,10 +1353,48 @@ def goalkeeper_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
         # next run" status as arm_dof_vel's own docstring) -- not derived
         # from a principled calibration against the probe's rad/s values.
         # See docs/BugFixes.md, 2026-08-15.
+        # FIX 2026-08-15 (user request, "drastically increase"): -0.1 -> -1.0
+        # (10x). model_11750.pt (6144_seqpromptness run) still showed the
+        # heel-down/toes-up tilt despite this term -- weight was a first
+        # guess and this was its first-ever live checkpoint. Chosen via
+        # AskUserQuestion (10x/20x/5x/custom offered, 10x picked). Kept
+        # local-joint-scoped (Ankle_Pitch only, not foot_ang_vel_xy's
+        # whole-body world-frame read) specifically so a large weight here
+        # is less likely to bleed into legitimate Hip_Pitch/Knee_Pitch reach
+        # motion the way foot_ang_vel_xy's -3.0 attempt did. Not yet
+        # validated against a live training run. See docs/BugFixes.md.
         "ankle_pitch_vel": RewardTermCfg(
             func=mjlab_mdp.joint_vel_l2,
-            weight=-0.1,
+            weight=-1.0,
             params={"asset_cfg": _ANKLE_PITCH_CFG},
+        ),
+        # NEW 2026-08-15 (user request, "basically never want pitch/roll in my
+        # training"): feetorientation (+3.0, gravity-vs-foot-Z alignment) is a
+        # REWARD for flat feet, diluted across all 61 active terms -- not a
+        # dedicated penalty. These three add sharp, always-on, undiluted
+        # gradient directly against pitch/roll, joint-local so they can't
+        # touch legitimate hip/knee-driven reach motion. Same "no gate, ever"
+        # policy as ankle_pitch_vel above, per the same explicit user
+        # instruction. See docs/BugFixes.md.
+        # ankle_pitch_pos/ankle_roll_pos reuse the existing generic
+        # deviation_waist_joint function (sum((joint_pos-default)^2), no
+        # waist-specific logic despite the name) -- same "reuse an existing
+        # scoped-by-asset_cfg mechanism, no new function" pattern as
+        # ankle_pitch_vel/arm_dof_vel reusing joint_vel_l2.
+        "ankle_pitch_pos": RewardTermCfg(
+            func=gk_mdp.deviation_waist_joint,
+            weight=-5.0,
+            params={"asset_cfg": _ANKLE_PITCH_CFG},
+        ),
+        "ankle_roll_pos": RewardTermCfg(
+            func=gk_mdp.deviation_waist_joint,
+            weight=-5.0,
+            params={"asset_cfg": _ANKLE_ROLL_CFG},
+        ),
+        "ankle_roll_vel": RewardTermCfg(
+            func=mjlab_mdp.joint_vel_l2,
+            weight=-1.0,
+            params={"asset_cfg": _ANKLE_ROLL_CFG},
         ),
     }
 

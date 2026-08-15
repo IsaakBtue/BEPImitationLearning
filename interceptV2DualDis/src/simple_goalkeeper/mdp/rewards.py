@@ -2572,27 +2572,21 @@ def feetorientation(
     return torch.exp(-sigma * err)
 
 
-def foot_ang_vel_xy(
-    env: "ManagerBasedRlEnv",
-    asset_cfg: SceneEntityCfg = _DEFAULT_FEET_CFG,
-) -> torch.Tensor:
-    """Sum of squared foot roll+pitch angular velocity across both feet.
-
-    Penalises active foot rotation in XY (heel-first landings, ankle twist during
-    dives). Orthogonal to feetorientation: that measures static tilt; this measures
-    how fast the foot is rotating into or out of a tilt.
-
-    FIX 2026-08-10 (user request, model_11250.pt replay): weight -0.5->-3.0
-    (goalkeeper_env_cfg.py) -- user observed persistent heel-down/toes-up
-    rotation throughout the episode ("no where in the episode i want that
-    kind of movement"), the pitch component of this exact term. Not yet
-    validated against a live training run.
-    """
-    robot: Entity = env.scene[asset_cfg.name]
-    foot_ang_vel_w = robot.data.body_link_ang_vel_w[:, asset_cfg.body_ids, :]  # [B, 2, 3]
-    return torch.sum(foot_ang_vel_w[:, :, :2] ** 2, dim=-1).sum(dim=-1)
-
-
+# REMOVED 2026-08-15 (user request): foot_ang_vel_xy (whole-body world-frame
+# foot roll+pitch angular velocity, sum across both feet) deleted outright --
+# superseded by ankle_pitch_vel/ankle_roll_vel (goalkeeper_env_cfg.py), which
+# read each ankle joint's own LOCAL velocity instead of the world-frame body
+# rate this function measured. The world-frame read conflated genuine
+# ankle-driven rotation with hip/knee-driven leg-swing propagation -- live-
+# confirmed via the scripted_yaw motion-sample tooling (this term reacted
+# even to a "pure" Hip_Yaw sweep, which is not tilt at all) and previously
+# the reason its own -3.0 (6x) attempt on 2026-08-10 had to be reverted
+# (killed legitimate reach/dive motion too, see docs/BugFixes.md 2026-08-13).
+# Its only unique remaining contribution -- penalizing hip/knee-driven foot
+# rotation -- was exactly that failure mode, not a benefit, once the
+# joint-local terms cover the genuinely-wanted signal cleanly. See
+# docs/BugFixes.md, 2026-08-15.
+#
 # REMOVED 2026-08-13 (user request): foot_ang_vel_z (foot YAW angular-
 # velocity penalty, NEW 2026-08-07, gated post-save-only 2026-08-13 earlier
 # this same session) deleted outright -- had no equivalent in

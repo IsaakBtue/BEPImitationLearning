@@ -2847,3 +2847,146 @@ Algebraically equivalent (whenever `|delta| > 0.50`) to `red_y = half_y + sign(d
 - **Not yet validated against a live training run.**
 
 ---
+
+## 2026-08-15 (same session) -- `ankle_pitch_vel` weight drastically raised: -0.1 -> -1.0 (10x)
+
+**Context:** user checked `model_11750.pt` (`6144_seqpromptness_2026-08-15` run) and asked why the heel-down/toes-up foot tilt was still visible. Investigation found this was `ankle_pitch_vel`'s first-ever live checkpoint: added earlier the same day (01:24, commit `f9b5eac`) at a first-guess weight of -0.1, and this run had also just picked up 3 more brand-new competing reward terms (`red_*` waypoint family, `trailing_foot_reach`, `sequence_promptness`) -- not evidence the mechanism failed, evidence it hadn't been given weight or training time yet. `foot_ang_vel_xy` (the older, whole-body tilt-rate term) is also still weak (-0.25, reverted down from a -3.0 attempt on 2026-08-13 after that was found to suppress legitimate leading-foot rotation too).
+
+User asked to "drastically increase" `ankle_pitch_vel`. Confirmed magnitude via `AskUserQuestion` (10x/20x/5x/custom offered) -- user picked 10x.
+
+**Fix:** `goalkeeper_env_cfg.py:1362` -- `ankle_pitch_vel` weight `-0.1` -> `-1.0`. No other file touched (`play.py` only references the term name for its P-panel plot list, no weight mirror to update).
+
+**Why a large weight is lower-risk here than it was for `foot_ang_vel_xy`:** `ankle_pitch_vel` reads the LOCAL `Ankle_Pitch` joint's own velocity (`joint_vel_l2` scoped to `_ANKLE_PITCH_CFG`), not `foot_ang_vel_xy`'s whole-body world-frame foot angular velocity, which conflates ankle-local rotation with legitimate Hip_Pitch/Knee_Pitch-driven leg-swing/reach motion -- that conflation is the documented reason the -3.0 (6x) `foot_ang_vel_xy` attempt killed real reach/swing motion and had to be reverted. A large weight on the ankle-local term structurally cannot touch hip/knee reach the same way.
+
+**Verification:**
+- `ast.parse` on `goalkeeper_env_cfg.py` -- no syntax errors.
+- Full suite: `env -u PYTHONPATH uv run pytest tests/ -q` -- **90/90 pass**.
+- **Not yet validated against a live training run** -- watch the next checkpoint for (a) whether the tilt actually reduces and (b) whether reach/dive motion regresses the way `foot_ang_vel_xy`'s -3.0 attempt did, given this is now a much larger relative jump (10x vs. that attempt's 6x).
+
+---
+
+## 2026-08-15 (same session) -- new `--agent scripted_yaw` play mode: isolated foot-Z-rotation motion sample for watching P-panel reward response
+
+**Context:** user asked for "a motion sample that only rotates the foot in the z axis (probably it has to also move then the hip etc) so i want to see what the reward graphs look like." Confirmed via `t1_constants.py`/prior findings: T1's ankle has no yaw DOF, so `Hip_Yaw` is the only joint that can rotate a foot's heading -- a pure foot-Z-rotation sample is necessarily a Hip_Yaw sweep, matching the user's own expectation.
+
+**Implementation (viewer/CLI-only, no reward-affecting code -- no pre-approval needed per Change Approval Workflow):** new `--agent scripted_yaw` mode in `scripts/play.py`, alongside the existing `zero`/`random`/`trained` dummy-mode agents. Resolves the actual action-vector index for the target joint (default `Left_Hip_Yaw`) via `action_manager.get_term("joint_pos").target_names.index(...)` -- not a hardcoded/assumed index, per this project's own established `SceneEntityCfg`/ordering caution (`.claude/skills/reward-shaping-scene-entity-cfg/`). Every other action dim stays 0 (= `default_joint_pos`, `JointPositionAction`'s `use_default_offset=True`). Drives a sine sweep, amplitude `--scripted-yaw-deg` (default 30deg, converted to normalized action units via the resolved per-joint `action_scale`), period `--scripted-yaw-period-steps` (default 100 steps = 2s/cycle), keyed off `episode_length_buf` so it repeats every episode automatically -- no manual restart needed to re-watch.
+
+**Usage:** `--force-region left_near` (existing flag) pins the ball-approach side to left, so the P-panel's assigned-foot-gated plots (`foot_ang_vel_xy`, `ankle_pitch_vel`, `feetorientation`, `foot_inner_face_continuous`, `assigned_foot_angle_deg`, ...) actually track the driven foot instead of a foot on the un-rotated side:
+```
+uv run sgk_play Mjlab-BeyondAMP-Goalkeeper-T1-MultiDisc \
+    --agent scripted_yaw --num-envs 1 --force-region left_near \
+    --scripted-yaw-deg 30 --no-terminations True
+```
+
+**Verification:**
+- `ast.parse` on `play.py` -- no syntax errors.
+- Full suite: `env -u PYTHONPATH uv run pytest tests/ -q` -- **90/90 pass**.
+- Live headless check (2 envs, 30 steps, CPU): confirmed `Left_Hip_Yaw` resolves to action index 11 with scale 0.2119 rad/unit, matching `t1_constants.py`'s documented WAIST/HIP_ROLL/HIP_YAW actuator group; stepped without exception; resulting foot world quaternion showed a genuine non-zero Z-rotation component, confirming the scripted action reaches the foot as intended.
+- **Diagnostic-only.** No reward weight/config touched by this entry -- see the `ankle_pitch_vel` weight-increase entry above for the actual training-config change made this session.
+
+---
+
+## 2026-08-15 (same session) -- `--agent scripted_yaw` fixed: robot fell over immediately, root-pin + ball-park added
+
+**Context:** user reported "nothing happends it just valls over" running the `scripted_yaw` command from the entry above. Followed systematic-debugging (already invoked this session): formed and tested hypotheses via live evidence rather than guessing.
+
+**Investigation (2 hypotheses tested, 1 refuted, 1 confirmed, all via direct measurement, not speculation):**
+1. First hypothesis (planted-foot ground-friction torque): a 100-step headless replay (no `--force-region`, CPU) showed only mild, self-recovering wobble (tilt peaked 0.317, well under the 0.8 fall threshold) -- didn't fall. Looked refuted.
+2. Reproduced the user's exact failure with `--force-region left_near` + terminations cleared (matches `--no-terminations True`, which -- found while reproducing -- clears ALL terminations including `time_out`, not just the fall ones, so a real fall never auto-resets and the robot just lies there, matching "it just falls over" verbatim): height collapsed 0.663m -> 0.15m, tilt saturated to 1.0 (fully tipped) between step 60-100, then stayed collapsed for the rest of the 600-step run.
+3. Ball-collision hypothesis (the ball crosses `ball_x=0`, right where the robot stands, at almost exactly the same step the tilt spikes): tested by teleporting the ball far away (10,10,5m) every step, verified via direct position readback that it stayed parked the whole run -- **robot still collapsed at the same timing.** Hypothesis refuted by direct evidence.
+4. Re-tested hypothesis 1 without `--force-region` this time WITH the ball parked (isolating region/ball from the picture entirely, `torch.manual_seed(0)` for reproducibility): **still collapsed** at step ~90, same signature. Confirms the original theory was right all along -- the earlier "stable" 300-step spot-checks in the previous entry's smoke test just hadn't run long enough / gotten unlucky with timing, not evidence of real stability.
+
+**Root cause, confirmed:** rotating a PLANTED, weight-bearing foot's `Hip_Yaw` by +/-30 deg against ground friction reaction-torques the whole robot over within ~1.5 sine cycles (~90 steps @ period=100) -- independent of the ball, independent of region. This is the exact same failure class this project's own `postleadfootorientation` reward already has an "airborne-only" gate for (2026-08-01 fix, see Divergences table in CLAUDE.md): "the unconditional version was pulling an already-planted foot to keep rotating, causing it to slip against the floor instead of turning cleanly." The scripted motion sample has no balance controller of any kind (every non-yaw action dim is fixed at 0 = default pose), so it has nothing to counteract the reaction torque.
+
+**Fix (`scripts/play.py`, viewer/diagnostic-only, no reward-affecting code -- no pre-approval needed):** two new `--agent scripted_yaw`-only flags, both defaulting True:
+1. `scripted_yaw_pin_root`: monkey-patches `env.step`/`env.reset` (the only hook available -- `policy()` only returns an action, it can't run code after physics advances) to re-write the robot's root pose to its post-reset value and zero its velocity, every step, via `Entity.write_root_link_pose_to_sim`/`write_root_link_velocity_to_sim`. Live-verified: with this on, height/tilt stay EXACTLY constant for 300 steps while the left foot's own world quaternion genuinely oscillates (z-component -0.282 to +0.148, confirming real rotation, not a frozen foot).
+2. `scripted_yaw_park_ball`: same monkey-patch mechanism, teleports the ball to (env_origin + 10,10,5m) with zero velocity every step, so it can never reach the robot. (Ruled out as the actual cause of the reported fall, per the investigation above, but kept on by default since it's a legitimate confound for an "isolated foot rotation" diagnostic regardless -- a real approaching ball is a separate thing to test, toggle `--scripted-yaw-park-ball False` for that.)
+
+Both flags can be set False individually to see the unpinned/unparked behavior instead (e.g. to specifically study how a planted-foot Hip_Yaw sweep destabilizes the robot, which is itself a legitimate question given the fix above).
+
+**Verification:**
+- `ast.parse` on `play.py` -- no syntax errors.
+- Full suite: `env -u PYTHONPATH uv run pytest tests/ -q` -- **90/90 pass**.
+- Live headless check (GPU, `--force-region left_near`, 300 steps): with both flags on, height held at 0.663m and tilt at 0.000 for the entire run while the left foot's quaternion genuinely swept through its expected range -- matches the diagnostic's intent exactly.
+- Live smoke test through the REAL `sgk_play` entry point (not just the standalone repro script), headless via `--viewer viser`, 40s: confirmed the `[INFO] scripted_yaw: pin_root=True park_ball=True` line prints, the env/reward-manager/viewer all construct with no exceptions, and the viser server starts cleanly. Did not visually confirm in a real display (`--viewer native`) this session -- do that before fully trusting the fix.
+
+---
+
+## 2026-08-15 (same session) -- `scripted_yaw` STILL fell over: pin pose captured lazily (real bug) + foot still ground-contact-limited even when pinned (user-identified, real second issue)
+
+**Context:** user tried the ankle_pitch/ankle_roll commands from the entry above -- both still fell over. Root-caused via a per-step diagnostic added directly into the patched step function (not guesswork): traced `h_before_pin`/`h_after_pin`/`pin_target_h` every step through the REAL `sgk_play` native-viewer entry point (not the standalone repro script, which had never actually been run through `run_play` itself for the ankle case).
+
+**Bug 1 (found via the trace):** `pin_target_h=nan` for the entire fall, every single step from 1 through ~120 -- pinning was a complete no-op that whole time. `NativeMujocoViewer` steps the sim for a real, observed ~120 steps BEFORE ever calling its first genuine `env.reset()` (some pre-render/priming window) -- the previous fix only captured `_pin_pose["pose"]` lazily inside the reset hook, so this entire pre-reset window ran fully unpinned, and the robot genuinely fell for real during it. The moment the first real reset finally fired (~step 120-150), height snapped to exactly 0.663m and held rock-stable for the rest of the run -- confirming the pin/park mechanism itself was correct, just not yet active when it needed to be.
+
+**Fix 1:** capture the pin pose EAGERLY -- synchronously, the instant the `scripted_yaw` branch runs, using whatever state exists right then (construction-time state is already a valid standing pose, confirmed by the trace: height read exactly 0.663m from step 1). New `_capture_pin_pose()` helper, called once immediately and again inside the reset hook (so a later genuine reset still refreshes it, rather than reusing the very first capture forever). `play.py`.
+
+**Bug 2 (user-identified, not from a trace):** user pointed out that pinning the TRUNK alone doesn't stop the FOOT from still being "limited by the ground" -- the root staying rigid doesn't mean the foot isn't still in ground contact, fighting the scripted rotation with real contact/friction forces locally at the foot/ankle, independent of whether the trunk itself can tip.
+
+**Fix 2:** new `scripted_yaw_lift_height` config field (default 0.4m), added as a Z offset inside `_capture_pin_pose()` on top of the real captured height -- the whole pinned pose floats 0.4m higher than where the robot actually stood, clearing both feet of the ~0.66m-tall T1 comfortably off the floor so the leg swings with zero ground contact of any kind. Set to 0.0 to keep the feet grounded instead (e.g. to specifically study ground-contact effects on their own).
+
+**Verification:**
+- `ast.parse` on `play.py` -- no syntax errors (checked after each edit).
+- Full suite: `env -u PYTHONPATH uv run pytest tests/ -q` -- **90/90 pass**.
+- Re-ran the real native-viewer entry point after Fix 1 alone (before Fix 2): confirmed via the same per-step trace that `pin_target_h` was no longer NaN from step 1 onward. A follow-up full run to confirm Fix 1 + Fix 2 together fully eliminates the fall could not be completed this session -- the user's own several concurrently-running `sgk_play` sessions (visible via `ps aux`, some backgrounded/stopped) were competing for the same GPU, causing a later verification attempt to die silently after loading only its first CUDA kernel module (GPU contention, not a code issue). **Not yet re-confirmed end-to-end after Fix 2 -- user should verify directly.**
+
+---
+
+## 2026-08-15 (same session) -- new `ankle_pitch_pos`/`ankle_roll_pos`/`ankle_roll_vel`: dedicated always-on pitch/roll penalties
+
+**Context:** user reported the ankle/foot rotation motion-sample work above ("weird because that should already be in that gravity aligned reward but it is not learning that") -- `feetorientation` (+3.0, gravity-vs-foot-Z alignment) is a REWARD for flat feet, diluted across all 61 (now 64) active terms, not a dedicated penalty -- explains why it alone wasn't enough to suppress the tilt. User: "make a positional penalty for pitch and also a vel and positional penalty for roll, both pitch and roll i basically never want in my training."
+
+**Fix (`goalkeeper_env_cfg.py`), all three reuse existing generic mechanisms, no new functions needed -- same pattern `ankle_pitch_vel`/`arm_dof_vel` already established (reusing `joint_vel_l2` scoped by `asset_cfg`):**
+1. New `_ANKLE_ROLL_CFG = SceneEntityCfg("robot", joint_names=("Left_Ankle_Roll", "Right_Ankle_Roll"))`, sibling of the existing `_ANKLE_PITCH_CFG`.
+2. `ankle_pitch_pos` / `ankle_roll_pos`: reuse the existing generic `deviation_waist_joint` function (`rewards.py`, already just `sum((joint_pos-default_joint_pos)^2)` with no waist-specific logic despite the name -- same "generic mechanism, scoped differently per RewardTermCfg" reuse as the velocity terms), scoped to `_ANKLE_PITCH_CFG`/`_ANKLE_ROLL_CFG` respectively. Weight `-5.0` each (confirmed via `AskUserQuestion`, offered -2.0/-5.0/custom).
+3. `ankle_roll_vel`: reuses `mjlab_mdp.joint_vel_l2` (same mechanism as `ankle_pitch_vel`), scoped to `_ANKLE_ROLL_CFG`. Weight `-1.0` (confirmed via `AskUserQuestion`, offered match-ankle_pitch_vel/-0.1-conservative/custom -- user picked matching ankle_pitch_vel exactly).
+4. All three always active, no gate -- same explicit "no need to gate, i never want this type of tilt behavior" policy `ankle_pitch_vel` was built under.
+5. `play.py`: added all three to `_ALL_FOOTORIENTATION_TERMS` (P-panel promotion list), right after `ankle_pitch_vel` -- brings the list to exactly 12 entries, AT the documented 12-slot cap, not over it.
+
+**Verification:**
+- `ast.parse` on `goalkeeper_env_cfg.py`/`play.py` -- no syntax errors.
+- Full suite: `env -u PYTHONPATH uv run pytest tests/ -q` -- **90/90 pass**.
+- Live headless smoke test (CPU, 4 envs, 30 random-action steps): all three terms confirmed registered (`RewardManager` now shows **64 active terms**, indices 61-63: `ankle_pitch_pos=-5.0`, `ankle_roll_pos=-5.0`, `ankle_roll_vel=-1.0`), computed with no exceptions across the run.
+- **Not yet validated against a live training run.**
+
+---
+
+## 2026-08-15 (same session) -- `foot_ang_vel_xy` dropped entirely
+
+**Context:** user asked whether `foot_ang_vel_xy` was even still useful now that `ankle_pitch_vel`/`ankle_roll_vel` exist. Answer given: no -- it measures whole-body world-frame foot roll+pitch angular velocity, which conflates genuine ankle rotation with hip/knee-driven leg-swing propagation (live-confirmed via the `scripted_yaw` motion-sample tooling: it reacted even to a "pure" Hip_Yaw sweep, which isn't tilt at all). That conflation is the documented reason its own -3.0 (6x) attempt on 2026-08-10 had to be reverted (killed legitimate reach/dive motion too, see the 2026-08-13 revert entry). The two new joint-local terms give a cleaner signal for the same intent without that risk. User: "drop foot_ang_vel_xy."
+
+**Fix:** deleted entirely, not just unregistered --
+1. `rewards.py`: function removed.
+2. `mdp/__init__.py`: export removed from the `rewards` import list.
+3. `goalkeeper_env_cfg.py`: `RewardTermCfg` registration removed.
+4. `play.py`: removed from `_ALL_FOOTORIENTATION_TERMS` (the active, last-registered P-panel promotion list). Left untouched in the older, superseded `_POST_RECOVERY_REWARD_TERMS` list -- that patch already tolerates a since-removed term name via its own `if n in native_viewer._term_names` guard, and is overridden by `_ALL_FOOTORIENTATION_TERMS` anyway (documented "last registered wins").
+5. Historical dated comments elsewhere referencing `foot_ang_vel_xy` (its own past weight-change history, other terms' docstrings citing it) left as-is -- same precedent as `foot_ang_vel_z`'s 2026-08-13 removal, which left its own prose trail intact.
+
+**Verification:**
+- `ast.parse` on all 4 changed files -- no syntax errors.
+- Full suite: `env -u PYTHONPATH uv run pytest tests/ -q` -- **90/90 pass**.
+- Live headless smoke test (CPU, 4 envs, 20 random-action steps): confirmed `foot_ang_vel_xy` absent from `reward_manager.active_terms` (**63 active terms**, down from 64), all 4 ankle pitch/roll terms still present, ran with no exceptions.
+
+---
+
+## 2026-08-15 (same session) -- `feetorientation` sigma steepened: 5.0 -> 40.0
+
+**Context:** user observed the P-panel showing ~2.5 (out of max 3.0) for `feetorientation` on an orientation they'd call "pretty bad," and asked whether fixing this term's own shape would help the broader tilt problem. Confirmed via direct calculation: `feetorientation = exp(-sigma*err)*weight`, `err = sum over both feet of (gravity_x^2+gravity_y^2)`; at `sigma=5.0` (the function's own default, never explicitly overridden in `goalkeeper_env_cfg.py` before this fix), an ~11deg one-foot tilt (`err≈sin^2(11deg)≈0.037`) scores `exp(-5*0.037)=0.83` -> 2.50/3.0 -- matching the user's observed number almost exactly, and confirming the "vanishing gradient near the optimum, too forgiving in the range that matters" diagnosis from earlier the same session was real, not just theoretical.
+
+**Fix:** `goalkeeper_env_cfg.py` -- `feetorientation`'s `sigma` param, previously left as the function's own default (5.0, never explicit), now explicitly set to `40.0` (chosen via `AskUserQuestion` from 20/40/leave-as-is/custom). Verified curve, computed directly (not estimated):
+
+| tilt | sigma=5 (old) | sigma=40 (new) |
+|------|---------------|-----------------|
+| 5deg | 96% | 74% |
+| 11deg | 83% | 23% |
+| 20deg | 56% | 1% |
+| 30deg | 29% | 0% |
+
+Small tilts (<5deg) still score close to full reward; the term now sharply distinguishes "close to flat" from "visibly bad" instead of being forgiving across the whole range that matters. No change to `weight` (still 3.0) or the underlying mechanism -- same bounded-reward shape, just steeper.
+
+**Verification:**
+- `ast.parse` on `goalkeeper_env_cfg.py` -- no syntax errors.
+- Full suite: `env -u PYTHONPATH uv run pytest tests/ -q` -- **90/90 pass**.
+- Curve values above computed directly in Python (`math.exp`), not estimated.
+- **Not yet validated against a live training run.**
+
+---
