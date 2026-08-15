@@ -3056,4 +3056,10 @@ At sigma=80, only tilts under ~5deg score meaningfully; by 11deg the reward is n
 - Live headless smoke test (CPU, 4 envs, 20 random-action steps, real `ManagerBasedRlEnv` construction): `ball_contact` sensor's `primary_names` confirmed unaffected (still exactly the same 8 `foot[1-4]_collision` geoms, unchanged order) -- the new vis geoms don't match that sensor's pattern and can't physically contact anything regardless (`contype=0`). Both new geoms resolve correctly via `robot.find_geoms(...)` by name. No exceptions.
 - **Not visually confirmed in a real display this session** (GPU busy with the user's own concurrently-running sessions) -- user should look for the red rectangles at the bottom of each foot in the viewer and confirm the position/size reads correctly; nudge `pos`/`size` in `t1_headless.xml` if not.
 
+**FIX (same day, user request, "it needs to be moved up towards the real bottom of the sole, also it needs to be a bit shorter it sticks to far out"):** two adjustments to both `left_sole_vis`/`right_sole_vis`:
+1. `pos_z`: `-0.05 -> -0.032`. The capsules' own bottom surface (centerline `Z=-0.01`, radius `0.02`) sits at `Z=-0.03` -- the original `-0.05` left the marker floating 1.5cm below that with a visible gap, not actually AT the sole. `-0.032` puts the box right at (a hair into) the real surface.
+2. `size_x`: `0.09 -> 0.065` (18cm -> 13cm total length) -- was overhanging past the visible foot in the forward/back direction.
+
+Verified via `mujoco.MjSpec(...).compile()` again after the change -- both geoms resolve at the new `pos=[0.0125, 0, -0.032]`, `size=[0.065, 0.03, 0.005]`. Full suite `env -u PYTHONPATH uv run pytest tests/ -q` -- 90/90 pass. Still not visually confirmed in a real display.
+
 ---
