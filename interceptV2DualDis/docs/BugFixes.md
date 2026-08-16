@@ -3264,3 +3264,157 @@ Verified via `mujoco.MjSpec(...).compile()` -- both geoms resolve at `size=[0.09
 **Correct value:** `0.05m` (5cm), direction = away from center (`sign(crossing_y - start_y)`, defaulting outward on the zero-crossing edge case).
 
 **Evidence:** `ast.parse` on both changed files — no syntax errors. Full suite: `env -u PYTHONPATH uv run pytest tests/ -q` — **90/90 pass**. `play.py` change is viewer-only (no training effect). **Not yet validated against a live training run** for the reward-side change.
+
+---
+
+## 2026-08-16: `feetorientation` weight and sigma raised (user request, "increase the footorientation reward 10x")
+
+**What changed:** `feetorientation` RewardTermCfg (`goalkeeper_env_cfg.py:935-967`) — `weight` `6.0 -> 30.0`, `sigma` `80.0 -> 100.0`.
+
+**Why it was requested as "10x":** user's literal ask was a 10x weight bump (6.0 -> 60.0). Presented via `AskUserQuestion` for confirmation per this project's Change Approval Workflow; user's actual answer changed scope on the spot: "do 30 to start of with, also increase sigma to 100" — landed on 5x weight (6.0 -> 30.0), plus a sigma increase not in the original ask.
+
+**Formula:** `err = sum over both feet of sin^2(tilt_from_flat)` (world-frame gravity XY component against unit foot-z, per `rewards.py:feetorientation:2738-2753`). `reward = weight * exp(-sigma * err)`.
+
+**Before/after (single-foot-tilt case, other foot flat, computed and shown to user before applying):**
+
+| Tilt | Before (w=6.0, sigma=80) | After (w=30.0, sigma=100) |
+|---|---|---|
+| 0deg | 6.00 (100%) | 30.00 (100%) |
+| 5deg | 3.27 (54.5%) | 14.03 (46.8%) |
+| 10deg | 0.54 (9.0%) | 1.47 (4.9%) |
+| 15deg | 0.028 (0.47%) | 0.037 (0.12%) |
+| 20deg+ | ~0 | ~0 |
+
+Net effect: near-flat feet (0-5deg) get up to 5x more reward signal; the drop-off past ~10deg is even sharper than before (higher sigma dominates the higher weight once tilt exceeds ~10deg).
+
+**Evidence:** formula/values derived analytically from the exact function in `rewards.py`, cross-checked against this same reward's own prior 2026-08-15 sigma-history entries (e.g. "sigma=5.0 gives ~11deg tilt 83% of max" — reproduced exactly, confirming the formula used here is correct). Not yet validated against a live training run.
+
+---
+
+## 2026-08-16: `foot_inner_face_continuous`/`inner_face_orientation_save` -- two revisions, root cause found via live P-panel comparison, then confirmed via a real checkpoint replay
+
+**Symptom (user report):** "the way it is calculated is really weird the angle between the x or y axis and the foot vector is not correct, a foot that is tilted but pointing very straight gets almost the same reward as a correct only rotated foot."
+
+**Revision 1 (toe/local-X -> lateral/local-Y body axis):** both functions measured the foot's toe direction (local X) against a target vector, using `quat_apply(foot_quat_w, (1,0,0))`. T1's `Ankle_Roll` joint axis is ALSO local X (`t1_headless.xml:186,257`, `axis="1 0 0"`, both sides) -- rotating a vector about its own axis leaves it unchanged (a basic rotation identity, not an approximation), so this metric could NEVER see Ankle_Roll, at any Ankle_Pitch value, for any upstream leg configuration. A foot rolled onto its edge (sole not flat, no real blocking face presented) could score identically to a genuinely flat, correctly-rotated foot as long as Hip_Yaw alone matched the target heading. Switched to the lateral (local Y) axis, which Ankle_Roll actually rotates (sweeps Y into Z as the foot rolls off flat). Live-verified: at the exact target orientation, 0deg roll scores 1.0 in both old and new formulas (no regression on the correct case); at 25deg roll (max Ankle_Roll range) the old formula still scored 1.0 (fully blind) while the new formula dropped to 0.906 (roll now visible). Same target angle/constants/overshoot shape preserved -- only the measured axis changed. `rewards.py`, `play.py`'s `assigned_foot_angle_deg` P-panel plot kept in sync.
+
+**Revision 2 (lateral/local-Y body axis -> Hip_Yaw joint value):** user found via the just-added `assigned_foot_angle_deg` P-panel that the angle rose purely from the foot tilting up/down (Ankle_Pitch), with no yaw rotation at all -- "this is wrong i dont want this." Root cause: revision 1's own derivation already implied this weakness but it wasn't caught before shipping -- local Y is only invariant to Ankle_Pitch in the degenerate zero-roll case (`Y_world = A @ R_pitch(phi) @ R_roll(theta) @ e_y`, genuinely a function of `phi` whenever `theta != 0`). ANY body-orientation vector read off the foot link necessarily entangles Ankle_Pitch and/or Ankle_Roll, because both are real rotations physically between the hip and the foot -- there is no vector choice that escapes this.
+
+**Real fix:** stopped inferring yaw from the foot's world orientation entirely. Both functions now read the `Hip_Yaw` JOINT VALUE directly (`robot.find_joints(["Left_Hip_Yaw", "Right_Hip_Yaw"])`, axis `"0 0 1"` for both sides per the XML, not mirrored). T1's ankle has no yaw DOF (confirmed repeatedly elsewhere in this file), so Hip_Yaw is the ONLY joint that changes the foot's heading -- and a joint-space scalar is, by construction, completely independent of every other joint's value (zero contamination, not just reduced, since the reward function literally never reads Ankle_Pitch/Ankle_Roll/Knee/Hip_Pitch/Hip_Roll at all). `default_joint_pos["Hip_Yaw"]` is 0.0, so the raw joint value already is the delta-from-neutral in degrees, no subtraction needed. Same target angle (`_FOOT_TARGET_ANGLE_DEG=50`), same `expected_sign` convention, same overshoot Gaussian/`_FOOT_OVERSHOOT_SIGMA`, same `alignment_threshold` -- only the angle's SOURCE changed (`alignment = cos(radians(target_signed_deg - hip_yaw_deg))`, exactly reproducing the old vector dot-product's geometric meaning in the pure-yaw case, per the rotation-sweep identity used in revision 1).
+
+**Diagnostic detour (kept for the record, not part of the fix):** before landing on the joint-space approach, spent significant effort trying to verify a claimed left/right (`near_left` vs `near_right`) asymmetry via two live probes (`scripts/probe_inner_face_axis_lr.py`) replaying `model_13000.pt`. That investigation did NOT reproduce the user's specific numeric claim (a formula-level left/right asymmetry) -- measured rewards genuinely differed by region (~0.0 vs ~0.8, not "the same"), and the angle distributions found were roughly the opposite of what was described. In hindsight the real bug (Ankle_Pitch contamination) was orthogonal to left/right and would show up on WHICHEVER side happened to have more ankle-pitch tilt in that specific replay -- the probe's regional aggregate stats diluted this per-episode effect. Lesson: when a live P-panel/visual check is available, prefer it over aggregate offline statistics for this class of "does the plotted number match what I see" question -- the user's own suggestion to add and watch the P-panel directly is what found the actual root cause.
+
+**Evidence:** 90/90 tests pass after both revisions. Revision 2's immunity to Ankle_Pitch/Ankle_Roll is true by construction (the function never reads those joints), confirmed via a direct check that the formula's output is unchanged across simulated Ankle_Pitch 0-30deg (left foot) and Ankle_Roll 0-25deg (right foot) at a fixed correct Hip_Yaw. Not yet validated against a live training run.
+
+**Revision 3 (Hip_Yaw alone -> Waist + Hip_Yaw), same day:** user watched the live `assigned_foot_angle_deg` P-panel (added specifically so they could cross-check the calculation against the viewer) and reported a left_near save visually pointing a full 90deg off the x-axis while the plot showed only 40deg. Investigated by reading `t1_headless.xml`'s actual body tree (not assumed): `Hip_Pitch_Left`/`Hip_Pitch_Right` (the whole leg) are children of a `"Waist"` body, which has its own yaw joint (`axis="0 0 1"`, range `+/-1.57 rad` = `+/-90deg`) sitting between `Trunk` (the free-joint root) and the legs -- Revision 2 read Hip_Yaw only and completely missed this second, larger-range yaw source. Live-checked against `model_13000.pt` at the exact `softstop`-firing moment: `left_near` `hip_yaw` mean `+40.7deg` + `waist` mean `+26.4deg` (same sign, both directly feed the same leg base) sums to `~65-67deg` combined -- much closer to the ~90deg visually reported than Hip_Yaw alone (the residual gap is plausibly whole-body/Trunk world yaw, which this reward's own documented design deliberately excludes: "robot-local, so a dive yaw doesn't degrade the signal" -- not itself a bug). For `right_near`, `hip_yaw` (`+5.6deg`) and `waist` (`-10.7deg`) were found to have OPPOSITE signs, partially cancelling -- confirms the earlier "right barely rotates" read wasn't a Hip_Yaw-only artifact, the full combined rotation genuinely is small (~5-8deg) on that side. Fix: both reward functions and the P-panel now sum `Waist + Hip_Yaw` (`total_yaw_deg`) instead of Hip_Yaw alone, feeding the same `alignment`/`overshoot` formulas unchanged. `rewards.py`, `play.py`. 90/90 tests pass. Not yet validated against a live training run.
+
+**Revision 4 (Waist + Hip_Yaw sum -> true toe-axis azimuth), same day:** user reported the plot STILL undercounted (`~40deg` shown at that point, still mid-investigation) and specifically asked whether foot ROLL needed accounting for too. Investigated with real data rather than reasoning further: live-checked `model_13000.pt` at the same save moments, comparing the Revision-3 joint-sum against the foot's true toe-axis (local X) WORLD-frame azimuth (`atan2` of its horizontal projection). Result: `left_near` joint-sum `67.0deg` vs. true toe azimuth `89.2deg` -- matching the user's visual read almost exactly. Crucially, `Ankle_Roll` was measured at `-26.0deg` (its own range limit) on these same saves yet contributes essentially nothing to that gap -- confirms the hypothesis "we need to account for roll" was the wrong diagnosis, even though the underlying instinct ("something is still missing") was correct. Root cause of the remaining `~22deg`: **Ankle_Pitch gimbal coupling**, not roll. `Ankle_Pitch`'s own rotation axis is itself downstream of Hip_Yaw/Waist in the kinematic chain (`t1_headless.xml`: Waist -> Hip_Pitch -> Hip_Roll -> Hip_Yaw -> Knee_Pitch -> Ankle_Pitch -> Ankle_Roll -> foot_link) -- once the leg is already yawed by a large angle, a subsequent Ankle_Pitch rotation no longer sweeps purely "vertically"; some of it leaks into the horizontal-plane (yaw-like) direction, a real, exact consequence of composing two non-parallel rotation axes, not a joint that can be summed in separately. Roll's exact invariance (rotating a vector about its own axis leaves it unchanged) was re-confirmed live, not just analytically, by the near-zero contribution despite Ankle_Roll sitting at its joint limit.
+
+**Fix:** stopped enumerating/summing individual joints entirely -- both reward functions now read the toe axis's TRUE azimuth directly (`atan2` of `quat_apply(assigned_foot_quat_w, local_X)`'s horizontal components), which automatically captures every real yaw-plane contributor (Waist, Hip_Yaw, AND the Ankle_Pitch coupling effect) in one physically-grounded measurement, with zero contribution from Ankle_Roll (provably, not approximately). **Frame choice confirmed via `AskUserQuestion`:** robot-local (subtracting the root's own world yaw via `quat_apply_inverse(root_link_quat_w, ...)`) for the REWARD, preserving the original 2026-08-01 design intent ("a dive yaw shouldn't degrade the signal" -- whole-body spin shouldn't earn free credit) over a literal world-frame match to the viewer. The diagnostic P-panel plot was kept in the SAME robot-local frame (matching its own stated "plotted number matches what the reward itself sees" purpose) rather than world frame -- meaning the plot will still read a bit under a literal 90deg against the room's world axes whenever the whole body has also spun during the dive (confirmed live: `~12deg` average Trunk world yaw on `left_near` saves); that residual gap is the robot's own spin, correctly excluded by design, not a remaining bug. Same target angle, same `expected_sign` convention, same overshoot shape/`alignment_threshold` -- only the angle's SOURCE changed, for the fourth and (pending live confirmation) final time today. `rewards.py`, `play.py`. 90/90 tests pass. Not yet validated against a live training run.
+
+---
+
+## 2026-08-16: `_FOOT_TARGET_ANGLE_DEG` retargeted 50 -> 80 (user request, "i want the target of the foot to be at 80 degrees, because left near literally shows it is possible")
+
+**What changed:** `_FOOT_TARGET_ANGLE_DEG` in `rewards.py` (line 98) and its mirrored viewer-only copy in `play.py` (line 970), both `50.0 -> 80.0`. No other change -- same formula shape, same `alignment_threshold=0.85`, same `_FOOT_OVERSHOOT_SIGMA`, just recentering the target.
+
+**Why the old 50deg value is no longer the right ceiling reference:** 50deg was chosen 2026-08-15 from an FK analysis that found Hip_Yaw's own joint range physically tops out at `~54.17deg` off neutral -- a real constraint, but only for Hip_Yaw ALONE. The SAME-DAY (2026-08-16) investigation above found two things that FK analysis didn't account for: (1) `Waist` is a second yaw source (`+/-90deg` range) between `Trunk` and the legs, entirely separate from Hip_Yaw; (2) `Ankle_Pitch` genuinely contributes to the horizontal-plane (yaw-like) angle via gimbal coupling once the leg is already yawed. Together these mean the foot's true achievable yaw is well past `54.17deg`.
+
+**Evidence for 80deg being achievable, not just theoretically closer:** live-replayed `model_13000.pt` (trained under the OLD 50deg target, so not itself proof the new target trains well -- only proof the ANGLE ITSELF is physically reachable) at real `softstop`-firing moments: `left_near` saves averaged `~89deg` toe-axis azimuth in WORLD frame, `~77deg` in ROBOT-LOCAL frame (subtracting `~12deg` average Trunk world spin) -- the same frame the reward now measures in. 80deg sits inside that observed range.
+
+**Evidence:** 90/90 tests pass. Not yet validated against a live training run under the new target -- `model_13000.pt`'s "it's achievable" evidence comes from a policy trained toward a DIFFERENT (50deg) target, so it demonstrates physical reachability, not that training will converge there under the new 80deg target.
+
+---
+
+## 2026-08-16: `foot_inner_face_continuous` shape sharpened (user request, "make the foot inner continuous more sharp so lower reward for lower angles and a sharp turnover at 80 deg")
+
+**What changed:** replaced the two-branch shape (`cos(target-angle)` for undershoot/wrong-side, a separate steep Gaussian only for overshoot past target) with a single symmetric Gaussian on the SIGNED error: `reward = exp(-_FOOT_OVERSHOOT_SIGMA * (target_signed_deg - yaw_deg)^2)`. Reuses the already-tuned `_FOOT_OVERSHOOT_SIGMA=0.03` (a 10deg miss scores ~5% of peak) on both sides, confirmed via `AskUserQuestion` (not a gentler custom sigma). This also removes the old `side_sign`/`overshoot_mask` branching entirely -- a signed-error Gaussian naturally handles the "wrong side" case too, since a wrong-side rotation has a larger `|error|` than a same-magnitude undershoot on the correct side, so it scores lower automatically with no separate check needed.
+
+**Why:** plain `cos(err)` is broad/flat near its own peak -- at the (now-80deg) target, a foot only 40deg rotated still scored `cos(40deg)=0.77`, too forgiving for a partially-committed rotation. User wants low reward for low angles and a narrow, sharp peak at the target instead.
+
+**Curve, target=80deg, sigma=0.03:**
+
+| angle | old (cos) | new (Gaussian) |
+|---|---|---|
+| 0deg | 0.17 | 0.00 |
+| 40deg | 0.77 | 0.00 |
+| 60deg | 0.98 | 0.00 |
+| 70deg | 0.99 | 0.05 |
+| 75deg | 1.00 | 0.47 |
+| 80deg | 1.00 | 1.00 |
+| 85deg | 0.99 | 0.47 |
+| 90deg | 0.98 | 0.05 |
+
+**Known trade-off, flagged to the user before applying:** this term now supplies essentially zero gradient until the foot is within ~15-20deg of the target -- much less early-approach signal than the cosine shape gave. `inner_face_orientation_save` (the one-shot sibling) is untouched, still uses its own `alignment_threshold` check, not this shape.
+
+**Evidence:** 90/90 tests pass. Curve values computed and verified directly (table above). Not yet validated against a live training run.
+
+---
+
+## 2026-08-16: `foot_inner_face_continuous` shape reconsidered -- reverted to asymmetric cos/Gaussian (user request, "have below 80 degrees better think unbiasedly how to improve it")
+
+**What changed:** the fully-symmetric sharp Gaussian from the immediately-preceding fix (this same file, above) was replaced back with the ORIGINAL two-branch shape: `cos(target_signed_deg - yaw_deg)` for undershoot/wrong-side, the existing steep Gaussian (`_FOOT_OVERSHOOT_SIGMA=0.03`, unchanged) only for genuine overshoot past target (`side_sign>0 & angle_from_forward_deg>80`). Net effect vs. the very first 2026-08-16 revision of this function (before any sharpening request): same formula, just retargeted `50->80deg` -- the symmetric-sharp experiment was tried and un-done same day.
+
+**Why (asked to think unbiasedly rather than just implement the literal request):** `foot_inner_face_continuous` is a DENSE, per-step reward -- its job is to guide the approach from wherever the policy currently is, which requires gradient across the whole undershoot range. A fully symmetric sharp Gaussian makes it behave like a near-binary spike (confirmed in the curve table of the immediately-preceding entry: reward is ~0 for angle<=60deg against an 80deg target) -- functionally redundant with the one-shot `inner_face_orientation_save`, which already judges "was it correct at the exact save moment" as a threshold check. The asymmetry (gentle cosine below target, steep Gaussian above) isn't arbitrary: this project has an extensive multi-fix history of specifically fighting OVERSHOOT (drifting back toward the old ~90deg value, going back to 2026-08-05's original overshoot-Gaussian fix) as a real, exploited failure mode -- undershoot has no comparable history, it's simply "hasn't finished rotating yet" and should keep climbable gradient rather than a cliff.
+
+**Confirmed via `AskUserQuestion`:** cosine for the undershoot branch (not a gentler custom-sigma Gaussian, not keeping the symmetric spike).
+
+**Evidence:** 90/90 tests pass. `inner_face_orientation_save` (the one-shot sibling) was never touched by either the sharpening attempt or this revert -- still its own `alignment_threshold` check. Not yet validated against a live training run.
+
+---
+
+## 2026-08-16: `foot_inner_face_continuous` undershoot branch steepened again, then a self-caught regression fixed (user request, "the difference between 45 deg and the wanted 80 deg is only 1.3 of reward is this good enough?")
+
+**Verified the user's observation:** at this term's max curriculum weight (6.94), plain `cos(err)` on the undershoot branch scored 45deg-off-target (35deg short of the 80deg target) at 82% of peak -- a 1.3-point gap, matching what the user reported almost exactly (`6.94*cos(35deg)=5.685`, gap `=1.255`). Judged too flat given this term's own modest peak next to much larger terms elsewhere (`stopball`/`softstop` up to 90+).
+
+**First attempt:** replaced `cos(err)` with a plain Gaussian, `_FOOT_UNDERSHOOT_SIGMA=0.0015` (chosen via `AskUserQuestion` from gentle(0.0008)/moderate(0.0015)/steep(0.003) previews) -- 45deg-off dropped to ~16% of peak, with real gradient through the mid-range (unlike reusing the overshoot sigma symmetrically, already tried and reverted the same day for killing early-approach gradient entirely).
+
+**Self-caught regression before shipping (not reported by the user):** a plain Gaussian is floored at 0 -- it can never go negative. This silently undid the deliberate 2026-07-10 fix (documented directly above this code) where `cos(err)` goes NEGATIVE for a genuinely wrong-direction rotation, specifically so the policy can distinguish "never rotated at all" (small positive) from "rotated the wrong way" (negative) -- a zero-floored shape collapses both cases back to ~0, recreating the exact ambiguity that fix existed to prevent. Caught by re-reading the surrounding code/history before considering the task done, not by live testing or the user.
+
+**Real fix (confirmed via `AskUserQuestion`):** sign-preserving power of cosine -- `sign(cos(err)) * |cos(err)|^_FOOT_UNDERSHOOT_POWER`. Keeps cosine's natural sign (restores the 2026-07-10 distinguishing behavior, genuinely negative past +/-90deg from target) while raising the magnitude to a power steepens the falloff near the peak. `_FOOT_UNDERSHOOT_POWER=9` (odd, to preserve the sign flip) chosen by matching the already-approved Gaussian's own curve: `cos(35deg)^n=0.16 -> n=9.18`, rounded to 9 -- verified numerically within ~0.05 of the Gaussian's values across the whole undershoot range, and verified again directly against the exact torch code path (not just the reference formula) before shipping.
+
+**Curve (weight=6.94, target=80deg):**
+
+| angle | cos(err) (original) | plain Gaussian (reverted) | sign-pow-cos, n=9 (shipped) |
+|---|---|---|---|
+| 80deg | 6.94 | 6.94 | 6.94 |
+| 70deg | 6.84 | 5.97 | 6.05 |
+| 60deg | 6.52 | 3.81 | 3.97 |
+| 45deg | 5.69 | 1.11 | 1.15 |
+| 20deg | 3.47 | 0.03 | 0.01 |
+| 0deg | 1.21 | 0.00 | 0.00 |
+| -10deg (wrong side) | -0.24 | 0.00 | -0.00 |
+| -80deg (wrong side) | -6.52 | 0.00 | -3.97 |
+| -100deg (wrong side) | -6.02 | 0.00 | -6.94 |
+
+**Evidence:** 90/90 tests pass. Curve verified both analytically and via the exact torch expression used in the shipped code. `inner_face_orientation_save` (one-shot sibling) untouched. Not yet validated against a live training run.
+
+---
+
+## 2026-08-16: `_FOOT_OVERSHOOT_SIGMA` steepened 0.03 -> 0.10 (user request, "i want sharper drop off above 80 degrees")
+
+**What changed:** `foot_inner_face_continuous`'s overshoot branch (foot rotated past the 80deg target, correct side) steepness `0.03 -> 0.10`, chosen via `AskUserQuestion` from moderate(0.06)/sharp(0.10, picked)/very-sharp(0.15) previews. Undershoot branch (yesterday's sign-preserving power-of-cosine fix, `_FOOT_UNDERSHOOT_POWER=9`) and `inner_face_orientation_save` (one-shot sibling) untouched.
+
+**Curve at max curriculum weight (6.94):**
+
+| overshoot | old (sigma=0.03) | new (sigma=0.10) |
+|---|---|---|
+| 2deg | 6.16 (89%) | 4.65 (67%) |
+| 5deg | 3.28 (47%) | 0.57 (8%) |
+| 8deg | 1.02 (15%) | 0.01 (0.1%) |
+| 10deg | 0.35 (5%) | ~0 |
+
+**Evidence:** 90/90 tests pass. Not yet validated against a live training run.
+
+---
+
+## 2026-08-16: `foot_inner_face_continuous`/`inner_face_orientation_save` switched from ROOT-LOCAL to WORLD frame (user request, "i want to have more control how it saves the ball, so i want 80 degrees in global frame")
+
+**Context:** user re-reported the plot showing ~90deg while the reward's own drop-off didn't seem to react. Investigation (below) found the earlier "reward=0.000" reading was actually a bug in the DIAGNOSTIC PROBE, not the reward -- calling `foot_inner_face_continuous` directly with an unresolved default `SceneEntityCfg` (the classic `reward-shaping-scene-entity-cfg` skill pitfall: `.body_ids` silently reads `slice(None)`, selecting every body, not just the two feet, until the real `RewardManager` resolves it). Re-ran using the actual resolved `asset_cfg` pulled from `env.reward_manager.get_term_cfg(...)` and confirmed the reward WAS working correctly in root-local terms (e.g. `world=90.4, root=79.9, reward=1.0000` -- root-local was right at the 80deg target even though world read 90). This is the same root-local-vs-world distinction from earlier today, just resurfacing.
+
+**User's reconsideration (not a bug fix, a deliberate re-scoping):** the ball always approaches from a fixed WORLD direction (this project's own Frame Convention, world -X), so "did the foot block at the correct angle" is fundamentally a world-frame question -- root-local answers a different question ("how much did the leg itself rotate, ignoring whole-body spin"). User wants direct control over the former.
+
+**Trade-off flagged before applying:** this project has an extensive, multi-fix history of fighting Hip_Yaw-reaction-torque whole-body yaw spin (`postheadingorientation`, `ang_vel_z` weight/target revisions, several `_FOOT_TARGET_ANGLE_DEG` retargets) specifically because world-frame credit for this KIND of reward is exploitable that way. Switching this term to world frame reopens some of that exposure -- `postheadingorientation`/`ang_vel_z`/`stayonline` still push back against whole-body spin, just not via this specific term anymore. User confirmed via `AskUserQuestion`, proceeding anyway given the explicit "more control over how it saves" goal.
+
+**What changed:** both functions dropped the `quat_apply_inverse(root_link_quat_w, foot_x_w)` step, using the toe axis's raw WORLD-frame azimuth directly. Still exactly immune to Ankle_Roll (that invariance is a property of local-X's own rotation axis, unrelated to which frame the resulting world vector is then read in). Same target angle (`_FOOT_TARGET_ANGLE_DEG=80`), same `expected_sign` convention, same overshoot/undershoot shapes and constants -- only the frame changed. Also restores `inner_face_orientation_save`'s ORIGINAL, long-standing design intent (its own docstring always said "world-frame target direction" -- earlier same-day joint-space revisions had silently drifted this function away from that without it being a deliberate choice for THIS function specifically). The diagnostic P-panel plot (already switched to world frame in the immediately-preceding fix) now genuinely matches what the reward measures again, not just what a human visually sees.
+
+**Evidence:** 90/90 tests pass. Not yet validated against a live training run -- this is the sixth revision of this reward's core geometry today; strongly recommend a fresh training run before drawing conclusions from any existing checkpoint, all of which were trained under different (root-local or joint-space) formulas.

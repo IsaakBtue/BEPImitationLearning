@@ -95,7 +95,22 @@ _DEFAULT_ROBOT_CFG = SceneEntityCfg("robot")
 # with margin (not pinned at the hard limit) while staying steeper than 45deg
 # (cos(50deg)=0.64) so the do-nothing gradient doesn't regress as far. Not yet
 # validated against a live training run.
-_FOOT_TARGET_ANGLE_DEG = 50.0
+# FIX 2026-08-16 (user request, "i want the target of the foot to be at 80
+# degrees, because left near literally shows it is possible"): 50 -> 80.
+# The 54.17deg "physical ceiling" reasoning above is now known to be
+# incomplete -- it was derived from Hip_Yaw's own joint range alone, before
+# the same-day investigation found (a) Waist contributes a second, larger
+# (+/-90deg) yaw source between Trunk and the legs, and (b) the angle this
+# reward actually measures (now the true toe-axis root-local azimuth, see
+# foot_inner_face_continuous's own 2026-08-16 fix history) also picks up a
+# real Ankle_Pitch gimbal-coupling contribution at large yaw. Live-checked
+# against model_13000.pt (a checkpoint trained under the OLD 50deg target,
+# so not itself evidence of what 80deg trains to): left_near's real
+# achieved toe-axis azimuth averaged ~89deg world-frame / ~77deg
+# robot-local (after subtracting ~12deg average Trunk world spin) at the
+# softstop-firing moment -- 80deg sits within that observed range, not
+# past it. Not yet validated against a live training run under this target.
+_FOOT_TARGET_ANGLE_DEG = 80.0
 _FOOT_TARGET_COS = math.cos(math.radians(_FOOT_TARGET_ANGLE_DEG))
 _FOOT_TARGET_SIN = math.sin(math.radians(_FOOT_TARGET_ANGLE_DEG))
 
@@ -133,7 +148,40 @@ _FOOT_TARGET_SIN = math.sin(math.radians(_FOOT_TARGET_ANGLE_DEG))
 # half that error (5deg) scores ~0.47 -- identical calibration philosophy to
 # the 2026-08-05 fix above, just re-anchored to the new target's own "back to
 # the old target" distance instead of the old target's.
-_FOOT_OVERSHOOT_SIGMA = 0.03
+# FIX 2026-08-16 (user request, "i want sharper drop off above 80
+# degrees"): 0.03 -> 0.10 (chosen via AskUserQuestion from
+# moderate(0.06)/sharp(0.10)/very sharp(0.15) previews). At the max
+# curriculum weight (6.94): 5deg overshoot now scores 0.57 (8% of peak,
+# was 3.28/47%), 8deg scores 0.01 (was 1.02/15%). Same reference-gap
+# calibration philosophy as the 2026-08-05/08-15 fixes above, just a
+# steeper value picked directly by the user rather than re-derived from a
+# specific reference gap. Not yet validated against a live training run.
+_FOOT_OVERSHOOT_SIGMA = 0.10
+
+# FIX 2026-08-16 (user request, "the difference between 45 deg and the
+# wanted 80 deg is only 1.3 of reward is this good enough?"): at the
+# current max curriculum weight (6.94), cos(err) gave 45deg-off-target
+# (35deg short of the 80deg _FOOT_TARGET_ANGLE_DEG) 82% of peak reward --
+# a 1.3-point gap, confirmed live-observed and verified analytically. Too
+# flat to strongly incentivize full commitment given this term's own
+# modest peak next to much larger terms elsewhere (stopball/softstop up to
+# 90+). First tried replacing cos(err) with a plain Gaussian
+# (sigma=0.0015, chosen via AskUserQuestion from gentle/moderate/steep) --
+# reverted before shipping: a plain Gaussian is floored at 0, silently
+# erasing the deliberate 2026-07-10 fix where cos(err) goes NEGATIVE for a
+# wrong-direction rotation (distinguishing it from "never rotated," which
+# a zero-floored shape can't do -- see foot_inner_face_continuous's own
+# fix history). Real fix: sign-preserving power of cosine,
+# `sign(cos(err)) * |cos(err)|^_FOOT_UNDERSHOOT_POWER` -- keeps cos's
+# natural sign (restores the 2026-07-10 distinguishing behavior) while the
+# power steepens the falloff near the peak. Power=9 (odd, to keep the sign
+# flip) chosen by matching the approved Gaussian's own curve numerically:
+# cos(35deg)^n=0.16 -> n=9.18, rounded to 9, verified within ~0.05 of the
+# Gaussian's values across the full undershoot range. 45deg-off now scores
+# ~17% of peak (was 82% under plain cosine), fades out below ~30deg,
+# genuinely negative past +/-90deg from target. Not yet validated against
+# a live training run.
+_FOOT_UNDERSHOOT_POWER = 9
 _DEFAULT_KNEE_CFG = SceneEntityCfg("robot", body_names=("Shank_Left", "Shank_Right"))
 # FIX 2026-08-03 (user request, G1-comparison finding): postupperdofpos's ONLY
 # consumer. Was Shoulder_Pitch/Roll + Elbow_Pitch/Yaw x2 sides (8 joints) --
@@ -4017,33 +4065,82 @@ def inner_face_orientation_save(
 
     robot: Entity = env.scene[asset_cfg.name]
 
-    foot_quat_w = robot.data.body_link_quat_w[:, asset_cfg.body_ids, :]  # (N, 2, 4)
-
     # FIX 2026-07-10: was the geometrically-closest foot to the ball's live
     # position (dist[:,0] <= dist[:,1]) -- see docstring. Now the fixed,
     # task-assigned foot, matching correct_foot's own gate below.
     foot_idx = _get_correct_foot_idx(env, ball_name)                       # (N,) 0=left, 1=right
     is_left = foot_idx == 0
-
-    # Foot long axis (toe direction) in local frame = (1, 0, 0).
-    # Rotate into world frame for each foot.
-    foot_long_local = torch.tensor([1.0, 0.0, 0.0], device=env.device).expand(env.num_envs, -1)
-    left_long_w  = quat_apply(foot_quat_w[:, 0, :], foot_long_local)      # (N, 3)
-    right_long_w = quat_apply(foot_quat_w[:, 1, :], foot_long_local)      # (N, 3)
-
-    # Pick the assigned foot's long axis.
-    foot_long_w = torch.where(is_left[:, None], left_long_w, right_long_w)  # (N, 3)
-
-    # Target direction: 60 deg off world forward (+X), leaning toward +Y for
-    # the left foot / -Y for the right foot (FIX 2026-08-01, see
-    # _FOOT_TARGET_ANGLE_DEG docstring above).
     expected_sign = torch.where(is_left, 1.0, -1.0)                        # (N,)
-    target_w = torch.stack([
-        torch.full((env.num_envs,), _FOOT_TARGET_COS, device=env.device),
-        expected_sign * _FOOT_TARGET_SIN,
-        torch.zeros(env.num_envs, device=env.device),
-    ], dim=-1)                                                              # (N, 3)
-    target_alignment = (foot_long_w * target_w).sum(dim=-1)                # (N,)
+
+    # FIX 2026-08-16 (user found live via the assigned_foot_angle_deg
+    # P-panel): first tried the lateral (local Y) body axis (see
+    # foot_inner_face_continuous's matching fix for the full derivation),
+    # but ANY body-orientation vector read off the foot link entangles
+    # Ankle_Pitch and/or Ankle_Roll -- user directly observed the plotted
+    # angle rising from pure Ankle_Pitch tilt with no yaw change at all.
+    # Switched to reading Hip_Yaw's JOINT VALUE directly (T1's ankle has no
+    # yaw DOF) -- zero Ankle_Pitch/Ankle_Roll contamination by construction.
+    #
+    # FIX 2026-08-16 (SAME DAY, user found via live viewer comparison
+    # against the P-panel): Hip_Yaw alone still undercounted -- user
+    # visually saw ~90deg on a left_near save while the plot showed ~40deg.
+    # First tried summing Waist + Hip_Yaw (t1_headless.xml: the legs are
+    # children of a "Waist" body with its own yaw joint, range +/-90deg,
+    # between Trunk and the legs -- completely missed by Hip_Yaw alone).
+    # That got closer (~65-67deg live-checked against model_13000.pt) but
+    # still undercounted.
+    #
+    # FIX 2026-08-16 (THIRD revision, same day): root-caused the remaining
+    # gap by comparing the joint-sum against the foot's true toe-axis WORLD
+    # azimuth (atan2 of the toe/local-X axis's horizontal projection) on
+    # the same live save moments -- ~89deg, matching the user's visual read
+    # almost exactly, vs. the joint-sum's ~67deg. The extra ~22deg is
+    # real and NOT roll (roll is exactly, provably invariant here: rotating
+    # a vector about its own axis leaves it unchanged, confirmed live too --
+    # Ankle_Roll sits at ~-26deg, its own range limit, on these same saves,
+    # yet contributes ~0 to the toe's true direction). It's Ankle_Pitch
+    # GIMBAL COUPLING: Ankle_Pitch's own rotation axis is itself downstream
+    # of Hip_Yaw/Waist in the kinematic chain, so once the leg is already
+    # yawed ~65deg, Ankle_Pitch's "vertical tip" rotation happens about an
+    # axis that's ALSO been yawed -- at large existing yaw, pitching is no
+    # longer purely vertical, some of it leaks into horizontal-plane
+    # direction. This is a real geometric effect from composing two
+    # non-parallel rotation axes, not summable from individual joint
+    # values. Fix: stopped enumerating joints -- now reads the toe axis's
+    # true azimuth directly. Originally set this to ROOT-LOCAL frame
+    # (subtracting Trunk's own world yaw via quat_apply_inverse) to
+    # preserve the 2026-08-01 "a dive yaw shouldn't earn free credit"
+    # design intent for foot_inner_face_continuous.
+    #
+    # FIX 2026-08-16 (SAME DAY, user request, "i want 80 degrees in global
+    # frame... i want to have more control how it saves the ball"):
+    # switched to WORLD frame (dropped the quat_apply_inverse step) -- the
+    # ball always approaches from a fixed WORLD direction (this project's
+    # own Frame Convention, world -X), so "did the foot block at the right
+    # angle" is fundamentally a world-frame question, not a robot-local
+    # one. This also restores this function's ORIGINAL pre-2026-08-16
+    # design (its own docstring always said "world-frame target
+    # direction" -- the joint-space/root-local revisions earlier today had
+    # silently drifted away from that without it being a deliberate
+    # decision for THIS function). Known trade-off, flagged to the user
+    # before applying: this project has an extensive history of fighting
+    # Hip_Yaw-reaction-torque whole-body yaw spin (postheadingorientation,
+    # ang_vel_z, several target-angle revisions) specifically BECAUSE
+    # world-frame credit is exploitable that way -- postheadingorientation/
+    # ang_vel_z/stayonline still push back against it, just not this term
+    # anymore. Provably exact: local-X is invariant to Ankle_Roll
+    # regardless of any other joint's value, so this measurement is still
+    # immune to roll -- only the world-vs-root-local choice changed. Same
+    # target angle, same expected_sign convention, same
+    # alignment_threshold. See docs/BugFixes.md, 2026-08-16.
+    foot_quat_w = robot.data.body_link_quat_w[:, asset_cfg.body_ids, :]     # (N, 2, 4)
+    assigned_quat_w = torch.where(is_left[:, None], foot_quat_w[:, 0, :], foot_quat_w[:, 1, :])  # (N, 4)
+    x_local = torch.tensor([1.0, 0.0, 0.0], device=env.device).expand(env.num_envs, -1)
+    foot_x_w = quat_apply(assigned_quat_w, x_local)                        # (N, 3), toe direction, world
+    yaw_deg = torch.rad2deg(torch.atan2(foot_x_w[:, 1], foot_x_w[:, 0]))   # (N,) signed, world frame
+
+    target_signed_deg = expected_sign * _FOOT_TARGET_ANGLE_DEG
+    target_alignment = torch.cos(torch.deg2rad(target_signed_deg - yaw_deg))  # (N,)
     oriented_correctly = target_alignment > alignment_threshold
 
     correct_foot = getattr(env, "_softstop_correct_foot", torch.zeros(env.num_envs, dtype=torch.bool, device=env.device))
@@ -4117,38 +4214,129 @@ def foot_inner_face_continuous(
     """
     robot: Entity = env.scene[asset_cfg.name]
 
-    foot_quat_w = robot.data.body_link_quat_w[:, asset_cfg.body_ids, :]  # (N, 2, 4)
-
     foot_idx = _get_correct_foot_idx(env, ball_name)  # (N,) — 0=left, 1=right
-
-    foot_long_local = torch.zeros(env.num_envs, 3, device=env.device)
-    foot_long_local[:, 0] = 1.0                                              # local X = toe dir
-    left_long_w  = quat_apply(foot_quat_w[:, 0, :], foot_long_local)        # (N, 3)
-    right_long_w = quat_apply(foot_quat_w[:, 1, :], foot_long_local)        # (N, 3)
-    foot_long_w  = torch.where((foot_idx == 0)[:, None], left_long_w, right_long_w)  # (N, 3)
-
     expected_sign = torch.where(foot_idx == 0, 1.0, -1.0)                   # (N,) left=+Y, right=-Y
-    target_local = torch.stack([
-        torch.full((env.num_envs,), _FOOT_TARGET_COS, device=env.device),
-        expected_sign * _FOOT_TARGET_SIN,
-        torch.zeros(env.num_envs, device=env.device),
-    ], dim=-1)                                                              # (N, 3)
-    target_w = quat_apply(robot.data.root_link_quat_w, target_local)       # (N, 3)
 
-    alignment = (foot_long_w * target_w).sum(dim=-1)                       # (N,) in [-1, 1]
+    # FIX 2026-08-16 (user found live via the assigned_foot_angle_deg
+    # P-panel): the 2026-08-16 local-Y fix above (see its own comment)
+    # closed the Ankle_Roll blind spot but is STILL a body-orientation
+    # read, and the user directly observed the plotted angle rising just
+    # from Ankle_Pitch tilt (foot pointing "downwards") with no yaw change
+    # at all -- confirmed by that fix's own derivation: local Y is provably
+    # NOT invariant to Ankle_Pitch except in the degenerate zero-roll case
+    # (Y_world = A @ R_pitch(phi) @ R_roll(theta) @ e_y, not independent of
+    # phi once theta != 0). Any body-orientation vector read off the foot
+    # link necessarily entangles Ankle_Pitch and/or Ankle_Roll, because
+    # both are real rotations between the hip and the foot.
+    #
+    # Real fix: don't infer yaw from the foot's world orientation at all --
+    # read the Hip_Yaw JOINT VALUE directly. T1's ankle has no yaw DOF
+    # (t1_headless.xml, confirmed repeatedly elsewhere in this file) --
+    # Hip_Yaw (axis "0 0 1" for BOTH sides, not mirrored; range +/-1 rad)
+    # is the ONLY LEG joint that changes the foot's heading. A joint-space
+    # scalar is, by construction, completely independent of every other
+    # joint's value (Ankle_Pitch, Ankle_Roll, Knee, Hip_Pitch, Hip_Roll all
+    # downstream/upstream but orthogonal in joint space) -- zero
+    # contamination, not just reduced. `default_joint_pos["Hip_Yaw"]` is
+    # 0.0 (confirmed via _POST_SAVE_STANCE_MAP's own comment), so the raw
+    # joint value IS the delta-from-neutral in radians already, no
+    # subtraction needed.
+    #
+    # FIX 2026-08-16 (SAME DAY, user found via live viewer comparison
+    # against the P-panel): Hip_Yaw alone still undercounted -- first tried
+    # summing Waist + Hip_Yaw (t1_headless.xml: legs are children of a
+    # "Waist" body with its own yaw joint, range +/-90deg, between Trunk
+    # and the legs), which got closer (~65-67deg live-checked) but still
+    # undercounted vs. the ~90deg visually observed.
+    #
+    # FIX 2026-08-16 (THIRD revision, same day, user confirmed frame choice
+    # via AskUserQuestion): root-caused the remaining gap -- see
+    # inner_face_orientation_save's matching fix (above) for the full
+    # derivation. The foot's true toe-axis WORLD azimuth read ~89deg on the
+    # same live save moments, matching the user's visual read almost
+    # exactly; the ~22deg the joint-sum missed is Ankle_Pitch GIMBAL
+    # COUPLING (Ankle_Pitch's own rotation axis is downstream of Hip_Yaw/
+    # Waist, so once the leg is already yawed, pitching is no longer purely
+    # vertical -- confirmed NOT roll: Ankle_Roll sits at its own range
+    # limit on these saves yet contributes ~0 to the toe's true direction,
+    # exactly as its roll-invariance identity predicts). Stopped enumerating
+    # joints -- now reads the toe axis's true azimuth directly. Originally
+    # set to ROOT-LOCAL frame (via quat_apply_inverse against
+    # root_link_quat_w) to preserve this reward's "robot-local... so a dive
+    # yaw doesn't degrade the signal" design intent.
+    #
+    # FIX 2026-08-16 (SAME DAY, user request, "i want 80 degrees in global
+    # frame... i want to have more control how it saves the ball"):
+    # switched to WORLD frame (dropped the quat_apply_inverse step),
+    # matching inner_face_orientation_save's own same-day fix -- the ball
+    # always approaches from a fixed WORLD direction, so the actual
+    # blocking angle is fundamentally a world-frame question. Known
+    # trade-off flagged to the user before applying: this reopens some
+    # exposure to the well-documented Hip_Yaw-reaction-torque whole-body
+    # yaw-spin exploit this project has repeatedly fought
+    # (postheadingorientation/ang_vel_z/stayonline still push back against
+    # it, just not via this term anymore). Still exactly immune to roll
+    # (local-X's own invariance to Ankle_Roll is unaffected by the
+    # world-vs-root-local choice) -- only which frame the yaw itself is
+    # measured in changed. Same target angle, same expected_sign
+    # convention, same overshoot shape/constants. See docs/BugFixes.md,
+    # 2026-08-16.
+    foot_quat_w = robot.data.body_link_quat_w[:, asset_cfg.body_ids, :]     # (N, 2, 4)
+    assigned_quat_w = torch.where((foot_idx == 0)[:, None], foot_quat_w[:, 0, :], foot_quat_w[:, 1, :])  # (N, 4)
+    x_local = torch.zeros(env.num_envs, 3, device=env.device)
+    x_local[:, 0] = 1.0
+    foot_x_w = quat_apply(assigned_quat_w, x_local)                        # (N, 3), toe direction, world
+    yaw_deg = torch.rad2deg(torch.atan2(foot_x_w[:, 1], foot_x_w[:, 0]))   # (N,) signed, world frame
 
-    # Overshoot detection: foot's angle off robot-forward (unsigned), and
-    # which side it's rotated toward (correct side = positive).
-    forward_local = torch.zeros(env.num_envs, 3, device=env.device)
-    forward_local[:, 0] = 1.0
-    forward_w = quat_apply(robot.data.root_link_quat_w, forward_local)     # (N, 3)
-    cos_from_forward = (foot_long_w * forward_w).sum(dim=-1).clamp(-1.0, 1.0)
-    angle_from_forward_deg = torch.rad2deg(torch.acos(cos_from_forward))   # (N,) in [0, 180]
+    target_signed_deg = expected_sign * _FOOT_TARGET_ANGLE_DEG              # (N,)
 
-    lateral_local = torch.zeros(env.num_envs, 3, device=env.device)
-    lateral_local[:, 1] = 1.0
-    lateral_w = quat_apply(robot.data.root_link_quat_w, lateral_local)     # (N, 3), robot-local +Y
-    side_sign = (foot_long_w * lateral_w).sum(dim=-1) * expected_sign      # (N,) >0 = correct side
+    # FIX 2026-08-16 (user request, then reconsidered same day, "have below
+    # 80 degrees better think unbiasedly how to improve it"): a fully
+    # symmetric sharp Gaussian (tried first, same day) makes this DENSE,
+    # per-step term behave like a near-binary spike -- it stops providing
+    # gradient until the foot is already close to target, which defeats
+    # the point of a dense shaping signal (the one-shot
+    # inner_face_orientation_save already handles "was it correct at the
+    # exact save moment" as a threshold check; this term's job is guiding
+    # the approach from wherever the policy currently is). Restored the
+    # ORIGINAL two-branch asymmetry: undershoot/wrong-side vs. steep
+    # Gaussian (_FOOT_OVERSHOOT_SIGMA=0.03, unchanged) ONLY for overshoot
+    # past target -- overshoot (drifting back toward the old ~90deg value)
+    # has an extensive multi-fix history of being a real, exploited
+    # failure mode in this project, undershoot doesn't and should keep
+    # climbable gradient rather than a cliff.
+    #
+    # FIX 2026-08-16 (SAME DAY, follow-up, user request: "the difference
+    # between 45 deg and the wanted 80 deg is only 1.3 of reward is this
+    # good enough?"): plain cos(err) on the undershoot branch was
+    # confirmed too flat -- at this term's max curriculum weight (6.94),
+    # 45deg off (35deg short of 80deg target) scored 82% of peak, only a
+    # 1.3-point gap. First tried a plain Gaussian (_FOOT_UNDERSHOOT_SIGMA,
+    # chosen via AskUserQuestion from gentle/moderate/steep) -- steeper
+    # than cosine, but a plain Gaussian is floored at 0, which silently
+    # undid the deliberate 2026-07-10 fix above (cos(err) going NEGATIVE
+    # for a wrong-direction rotation, distinguishing it from "never
+    # rotated at all" -- a Gaussian collapses both cases to ~0, exactly
+    # the ambiguity that fix existed to prevent). Caught before shipping,
+    # not by the user.
+    #
+    # Real fix (confirmed via AskUserQuestion): sign-preserving power of
+    # cosine, `sign(cos(err)) * |cos(err)|^_FOOT_UNDERSHOOT_POWER` --
+    # keeps cos's natural sign (still negative past +/-90deg from target,
+    # preserving the 2026-07-10 distinguishing behavior) while raising the
+    # magnitude to a power steepens the falloff near the peak. Power=9
+    # chosen by matching the approved Gaussian's own curve (45deg-off
+    # ~16% of peak) via cos(35deg)^n=0.16 -> n=9.18, rounded to 9 (odd, to
+    # keep the sign flip) -- verified numerically within ~0.05 of the
+    # Gaussian's own values across the full undershoot range, so this
+    # keeps the steepness the user already approved while restoring the
+    # wrong-direction penalty. See docs/BugFixes.md, 2026-08-16.
+    undershoot_err = target_signed_deg - yaw_deg                            # (N,)
+    cos_err = torch.cos(torch.deg2rad(undershoot_err))
+    alignment = torch.sign(cos_err) * cos_err.abs() ** _FOOT_UNDERSHOOT_POWER  # (N,) in [-1, 1]
+
+    side_sign = yaw_deg * expected_sign                  # (N,) >0 = correct side
+    angle_from_forward_deg = yaw_deg.abs()                 # (N,) magnitude of yaw from neutral
 
     overshoot_mask = (side_sign > 0.0) & (angle_from_forward_deg > _FOOT_TARGET_ANGLE_DEG)
     overshoot_err = angle_from_forward_deg - _FOOT_TARGET_ANGLE_DEG

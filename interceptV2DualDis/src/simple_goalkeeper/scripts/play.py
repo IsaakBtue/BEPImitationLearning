@@ -967,7 +967,7 @@ def _patch_viewer_wrong_foot_contact_plot(native_viewer: "NativeMujocoViewer", e
     native_viewer._update_reward_figures = _patched_update_reward_figures
 
 
-_FOOT_TARGET_ANGLE_DEG = 50.0
+_FOOT_TARGET_ANGLE_DEG = 80.0
 """Must match rewards.py's _FOOT_TARGET_ANGLE_DEG (leading-foot block-posture
 target, 2026-08-01, retargeted 60->45 2026-08-07, reverted 45->60 2026-08-08
 per user request -- back to the original 2026-08-01 value; retargeted again
@@ -975,10 +975,17 @@ per user request -- back to the original 2026-08-01 value; retargeted again
 model_11250.pt replay found the foot almost not rotating toward the target
 at all. FIX 2026-08-13: reverted 75->60. FIX 2026-08-15: retargeted 60->50 --
 FK/render analysis found Hip_Yaw's physical reach ceiling (~54.17deg from
-neutral) is below 60deg; see rewards.py's _FOOT_TARGET_ANGLE_DEG docstring
-and docs/BugFixes.md). Kept as a separate literal here (viewer-only display,
-no runtime dependency on rewards.py's private constant) purely for the plot
-title -- verify against rewards.py if that constant ever changes."""
+neutral) is below 60deg -- since superseded, see below. FIX 2026-08-16
+(user request, "i want the target of the foot to be at 80 degrees, because
+left near literally shows it is possible"): retargeted 50->80. The 54.17deg
+ceiling above only accounted for Hip_Yaw's own joint range -- the same-day
+Waist/toe-azimuth investigation found a second yaw source (Waist, +/-90deg)
+plus a real Ankle_Pitch gimbal-coupling contribution at large yaw, both
+missed by that earlier FK analysis; see rewards.py's _FOOT_TARGET_ANGLE_DEG
+docstring and docs/BugFixes.md). Kept as a separate literal here
+(viewer-only display, no runtime dependency on rewards.py's private
+constant) purely for the plot title -- verify against rewards.py if that
+constant ever changes."""
 
 _INNER_FOOT_TARGET_OFFSET = 0.05
 """Must match rewards.py's _get_foot_block_offset helper (NEW 2026-08-15, user
@@ -1014,29 +1021,70 @@ def _compute_assigned_foot_angle_deg(env, env_idx: int) -> float:
     number matches what the reward itself sees, not a fresh reimplementation.
     Unsigned (0-180 deg): the assigned foot is always evaluated against its
     own side's target, so magnitude alone is meaningful here.
+
+    FIX 2026-08-16 (kept in sync with foot_inner_face_continuous's own
+    2026-08-16 fix, rewards.py, SECOND revision): the lateral (local Y)
+    body-axis version (first revision, same day) still entangled
+    Ankle_Pitch -- user directly observed this plot rising from pure
+    Ankle_Pitch tilt with no yaw change, live. Switched to reading the
+    Hip_Yaw JOINT VALUE directly (T1's ankle has no yaw DOF) -- zero
+    Ankle_Pitch/Ankle_Roll contamination by construction.
+
+    FIX 2026-08-16 (SAME DAY, THIRD revision): Hip_Yaw alone still
+    undercounted -- user visually saw ~90deg on a left_near save while this
+    plot showed ~40deg. First tried summing Waist + Hip_Yaw
+    (t1_headless.xml: legs are children of a "Waist" body with its own yaw
+    joint, range +/-90deg, between Trunk and the legs -- completely missed
+    by Hip_Yaw alone), which got closer (~65-67deg live-checked) but still
+    undercounted.
+
+    FIX 2026-08-16 (FOURTH revision, same day, user confirmed frame choice
+    via AskUserQuestion at the time): root-caused the remaining gap -- the
+    foot's true toe-axis WORLD azimuth read ~89deg on the same live save
+    moments, matching the user's visual read almost exactly. The ~22deg the
+    joint-sum missed is Ankle_Pitch GIMBAL COUPLING (confirmed NOT roll --
+    Ankle_Roll sits at its own range limit on these saves yet contributes
+    ~0 to the toe's true direction, exactly as its roll-invariance identity
+    predicts), not summable from individual joint values. Switched to
+    ROOT-LOCAL frame at the time, matching foot_inner_face_continuous's own
+    fix, reasoning this plot's job was to mirror what the reward itself
+    sees.
+
+    FIX 2026-08-16 (FIFTH revision, same day, user re-reported the gap):
+    that reasoning was wrong for THIS plot specifically. The reward stays
+    root-local on purpose (a dive/whole-body yaw shouldn't earn free
+    credit -- correct for shaping what the policy is optimized for), but
+    THIS plot's own stated purpose (see its very first docstring
+    paragraph above) is to let a human visually cross-check against what
+    they see in the viewer -- and a human's eye compares against the
+    ROOM (world frame), not the robot's own rotated body frame. Root-local
+    made the plot read ~12-20deg (live-measured average Trunk world spin
+    on left_near saves) under what's actually visible, recreating the
+    exact "plot doesn't match what I see" confusion this plot exists to
+    prevent. Switched back to WORLD frame (dropping the
+    quat_apply_inverse-against-root_link_quat_w step) -- this plot and
+    the reward now deliberately read DIFFERENT numbers for a save with any
+    whole-body spin, which is correct: they're answering different
+    questions (reward: "how much did the LEG rotate", this plot: "what
+    angle does the foot look like it's at in the room"). See
+    docs/BugFixes.md, 2026-08-16.
     """
     raw_env = env.unwrapped if hasattr(env, "unwrapped") else env
     from mjlab.utils.lab_api.math import quat_apply
     from simple_goalkeeper.mdp.rewards import _get_correct_foot_idx
 
     robot = raw_env.scene["robot"]
-    foot_ids = robot.find_bodies(["left_foot_link", "right_foot_link"])[0]
-    foot_quat_w = robot.data.body_link_quat_w[:, foot_ids, :]  # (N, 2, 4)
-
     foot_idx = _get_correct_foot_idx(raw_env, "ball")  # (N,) 0=left, 1=right
 
-    foot_long_local = torch.zeros(raw_env.num_envs, 3, device=raw_env.device)
-    foot_long_local[:, 0] = 1.0
-    left_long_w  = quat_apply(foot_quat_w[:, 0, :], foot_long_local)
-    right_long_w = quat_apply(foot_quat_w[:, 1, :], foot_long_local)
-    foot_long_w  = torch.where((foot_idx == 0)[:, None], left_long_w, right_long_w)  # (N, 3)
+    foot_ids = robot.find_bodies(["left_foot_link", "right_foot_link"])[0]
+    foot_quat_w = robot.data.body_link_quat_w[:, foot_ids, :]  # (N, 2, 4)
+    assigned_quat_w = torch.where((foot_idx == 0)[:, None], foot_quat_w[:, 0, :], foot_quat_w[:, 1, :])  # (N, 4)
 
-    forward_local = torch.zeros(raw_env.num_envs, 3, device=raw_env.device)
-    forward_local[:, 0] = 1.0
-    forward_w = quat_apply(robot.data.root_link_quat_w, forward_local)  # (N, 3)
+    x_local = torch.zeros(raw_env.num_envs, 3, device=raw_env.device)
+    x_local[:, 0] = 1.0
+    foot_x_w = quat_apply(assigned_quat_w, x_local)                         # (N, 3), toe direction, world
 
-    cos_angle = (foot_long_w * forward_w).sum(dim=-1).clamp(-1.0, 1.0)  # (N,)
-    angle_deg = torch.rad2deg(torch.acos(cos_angle))  # (N,) in [0, 180]
+    angle_deg = torch.rad2deg(torch.atan2(foot_x_w[:, 1], foot_x_w[:, 0])).abs()  # (N,) unsigned, world frame
 
     return float(angle_deg[env_idx].item())
 
@@ -1058,7 +1106,13 @@ def _patch_viewer_foot_orientation_plot(native_viewer: "NativeMujocoViewer", env
         from mjlab.viewer.native.viewer import make_empty_figure
         cfg = native_viewer._plot_cfg
         native_viewer._figures[_NAME] = make_empty_figure(
-            f"{_NAME} (target={_FOOT_TARGET_ANGLE_DEG:.0f}+/-{_FOOT_TARGET_TOLERANCE_DEG:.0f})",
+            # FIX 2026-08-16 (SAME DAY, user request, "i want 80 degrees in
+            # global frame"): foot_inner_face_continuous/
+            # inner_face_orientation_save (rewards.py) switched to WORLD
+            # frame too -- this plot (already world-frame, see FIFTH
+            # revision above) now genuinely matches what the reward
+            # measures again, not just what a human sees.
+            f"{_NAME}_world (target={_FOOT_TARGET_ANGLE_DEG:.0f}+/-{_FOOT_TARGET_TOLERANCE_DEG:.0f})",
             cfg.grid_size, cfg.init_yrange, cfg.history, cfg.background_alpha,
         )
         native_viewer._histories[_NAME] = deque(maxlen=cfg.history)
@@ -1072,6 +1126,31 @@ def _patch_viewer_foot_orientation_plot(native_viewer: "NativeMujocoViewer", env
             angle_deg = _compute_assigned_foot_angle_deg(env, native_viewer.env_idx)
             native_viewer._append_point(_NAME, angle_deg)
             native_viewer._write_history_to_figure(_NAME)
+            # FIX 2026-08-16 (user request, "have a ylim of minimum of 0
+            # because i want to have more information but i am seeing -dge
+            # in the plot"): _compute_assigned_foot_angle_deg's own return
+            # is unsigned (.abs()) and can never be negative, but mjlab's
+            # generic _write_history_to_figure autoscale pads BELOW the
+            # data's own min (`lo -= pad*span`), which can push the axis's
+            # lower bound below 0 even though no actual data point is
+            # negative -- wasted axis space, less resolution on the range
+            # that matters. Clamp the just-computed lower bound back to 0
+            # (already scaled by native_viewer._scale[_NAME], same units
+            # fig.range is stored in) right after the generic autoscale
+            # runs, rather than touching mjlab's own shared plotting code.
+            #
+            # FIX 2026-08-16 (SAME DAY, user request, "make 100 deg the
+            # maximum in the plot"): same rationale, upper side -- the
+            # autoscale's `hi += pad*span` padding can push well past
+            # values that are actually meaningful (target is now 80deg),
+            # wasting resolution on empty headroom. Clamp the upper bound
+            # to 100deg (scaled the same way as lo).
+            fig = native_viewer._figures[_NAME]
+            scale = native_viewer._scale[_NAME]
+            if fig.range[1][0] < 0.0:
+                fig.range[1][0] = 0.0
+            if fig.range[1][1] > 100.0 * scale:
+                fig.range[1][1] = 100.0 * scale
         orig_update_reward_figures(viewer_handle)
 
     native_viewer.setup = _patched_setup

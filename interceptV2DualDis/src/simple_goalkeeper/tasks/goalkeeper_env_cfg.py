@@ -949,7 +949,7 @@ def goalkeeper_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
             # the earlier sigma steepening 5->80) gives it more say in the
             # combined objective now that the ankle terms aren't diluting/
             # fighting it. See docs/BugFixes.md, 2026-08-15.
-            weight=6.0,
+            weight=30.0,
             # FIX 2026-08-15 (user request): sigma was the function's own
             # default (5.0), never explicitly set here -- user noticed a
             # visually "pretty bad" ~11deg one-foot tilt still scored ~83%
@@ -962,8 +962,15 @@ def goalkeeper_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
             # overrides. FIX 2026-08-15 (same day, user request, "make
             # sigma even bigger"): 40.0 -> 80.0 (same ~11deg tilt now
             # scores ~5%, chosen via AskUserQuestion from 80/150/custom).
-            # See docs/BugFixes.md, 2026-08-15.
-            params={"asset_cfg": _FEET_CFG, "sigma": 80.0},
+            # FIX 2026-08-16 (user request, "increase the footorientation
+            # reward 10x" -- landed at 6.0 -> 30.0 (5x, "do 30 to start of
+            # with") after AskUserQuestion, plus sigma 80.0 -> 100.0 (user
+            # request, same message): one-foot-tilt reward at max (0deg)
+            # rises 6.0 -> 30.0; a ~11deg tilt drops further, from ~5% of
+            # max (before) to ~4.2% of max (after) -- steeper sigma still
+            # dominates the higher weight past ~10deg. See docs/BugFixes.md,
+            # 2026-08-16.
+            params={"asset_cfg": _FEET_CFG, "sigma": 100.0},
         ),
         # REMOVED 2026-08-15 (user request): foot_ang_vel_xy deleted outright
         # (function + this registration + mdp/__init__.py export), not just
