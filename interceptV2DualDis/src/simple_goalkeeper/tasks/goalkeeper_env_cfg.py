@@ -923,6 +923,18 @@ def goalkeeper_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
             weight=2.0,
             params={"ball_name": BALL_NAME, "target_height": 0.10, "asset_cfg": _FEET_CFG},
         ),
+        # NEW 2026-08-17 (user request): "an incentive that raises the foot"
+        # for the TRAILING foot specifically during its start->orange and
+        # orange->red journey -- foot_clearance above takes max(both feet),
+        # fully satisfiable by the leading foot alone, leaving the trailing
+        # foot's own lift unrewarded during this journey. Same target
+        # height/weight as foot_clearance (0.10m / 2.0), scoped to one foot
+        # instead of max(both) -- see rewards.py:trailing_foot_lift.
+        "trailing_foot_lift": RewardTermCfg(
+            func=gk_mdp.trailing_foot_lift,
+            weight=2.0,
+            params={"ball_name": BALL_NAME, "target_height": 0.10, "asset_cfg": _FEET_CFG},
+        ),
         # --- goalkeeper stance ---
         "stayonline": RewardTermCfg(
             func=gk_mdp.stayonline,
@@ -949,7 +961,6 @@ def goalkeeper_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
             # the earlier sigma steepening 5->80) gives it more say in the
             # combined objective now that the ankle terms aren't diluting/
             # fighting it. See docs/BugFixes.md, 2026-08-15.
-            weight=30.0,
             # FIX 2026-08-15 (user request): sigma was the function's own
             # default (5.0), never explicitly set here -- user noticed a
             # visually "pretty bad" ~11deg one-foot tilt still scored ~83%
@@ -970,6 +981,9 @@ def goalkeeper_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
             # max (before) to ~4.2% of max (after) -- steeper sigma still
             # dominates the higher weight past ~10deg. See docs/BugFixes.md,
             # 2026-08-16.
+            # FIX 2026-08-17 (user request): 30.0 -> 15.0. sigma (100.0)
+            # left unchanged.
+            weight=15.0,
             params={"asset_cfg": _FEET_CFG, "sigma": 100.0},
         ),
         # REMOVED 2026-08-15 (user request): foot_ang_vel_xy deleted outright

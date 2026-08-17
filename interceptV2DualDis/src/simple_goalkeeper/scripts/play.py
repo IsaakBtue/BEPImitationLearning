@@ -43,6 +43,15 @@ Usage:
     uv run sgk_play Mjlab-BeyondAMP-Goalkeeper-T1-MultiDisc \\
         --agent scripted_yaw --num-envs 1 --force-region left_near \\
         --scripted-yaw-deg 30 --no-terminations True
+
+    # Static-pose probe: hold the HOME_KEYFRAME joint pose with the root
+    # pitched to postorientation's own forward-lean target (default 15deg,
+    # matching _HOME_LEAN_TARGET in rewards.py) so you can watch it live in
+    # the real viewer instead of an offline render. No policy involved, ball
+    # parked out of the way, root+joints re-pinned every step:
+    uv run sgk_play Mjlab-BeyondAMP-Goalkeeper-T1-MultiDisc \\
+        --agent scripted_lean --num-envs 1 --no-terminations True \\
+        --scripted-lean-deg 15
 """
 from __future__ import annotations
 
@@ -74,7 +83,7 @@ from simple_goalkeeper.rsl_rl_multi.him_amp_on_policy_runner import (
 
 @dataclass(frozen=True)
 class PlayConfig:
-    agent: Literal["zero", "random", "trained", "scripted_yaw"] = "trained"
+    agent: Literal["zero", "random", "trained", "scripted_yaw", "scripted_lean"] = "trained"
     checkpoint_file: str | None = None
     scripted_yaw_joint: str = "Left_Hip_Yaw"
     """--agent scripted_yaw only: which joint to drive. T1's ankle has no yaw
@@ -117,6 +126,28 @@ class PlayConfig:
     standing height comfortably clear of the floor, so the leg swings freely
     with no contact of any kind. Set to 0.0 to keep the feet grounded instead
     (e.g. to specifically study ground-contact effects)."""
+    scripted_lean_deg: float = 15.0
+    """--agent scripted_lean only: forward-pitch angle (degrees, about body-Y)
+    to hold the root at, matching rewards.py's _HOME_LEAN_TARGET convention
+    (positive = forward lean, render-verified 2026-08-17 -- see docs/BugFixes.md).
+    Joints are held at robot.data.default_joint_pos (HOME_KEYFRAME) throughout --
+    only the root orientation is scripted."""
+    scripted_lean_root_height: float = 0.665
+    """--agent scripted_lean only: root Z to hold (metres), matches
+    HOME_KEYFRAME's own pos[2] in t1_constants.py."""
+    scripted_lean_park_ball: bool = True
+    """--agent scripted_lean only: teleport the ball far away every step, same
+    mechanism as --scripted-yaw-park-ball -- this is a static-pose probe, not
+    a save-interaction one."""
+    scripted_lean_pose: Literal["post_save", "reset"] = "post_save"
+    """--agent scripted_lean only: which joint stance to hold the legs/arms at.
+    "post_save" (default) uses rewards.py's _POST_SAVE_STANCE_MAP -- the ACTUAL
+    target postlegdofpos/postupperdofpos/postshoulderdofpos/postwaistdofpos
+    steer toward post-save (straight legs, all leg joints 0.0). "reset" uses
+    robot.data.default_joint_pos (HOME_KEYFRAME, crouched legs) -- the
+    episode-start stance, not the recovery target. These differ only in the
+    legs; arm values are identical between the two maps. Get this wrong and
+    the rendered pose isn't the one the reward stack actually targets."""
     motion_file: str | None = None
     """Optional NPZ motion file for the WithOverlay task (overrides default)."""
     amp_eye_view: bool = False
@@ -668,7 +699,7 @@ def _patch_viewer_intercept_vis(native_viewer: "NativeMujocoViewer", env) -> Non
             start_y = float(origins[1])
             delta = cross_y - start_y
             sign = 1.0 if delta >= 0 else -1.0
-            red_offset = min(0.4, abs(delta) / 2.0)
+            red_offset = min(0.25, abs(delta) / 2.0)  # FIX 2026-08-17: 0.4 -> 0.25, mirrors rewards.py
             red_y = cross_y - sign * red_offset
             _add_sphere(goal_x, red_y, sphere_z, 0.08, [0.9, 0.1, 0.1, 0.75])
             _add_line(
@@ -1740,7 +1771,7 @@ def run_play(task_id: str, cfg: PlayConfig) -> None:
     else:
         env = AMPEnvWrapper(env, clip_actions=agent_cfg.clip_actions, motion_dataset=agent_cfg.amp_data)
 
-    DUMMY_MODE = cfg.agent in {"zero", "random", "scripted_yaw"}
+    DUMMY_MODE = cfg.agent in {"zero", "random", "scripted_yaw", "scripted_lean"}
     if DUMMY_MODE:
         action_shape: tuple[int, ...] = env.unwrapped.action_space.shape
         if cfg.agent == "zero":
@@ -1879,6 +1910,100 @@ def run_play(task_id: str, cfg: PlayConfig) -> None:
             print(
                 f"[INFO] scripted_yaw: pin_root={cfg.scripted_yaw_pin_root} "
                 f"park_ball={cfg.scripted_yaw_park_ball}",
+                file=sys.stderr,
+            )
+        elif cfg.agent == "scripted_lean":
+            # Static-pose probe (2026-08-17, user request): visualize
+            # postorientation's own forward-lean target (rewards.py's
+            # _HOME_LEAN_TARGET=sin(15deg)) live in the real viewer, since
+            # that target's docstring flagged it as "derived analytically,
+            # not yet render-verified" -- render-verified offline first
+            # (standalone MuJoCo render, see docs/BugFixes.md 2026-08-17:
+            # the torso tips toward the SAME direction the toes point, a
+            # genuine forward lean), this gives the same thing live.
+            #
+            # No joint sweep, no action needed -- zero action already holds
+            # default_joint_pos (HOME_KEYFRAME) via JointPositionAction's
+            # use_default_offset=True, same mechanism scripted_yaw relies on
+            # for every joint it doesn't drive. Only the root orientation is
+            # scripted, re-written every step (same pin pattern scripted_yaw
+            # uses) so the pose stays crisp regardless of what reset/RSI
+            # would otherwise produce.
+            import math as _lean_math
+            from simple_goalkeeper.mdp.rewards import _POST_SAVE_STANCE_MAP
+
+            raw_env_for_lean = env.unwrapped
+            n_lean = raw_env_for_lean.num_envs
+            half = _lean_math.radians(cfg.scripted_lean_deg) / 2.0
+            _lean_quat = torch.tensor(
+                [_lean_math.cos(half), 0.0, _lean_math.sin(half), 0.0], device=device
+            ).expand(n_lean, -1)
+
+            _lean_robot = raw_env_for_lean.scene["robot"]
+            if cfg.scripted_lean_pose == "post_save":
+                # Same resolution pattern postlegdofpos/postupperdofpos/
+                # postshoulderdofpos/postwaistdofpos use (rewards.py,
+                # env._post_save_stance_target) -- straight legs, not
+                # HOME_KEYFRAME's crouched reset pose.
+                all_names = _lean_robot.joint_names
+                _lean_stance = torch.zeros(len(all_names), device=device)
+                for i, name in enumerate(all_names):
+                    if name in _POST_SAVE_STANCE_MAP:
+                        _lean_stance[i] = _POST_SAVE_STANCE_MAP[name]
+                _lean_stance = _lean_stance.expand(n_lean, -1)
+            else:
+                _lean_stance = _lean_robot.data.default_joint_pos
+            print(
+                f"[INFO] scripted_lean: joint stance = {cfg.scripted_lean_pose!r} "
+                f"({'straight legs, _POST_SAVE_STANCE_MAP' if cfg.scripted_lean_pose == 'post_save' else 'crouched legs, HOME_KEYFRAME reset pose'})",
+                file=sys.stderr,
+            )
+
+            def policy(obs: torch.Tensor) -> torch.Tensor:
+                return torch.zeros(action_shape, device=device)
+
+            def _park_ball_state_lean() -> None:
+                if not cfg.scripted_lean_park_ball:
+                    return
+                ball_entity = raw_env_for_lean.scene["ball"]
+                park_pos = (
+                    torch.tensor([[10.0, 10.0, 5.0]], device=device).expand(n_lean, -1)
+                    + raw_env_for_lean.scene.env_origins
+                )
+                park_quat = torch.tensor([[1.0, 0.0, 0.0, 0.0]], device=device).expand(n_lean, -1)
+                ball_entity.write_root_link_pose_to_sim(torch.cat([park_pos, park_quat], dim=-1))
+                ball_entity.write_root_link_velocity_to_sim(torch.zeros(n_lean, 6, device=device))
+
+            def _apply_lean_pose() -> None:
+                robot_entity = raw_env_for_lean.scene["robot"]
+                root_pos = raw_env_for_lean.scene.env_origins.clone()
+                root_pos[:, 2] += cfg.scripted_lean_root_height
+                robot_entity.write_root_link_pose_to_sim(torch.cat([root_pos, _lean_quat], dim=-1))
+                robot_entity.write_root_link_velocity_to_sim(torch.zeros(n_lean, 6, device=device))
+                robot_entity.write_joint_state_to_sim(
+                    _lean_stance, torch.zeros_like(_lean_stance)
+                )
+
+            _orig_lean_reset = env.reset
+            _orig_lean_step = env.step
+
+            def _patched_lean_reset(*args, **kwargs):
+                result = _orig_lean_reset(*args, **kwargs)
+                _park_ball_state_lean()
+                _apply_lean_pose()
+                return result
+
+            def _patched_lean_step(actions: torch.Tensor):
+                result = _orig_lean_step(actions)
+                _park_ball_state_lean()
+                _apply_lean_pose()
+                return result
+
+            env.reset = _patched_lean_reset
+            env.step = _patched_lean_step
+            print(
+                f"[INFO] scripted_lean: holding {cfg.scripted_lean_deg:.1f}deg forward "
+                f"lean at HOME_KEYFRAME joints, root height={cfg.scripted_lean_root_height:.3f}m",
                 file=sys.stderr,
             )
         else:

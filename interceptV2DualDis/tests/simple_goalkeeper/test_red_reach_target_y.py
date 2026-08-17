@@ -3,7 +3,7 @@
 NEW 2026-08-15: trailing-foot second-stage ("red") mirror of
 _get_orange_reach_target_y, active only once both blue and orange are
 genuinely landed (env._blue_landed_genuine & env._orange_landed_genuine).
-Anchored at full_y (green), a flat 0.4m offset toward start (sign-safe),
+Anchored at full_y (green), a flat 0.25m offset toward start (sign-safe),
 CLAMPED to never exceed blue's own distance from green (|delta|/2) -- NOT a
 shrink-then-halve formula like orange's. FIX 2026-08-15 (user request): the
 original shrink-based formula's distance from green scaled with the total
@@ -12,7 +12,9 @@ checkpoint rollout for crossings just over the 0.5m wide threshold. Then the
 first flat-0.4m-offset fix was found (also live) to place red BEFORE blue
 for crossings under ~0.8m total distance -- clamped so red instead collapses
 onto blue's own position in that range rather than overshooting past it.
-See docs/BugFixes.md, 2026-08-15.
+FIX 2026-08-17 (user request, "standard position of 20cm to 30cm on further
+ranges"): offset cap 0.4 -> 0.25, same clamp mechanism, only the far-range
+value changed. See docs/BugFixes.md, 2026-08-15/17.
 """
 import torch
 
@@ -50,33 +52,40 @@ def _red_y(crossing_delta: float) -> float:
     return result[0].item()
 
 
-def test_red_target_is_flat_040_offset_from_green_positive_side():
-    # delta=+1.00m -> full_y=1.0, red_y=1.0-0.4=0.6 -- fixed offset,
+def test_red_target_is_flat_025_offset_from_green_positive_side():
+    # delta=+1.00m -> full_y=1.0, red_y=1.0-0.25=0.75 -- fixed offset,
     # independent of the crossing distance (unlike orange's shrink formula).
-    assert abs(_red_y(1.0) - 0.6) < 1e-6
+    assert abs(_red_y(1.0) - 0.75) < 1e-6
 
 
-def test_red_target_at_exactly_080_gets_the_full_offset():
-    # delta=+0.80m -> blue's own distance from green is |delta|/2=0.40,
-    # exactly equal to the 0.4m cap -- boundary case, clamp is a no-op here.
-    assert abs(_red_y(0.8) - 0.4) < 1e-6
+def test_red_target_at_exactly_050_gets_the_full_offset():
+    # delta=+0.50m -> blue's own distance from green is |delta|/2=0.25,
+    # exactly equal to the 0.25m cap -- boundary case, clamp is a no-op here.
+    assert abs(_red_y(0.5) - 0.25) < 1e-6
 
 
-def test_red_target_clamps_to_blue_position_below_080():
-    # delta=+0.55m (just over the 0.5m wide threshold, well under the 0.8m
-    # clamp boundary): blue's own distance from green is |delta|/2=0.275,
-    # LESS than the 0.4m offset -- red_y must clamp to blue_y (0.275) rather
-    # than overshoot past it toward start (which an uncapped 0.4m offset
-    # would give: 0.55-0.4=0.15, confirmed live to invert start<orange<
-    # blue<red<green into start<orange<red<blue<green -- the bug this
-    # clamp fixes).
-    blue_y = 0.0 + 0.55 / 2.0  # start_y=0 in this test's _FakeEnv
-    assert abs(_red_y(0.55) - blue_y) < 1e-6
+def test_red_target_clamps_below_uncapped_half_delta_for_realistic_wide_crossing():
+    # delta=+0.60m -- a realistic "just wide" crossing (wide_threshold=0.5m
+    # elsewhere in this project). Blue's own distance from green is
+    # |delta|/2=0.30, ABOVE the 0.25m cap -- red_offset clamps to 0.25, so
+    # red sits STRICTLY closer to green than blue (0.25 < 0.30), not at
+    # blue's exact position (that exact-collapse case only occurs at the
+    # delta=0.50 boundary now that the cap equals the wide threshold's own
+    # half-distance -- see test_red_target_at_exactly_050_gets_the_full_offset).
+    # Guards the same inversion bug the old clamp existed for: an uncapped
+    # offset (0.60-0.25=0.35) would still stay inside blue here, but the
+    # invariant this test actually checks -- red_offset never exceeds
+    # blue's own distance from green -- is what prevents the inversion in
+    # general.
+    blue_dist = 0.60 / 2.0
+    red_y = _red_y(0.60)
+    assert abs(red_y - (0.60 - 0.25)) < 1e-6
+    assert (0.60 - blue_dist) < red_y < 0.60  # strictly between blue and green
 
 
 def test_red_target_sign_safe_for_right_side_crossings():
-    # delta=-1.00m -> full_y=-1.0, red_y=-1.0-(-0.4)=-0.6
-    assert abs(_red_y(-1.0) - (-0.6)) < 1e-6
+    # delta=-1.00m -> full_y=-1.0, red_y=-1.0-(-0.25)=-0.75
+    assert abs(_red_y(-1.0) - (-0.75)) < 1e-6
 
 
 def test_red_active_false_when_blue_and_orange_attrs_missing():

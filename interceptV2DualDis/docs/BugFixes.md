@@ -3418,3 +3418,77 @@ Net effect: near-flat feet (0-5deg) get up to 5x more reward signal; the drop-of
 **What changed:** both functions dropped the `quat_apply_inverse(root_link_quat_w, foot_x_w)` step, using the toe axis's raw WORLD-frame azimuth directly. Still exactly immune to Ankle_Roll (that invariance is a property of local-X's own rotation axis, unrelated to which frame the resulting world vector is then read in). Same target angle (`_FOOT_TARGET_ANGLE_DEG=80`), same `expected_sign` convention, same overshoot/undershoot shapes and constants -- only the frame changed. Also restores `inner_face_orientation_save`'s ORIGINAL, long-standing design intent (its own docstring always said "world-frame target direction" -- earlier same-day joint-space revisions had silently drifted this function away from that without it being a deliberate choice for THIS function specifically). The diagnostic P-panel plot (already switched to world frame in the immediately-preceding fix) now genuinely matches what the reward measures again, not just what a human visually sees.
 
 **Evidence:** 90/90 tests pass. Not yet validated against a live training run -- this is the sixth revision of this reward's core geometry today; strongly recommend a fresh training run before drawing conclusions from any existing checkpoint, all of which were trained under different (root-local or joint-space) formulas.
+
+---
+
+## 2026-08-17: `foot_inner_face_continuous` undershoot slope flattened, `feetorientation` weight lowered, new `trailing_foot_lift` reward added
+
+**What changed (user request):**
+- `foot_inner_face_continuous._FOOT_UNDERSHOOT_POWER`: `9 -> 5` (`rewards.py`). `_FOOT_OVERSHOOT_SIGMA` explicitly left at `0.10` per user request ("dont touch i dont have data for that").
+- `feetorientation` weight: `30.0 -> 15.0` (`goalkeeper_env_cfg.py`), sigma (`100.0`) unchanged.
+- New reward `trailing_foot_lift` (`rewards.py`, registered in `goalkeeper_env_cfg.py`): foot_clearance-style Gaussian height bump (`target_height=0.10`, `clearance_sigma=300`, weight `2.0` -- all matching `foot_clearance` exactly), scoped to the TRAILING (non-assigned) foot only instead of `max(both feet)`. Active window `env._orange_wide & ~env._red_landed_genuine`, covering both requested spans (start->orange, orange->red) in one gate.
+
+**Why:**
+- User reported `foot_inner_face_continuous` "didn't learn to rotate the foot" -- at power=9, 45deg-off-target (35deg short of the 80deg target) scored only ~17% of peak, likely too little gradient from a mostly-unrotated start. At power=5, the same point scores ~38% of peak. Chosen via `AskUserQuestion` (5/3/7 offered).
+- `feetorientation` (flat-feet reward) weight judged too high relative to other terms; lowered per direct user instruction.
+- `foot_clearance` takes `max(both feet)`, fully satisfiable by the leading foot alone -- the trailing foot had no lift incentive of its own during its start->orange->red journey. `trailing_foot_lift` closes that gap, mirroring the `orange_foot_proximity`/2026-08-08 pattern (a trailing-foot-specific analog of an existing leading-foot/whole-table mechanism) but for height instead of position.
+
+**Evidence:** Syntax-checked (`ast.parse`) on all 3 touched files. Live smoke test: constructed `Mjlab-BeyondAMP-Goalkeeper-T1-MultiDisc` env directly (bypassing the viewer), 4 envs, 60 zero-action steps -- no exceptions, `trailing_foot_lift` and `feetorientation` both produced genuine nonzero `Episode_Reward/*` values. Not yet validated against a live training run.
+
+---
+
+## 2026-08-17: Diagnosed "arms swinging again" on `model_39750` (`2026-08-16_11-57-16_6144_innerfacereworkretune_2026-08-16`) -- root cause is the orange/red trailing-foot mechanism, NOT `_FOOT_TARGET_ANGLE_DEG`
+
+**Investigation (user request, "check why the arms are again swinging"):** live checkpoint replay probe (64 envs, 1500 steps, read-only, no training impact), logging 8-joint arm speed (`sum|joint_vel|`, the 8 arm joints), root `ang_vel_z`, both-side `Hip_Yaw` joint speed, and assigned-foot world-yaw error vs. `_FOOT_TARGET_ANGLE_DEG`.
+
+**Hypothesis 1 (rejected):** the 2026-08-16 `foot_inner_face_continuous`/`inner_face_orientation_save` retarget (50°→80°, root-local→world frame) demands more `Hip_Yaw` reaction torque, causing the swing. **Falsified:** `model_39750` (post-fix, 80°) scored slightly LOWER on every metric (arm_speed 1.52 vs 2.05, hip_yaw_speed 0.37 vs 0.63) than `model_15750` (pre-fix, 50°, the checkpoint stopped specifically to relaunch with the 08-16 changes).
+
+**Hypothesis 2 (confirmed):** the elevation is real but predates the 08-16 fix -- comparing against `model_17250` (2026-08-07, `_FOOT_TARGET_ANGLE_DEG=45°`, the checkpoint the user separately confirmed had correct foot rotation, see the "Leading-foot save-orientation target angle" divergence-table row) showed arm_speed +32% overall / +68% in the late post-save recovery window (80-200 steps after save, where it should have decayed near baseline), hip_yaw_speed +38% / +74%. Bisected across 5 checkpoints spanning 2026-08-07→08-16 (target angle 45→60→75→50→80°, trailing-foot terms 0→1→2→4→4):
+
+| checkpoint | target angle | trailing-foot terms present | arm_speed | hip_yaw_speed |
+|---|---|---|---|---|
+| 08-07 shoulderscale1 | 45° | none | 1.15 | 0.27 |
+| 08-08 orangetrailingfoot | 60° | orange+red (just added) | 1.42 | 0.38 |
+| 08-10 footorient75heelpitch6x | 75° | orange+red | 1.35 | 0.42 |
+| 08-15 run_2026-08-15b | 50° | orange+red+trailing_foot_reach+sequence_promptness | 2.11 | 0.64 |
+| 08-16 innerfacereworkretune | 80° | same as 08-15 | 1.52 | 0.37 |
+
+arm_speed/hip_yaw_speed jump once, between 08-07 (no trailing-foot mechanism) and 08-08 (orange/red just introduced), then stay in the same 1.35-2.11 band across target-angle changes 60→75→50→80° -- no monotonic scaling with the angle. The single worst checkpoint (08-15b) has the LOWEST target angle (50°) of the 4 trailing-foot-era checkpoints but the MOST trailing-foot reward terms stacked (4, vs. 08-16's same 4) -- activity tracks trailing-foot reward-term count/strength, not the leading-foot orientation target.
+
+**Conclusion:** root cause is the orange/red trailing-foot waypoint mechanism (2026-08-08 onward) driving genuinely more whole-body movement (the trailing foot traveling further/faster to reach waypoints), not `_FOOT_TARGET_ANGLE_DEG`. Not fully isolated to one specific trailing-foot term (see below).
+
+**Conflict-of-interest flag raised to the user:** the same-session `trailing_foot_lift` addition (see the entry directly above) gives the trailing foot yet another incentive to move during this exact start→orange→red window, plausibly compounding this pattern.
+
+**Decision (user, via `AskUserQuestion`):** leave `trailing_foot_lift` in as committed, monitor arm-swing behavior on the next training run rather than preemptively bisecting individual orange/red terms or adding damping now. No reward code changed as a result of this investigation.
+
+---
+
+## 2026-08-17: Visualized `postorientation`'s forward-lean target (viewer/diagnostic tooling only)
+
+**What changed (user request, "visualize how it looks"):** two ways to see `postorientation`'s `_HOME_LEAN_TARGET=sin(15deg)` root-pitch target live/rendered, since its own docstring flagged it as "derived analytically, not yet render-verified":
+- Standalone offline MuJoCo render script (scratchpad, not committed) -- baseline vs. 15deg-forward-pitched root.
+- New `--agent scripted_lean` mode in `scripts/play.py` (same architecture as the existing `scripted_yaw` probe -- root+joints re-pinned every step via `write_root_link_pose_to_sim`/`write_joint_state_to_sim`, ball parked, no policy): `uv run sgk_play Mjlab-BeyondAMP-Goalkeeper-T1-MultiDisc --agent scripted_lean --num-envs 1 --no-terminations True --scripted-lean-deg 15`.
+
+**First pass was wrong (caught by user follow-up, "is this the final pose we use?"):** initial render/live-agent held the legs at `robot.data.default_joint_pos` (`HOME_KEYFRAME`'s crouched reset pose: `Hip_Pitch=-0.3, Knee_Pitch=0.6, Ankle_Pitch=-0.3`). That's the episode-START stance, not what the post-save recovery reward stack (`postlegdofpos`/`postupperdofpos`/`postshoulderdofpos`/`postwaistdofpos`) actually targets -- `_POST_SAVE_STANCE_MAP` (straight legs, all leg joints `0.0`). Fixed both the render script and `scripted_lean`'s default (`--scripted-lean-pose post_save`, using the exact `robot.joint_names`-indexed resolution pattern `postlegdofpos` etc. already use) to hold the real post-save target stance; `--scripted-lean-pose reset` still available to see the crouched episode-start pose instead. Visual result differs meaningfully: straight legs pivot as one rigid unit from the hip, so the 15deg root pitch produces a noticeably steeper-looking forward lean than the crouched-leg version did.
+
+**Evidence:** headless smoke test (2 envs, 30 steps, no viewer) -- `projected_gravity_b[:,0]` tracked the `0.259` target (`0.276` after 30 steps of write-then-step, small residual from the one physics step between writes, not a bug). No exceptions. `play.py` syntax-checked. Not a training-affecting change (viewer/diagnostic-only per the Change Approval Workflow).
+
+**FOLLOW-UP (same day, user pushback "it looks awful"), corrected twice more:**
+
+1. First correction (this entry, above): fixed leg stance source (`_POST_SAVE_STANCE_MAP` not `HOME_KEYFRAME`).
+2. **Second correction:** the fixed render still combined `postorientation`'s 15deg root target and `postlegdofpos`'s straight-leg target via rigid kinematics with no physics reconciling them -- nothing in training ever asks these two independent reward pulls to agree with each other, so the render (whole body pivoting as one rigid plank from the hip) was a physically-unreconciled worst case, not a real pose. Checked a real trained-checkpoint rollout (`model_39750`, live probe, steady post-save window 60-150 steps after save) instead: measured root pitch ≈0 (NOT 0.259) with partially-bent knees -- neither target is actually achieved.
+3. **Third correction (the real bug):** that "real" measurement was itself wrong -- it averaged literal `Left_*`/`Right_*` joint columns across episodes where the ball-assigned (blocking) leg alternates left/right roughly 50/50, blending two physically different roles (assigned/blocking leg vs. trailing/standing leg) into a number that is nobody's real pose. Re-ran classifying legs by ROLE (`_get_correct_foot_idx`) instead of literal side. Result: **std exceeds or rivals the mean on almost every leg joint** in the "steady" window (e.g. assigned `Hip_Pitch` mean=-0.054, std=0.742; trailing `Hip_Roll` mean=-0.645, std=0.313) -- five real single-frame snapshots from that window show assigned-leg `Hip_Roll` alone reading 0.355/0.164/-0.661/0.313/0.404. **Conclusion: there is no single settled "final pose" for this checkpoint to visualize at all** -- the robot is still actively moving episode-to-episode in the window that should be steady, consistent with the same-day arm-swing finding (hip-yaw/arm activity not decaying to near-zero post-save, driven by the ongoing trailing-foot mechanism). Any static render (average or cherry-picked frame) misrepresents a moving target as a still one. Correct way to observe this: watch the real checkpoint live (`--agent trained --checkpoint-file <path>`), not a static pose.
+
+No code changes from this follow-up (probe scripts only, scratchpad, not committed).
+
+---
+
+## 2026-08-17: Red waypoint far-range offset lowered 40cm -> 25cm (user request, "standard position of 20cm to 30cm on further ranges")
+
+**What changed:** `_get_red_reach_target_y`'s `RED_OFFSET_FROM_GREEN` constant `0.4 -> 0.25` (`rewards.py`), mirrored in `play.py`'s viewer marker (`red_offset = min(0.25, ...)`, was `min(0.4, ...)`). Same clamp mechanism (`red_offset = min(RED_OFFSET_FROM_GREEN, |delta|/2)`), only the far-range cap value changed.
+
+**Why:** user wants the red target's standard/far-range distance from green in the 20-30cm band, not the existing 40cm. 25cm chosen (midpoint) via `AskUserQuestion`.
+
+**Side effect worth knowing:** `RED_OFFSET_FROM_GREEN=0.25` now exactly equals `wide_threshold/2` (0.5/2) -- the minimum possible blue-to-green distance for any genuinely wide crossing. This means the clamp is now a no-op (or very close to it) for essentially the ENTIRE wide-crossing range: any crossing wide enough to have orange/red active at all (`|delta|>=0.5`) already has `blue_dist=|delta|/2>=0.25`, so red gets its full 25cm offset from green in practically all cases -- red's distance from green is now close to a genuine constant ~25cm across the wide range, not a variable-then-capped value like before. This is consistent with "standard position" (near-constant), not a regression.
+
+**Evidence:** 4 formula unit tests updated (`test_red_reach_target_y.py`) to the new cap value; one test re-derived from a fabricated non-wide delta (0.35, below the real 0.5m wide threshold) to a realistic wide-range value (0.60) that actually demonstrates the clamp engaging within real usage. Full suite 90/90 pass. Not yet validated against a live training run.

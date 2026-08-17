@@ -179,9 +179,19 @@ _FOOT_OVERSHOOT_SIGMA = 0.10
 # cos(35deg)^n=0.16 -> n=9.18, rounded to 9, verified within ~0.05 of the
 # Gaussian's values across the full undershoot range. 45deg-off now scores
 # ~17% of peak (was 82% under plain cosine), fades out below ~30deg,
-# genuinely negative past +/-90deg from target. Not yet validated against
-# a live training run.
-_FOOT_UNDERSHOOT_POWER = 9
+# genuinely negative past +/-90deg from target.
+#
+# FIX 2026-08-17 (user request, "it didn't learn to rotate the foot"):
+# 9 -> 5. At power=9 the curve was apparently too steep to supply usable
+# gradient from a mostly-unrotated start -- 45deg-off-target (35deg short
+# of the 80deg target) scored only ~17% of peak, and points further out
+# score even less, giving little incentive to begin rotating at all. At
+# power=5, 45deg-off now scores ~38% of peak -- flatter near the start of
+# the climb while keeping the same sign-preserving shape (still negative
+# past +/-90deg from target, still distinguishes "wrong direction" from
+# "not yet rotated"). Chosen via AskUserQuestion (5/3/7 offered). Not yet
+# validated against a live training run.
+_FOOT_UNDERSHOOT_POWER = 5
 _DEFAULT_KNEE_CFG = SceneEntityCfg("robot", body_names=("Shank_Left", "Shank_Right"))
 # FIX 2026-08-03 (user request, G1-comparison finding): postupperdofpos's ONLY
 # consumer. Was Shoulder_Pitch/Roll + Elbow_Pitch/Yaw x2 sides (8 joints) --
@@ -1099,7 +1109,12 @@ def _get_red_reach_target_y(
     wide = getattr(env, "_blue_wide", torch.zeros_like(delta, dtype=torch.bool))
     env._red_wide = wide
 
-    RED_OFFSET_FROM_GREEN = 0.4
+    # FIX 2026-08-17 (user request, "standard position of 20cm to 30cm on
+    # further ranges"): 0.4 -> 0.25. Same clamp formula/mechanism, only the
+    # far-range cap value changed -- for |delta|>=0.5m (2*0.25) red now sits
+    # a flat 25cm from green instead of 40cm; narrower wide crossings still
+    # scale down below that via the unchanged |delta|/2 term.
+    RED_OFFSET_FROM_GREEN = 0.25
     red_offset = torch.clamp(delta.abs() / 2.0, max=RED_OFFSET_FROM_GREEN)
     red_y = full_y - torch.sign(delta) * red_offset
 
@@ -5062,6 +5077,64 @@ def foot_clearance(
     max_foot_height = foot_z_above_floor.max(dim=-1).values                   # (N,)
     reward = torch.exp(-clearance_sigma * (max_foot_height - target_height) ** 2)
     return reward * (~behind).float()
+
+
+def trailing_foot_lift(
+    env: "ManagerBasedRlEnv",
+    ball_name: str,
+    asset_cfg: SceneEntityCfg = _DEFAULT_FEET_CFG,
+    target_height: float = 0.10,
+    clearance_sigma: float = 300.0,
+) -> torch.Tensor:
+    """Reward for lifting the TRAILING (non-assigned) foot during the
+    blue->orange and orange->red waypoint journey.
+
+    NEW 2026-08-17 (user request): "an incentive that raises the foot" while
+    the trailing foot travels start->orange and orange->red. `foot_clearance`
+    already rewards lifting SOME foot to target_height, but takes the max
+    across both feet -- fully satisfiable by the LEADING foot alone, leaving
+    the trailing foot with no lift incentive of its own during this specific
+    journey (mirrors the gap `orange_foot_proximity` closed for trailing-foot
+    *position* on 2026-08-08, this time for height).
+
+    Same Gaussian-bump shape/constants as foot_clearance (target_height=0.10,
+    clearance_sigma=300) -- consistent kernel convention across the reward
+    table, scoped to one foot instead of max(both).
+
+    Active window: `env._orange_wide & ~env._red_landed_genuine` -- a single
+    gate spanning BOTH requested spans (start->orange, i.e. before orange
+    lands, AND orange->red, i.e. after orange lands but before red does),
+    since `env._red_active` (gating red's own terms) only ever turns true
+    once orange has already landed genuinely -- there is no gap between the
+    two spans to leave uncovered. `env._orange_wide` (== `env._blue_wide`)
+    keeps this zero on narrow crossings, where orange/red don't exist.
+    Deliberately NOT gated on `~behind` like `foot_clearance` -- the
+    orange->red leg of this journey routinely continues past the save.
+
+    No G1 equivalent (same justification class as the orange/red waypoint
+    terms -- G1 has no intermediate-waypoint concept for either foot).
+    `_get_orange_reach_target_y`/`_get_red_reach_target_y` called explicitly
+    (values discarded) purely to guarantee `env._orange_wide`/
+    `env._red_landed_genuine` are fresh this tick regardless of registration
+    order -- same freshness pattern `trailing_foot_reach` uses above. Not
+    yet validated against a live training run.
+    """
+    _get_orange_reach_target_y(env, ball_name, asset_cfg=asset_cfg)
+    _get_red_reach_target_y(env, ball_name, asset_cfg=asset_cfg)
+
+    robot: Entity = env.scene[asset_cfg.name]
+    foot_idx = _get_correct_foot_idx(env, ball_name)      # (N,) — leading foot, 0=left, 1=right
+    trailing_idx = 1 - foot_idx                             # (N,) — the OTHER foot
+
+    foot_pos_w = robot.data.body_link_pos_w[:, asset_cfg.body_ids, :]       # (N, 2, 3)
+    trailing_z_w = torch.where(trailing_idx == 0, foot_pos_w[:, 0, 2], foot_pos_w[:, 1, 2])  # (N,)
+    floor_z = env.scene.env_origins[:, 2]                                    # (N,)
+    trailing_z = (trailing_z_w - floor_z).clamp(0.0, None)                   # (N,)
+
+    reward = torch.exp(-clearance_sigma * (trailing_z - target_height) ** 2)
+
+    active = env._orange_wide & ~env._red_landed_genuine
+    return reward * active.float()
 
 
 def feet_slippage(
