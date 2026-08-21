@@ -212,6 +212,7 @@ class AnalyticsPolicy:
         self._wf_flash = 0.0
         self._knee_flash = 0.0
         self._shin_flash = 0.0
+        self._chin_flash = 0.0
         # FIX 2026-07-22 (research: shank_height vs base_height termination
         # tuning): per-episode running minimums, so a deep-lunge episode's
         # worst height is captured even though the live status line
@@ -309,7 +310,7 @@ class AnalyticsPolicy:
         # call (_patch_viewer_wrong_foot_contact_plot) only runs while
         # _show_plots is True, which made it an unreliable ground-truth
         # source for confirming whether contact is actually being detected.
-        self._wf_flash, self._knee_flash, self._shin_flash = _compute_wrong_foot_contact_flash(env, 0)
+        self._wf_flash, self._knee_flash, self._shin_flash, self._chin_flash = _compute_wrong_foot_contact_flash(env, 0)
 
         if not self.enabled:
             return actions
@@ -330,6 +331,23 @@ class AnalyticsPolicy:
         stopball_fired  = sb_flag[0].item()  if sb_flag  is not None else False
         softstop_fired  = ss_flag[0].item()  if ss_flag  is not None else False
         cleanstop_fired = cs_flag[0].item()  if cs_flag  is not None else False
+
+        # DEBUG 2026-08-21 (user request): make red's activation gate
+        # (env._red_active = _blue_landed_genuine & _orange_landed_genuine)
+        # directly visible on the console status line, alongside the red
+        # sphere play.py already draws in the native viewer once red_active
+        # (see _patch_viewer_debug_visualizers). User wants to confirm
+        # whether RD actually flips true and stays true through the
+        # save/softstop/ball-behind sequence, not just whether the code
+        # exists.
+        blue_landed_genuine_t = getattr(env, "_blue_landed_genuine", None)
+        orange_landed_genuine_t = getattr(env, "_orange_landed_genuine", None)
+        red_active_t = getattr(env, "_red_active", None)
+        red_landed_genuine_t = getattr(env, "_red_landed_genuine", None)
+        blue_landed_genuine = bool(blue_landed_genuine_t[0].item()) if blue_landed_genuine_t is not None else False
+        orange_landed_genuine = bool(orange_landed_genuine_t[0].item()) if orange_landed_genuine_t is not None else False
+        red_active = bool(red_active_t[0].item()) if red_active_t is not None else False
+        red_landed_genuine = bool(red_landed_genuine_t[0].item()) if red_landed_genuine_t is not None else False
 
         # Foot heights + slip velocities.
         from simple_goalkeeper.robots.t1_constants import HOME_KEYFRAME  # noqa: F401 (unused val)
@@ -424,7 +442,12 @@ class AnalyticsPolicy:
             f"{'CS✓' if cleanstop_fired else 'CS·'} "
             f"{'WF✓' if self._wf_flash else 'WF·'} "
             f"{'KN✓' if self._knee_flash else 'KN·'} "
-            f"{'SH✓' if self._shin_flash else 'SH·'}"
+            f"{'SH✓' if self._shin_flash else 'SH·'} "
+            f"{'HD✓' if self._chin_flash else 'HD·'} "
+            f"{'BL✓' if blue_landed_genuine else 'BL·'} "
+            f"{'OR✓' if orange_landed_genuine else 'OR·'} "
+            f"{'RD✓' if red_active else 'RD·'} "
+            f"{'RDL✓' if red_landed_genuine else 'RDL·'}"
         )
         lf_tag = f"{'G' if lf_contact else 'A'}{lf_slip:.2f}"
         rf_tag = f"{'G' if rf_contact else 'A'}{rf_slip:.2f}"
@@ -752,7 +775,7 @@ spike is computed correctly but clipped out of the plotted range entirely,
 looking like no reaction. 15 steps clears that floor with margin."""
 
 
-def _compute_wrong_foot_contact_flash(env, env_idx: int) -> tuple[float, float, float]:
+def _compute_wrong_foot_contact_flash(env, env_idx: int) -> tuple[float, float, float, float]:
     """Raw "bad ball contact" signals for the viewer's P-panel, each latched
     high for _WRONG_FOOT_FLASH_STEPS steps after a detected touch: (1) any
     ball contact penalize_wrong_foot_ball_contact treats as bad (wrong-side
@@ -812,10 +835,24 @@ def _compute_wrong_foot_contact_flash(env, env_idx: int) -> tuple[float, float, 
     since it wasn't requested -- only rolled into the combined
     wrong_touch/"wrong_foot_ball_contact" signal.
 
-    Both remaining signals are viewer-only display latches with no effect
-    on training/reward.
+    NEW 2026-08-21 (user request, "the shin like the leg not the chin" --
+    i.e. same isolated-plot treatment shin_contact got, applied to chin):
+    added a 4th signal, "chin/head proximity" -- distance-based, against the
+    LITERAL head_collision sphere geometry (H2 body, size 0.08, local offset
+    (0.01,0,0.11)), no separate tuning margin -- mirrors this project's
+    "use the exact marker geometry, not a tuned proximity constant"
+    discipline (see cleanstop's sole-contact check). NOT wired into
+    rewards.py:penalize_wrong_foot_ball_contact -- that reward has no
+    chin/head sub-condition right now (removed 2026-08-07, see this
+    function's own FIX above); this is viewer-only telemetry, same as
+    knee_distance_contact/shin_contact were before anyone decided whether to
+    make them reward-affecting.
+
+    All four signals are viewer-only display latches with no effect on
+    training/reward.
     """
     raw_env = env.unwrapped if hasattr(env, "unwrapped") else env
+    from mjlab.utils.lab_api.math import quat_apply
     from simple_goalkeeper.mdp.rewards import _get_correct_foot_idx
 
     _KNEE_GEOM_RADIUS = 0.06
@@ -867,6 +904,16 @@ def _compute_wrong_foot_contact_flash(env, env_idx: int) -> tuple[float, float, 
     leading_shin_touch = shin_near[env_ar, foot_idx]
 
     wrong_touch = wrong_sole_touch | wrong_leg_touch | leading_knee_touch | leading_shin_touch
+
+    _HEAD_GEOM_RADIUS = 0.08  # head_collision's own size, t1_headless.xml
+    _HEAD_LOCAL_OFFSET = torch.tensor([0.01, 0.0, 0.11], device=raw_env.device)
+    head_body_id = robot.find_bodies(["H2"])[0]
+    head_pos_w = robot.data.body_link_pos_w[:, head_body_id, :].squeeze(1)      # (B, 3)
+    head_quat_w = robot.data.body_link_quat_w[:, head_body_id, :].squeeze(1)    # (B, 4)
+    head_center_w = head_pos_w + quat_apply(head_quat_w, _HEAD_LOCAL_OFFSET.expand(raw_env.num_envs, -1))
+    dist_to_head = (ball_pos_w - head_center_w).norm(dim=-1)                    # (B,)
+    head_threshold = _HEAD_GEOM_RADIUS + _BALL_GEOM_RADIUS  # literal geometry, no tuning margin
+    chin_touch = dist_to_head < head_threshold
 
     # NEW 2026-08-15 (user request, "put in the viewer the shins contact
     # penalty"): isolated shin-only signal, mirroring knee_distance_contact's
@@ -927,10 +974,22 @@ def _compute_wrong_foot_contact_flash(env, env_idx: int) -> tuple[float, float, 
         shin_counter[~shin_touch & ~just_reset] - 1, min=0
     )
 
+    if not hasattr(raw_env, "_chin_flash_counter"):
+        raw_env._chin_flash_counter = torch.zeros(
+            raw_env.num_envs, dtype=torch.long, device=raw_env.device
+        )
+    chin_counter = raw_env._chin_flash_counter
+    chin_counter[just_reset] = 0
+    chin_counter[chin_touch] = _WRONG_FOOT_FLASH_STEPS
+    chin_counter[~chin_touch & ~just_reset] = torch.clamp(
+        chin_counter[~chin_touch & ~just_reset] - 1, min=0
+    )
+
     return (
         float(counter[env_idx].item() > 0),
         float(knee_counter[env_idx].item() > 0),
         float(shin_counter[env_idx].item() > 0),
+        float(chin_counter[env_idx].item() > 0),
     )
 
 
@@ -960,11 +1019,17 @@ def _patch_viewer_wrong_foot_contact_plot(native_viewer: "NativeMujocoViewer", e
     sub-conditions (see _compute_wrong_foot_contact_flash's own docstring)
     from the combined "wrong_foot_ball_contact" signal, same reasoning as
     knee_distance_contact's own addition.
+
+    NEW 2026-08-21 (user request, "i want the shin like the leg not the
+    chin" -- i.e. give chin the same isolated-plot treatment shin_contact
+    got): added "chin_contact", mirroring shin_contact/knee_distance_contact
+    exactly. Viewer-only -- not wired into any reward (see
+    _compute_wrong_foot_contact_flash's own docstring for why).
     """
     orig_setup = native_viewer.setup
     orig_update_reward_figures = native_viewer._update_reward_figures
 
-    _TERM_NAMES = ("wrong_foot_ball_contact", "knee_distance_contact", "shin_contact")
+    _TERM_NAMES = ("wrong_foot_ball_contact", "knee_distance_contact", "shin_contact", "chin_contact")
 
     def _patched_setup() -> None:
         orig_setup()
@@ -985,13 +1050,15 @@ def _patch_viewer_wrong_foot_contact_plot(native_viewer: "NativeMujocoViewer", e
 
     def _patched_update_reward_figures(viewer_handle: "mujoco.viewer.Handle") -> None:
         if native_viewer._show_plots and native_viewer._term_names and not native_viewer._is_paused:
-            wrong_foot_flash, knee_flash, shin_flash = _compute_wrong_foot_contact_flash(env, native_viewer.env_idx)
+            wrong_foot_flash, knee_flash, shin_flash, chin_flash = _compute_wrong_foot_contact_flash(env, native_viewer.env_idx)
             native_viewer._append_point("wrong_foot_ball_contact", wrong_foot_flash)
             native_viewer._write_history_to_figure("wrong_foot_ball_contact")
             native_viewer._append_point("knee_distance_contact", knee_flash)
             native_viewer._write_history_to_figure("knee_distance_contact")
             native_viewer._append_point("shin_contact", shin_flash)
             native_viewer._write_history_to_figure("shin_contact")
+            native_viewer._append_point("chin_contact", chin_flash)
+            native_viewer._write_history_to_figure("chin_contact")
         orig_update_reward_figures(viewer_handle)
 
     native_viewer.setup = _patched_setup

@@ -3492,3 +3492,16 @@ No code changes from this follow-up (probe scripts only, scratchpad, not committ
 **Side effect worth knowing:** `RED_OFFSET_FROM_GREEN=0.25` now exactly equals `wide_threshold/2` (0.5/2) -- the minimum possible blue-to-green distance for any genuinely wide crossing. This means the clamp is now a no-op (or very close to it) for essentially the ENTIRE wide-crossing range: any crossing wide enough to have orange/red active at all (`|delta|>=0.5`) already has `blue_dist=|delta|/2>=0.25`, so red gets its full 25cm offset from green in practically all cases -- red's distance from green is now close to a genuine constant ~25cm across the wide range, not a variable-then-capped value like before. This is consistent with "standard position" (near-constant), not a regression.
 
 **Evidence:** 4 formula unit tests updated (`test_red_reach_target_y.py`) to the new cap value; one test re-derived from a fabricated non-wide delta (0.35, below the real 0.5m wide threshold) to a realistic wide-range value (0.60) that actually demonstrates the clamp engaging within real usage. Full suite 90/90 pass. Not yet validated against a live training run.
+
+## 2026-08-21: `left_shin`/`right_shin` marker repositioned + `chin_contact` P-panel plot added + `penalize_wrong_foot_ball_contact` weight raised -100 -> -500
+
+**What changed:**
+- `left_shin`/`right_shin` sites and their `_vis` markers (`t1_headless.xml`) moved `z=-0.14 -> -0.10` (toward the knee) on user request ("have the shin contact a bit higher"). This site is read live by `rewards.py:penalize_wrong_foot_ball_contact`'s `leading_shin_touch` check, not viewer-only -- training-relevant going forward.
+- New `chin_contact` P-panel plot + `HD` console flag added (`play.py`), mirroring `shin_contact`'s existing pattern -- distance-based against the literal `head_collision` geometry, no tuning margin. Viewer-only, not wired into any reward.
+- `penalize_wrong_foot_ball_contact` weight `-100.0 -> -500.0` (5x, `goalkeeper_env_cfg.py`).
+
+**Why the weight change:** user found (via `probe_region_reward_asymmetry.py`, prior session) that `left_near`'s convergence failure correlated with this penalty firing heavily there (-456/episode average) while `right_near` fired it at exactly 0.000. Root cause of "why didn't -100 already fix this": -456/episode is tiny next to the rest of the reward stack per episode (`success` ~+6900, `feetorientation` ~+7300, `near_stick_reach` ~+2650, `postupperdofpos` ~+1250) -- under 3% of total reward, not enough to steer behavior. `right_near`'s exact 0.000 firing rate proves this is avoidable with correct technique (not an unavoidable side-effect, as an earlier docstring claimed), so raising the weight is expected to actually help. 5x chosen via `AskUserQuestion` (options: 5x/10x/20x).
+
+**Deliberately not done yet:** a persistent/continuous-after-first-touch penalty (stays active for the rest of the episode once fired) was considered and explicitly deferred -- a much bigger lever than a flat weight increase, and this project's own history (`arm_torque_limits`/`arm_action_rate_l2`/`arm_action_acc_l2`, reverted 2026-07-29) shows an overly strong penalty can over-suppress legitimate approach/dive motion rather than just discourage bad technique. Validate x5 first before stacking a second change.
+
+Not yet validated against a live training run.

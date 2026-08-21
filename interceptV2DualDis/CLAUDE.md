@@ -3,6 +3,7 @@
 ## Response Style
 
 - Keep answers short.
+- Plain English, simple language — no jargon-heavy or overly technical phrasing unless the user used the term first.
 - Use bullet points, not prose.
 - Just tell the user what to do — skip explanation/rationale unless asked.
 - **Hard cap: a handful of short bullets per response, not a report.** No multi-paragraph investigations, no restating evidence already given earlier in the conversation, no hedging/caveat paragraphs. If more detail is truly needed, give the one-line conclusion first and wait to be asked before expanding. (2026-08-13 user request: "your claude outputs of texts are too long.")

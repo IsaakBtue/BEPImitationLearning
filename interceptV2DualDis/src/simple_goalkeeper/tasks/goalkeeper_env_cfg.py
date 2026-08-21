@@ -1188,7 +1188,16 @@ def goalkeeper_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
         # outweighing the save-quality benefit. See rewards.py docstring.
         "penalize_wrong_foot_ball_contact": RewardTermCfg(
             func=gk_mdp.penalize_wrong_foot_ball_contact,
-            weight=-100.0,
+            # FIX 2026-08-21 (user request): -100.0 -> -500.0 (5x). Root cause:
+            # this penalty's per-episode magnitude (~-456 on left_near, the
+            # worst-affected region) was tiny next to the rest of the reward
+            # stack (success ~+6900, feetorientation ~+7300, near_stick_reach
+            # ~+2650, postupperdofpos ~+1250 per episode) -- too small to
+            # actually steer behavior. right_near fires this at exactly 0.000
+            # (confirmed via live probe), proving it IS avoidable with correct
+            # technique, not an unavoidable side-effect -- so raising the
+            # weight is expected to help, not just add noise.
+            weight=-500.0,
             # FIX 2026-08-07 (user request): knee_proximity_margin 0.05->0.10m,
             # explicit now (was relying on the function's own default) --
             # see rewards.py:penalize_wrong_foot_ball_contact docstring.
