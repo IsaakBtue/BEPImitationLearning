@@ -3505,3 +3505,27 @@ No code changes from this follow-up (probe scripts only, scratchpad, not committ
 **Deliberately not done yet:** a persistent/continuous-after-first-touch penalty (stays active for the rest of the episode once fired) was considered and explicitly deferred -- a much bigger lever than a flat weight increase, and this project's own history (`arm_torque_limits`/`arm_action_rate_l2`/`arm_action_acc_l2`, reverted 2026-07-29) shows an overly strong penalty can over-suppress legitimate approach/dive motion rather than just discourage bad technique. Validate x5 first before stacking a second change.
 
 Not yet validated against a live training run.
+
+## 2026-08-21: `wrong_foot_ball_contact` P-panel plot restored to visible slots
+
+**What was wrong:** user asked to "add the penalize wrong foot ball contact in the mujoco p viewer" -- but `wrong_foot_ball_contact` was already registered and computed every step by `_patch_viewer_wrong_foot_contact_plot` (added 2026-08-07). It just wasn't visible: `_patch_viewer_sole_contact_and_stop_plots`, registered LAST in `run_play`, reorders `_term_names` and fills all 12 of `max_viewports`' guaranteed-visible slots with its own 8+4 term list, silently pushing `wrong_foot_ball_contact`/`knee_distance_contact` past the cutoff -- exactly the failure mode that function's own 2026-08-15 docstring entry warned would happen.
+
+**What changed:** `_patch_viewer_sole_contact_and_stop_plots`'s `_PROMOTED` tuple (`play.py`) -- swapped `softstop` out for `wrong_foot_ball_contact`. `cleanstop`/`sole_ball_contact`/`shin_contact` unchanged.
+
+**Why `softstop` demoted:** least relevant of the 4 promoted terms to the wrong-foot-contact investigation the user is asking to watch; `cleanstop` already covers save-quality alongside `sole_ball_contact`.
+
+**Known gap:** `knee_distance_contact` (the other signal from the same `_patch_viewer_wrong_foot_contact_plot` patch) still falls outside the visible 12 -- not requested this time, left as-is. Viewer-only change, no effect on training/rewards.
+
+## 2026-08-21: `penalize_wrong_foot_ball_contact` weight reverted -500.0 -> -100.0 (same-day 5x bump undone)
+
+**What was wrong:** the same-day 5x weight bump (-100 -> -500, see the "shin site repositioned + chin_contact plot + weight raised" entry above) was meant to stop the leading leg's knee/shin from getting near the ball undetected. Instead, `6144_autotrain_2026-08-21_13-40`'s checkpoint (`model_9250.pt`) converged the leading foot's block orientation to almost exactly `target+180°` (mirror-opposite) on BOTH sides -- not undershooting, a confident, tightly-converged (std 5-7°) full rotation in the wrong direction.
+
+**Evidence:**
+- `probe_left_right_yaw.py` against `model_9250.pt`: left target +80° -> achieved mean -98.9° (near) / -97.8° (far); right target -80° -> achieved mean +101.1° (near) / +94.0° (far). All four regions land within ~1-6° of the exact mirror (`target+180`, wrapped).
+- `probe_region_reward_asymmetry.py` on the SAME checkpoint: `penalize_wrong_foot_ball_contact`'s own per-episode magnitude has collapsed to ~0.000 (left_near) / -1.340 (right_near) -- down from the ~-456/episode that justified the 5x bump in the first place. If behavior hadn't changed, -500 weight would show ~-2280/episode; instead it's ~0, meaning the policy learned to almost entirely stop triggering this penalty.
+
+**Why this points at the weight (not just the shin geom move, done same day):** at -500, one single firing of this penalty vastly outweighs the ENTIRE orientation reward budget (`inner_face_orientation_save` one-shot bonus maxes +34.72, `foot_inner_face_continuous` dense term maxes +6.94/step) -- cheapest way to guarantee never tripping it is to keep the leading leg's knee/shin away from the ball's path entirely, i.e. rotate the foot away from the ball rather than toward it. Same failure class this project already hit once before: `arm_torque_limits`/`arm_action_rate_l2`/`arm_action_acc_l2`, reverted 2026-07-29 for the identical reason (a penalty strong enough to out-suppress the exact behavior it was meant to only discourage, not prevent entirely).
+
+**What changed:** `goalkeeper_env_cfg.py`'s `penalize_wrong_foot_ball_contact` weight `-500.0 -> -100.0`. The same-day shin site move (`t1_headless.xml`, z `-0.14 -> -0.10`) is deliberately left unchanged -- this revert isolates the weight as the one variable under test.
+
+**Not yet validated against a live training run.** This is a controlled test to isolate the cause, not a confirmed fix -- needs a fresh run (or long enough continuation) to see whether orientation recovers under -100 with the geom position kept.

@@ -1197,7 +1197,27 @@ def goalkeeper_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
             # (confirmed via live probe), proving it IS avoidable with correct
             # technique, not an unavoidable side-effect -- so raising the
             # weight is expected to help, not just add noise.
-            weight=-500.0,
+            #
+            # REVERT 2026-08-21 (same day, user request): -500.0 -> -100.0.
+            # The 5x run (6144_autotrain_2026-08-21_13-40, model_9250.pt)
+            # converged the leading foot's block orientation to almost
+            # exactly target+180 (mirror-opposite) on BOTH sides, confirmed
+            # via probe_left_right_yaw.py (tight std 5-7deg, not noise).
+            # probe_region_reward_asymmetry.py on that same checkpoint showed
+            # this term's own per-episode magnitude collapsed to ~0.000/-1.34
+            # (from the ~-456 that justified the 5x in the first place) --
+            # i.e. the policy learned to almost entirely avoid triggering
+            # this penalty, consistent with it now dominating the much
+            # smaller orientation-reward budget (one-shot bonus maxes
+            # +34.72, dense term +6.94/step) and steering the leading leg
+            # away from the ball entirely to dodge it. Same failure class as
+            # arm_torque_limits/arm_action_rate_l2/arm_action_acc_l2
+            # (reverted 2026-07-29): a penalty raised enough to out-suppress
+            # the behavior it was meant to only discourage. Reverting to
+            # isolate this one variable -- shin site position (t1_headless.xml,
+            # z -0.14->-0.10) kept as-is. Not yet validated against a live
+            # training run; this is a controlled test, not a confirmed fix.
+            weight=-100.0,
             # FIX 2026-08-07 (user request): knee_proximity_margin 0.05->0.10m,
             # explicit now (was relying on the function's own default) --
             # see rewards.py:penalize_wrong_foot_ball_contact docstring.

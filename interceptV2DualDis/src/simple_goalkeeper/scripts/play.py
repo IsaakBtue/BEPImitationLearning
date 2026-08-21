@@ -1367,12 +1367,23 @@ def _patch_viewer_sole_contact_and_stop_plots(native_viewer: "NativeMujocoViewer
     `shin_contact` is guaranteed here since it's the one actually requested
     this time; `wrong_foot_ball_contact`/`knee_distance_contact` may now
     fall out of the visible set.
+
+    FIX 2026-08-21 (user request, "add the penalize wrong foot ball contact
+    in the mujoco p viewer"): swapped `softstop` out for
+    `wrong_foot_ball_contact` -- confirmed via this exact mechanism
+    (`_patch_viewer_wrong_foot_contact_plot` registers/computes it every
+    step, but this later patch's own reorder was silently pushing it past
+    the 12-slot cutoff, precisely as the 2026-08-15 entry above warned).
+    `softstop` demoted as the least relevant of the 4 promoted terms to
+    the wrong-foot-contact signal `penalize_wrong_foot_ball_contact`
+    mirrors -- `cleanstop`/`sole_ball_contact`/`shin_contact` all stay.
+    `knee_distance_contact` still falls outside the visible set.
     """
     orig_setup = native_viewer.setup
     orig_update_reward_figures = native_viewer._update_reward_figures
 
     _RAW_NAME = "sole_ball_contact"
-    _PROMOTED = (_RAW_NAME, "cleanstop", "softstop", "shin_contact")
+    _PROMOTED = (_RAW_NAME, "cleanstop", "wrong_foot_ball_contact", "shin_contact")
 
     def _patched_setup() -> None:
         orig_setup()
