@@ -3529,3 +3529,32 @@ Not yet validated against a live training run.
 **What changed:** `goalkeeper_env_cfg.py`'s `penalize_wrong_foot_ball_contact` weight `-500.0 -> -100.0`. The same-day shin site move (`t1_headless.xml`, z `-0.14 -> -0.10`) is deliberately left unchanged -- this revert isolates the weight as the one variable under test.
 
 **Not yet validated against a live training run.** This is a controlled test to isolate the cause, not a confirmed fix -- needs a fresh run (or long enough continuation) to see whether orientation recovers under -100 with the geom position kept.
+
+## 2026-08-22: `postleadfootorientation`/`postsave_foot_airtime` weight + window raised (user request, post-save foot orientation focus)
+
+**What changed (`goalkeeper_env_cfg.py`):**
+- `postleadfootorientation` weight `2.0 -> 6.0` (3x).
+- `postsave_foot_airtime` weight `1.0 -> 2.0` (2x).
+- Both terms' `window_steps` explicitly overridden `20 -> 30` (~0.4s -> ~0.6s at dt=0.02s) via `params`, rather than changing `_postsave_airtime_window`'s function default -- keeps `postheadingorientation` (the third consumer of that shared helper, `rewards.py:4868`) at its existing 20-step/~0.4s window, since the user's request was scoped to these two terms only.
+
+**Why:** user wants more emphasis on leading-foot orientation recovery after a save, with more hangtime for the rotation to actually happen in. Exact multipliers (3x/2x) and window value (30 steps / 0.6s, out of the requested 0.5-0.7s range) chosen via `AskUserQuestion`.
+
+**Evidence:** `ast.parse` syntax check passed. Not yet smoke-tested live or validated against a training run.
+
+## 2026-08-22: `_FOOT_TARGET_ANGLE_DEG` retargeted 80->70 + `alignment_threshold` 0.7->0.8 (user request)
+
+**What was found first:** CLAUDE.md's "Leading-foot save-orientation target angle" divergence row had gone stale -- it documented the 2026-08-15 retarget to 50° as current, but `rewards.py:_FOOT_TARGET_ANGLE_DEG` was actually 80.0, changed by a later commit (`008ad7b`, "foot inner-face orientation reward overhaul") that never got logged in that row. The 80° value itself was evidence-based at the time (see the comment block directly above the constant in `rewards.py`): a `model_13000.pt` replay (trained under the old 50° target) found the leading foot's real achieved toe-axis azimuth at the softstop-firing moment averaged ~77° robot-local, i.e. 80° sat within the observed achievable range, not past it.
+
+**What changed:** `_FOOT_TARGET_ANGLE_DEG` (`rewards.py`) `80.0 -> 70.0`; `inner_face_orientation_save`'s `alignment_threshold` (`goalkeeper_env_cfg.py`) `0.7 -> 0.8` (~45.6° tolerance cone -> ~36.9°), tightened alongside the shallower target per this project's established pattern (a shallower target raises the do-nothing/zero-rotation score, so the acceptance cone is tightened to keep requiring real rotation). Both chosen via `AskUserQuestion`.
+
+**Evidence:** `ast.parse` syntax check passed on both files. Not yet smoke-tested live or validated against a training run. CLAUDE.md's divergence-table row updated in the same commit to stop being stale.
+
+## 2026-08-22: `inner_face_orientation_save` fire-window replaced with a plain +/-5° check (was a ~36.87°/side cosine cone)
+
+**What was wrong:** user asked for the one-shot save-orientation bonus to have "only 5 above or below" the target -- but the existing `alignment_threshold` param (a cosine-similarity threshold, `cos(target-yaw) > alignment_threshold`) at its current value (0.8) actually fired anywhere within ~36.87° on EACH side of the target, i.e. `[target-36.87°, target+36.87°]`, much wider than a human reading "alignment_threshold=0.8" would expect. Confirmed the check IS symmetric (not "only a minimum" as first suspected in conversation) -- it was just a much wider symmetric band than the user wanted, expressed in a non-obvious unit (a dot-product threshold, not degrees).
+
+**What changed (`rewards.py:inner_face_orientation_save`):** replaced the `alignment_threshold` param and its cosine check entirely with `tolerance_deg: float = 5.0` and a plain `abs(signed_progress_deg - _FOOT_TARGET_ANGLE_DEG) < tolerance_deg` check, where `signed_progress_deg = expected_sign * yaw_deg` (the same left/right-mirroring construction `foot_inner_face_continuous` already uses for its own overshoot check). At the current 70° target this fires only in `[65°, 75°]`. `goalkeeper_env_cfg.py`'s `params` updated `alignment_threshold: 0.8 -> tolerance_deg: 5.0`. `play.py`'s mirrored `_FOOT_TARGET_TOLERANCE_DEG` viewer constant updated `36.87 -> 5.0` (its docstring/plot-label meaning changed from "degrees(acos(threshold))" to a literal degree value -- the `target±tolerance` plot-title format itself needed no code change, still accurate).
+
+**Scope:** `foot_inner_face_continuous` (the dense per-step term) is UNCHANGED -- it has its own separate asymmetric undershoot/overshoot shape already, not touched by this fix. User explicitly confirmed this fix is scoped to the one-shot bonus only.
+
+**Evidence:** `ast.parse` syntax check passed on all 3 files. `inspect.signature()` confirms the new `tolerance_deg: float = 5.0` param resolves correctly on import. Not yet smoke-tested live or validated against a training run.

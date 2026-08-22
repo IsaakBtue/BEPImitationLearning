@@ -1065,7 +1065,7 @@ def _patch_viewer_wrong_foot_contact_plot(native_viewer: "NativeMujocoViewer", e
     native_viewer._update_reward_figures = _patched_update_reward_figures
 
 
-_FOOT_TARGET_ANGLE_DEG = 80.0
+_FOOT_TARGET_ANGLE_DEG = 70.0
 """Must match rewards.py's _FOOT_TARGET_ANGLE_DEG (leading-foot block-posture
 target, 2026-08-01, retargeted 60->45 2026-08-07, reverted 45->60 2026-08-08
 per user request -- back to the original 2026-08-01 value; retargeted again
@@ -1080,7 +1080,8 @@ ceiling above only accounted for Hip_Yaw's own joint range -- the same-day
 Waist/toe-azimuth investigation found a second yaw source (Waist, +/-90deg)
 plus a real Ankle_Pitch gimbal-coupling contribution at large yaw, both
 missed by that earlier FK analysis; see rewards.py's _FOOT_TARGET_ANGLE_DEG
-docstring and docs/BugFixes.md). Kept as a separate literal here
+docstring and docs/BugFixes.md). FIX 2026-08-22 (user request, "make it 70
+degrees"): retargeted 80->70. Kept as a separate literal here
 (viewer-only display, no runtime dependency on rewards.py's private
 constant) purely for the plot title -- verify against rewards.py if that
 constant ever changes."""
@@ -1095,15 +1096,24 @@ the actual foot-aim point while the rod stays pinned to the true, unmodified
 ball crossing_y -- see the green-sphere block below. Verify against
 rewards.py if that constant ever changes."""
 
-_FOOT_TARGET_TOLERANCE_DEG = 31.79
-"""degrees(acos(0.85)) -- inner_face_orientation_save's alignment_threshold
-(0.7->0.85, 2026-08-07, tightened alongside the target-angle change above).
-FIX 2026-08-08: the target angle reverted 45->60 the same day but
-alignment_threshold was deliberately LEFT at 0.85 per explicit user request
-(not reverted to the 0.7 that was originally calibrated for 60deg) -- this
-tolerance value is therefore no longer the "matching" calibration for the
-current target the way it was on 2026-08-07, a known, requested divergence.
-Not itself read by any reward function."""
+_FOOT_TARGET_TOLERANCE_DEG = 5.0
+"""inner_face_orientation_save's tolerance_deg -- the one-shot bonus fires when
+the foot's signed angle is within this many degrees of _FOOT_TARGET_ANGLE_DEG
+(a plain +/- window, e.g. [65,75] at the current 70deg target).
+
+History: this used to be a cosine-threshold cone (alignment_threshold, a dot-
+product/cos() check), NOT a clean degree window -- 0.7->0.85 (2026-08-07,
+tightened alongside a target-angle change); left at 0.85 through the
+2026-08-08 target revert per explicit user request (a known, requested
+divergence from "matching" calibration); reverted 0.85->0.7 (2026-08-13,
+alongside the 75->60 target revert -- back to the value that trained
+model_17250.pt); 0.7->0.8 (2026-08-22, alongside the 80->70 target retarget).
+FIX 2026-08-22 (LATER same day, user request, "only 5 above or below" --
+the cosine cone's ~36.87deg-per-side tolerance at 0.8 was much wider than
+the user expected from watching training): replaced the cosine-threshold
+mechanism entirely with a plain `abs(signed_progress-target) < tolerance_deg`
+check in rewards.py -- this constant is now a literal degree value, not
+degrees(acos(threshold)). Not itself read by any reward function."""
 
 
 def _compute_assigned_foot_angle_deg(env, env_idx: int) -> float:

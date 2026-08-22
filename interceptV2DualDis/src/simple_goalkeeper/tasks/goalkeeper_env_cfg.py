@@ -717,7 +717,13 @@ def goalkeeper_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
             # value that trained model_17250.pt, alongside _FOOT_TARGET_ANGLE_DEG's
             # matching 75->60 revert (rewards.py) and foot_ang_vel_z's new
             # post-save-only gate. See docs/BugFixes.md.
-            params={"ball_name": BALL_NAME, "alignment_threshold": 0.7, "asset_cfg": _FEET_CFG},
+            # FIX 2026-08-22 (user request): alignment_threshold 0.7->0.8,
+            # alongside _FOOT_TARGET_ANGLE_DEG's 80->70 retarget (rewards.py).
+            # FIX 2026-08-22 (later same day, user request, "only 5 above or
+            # below"): replaced the cosine-threshold param entirely with a
+            # plain tolerance_deg=5.0 window -- see rewards.py's docstring.
+            # docs/BugFixes.md.
+            params={"ball_name": BALL_NAME, "tolerance_deg": 5.0, "asset_cfg": _FEET_CFG},
         ),
         "foot_inner_face_continuous": RewardTermCfg(
             func=gk_mdp.foot_inner_face_continuous,
@@ -736,20 +742,26 @@ def goalkeeper_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
         # forward once the save has happened (behind-gated) -- complementary
         # to foot_inner_face_continuous's (~behind)-gated sideways target, so
         # the two can never be active on the same step.
+        # FIX 2026-08-22 (user request): weight 2.0->6.0 (3x), window_steps
+        # 20->30 (~0.4s->~0.6s, explicit override of the shared
+        # _postsave_airtime_window default) -- see docs/BugFixes.md.
         "postleadfootorientation": RewardTermCfg(
             func=gk_mdp.postleadfootorientation,
-            weight=2.0,
-            params={"ball_name": BALL_NAME, "asset_cfg": _FEET_CFG},
+            weight=6.0,
+            params={"ball_name": BALL_NAME, "asset_cfg": _FEET_CFG, "window_steps": 30},
         ),
         # NEW 2026-08-01 (user request): flat, time-boxed bonus (~0.2s) for
         # the assigned foot staying airborne right after the save, so
         # postleadfootorientation actually has hangtime to work with instead
         # of relying on whatever the dive physics happens to leave it. See
         # rewards.py:postsave_foot_airtime docstring.
+        # FIX 2026-08-22 (user request): weight 1.0->2.0 (2x), window_steps
+        # 20->30 (~0.4s->~0.6s, matching postleadfootorientation's window so
+        # the two stay in sync) -- see docs/BugFixes.md.
         "postsave_foot_airtime": RewardTermCfg(
             func=gk_mdp.postsave_foot_airtime,
-            weight=1.0,
-            params={"ball_name": BALL_NAME, "asset_cfg": _FEET_CFG},
+            weight=2.0,
+            params={"ball_name": BALL_NAME, "asset_cfg": _FEET_CFG, "window_steps": 30},
         ),
         # NEW 2026-08-07 (user request): one-shot bonus for the leading foot
         # touching down near a controlled 0.1 m/s, instead of slamming into

@@ -110,7 +110,8 @@ _DEFAULT_ROBOT_CFG = SceneEntityCfg("robot")
 # robot-local (after subtracting ~12deg average Trunk world spin) at the
 # softstop-firing moment -- 80deg sits within that observed range, not
 # past it. Not yet validated against a live training run under this target.
-_FOOT_TARGET_ANGLE_DEG = 80.0
+# FIX 2026-08-22 (user request): retargeted 80->70 -- see docs/BugFixes.md.
+_FOOT_TARGET_ANGLE_DEG = 70.0
 _FOOT_TARGET_COS = math.cos(math.radians(_FOOT_TARGET_ANGLE_DEG))
 _FOOT_TARGET_SIN = math.sin(math.radians(_FOOT_TARGET_ANGLE_DEG))
 
@@ -4000,18 +4001,27 @@ def inner_face_orientation_save(
     env: "ManagerBasedRlEnv",
     ball_name: str,
     asset_cfg: SceneEntityCfg = _DEFAULT_FEET_CFG,
-    alignment_threshold: float = 0.85,
+    tolerance_deg: float = 5.0,
 ) -> torch.Tensor:
     """One-time bonus when softstop fires and the assigned foot is turned sideways
     (block posture), rotated toward the side it's actually saving on.
 
-    Checks that the foot's long axis (toe-heel, local X) is within alignment_threshold
-    of a world-frame target direction 45° off forward / 45° off full-sideways world Y
-    (_FOOT_TARGET_COS/_FOOT_TARGET_SIN) at the save moment.
+    Checks that the foot's long axis (toe-heel, local X) world-frame signed yaw is
+    within tolerance_deg of _FOOT_TARGET_ANGLE_DEG (the block-posture target angle,
+    off forward, mirrored by side) at the save moment.
 
-    quat_apply(foot_quat, [1,0,0]) · target_w > threshold, target_w = (cos45°, ±sin45°, 0)
-    threshold=0.85 ≈ cos(31.8°): foot long axis within ~32° of the target direction, in the
-    correct (side-matched) direction.
+    FIX 2026-08-22 (user request, "only 5 above or below"): was a cosine-threshold
+    check (`cos(target-yaw) > alignment_threshold`), which is symmetric but NOT a
+    clean degree window -- alignment_threshold=0.8 meant a ~36.87° cone on EACH side
+    of the target, i.e. this fired anywhere in [target-36.87°, target+36.87°], much
+    wider than the user expected from watching training. Replaced with a plain
+    `abs(signed_progress - target) < tolerance_deg` window -- tolerance_deg=5.0 means
+    exactly [target-5°, target+5°], not derived from any cosine/dot-product math.
+    signed_progress = expected_sign * yaw_deg (same construction foot_inner_face_
+    continuous already uses for its own overshoot check below) converts the
+    left/right-mirrored yaw into a single canonical "how far rotated toward the
+    block posture" scale, so the same tolerance_deg applies symmetrically to both
+    feet without a sign special-case.
 
     FIX 2026-08-01 (user request): target retargeted from full-sideways (90° off forward,
     parallel to world Y) to 60° off forward (30° off Y) — see _FOOT_TARGET_ANGLE_DEG.
@@ -4154,9 +4164,8 @@ def inner_face_orientation_save(
     foot_x_w = quat_apply(assigned_quat_w, x_local)                        # (N, 3), toe direction, world
     yaw_deg = torch.rad2deg(torch.atan2(foot_x_w[:, 1], foot_x_w[:, 0]))   # (N,) signed, world frame
 
-    target_signed_deg = expected_sign * _FOOT_TARGET_ANGLE_DEG
-    target_alignment = torch.cos(torch.deg2rad(target_signed_deg - yaw_deg))  # (N,)
-    oriented_correctly = target_alignment > alignment_threshold
+    signed_progress_deg = expected_sign * yaw_deg  # (N,) positive = rotated toward the block-posture target
+    oriented_correctly = (signed_progress_deg - _FOOT_TARGET_ANGLE_DEG).abs() < tolerance_deg
 
     correct_foot = getattr(env, "_softstop_correct_foot", torch.zeros(env.num_envs, dtype=torch.bool, device=env.device))
     fired = just_fired & oriented_correctly & correct_foot & ~env._ifos_flag
