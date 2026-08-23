@@ -734,6 +734,84 @@ def _patch_viewer_intercept_vis(native_viewer: "NativeMujocoViewer", env) -> Non
     native_viewer._update_debug_visualizers = _patched_update
 
 
+def _patch_viewer_contact_yield_vis(native_viewer: "NativeMujocoViewer", env) -> None:
+    """Draw `contact_yield_velocity`'s target direction and the leading
+    foot's actual velocity as two lines from the foot, every frame.
+
+    NEW 2026-08-23 (user request), "could u plot that vector in the play
+    script" -- `contact_yield_velocity` (`rewards.py`) rewards the
+    leading foot's velocity component along a specific direction (the
+    -90deg rotation of the foot-orientation target vector); this draws
+    that same direction so it's visually inspectable, not just a number
+    on a plot. Two lines from the assigned foot's current position:
+    - GREEN: the rewarded ("yield") direction, `-target_dir_w`, fixed
+      visual length 0.3m -- this is what the foot SHOULD move along.
+    - ORANGE: the foot's ACTUAL current velocity direction, scaled to a
+      fixed 0.3m visual length (direction only, not true magnitude) --
+      lets you see at a glance how aligned actual motion is with the
+      reward's target (parallel = high reward, opposite = the new
+      negative-penalty branch, perpendicular = ~0).
+
+    Drawn every frame (not just at the fire instant) so the direction is
+    visible during the whole approach, not only for one tick at contact.
+    Chains onto whatever `_update_debug_visualizers` already is
+    (`_patch_viewer_intercept_vis` runs first in `run_play`'s own
+    registration order) rather than replacing it.
+    """
+    from simple_goalkeeper.mdp.rewards import (
+        _get_correct_foot_idx, _FOOT_TARGET_COS, _FOOT_TARGET_SIN,
+    )
+
+    orig_update = native_viewer._update_debug_visualizers
+    _VIS_LEN = 0.3
+
+    def _patched_update(viewer_handle: "mujoco.viewer.Handle") -> None:
+        orig_update(viewer_handle)
+
+        raw_env = env.unwrapped if hasattr(env, "unwrapped") else env
+        robot = raw_env.scene["robot"]
+        env_idx = native_viewer.env_idx
+
+        foot_idx_t = _get_correct_foot_idx(raw_env, "ball")
+        foot_idx = int(foot_idx_t[env_idx].item())
+        expected_sign = 1.0 if foot_idx == 0 else -1.0
+
+        foot_body_ids, _ = robot.find_bodies(("left_foot_link", "right_foot_link"))
+        foot_pos_w = robot.data.body_link_pos_w[env_idx, foot_body_ids, :].detach().cpu().numpy()
+        foot_vel_w = robot.data.body_link_lin_vel_w[env_idx, foot_body_ids, :].detach().cpu().numpy()
+        origin = foot_pos_w[foot_idx]
+        vel = foot_vel_w[foot_idx]
+
+        target_dir = np.array(
+            [expected_sign * _FOOT_TARGET_SIN, -_FOOT_TARGET_COS, 0.0], dtype=np.float64,
+        )
+        yield_dir = -target_dir  # the rewarded direction (see rewards.py:contact_yield_velocity)
+
+        scn = viewer_handle.user_scn
+
+        def _add_line(from_: np.ndarray, to: np.ndarray, width: float, rgba) -> None:
+            if scn.ngeom >= scn.maxgeom:
+                return
+            scn.ngeom += 1
+            g = scn.geoms[scn.ngeom - 1]
+            g.category = mujoco.mjtCatBit.mjCAT_DECOR
+            mujoco.mjv_initGeom(
+                geom=g, type=mujoco.mjtGeom.mjGEOM_LINE,
+                size=np.zeros(3, dtype=np.float64), pos=np.zeros(3, dtype=np.float64),
+                mat=np.zeros(9, dtype=np.float64), rgba=np.array(rgba, dtype=np.float32),
+            )
+            mujoco.mjv_connector(geom=g, type=mujoco.mjtGeom.mjGEOM_LINE, width=width, from_=from_, to=to)
+
+        _add_line(origin, origin + yield_dir * _VIS_LEN, 0.01, [0.1, 1.0, 0.2, 0.9])
+
+        vel_speed = float(np.linalg.norm(vel))
+        if vel_speed > 1e-4:
+            vel_dir = vel / vel_speed
+            _add_line(origin, origin + vel_dir * _VIS_LEN, 0.01, [1.0, 0.6, 0.0, 0.9])
+
+    native_viewer._update_debug_visualizers = _patched_update
+
+
 def _patch_viewer_new_reward_plots(native_viewer: "NativeMujocoViewer", env) -> None:
     """Promote the 2026-07-28 cleanstop/arm-penalty reward-term plots into the
     always-visible front slots, replacing the 3 feet-slippage plots that used
@@ -1445,8 +1523,20 @@ def _compute_foot_restitution_dampratio(env, env_idx: int) -> float:
 
 def _patch_viewer_foot_restitution_plot(native_viewer: "NativeMujocoViewer", env) -> None:
     """Add a "foot_restitution_dampratio" raw P-panel plot (see
-    `_compute_foot_restitution_dampratio`) and promote it into the
-    always-visible front slots.
+    `_compute_foot_restitution_dampratio`) and promote it, plus the
+    ordinary `contact_yield_velocity` reward term, into the always-visible
+    front slots. Also fixes the display-scale bug on `contact_yield_velocity`
+    and `cleanstop`'s own figures (see the FIX 2026-08-23 comment inside
+    `_patched_update_reward_figures` below for the full mechanism).
+
+    FIX 2026-08-23 (user request, "put the contact yield velocity in the p
+    mujoco viewer"): `contact_yield_velocity` is a normal registered
+    reward term (`rewards.py`/`goalkeeper_env_cfg.py`) so it already has
+    an auto-created figure -- no new raw plot needed, just promoted into
+    `_term_names` alongside `foot_restitution_dampratio`. Demoted
+    `wrong_foot_ball_contact` (in addition to the existing
+    `trailing_foot_forward_continuous` demotion below) to stay within the
+    12-slot cap.
 
     FIX 2026-08-23 (user report, "i dont see it"): the viewer has a HARD
     `max_viewports=12` render cap (`mjlab/viewer/native/viewer.py`) with NO
@@ -1496,7 +1586,8 @@ def _patch_viewer_foot_restitution_plot(native_viewer: "NativeMujocoViewer", env
     orig_update_reward_figures = native_viewer._update_reward_figures
 
     _RAW_NAME = "foot_restitution_dampratio"
-    _DEMOTED = "trailing_foot_forward_continuous"
+    _ALSO_PROMOTED = "contact_yield_velocity"  # ordinary reward term, already has an auto-created figure
+    _DEMOTED = ("trailing_foot_forward_continuous", "wrong_foot_ball_contact")
     _FIXED_LO, _FIXED_HI = -0.5, 1.5
 
     def _patched_setup() -> None:
@@ -1509,26 +1600,50 @@ def _patch_viewer_foot_restitution_plot(native_viewer: "NativeMujocoViewer", env
         )
         native_viewer._histories[_RAW_NAME] = deque(maxlen=cfg.history)
         native_viewer._scale[_RAW_NAME] = 1.0
-        rest = [n for n in native_viewer._term_names if n not in (_RAW_NAME, _DEMOTED)]
-        native_viewer._term_names = [_RAW_NAME] + rest
+        rest = [n for n in native_viewer._term_names if n not in (_RAW_NAME, _ALSO_PROMOTED, *_DEMOTED)]
+        front = [_RAW_NAME] + ([_ALSO_PROMOTED] if _ALSO_PROMOTED in native_viewer._term_names else [])
+        native_viewer._term_names = front + rest
 
-    def _write_fixed_range_figure() -> None:
-        fig = native_viewer._figures[_RAW_NAME]
-        hist = native_viewer._histories[_RAW_NAME]
+    def _write_fixed_range(name: str, lo: float, hi: float) -> None:
+        fig = native_viewer._figures[name]
+        hist = native_viewer._histories[name]
         n = min(len(hist), native_viewer._plot_cfg.history)
         fig.linepnt[0] = n
         for i in range(n):
             fig.linedata[0][2 * i] = float(-i)
             fig.linedata[0][2 * i + 1] = float(hist[-1 - i])
-        fig.range[1][0] = _FIXED_LO
-        fig.range[1][1] = _FIXED_HI
+        fig.range[1][0] = lo
+        fig.range[1][1] = hi
+        fig.title = name  # drop any "(1eN)" suffix from the native autoscale write below
 
     def _patched_update_reward_figures(viewer_handle: "mujoco.viewer.Handle") -> None:
         if native_viewer._show_plots and native_viewer._term_names and not native_viewer._is_paused:
             value = _compute_foot_restitution_dampratio(env, native_viewer.env_idx)
             native_viewer._append_point(_RAW_NAME, value)
-            _write_fixed_range_figure()
+            _write_fixed_range(_RAW_NAME, _FIXED_LO, _FIXED_HI)
         orig_update_reward_figures(viewer_handle)
+        # FIX 2026-08-23 (user report, "why is contact yield velocity peaks
+        # at 5e7 and cleanstop only 1e7"): the native autoscale
+        # (_write_history_to_figure) picks its display-scale multiplier
+        # from a percentile window of recent history -- for a one-shot,
+        # mostly-zero term (fires once per episode, rest of the buffer is
+        # 0), that window collapses to the 1e-6 min_span floor, and the
+        # multiplier explodes to 1e6-1e8 to compensate. Not a real reward
+        # blowup -- the actual plotted units are raw_reward*weight (see
+        # reward_manager.py's _step_reward = value/dt). `orig_update_
+        # reward_figures` above already ran the native (buggy-scaled)
+        # write for every ordinary term including these two -- overwrite
+        # each with a fixed, correct-units range afterward, same bypass
+        # already used for foot_restitution_dampratio.
+        if native_viewer._show_plots and not native_viewer._is_paused:
+            if _ALSO_PROMOTED in native_viewer._histories:
+                # max = 1.0 (raw) * 5.0 (weight) = 5.0
+                _write_fixed_range(_ALSO_PROMOTED, -0.5, 5.5)
+            if "cleanstop" in native_viewer._histories:
+                # FIX 2026-08-23 (user request, "fix cleanstop aswell"):
+                # max = 1.0 (raw scale) * 34.72 (cleanstop_curriculum's own
+                # peak weight, goalkeeper_env_cfg.py) = 34.72.
+                _write_fixed_range("cleanstop", -2.0, 38.0)
 
     native_viewer.setup = _patched_setup
     native_viewer._update_reward_figures = _patched_update_reward_figures
@@ -2273,6 +2388,7 @@ def run_play(task_id: str, cfg: PlayConfig) -> None:
         _patch_viewer_all_footorientation_plots(native_viewer, env)
         _patch_viewer_sole_contact_and_stop_plots(native_viewer, env)
         _patch_viewer_foot_restitution_plot(native_viewer, env)
+        _patch_viewer_contact_yield_vis(native_viewer, env)
         native_viewer.run()
     elif resolved_viewer == "viser":
         ViserPlayViewer(env, final_policy).run()

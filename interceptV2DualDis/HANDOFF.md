@@ -5,6 +5,39 @@ Running log of what to watch for after recent reward changes, for whoever
 full rationale/evidence on each item — this file is just the "what to watch"
 distillation.
 
+## 2026-08-23 (later same day) -- cleanstop settle-counter leaky decrement + new one-shot `contact_yield_velocity` reward
+
+**None of this has been validated against a live training run yet** — both
+changes are live-checkpoint-replay verified only (real physics, real
+trained policy, no learning). See `docs/BugFixes.md` for the full replay
+numbers behind both.
+
+### What changed
+- `cleanstop`'s settle counter no longer resets to 0 on a single bad tick
+  — leaky decrement (`-3`, clamped at 0) instead.
+- New `contact_yield_velocity` (weight 5.0, one-shot, fires at the genuine
+  contact instant): rewards the leading foot's velocity yielding backward
+  along its own orientation-target direction at contact.
+
+### What to watch once a training run has real data
+- **`cleanstop`'s own rate/scale**: the replay found it already fires
+  96.5% of the time softstop does — the settle-reset fix should mostly
+  show up as less noise/delay before firing, not a big rate jump. The
+  actual number to watch is whether the mean ball speed AT the firing
+  instant drops from the replay's measured 0.79 m/s baseline (target 0.2)
+  — that's `contact_yield_velocity`'s job, not the settle-counter fix's.
+- **`contact_yield_velocity` itself**: brand new, no training-time
+  baseline — watch it trend upward from near-zero (the pre-existing
+  checkpoint used to smoke-test it showed almost no yielding behavior,
+  expected since it never trained with this incentive).
+- **Side effects on the dive/approach**: this rewards a specific foot
+  velocity direction at one instant only (one-shot, not continuous), so it
+  shouldn't fight `footreach`/`blue_trunk_drive`'s approach-phase
+  velocity shaping the way the earlier, since-corrected continuous version
+  might have — but watch `footreach`/`Episode_Termination/ball_exit` for
+  any regression anyway, same class of risk every new movement-adjacent
+  reward in this project has had.
+
 ## 2026-08-23 -- new `randomize_foot_ball_restitution` event (save-contact bounciness DR, matches G1's own restitution randomization)
 
 **None of this has been validated against a live training run yet.** New

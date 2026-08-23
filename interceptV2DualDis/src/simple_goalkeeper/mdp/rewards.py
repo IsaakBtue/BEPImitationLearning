@@ -5037,13 +5037,129 @@ def cleanstop(
     below = ball_speed < speed_threshold
 
     env._cleanstop_settle_count[eligible & below] += 1
-    env._cleanstop_settle_count[~(eligible & below)] = 0
+    # FIX 2026-08-23 (user request): was a hard reset to 0 on any single
+    # tick over threshold -- live checkpoint replay found ~36% of save
+    # attempts (84/231) hit at least one such bounce mid-settle, wiping
+    # out however many consecutive good ticks had already accumulated and
+    # forcing a fresh count from 0. Changed to a leaky decrement (-3) so
+    # one transient bounce costs progress, not the whole count -- same
+    # pattern this project already used to fix the analogous blue-ball
+    # landing-gate settle counter. Still fires only firmly under threshold.
+    env._cleanstop_settle_count[~(eligible & below)] = torch.clamp(
+        env._cleanstop_settle_count[~(eligible & below)] - 3, min=0
+    )
 
     fired = eligible & (env._cleanstop_settle_count >= settle_steps)
     env._cleanstop_flag |= fired
 
     scale = torch.clamp(torch.exp(-decay_rate * (ball_speed - best_speed)), min=0.0, max=1.0)
     return fired.float() * scale
+
+
+def contact_yield_velocity(
+    env: "ManagerBasedRlEnv",
+    ball_name: str,
+    asset_cfg: SceneEntityCfg = _DEFAULT_FEET_CFG,
+    max_credit_speed: float = 0.5,
+) -> torch.Tensor:
+    """One-shot reward, fires exactly once at the genuine foot-ball contact
+    instant, for the leading foot's velocity 'giving' backward along the
+    direction NORMAL to (90 deg rotated from) its own orientation target
+    (`_FOOT_TARGET_COS`/`_FOOT_TARGET_SIN`, mirrored per assigned side --
+    the vector `foot_inner_face_continuous`/`inner_face_orientation_save`
+    target for the foot's TOE axis), rather than presenting a rigid,
+    stationary block face.
+
+    NEW 2026-08-23 (user request), successor to an earlier CONTINUOUS
+    version of this idea that the user explicitly corrected: "the other
+    mechanism is wrong it should be a one off reward since you only have
+    one contact moment for the booster to save the ball." Physical
+    reasoning (user's own): via conservation of momentum, a foot moving
+    backward (yielding) at contact absorbs some of the ball's incoming
+    momentum instead of rigidly rebounding it, lowering the post-contact
+    ball speed -- directly targets `cleanstop`'s own best_speed=0.2 goal,
+    which a live checkpoint replay (2026-08-23) found the policy currently
+    satisfies only marginally (mean ball speed at `cleanstop`-firing time
+    0.79 m/s, mean payout scale 0.13) -- consistent with there being no
+    reward anywhere that shapes the CONTACT itself, only the outcome after
+    the fact.
+
+    FIX 2026-08-23 (user correction, same day): first version used the
+    SAME direction as the foot-orientation target (the toe axis) --
+    corrected per explicit user request to use the NORMAL to it instead.
+    The toe-axis target `(cos, sign*sin)` points mostly sideways (70 deg
+    off forward); rotating -90 deg (`(x,y) -> (y,-x)`) gives
+    `(sign*sin, -cos)`, which points mostly along the robot's forward axis
+    -- i.e. roughly toward where the ball is coming from, a physically
+    sensible "block-face normal" (the direction the flat blocking surface
+    actually faces the incoming ball, as opposed to the toe-axis direction
+    the foot is rotated to). Yielding is then "backward" relative to THAT
+    normal, which points back toward -X -- the same direction the ball
+    itself is already travelling (`Frame Convention`: ball always
+    approaches in world -X). The other +90 deg rotation is the opposite
+    choice (not used) -- flip the sign in `target_dir_w` below to switch.
+
+    Gated on `env._sb_deflection_now` -- `stopball`'s own raw per-tick
+    "is a genuine single-contact deflection happening right now" flag
+    (already correct-foot- and landing-gated, same event `softstop` keys
+    off) -- the correct, already-proven instant to sample foot velocity at,
+    reused rather than inventing a second contact-detection mechanism.
+
+    `yield_component = -dot(foot_vel_w, target_dir_w)`: positive when the
+    foot moves opposite to the block-face normal (retreating/yielding),
+    negative when it moves INTO that normal instead (bracing/ramming
+    rather than yielding). Scaled linearly by `max_credit_speed` (a plain
+    ratio, not a peaked/exp kernel -- this is a "more yield is better, up
+    to a point" quantity, not a target value to hit exactly, so a simple
+    linear scale gives gradient across the whole useful range rather than
+    concentrating it around one point) and clamped to `[-1, 1]`.
+
+    FIX 2026-08-23 (user request, "make the reward negative if it is
+    opposite the velocity because i only see a constant 0 reward"): was
+    clamped to `[0, max_credit_speed]` -- a non-yielding contact scored
+    exactly 0, indistinguishable from "no contact happened at all" from
+    the policy's perspective, giving no gradient AWAY from the wrong
+    behavior. Same reasoning already applied in this file to
+    `foot_inner_face_continuous` (see that function's own docstring: "a
+    mild, informative penalty gives clearer gradient... than merely
+    withholding reward, which would look identical to 'never rotated at
+    all'"). Now symmetric: `[-max_credit_speed, max_credit_speed]`,
+    normalized to `[-1, 1]`.
+
+    `max_credit_speed=0.5` m/s (user-set, was 1.0) is still a first guess
+    for the ceiling itself, not yet calibrated against a measured
+    foot-velocity-at-contact distribution; not yet validated against a
+    live training run.
+    """
+    if not hasattr(env, "_contact_yield_flag"):
+        env._contact_yield_flag = torch.zeros(env.num_envs, dtype=torch.bool, device=env.device)
+    just_reset = env.episode_length_buf <= 1
+    env._contact_yield_flag[just_reset] = False
+
+    deflection_now = getattr(
+        env, "_sb_deflection_now", torch.zeros(env.num_envs, dtype=torch.bool, device=env.device)
+    )
+    fired = deflection_now & ~env._contact_yield_flag
+    env._contact_yield_flag |= fired
+
+    robot: Entity = env.scene[asset_cfg.name]
+    foot_idx = _get_correct_foot_idx(env, ball_name)                        # (N,) 0=left, 1=right
+    expected_sign = torch.where(foot_idx == 0, 1.0, -1.0)                   # (N,) left=+Y, right=-Y
+
+    foot_vel_w = robot.data.body_link_lin_vel_w[:, asset_cfg.body_ids, :]   # (N, 2, 3)
+    arange = torch.arange(env.num_envs, device=env.device)
+    assigned_vel_w = foot_vel_w[arange, foot_idx]                           # (N, 3)
+
+    # Normal to the foot-orientation target vector (-90 deg rotation of
+    # (_FOOT_TARGET_COS, sign*_FOOT_TARGET_SIN) -- see FIX comment above).
+    target_dir_w = torch.zeros_like(assigned_vel_w)
+    target_dir_w[:, 0] = expected_sign * _FOOT_TARGET_SIN
+    target_dir_w[:, 1] = -_FOOT_TARGET_COS
+
+    yield_component = -torch.sum(assigned_vel_w * target_dir_w, dim=-1)     # (N,)
+    reward = torch.clamp(yield_component, min=-max_credit_speed, max=max_credit_speed) / max_credit_speed
+
+    return fired.float() * reward
 
 
 def foot_clearance(

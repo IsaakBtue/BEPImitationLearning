@@ -696,6 +696,17 @@ def goalkeeper_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
             weight=17.36,
             params={"ball_name": BALL_NAME, "speed_threshold": 1.0, "best_speed": 0.2, "decay_rate": 3.75},
         ),
+        # --- one-shot, fires at the genuine contact instant (env._sb_deflection_now):
+        # rewards the leading foot's velocity yielding backward along its own
+        # orientation target direction (conservation of momentum -> lower
+        # post-contact ball speed, directly targeting cleanstop's own goal).
+        # See rewards.py:contact_yield_velocity. Weight 5.0 is a first guess,
+        # not yet validated against a live training run.
+        "contact_yield_velocity": RewardTermCfg(
+            func=gk_mdp.contact_yield_velocity,
+            weight=5.0,
+            params={"ball_name": BALL_NAME, "asset_cfg": _FEET_CFG, "max_credit_speed": 0.5},
+        ),
         # --- continuing close-to-target signal, tiered 1.0x/2.0x/3.0x by softstop/cleanstop
         # (ports G1 _reward_success; FIX 2026-07-27 retiered off stopball -- see rewards.py).
         # MUST stay registered after "cleanstop" above: success() reads env._cleanstop_flag,

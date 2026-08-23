@@ -6,7 +6,7 @@ from .rewards import (
     ball_vx_reduction, posture, ang_vel_xy_l2, ang_vel_z_l2,
     stayonline, noretreat, feetorientation, deviation_waist_joint,
     footreach, foot_proximity, near_stick_reach, stopball, softstop, success, single_foot_save, cleanstop, foot_clearance,
-    trailing_foot_lift, clearance_at_save,
+    trailing_foot_lift, clearance_at_save, contact_yield_velocity,
     airborne_at_save, inner_face_orientation_save, foot_inner_face_continuous,
     trailing_foot_forward_continuous, postleadfootorientation, postsave_foot_airtime, postheadingorientation,
     postleadfootplantspeed,
