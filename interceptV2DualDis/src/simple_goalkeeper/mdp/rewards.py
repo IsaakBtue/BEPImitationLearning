@@ -111,7 +111,8 @@ _DEFAULT_ROBOT_CFG = SceneEntityCfg("robot")
 # softstop-firing moment -- 80deg sits within that observed range, not
 # past it. Not yet validated against a live training run under this target.
 # FIX 2026-08-22 (user request): retargeted 80->70 -- see docs/BugFixes.md.
-_FOOT_TARGET_ANGLE_DEG = 70.0
+# FIX 2026-08-23 (user request): retargeted 70->55.
+_FOOT_TARGET_ANGLE_DEG = 55.0
 _FOOT_TARGET_COS = math.cos(math.radians(_FOOT_TARGET_ANGLE_DEG))
 _FOOT_TARGET_SIN = math.sin(math.radians(_FOOT_TARGET_ANGLE_DEG))
 
