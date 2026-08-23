@@ -1554,6 +1554,25 @@ def goalkeeper_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
         params={},
     )
 
+    # Save-contact bounciness DR, matching G1's own randomize_restitution
+    # (restitution_range=[0.0,1.0], resampled every reset). Randomizes the
+    # FOOT geoms (not the ball) -- FULL_COLLISION's priority=1 makes the foot
+    # always win foot-ball contact, so only the foot's own solref actually
+    # affects save bounciness. See randomize_foot_ball_restitution's own
+    # docstring for the live-calibrated dampratio->restitution mapping.
+    cfg.events["randomize_foot_ball_restitution"] = EventTermCfg(
+        func=gk_mdp.randomize_foot_ball_restitution,
+        mode="reset",
+        params={
+            "dampratio_range": (0.35, 1.0),
+            # Explicit -- a function's own default SceneEntityCfg is NEVER
+            # resolved unless it's also present here (mjlab only resolves
+            # SceneEntityCfg objects found in a term's own params dict).
+            # See .claude/skills/reward-shaping-scene-entity-cfg.
+            "asset_cfg": gk_mdp.events._FOOT_COLLISION_CFG,
+        },
+    )
+
     # Per-step catchstep decrement for ball visibility warmup.
     cfg.events["tick_catchstep"] = EventTermCfg(
         func=gk_mdp.tick_catchstep,
@@ -1624,6 +1643,13 @@ def goalkeeper_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
         cfg.terminations.pop("out_of_terrain_bounds", None)
         # No disturbance pushes during play/eval — mirrors kick task play mode.
         cfg.events.pop("push_robot", None)
+        # FIX 2026-08-23 (user request): restitution DR now stays ACTIVE in
+        # play mode too — reverses the push_robot-style pop this had until
+        # today. Per this project's own Training/Play Parity Rule, a policy
+        # evaluated on a different distribution than it trained on gives
+        # misleading results; user judged that principle applies here, not
+        # just to ball spawn range. Foot geoms now resample dampratio
+        # U(0.35,1.0) every play-mode reset too, same as training.
         # RSI disabled in play mode by default — mirrors BoosterT1mjlab kicking task
         # which never registers reset_from_motion_data in play. Always starting from
         # standing makes play behaviour deterministic and consistent across episodes.

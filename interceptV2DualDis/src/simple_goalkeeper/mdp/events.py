@@ -1243,3 +1243,96 @@ def ball_exit_termination(
     ball: Entity = env.scene[ball_name]
     ball_x_local = ball.data.root_link_pos_w[:, 0] - env.scene.env_origins[:, 0]
     return ball_x_local < behind_threshold
+
+
+# Matches t1_constants.py's own `_foot_regex` -- the 8 foot collision geoms
+# (left/right_foot1..4_collision) that FULL_COLLISION gives priority=1,
+# solref=(0.01, 1.0). Since foot priority beats the ball's own solref for
+# ANY foot-ball contact (confirmed live, 2026-08-23: varying the ball's own
+# solref changed foot-ball bounce restitution 0.0% -- identical 0.1289 at
+# every value tested), THIS is the geom that has to be randomized to vary
+# save-contact bounciness at all, not the ball. See rewards on restitution
+# investigation, 2026-08-23.
+_FOOT_COLLISION_CFG = SceneEntityCfg(
+    "robot", geom_names=(r"^(left|right)_foot\d+_collision$",)
+)
+
+
+def randomize_foot_ball_restitution(
+    env: "ManagerBasedRlEnv",
+    env_ids: torch.Tensor | None,
+    dampratio_range: tuple[float, float] = (0.35, 1.0),
+    asset_cfg: SceneEntityCfg = _FOOT_COLLISION_CFG,
+) -> None:
+    """Randomize save-contact bounciness per env, matching G1's own
+    `randomize_restitution` (`g1_29_config.py`: `restitution_range=[0.0,1.0]`,
+    resampled every reset).
+
+    G1 randomizes the BALL's restitution directly (Isaac Gym/PhysX resolves
+    contact restitution as a genuine per-shape material property). MuJoCo has
+    no literal restitution scalar -- bounciness is emergent from a
+    (timeconst, dampratio) solref pair -- AND this project's foot geoms
+    already carry `priority=1` (`FULL_COLLISION`, `t1_constants.py`), which
+    makes MuJoCo use the foot's own solref *entirely* for foot-ball contact,
+    ignoring the ball's. So randomizing the ball (the literal G1-equivalent
+    target) would be a no-op for the actual save; this randomizes the winning
+    geom (the foot) instead to get the same real effect G1 gets.
+
+    `dampratio_range=(0.35, 1.0)` was calibrated live against the real
+    `mujoco_warp` engine (production's own timestep=0.005,
+    integrator=implicitfast, iterations=10, ls_iterations=20 --
+    `velocity_env_cfg.py`, no override in this project), holding
+    `timeconst=0.01` fixed (production's own value) and sweeping only
+    dampratio -- the two-parameter version was non-monotonic. Measured
+    first-bounce restitution across the calibrated range:
+
+        dampratio=1.00 (current production) -> restitution 0.129
+        dampratio=0.70                      -> restitution 0.231
+        dampratio=0.50                      -> restitution 0.424
+        dampratio=0.35                      -> restitution 0.834
+        dampratio=0.30                      -> restitution 1.124 (unphysical -- excluded)
+
+    So dampratio=1.0 is the LEAST bouncy end (matches current production
+    exactly, restitution~0.13) and dampratio=0.35 is the MOST bouncy end of
+    the verified-stable range (restitution~0.83) -- sampling uniform over
+    dampratio does not give a uniform restitution distribution (the mapping
+    is nonlinear), a known simplification, not yet refit to be
+    restitution-uniform. `timeconst` is deliberately NOT randomized -- values
+    below ~0.005 (this project's timestep) were confirmed live to explode
+    (NaN) on the real mujoco_warp engine.
+
+    All 8 foot geoms (both feet, all 4 capsules each) get the SAME per-env
+    value -- a physical foot doesn't have per-capsule independent
+    bounciness. Only the dampratio axis (index 1) is touched; `timeconst`
+    (index 0) and every other FULL_COLLISION field (condim, friction,
+    priority itself) are untouched.
+
+    FIX 2026-08-23: does NOT use mjlab's own `dr._core._randomize_model_field`
+    (what every other DR function in this file's sibling `dr/geom.py` uses)
+    -- confirmed live it computes a DIFFERENT, off-by-one geom index set
+    than `asset_cfg.geom_ids`/`robot.find_geoms()` for this scene (wrote to
+    `left_foot2/3/4_collision` + one unrelated extra geom, never
+    `left_foot1_collision`, same one-off pattern on the right side) --
+    likely a genuine indexing bug in that private helper for this asset,
+    not something to route around by guessing at a fix. Writes directly to
+    `env.sim.model.geom_solref` using `asset_cfg.geom_ids`, independently
+    verified twice (matches a fresh `robot.find_geoms()` call exactly) to
+    be correct for this scene.
+
+    Not yet validated against a live training run.
+    """
+    if env_ids is None:
+        env_ids = torch.arange(env.num_envs, device=env.device, dtype=torch.long)
+    geom_ids = torch.as_tensor(asset_cfg.geom_ids, device=env.device, dtype=torch.long)
+
+    lo, hi = dampratio_range
+    sampled = sample_uniform(lo, hi, (len(env_ids),), env.device)  # (n_envs,)
+
+    env_grid, geom_grid = torch.meshgrid(env_ids, geom_ids, indexing="ij")
+    env.sim.model.geom_solref[env_grid, geom_grid, 1] = sampled.unsqueeze(-1).expand(-1, len(geom_ids))
+
+    # Stash the sampled per-env value for the P-panel plot (play.py) and any
+    # reward/diagnostic code that wants it.
+    if not hasattr(env, "_foot_restitution_dampratio"):
+        env._foot_restitution_dampratio = torch.ones(env.num_envs, device=env.device)
+    env._foot_restitution_dampratio[env_ids] = sampled

@@ -5,6 +5,33 @@ Running log of what to watch for after recent reward changes, for whoever
 full rationale/evidence on each item — this file is just the "what to watch"
 distillation.
 
+## 2026-08-23 -- new `randomize_foot_ball_restitution` event (save-contact bounciness DR, matches G1's own restitution randomization)
+
+**None of this has been validated against a live training run yet.** New
+event (`mdp/events.py`), registered `mode="reset"` for training only
+(popped in play, matching `push_robot`'s own precedent). Randomizes the
+FOOT geoms' `solref` dampratio (0.35-1.0, uniform, resampled every reset),
+NOT the ball's -- `t1_constants.py`'s `FULL_COLLISION` gives the foot
+`priority=1`, which makes MuJoCo use the foot's own solref entirely for
+foot-ball contact, ignoring the ball's (confirmed live: varying the ball's
+own solref changed foot-ball restitution 0.0%). Calibrated live against the
+real `mujoco_warp` engine: dampratio=1.0 (current production) -> restitution
+~0.13, dampratio=0.35 -> ~0.83. New P-panel plot `foot_restitution_dampratio`
+(`play.py`, not promoted to the always-visible front slots -- already at the
+documented 12-slot cap).
+
+### What to watch once a training run has real data
+- **General stability**: this changes contact dynamics on EVERY reset, for
+  EVERY env -- watch `Loss/*` and `Episode_Termination/*` for anything new
+  (sharpforce spikes, self-collision) at the bouncy end of the range.
+- **`cleanstop`/`softstop`/`stopball` rates**: expect more variance
+  episode-to-episode now that save bounciness genuinely varies -- a drop in
+  the AVERAGE rate (not just variance) would suggest 0.35 is too bouncy for
+  the policy to reliably control; consider narrowing the range.
+- **`foot_restitution_dampratio` plot**: sanity-check it's actually varying
+  across resets during a real training session (not stuck at 1.0), and
+  reads 1.0 flat during a play/eval session (DR correctly disabled there).
+
 ## 2026-08-06 (later same day, 2nd batch) -- foot/leg orientation rework: sound airborne latch, foot_inner_face_continuous simplified, postheadingorientation targets save-time heading
 
 Four changes landed together, all stemming from the user reporting

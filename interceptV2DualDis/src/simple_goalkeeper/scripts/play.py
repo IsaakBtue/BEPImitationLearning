@@ -1421,6 +1421,119 @@ def _patch_viewer_sole_contact_and_stop_plots(native_viewer: "NativeMujocoViewer
     native_viewer._update_reward_figures = _patched_update_reward_figures
 
 
+def _compute_foot_restitution_dampratio(env, env_idx: int) -> float:
+    """Current foot-collision solref dampratio for env_idx's LEFT foot1
+    geom (all 8 foot geoms always share one value per env -- see
+    `randomize_foot_ball_restitution`'s own docstring, `mdp/events.py`).
+
+    Reads directly from `env.sim.model.geom_solref` rather than the cached
+    `env._foot_restitution_dampratio` attribute so this plot is correct
+    regardless of whether the randomization event fires this specific
+    reset. FIX 2026-08-23 (user request): the event is now registered in
+    BOTH train and play (`goalkeeper_env_cfg.py`) per this project's own
+    Training/Play Parity Rule -- was popped in play until today, see that
+    file's own changelog comment for the reasoning.
+    """
+    raw_env = env.unwrapped if hasattr(env, "unwrapped") else env
+    if not hasattr(_compute_foot_restitution_dampratio, "_geom_id"):
+        robot = raw_env.scene["robot"]
+        ids, _ = robot.find_geoms(r"^left_foot1_collision$")
+        _compute_foot_restitution_dampratio._geom_id = ids[0]
+    geom_id = _compute_foot_restitution_dampratio._geom_id
+    return float(raw_env.sim.model.geom_solref[env_idx, geom_id, 1].item())
+
+
+def _patch_viewer_foot_restitution_plot(native_viewer: "NativeMujocoViewer", env) -> None:
+    """Add a "foot_restitution_dampratio" raw P-panel plot (see
+    `_compute_foot_restitution_dampratio`) and promote it into the
+    always-visible front slots.
+
+    FIX 2026-08-23 (user report, "i dont see it"): the viewer has a HARD
+    `max_viewports=12` render cap (`mjlab/viewer/native/viewer.py`) with NO
+    pagination/toggle of any kind -- anything past index 11 of
+    `_term_names` is never drawn, period. The original version of this
+    patch appended past that cap (already fully saturated by
+    `_patch_viewer_sole_contact_and_stop_plots`'s own 12) and claimed a
+    "toggle the full list" escape hatch that doesn't exist -- corrected.
+    Demotes `trailing_foot_forward_continuous` (least relevant of the 8
+    footorientation terms to a ball-contact-physics investigation) to make
+    room, registered LAST so this reorder is the final word (same
+    last-registered-wins mechanism `_patch_viewer_sole_contact_and_stop_plots`
+    itself documents). Say if you want a different term swapped instead.
+
+    NEW 2026-08-23 (user request), same raw-custom-plot pattern as
+    `_compute_sole_ball_contact`/`_patch_viewer_sole_contact_and_stop_plots`.
+    Plots dampratio itself (0.35=bounciest calibrated end, 1.0=current
+    production/least bouncy), not restitution -- restitution isn't a single
+    MuJoCo model field to read back live; see
+    `randomize_foot_ball_restitution`'s docstring for the measured
+    dampratio->restitution mapping.
+
+    FIX 2026-08-23 (user request, "make it the same randomised in play...
+    training and play needs to be very similar"): was a genuinely constant
+    flat line at 1.0 in play mode -- `randomize_foot_ball_restitution` used
+    to be popped from `cfg.events` in play (mirroring `push_robot`'s own
+    precedent, treating it as training-robustness DR rather than a core
+    task parameter). Reversed per this project's own Training/Play Parity
+    Rule -- the event is now registered in both train and play
+    (`goalkeeper_env_cfg.py`), so this plot correctly varies per reset in
+    play mode too now, not just during training.
+
+    FIX 2026-08-23 (user report, "it shows a constant line nothing else...
+    max 1.5 and -0.5"): the native viewer's own autoscale
+    (`_write_history_to_figure`) computes lo/hi from a percentile window of
+    the last `history` points -- for a genuinely constant value this
+    collapses to a near-zero-width window (`min_span` floor), which reads
+    as "a flat line pinned somewhere, uninformative" regardless of the
+    actual value. Also confirmed live: `native_viewer._yrange[name]` this
+    patch set is NEVER read by `_write_history_to_figure` at all (dead
+    code in the original version of this patch) -- that function always
+    recomputes its own lo/hi from the data. Fixed by writing this term's
+    figure directly with a FIXED range (-0.5, 1.5), bypassing the shared
+    autoscale entirely, instead of trying to fight it via `_yrange`.
+    """
+    orig_setup = native_viewer.setup
+    orig_update_reward_figures = native_viewer._update_reward_figures
+
+    _RAW_NAME = "foot_restitution_dampratio"
+    _DEMOTED = "trailing_foot_forward_continuous"
+    _FIXED_LO, _FIXED_HI = -0.5, 1.5
+
+    def _patched_setup() -> None:
+        orig_setup()
+        from mjlab.viewer.native.viewer import make_empty_figure
+        cfg = native_viewer._plot_cfg
+        native_viewer._figures[_RAW_NAME] = make_empty_figure(
+            f"{_RAW_NAME} (0.35=bounciest, 1.0=least bouncy; resamples every reset)",
+            cfg.grid_size, (_FIXED_LO, _FIXED_HI), cfg.history, cfg.background_alpha,
+        )
+        native_viewer._histories[_RAW_NAME] = deque(maxlen=cfg.history)
+        native_viewer._scale[_RAW_NAME] = 1.0
+        rest = [n for n in native_viewer._term_names if n not in (_RAW_NAME, _DEMOTED)]
+        native_viewer._term_names = [_RAW_NAME] + rest
+
+    def _write_fixed_range_figure() -> None:
+        fig = native_viewer._figures[_RAW_NAME]
+        hist = native_viewer._histories[_RAW_NAME]
+        n = min(len(hist), native_viewer._plot_cfg.history)
+        fig.linepnt[0] = n
+        for i in range(n):
+            fig.linedata[0][2 * i] = float(-i)
+            fig.linedata[0][2 * i + 1] = float(hist[-1 - i])
+        fig.range[1][0] = _FIXED_LO
+        fig.range[1][1] = _FIXED_HI
+
+    def _patched_update_reward_figures(viewer_handle: "mujoco.viewer.Handle") -> None:
+        if native_viewer._show_plots and native_viewer._term_names and not native_viewer._is_paused:
+            value = _compute_foot_restitution_dampratio(env, native_viewer.env_idx)
+            native_viewer._append_point(_RAW_NAME, value)
+            _write_fixed_range_figure()
+        orig_update_reward_figures(viewer_handle)
+
+    native_viewer.setup = _patched_setup
+    native_viewer._update_reward_figures = _patched_update_reward_figures
+
+
 def _patch_viewer_postupperdofpos_plot(native_viewer: "NativeMujocoViewer", env) -> None:
     """Promote `postupperdofpos` (arm post-save recovery reward) into the
     always-visible front P-panel slots.
@@ -2159,6 +2272,7 @@ def run_play(task_id: str, cfg: PlayConfig) -> None:
         _patch_viewer_post_recovery_plots(native_viewer, env)
         _patch_viewer_all_footorientation_plots(native_viewer, env)
         _patch_viewer_sole_contact_and_stop_plots(native_viewer, env)
+        _patch_viewer_foot_restitution_plot(native_viewer, env)
         native_viewer.run()
     elif resolved_viewer == "viser":
         ViserPlayViewer(env, final_policy).run()

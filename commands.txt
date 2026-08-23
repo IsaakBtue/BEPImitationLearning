@@ -1,2 +1,2 @@
-cd interceptV2DualDis
-uv run sgk_play Mjlab-BeyondAMP-Goalkeeper-T1-MultiDisc --viewer native --agent trained --checkpoint-file logs/rsl_rl/intercept_simple_goalkeeper_multidisc/2026-08-20_15-11-49_6144_traillift_footorientretune_2026-08-20/model_39750.pt --num-envs 1 --analytics True
+cd /home/isaak/BEPImitationlearning/interceptV2DualDis
+python3 src/simple_goalkeeper/scripts/probe_ball_restitution.py --viewer
