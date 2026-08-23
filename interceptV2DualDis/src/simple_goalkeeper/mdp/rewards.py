@@ -5088,16 +5088,33 @@ def contact_yield_velocity(
     SAME direction as the foot-orientation target (the toe axis) --
     corrected per explicit user request to use the NORMAL to it instead.
     The toe-axis target `(cos, sign*sin)` points mostly sideways (70 deg
-    off forward); rotating -90 deg (`(x,y) -> (y,-x)`) gives
-    `(sign*sin, -cos)`, which points mostly along the robot's forward axis
+    off forward); its normal points mostly along the robot's forward axis
     -- i.e. roughly toward where the ball is coming from, a physically
     sensible "block-face normal" (the direction the flat blocking surface
     actually faces the incoming ball, as opposed to the toe-axis direction
     the foot is rotated to). Yielding is then "backward" relative to THAT
     normal, which points back toward -X -- the same direction the ball
     itself is already travelling (`Frame Convention`: ball always
-    approaches in world -X). The other +90 deg rotation is the opposite
-    choice (not used) -- flip the sign in `target_dir_w` below to switch.
+    approaches in world -X).
+
+    FIX 2026-08-23 (user report, "the left green yield velocity direction
+    is correct but the right one is not"): a FIXED -90 deg rotation
+    (`(x,y) -> (y,-x)`) applied to each side's own already-mirrored
+    target vector does NOT produce a mirrored pair -- rotation and mirror
+    reflection don't commute. Applying `(x,y)->(y,-x)` to `(cos,sign*sin)`
+    gives `(sign*sin,-cos)`: X now carries the sign flip instead of Y,
+    which flips which LONGITUDINAL direction (forward vs backward) each
+    foot's normal points in -- concretely, left ended up pointing mostly
+    +X (forward) while right pointed mostly -X (backward), opposite
+    senses, not a mirror pair. Fixed by making the rotation ITSELF mirror
+    with `sign` (`+90 deg` for one side, `-90 deg` for the other, i.e.
+    `-sign*90 deg` uniformly): `target_dir_w = (sin, -sign*cos)`. Verified
+    algebraically: `dot(original, rotated) = cos*sin - sign^2*sin*cos = 0`
+    for both signs (still perpendicular), `|rotated|^2 = sin^2+sign^2*cos^2
+    = 1` (still unit length), and X (`sin`) is now sign-independent while
+    Y (`-sign*cos`) carries the flip -- the same mirror structure the
+    original toe-axis target itself has, this time correctly preserved
+    through the rotation.
 
     Gated on `env._sb_deflection_now` -- `stopball`'s own raw per-tick
     "is a genuine single-contact deflection happening right now" flag
@@ -5150,11 +5167,12 @@ def contact_yield_velocity(
     arange = torch.arange(env.num_envs, device=env.device)
     assigned_vel_w = foot_vel_w[arange, foot_idx]                           # (N, 3)
 
-    # Normal to the foot-orientation target vector (-90 deg rotation of
-    # (_FOOT_TARGET_COS, sign*_FOOT_TARGET_SIN) -- see FIX comment above).
+    # Normal to the foot-orientation target vector, rotation itself mirrored
+    # by `sign` so left/right stay a proper mirror pair -- see FIX comment
+    # above (a fixed-direction rotation does NOT commute with the mirror).
     target_dir_w = torch.zeros_like(assigned_vel_w)
-    target_dir_w[:, 0] = expected_sign * _FOOT_TARGET_SIN
-    target_dir_w[:, 1] = -_FOOT_TARGET_COS
+    target_dir_w[:, 0] = _FOOT_TARGET_SIN
+    target_dir_w[:, 1] = -expected_sign * _FOOT_TARGET_COS
 
     yield_component = -torch.sum(assigned_vel_w * target_dir_w, dim=-1)     # (N,)
     reward = torch.clamp(yield_component, min=-max_credit_speed, max=max_credit_speed) / max_credit_speed
