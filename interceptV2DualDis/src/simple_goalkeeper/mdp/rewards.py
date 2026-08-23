@@ -5146,6 +5146,60 @@ def trailing_foot_lift(
     return reward * active.float()
 
 
+def clearance_at_save(
+    env: "ManagerBasedRlEnv",
+    ball_name: str,
+    asset_cfg: SceneEntityCfg = _DEFAULT_FEET_CFG,
+    target_height: float = 0.05,
+    clearance_sigma: float = 300.0,
+) -> torch.Tensor:
+    """Continuous reward for the LEADING foot hovering near target_height
+    during the blue-landed -> real-save window.
+
+    NEW 2026-08-23 (user request), successor to the removed (2026-06-29)
+    `airborne_at_save` -- that term was a one-shot BINARY bonus (airborne
+    y/n) fired only on the exact softstop tick. This is deliberately
+    different on both axes: continuous (graded toward a real height target,
+    same Gaussian-bump kernel as foot_clearance/trailing_foot_lift) and
+    windowed rather than instantaneous -- active for every step from the
+    leading foot's genuine blue landing (`env._blue_landed_genuine`, already
+    excludes cheap/free landings -- see `_get_reach_target_y`) through the
+    real save (`_ball_is_behind`), not just the single save tick. User
+    request: "in between blue ball and green ball save" -- "green ball" is
+    this codebase's own term for the true/final target, as opposed to the
+    blue/orange/red intermediate waypoint markers (see e.g.
+    `_get_reach_target_y`'s docstring).
+
+    Unlike foot_clearance (max over both feet) or trailing_foot_lift (the
+    trailing foot), this scopes to the LEADING/assigned foot specifically --
+    the one that will make contact -- via `_get_correct_foot_idx`, mirroring
+    trailing_foot_lift's single-foot selection pattern.
+
+    `_get_reach_target_y` is called explicitly here (return value discarded)
+    purely to guarantee `env._blue_landed_genuine` is fresh this tick
+    regardless of registration order -- same freshness pattern
+    trailing_foot_lift already uses for `env._orange_wide`/
+    `env._red_landed_genuine`.
+
+    Not yet validated against a live training run.
+    """
+    _get_reach_target_y(env, ball_name, asset_cfg=asset_cfg)
+
+    robot: Entity = env.scene[asset_cfg.name]
+    foot_idx = _get_correct_foot_idx(env, ball_name)      # (N,) — leading foot, 0=left, 1=right
+
+    foot_pos_w = robot.data.body_link_pos_w[:, asset_cfg.body_ids, :]        # (N, 2, 3)
+    leading_z_w = torch.where(foot_idx == 0, foot_pos_w[:, 0, 2], foot_pos_w[:, 1, 2])  # (N,)
+    floor_z = env.scene.env_origins[:, 2]                                     # (N,)
+    leading_z = (leading_z_w - floor_z).clamp(0.0, None)                      # (N,)
+
+    reward = torch.exp(-clearance_sigma * (leading_z - target_height) ** 2)
+
+    behind = _ball_is_behind(env, ball_name)
+    active = env._blue_landed_genuine & ~behind
+    return reward * active.float()
+
+
 def feet_slippage(
     env: "ManagerBasedRlEnv",
     ball_name: str = "ball",

@@ -951,6 +951,17 @@ def goalkeeper_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
             weight=2.0,
             params={"ball_name": BALL_NAME, "target_height": 0.05, "asset_cfg": _FEET_CFG},
         ),
+        # NEW 2026-08-23 (user request): successor to the removed (2026-06-29)
+        # airborne_at_save -- continuous (not one-shot binary), leading foot
+        # only, active blue-landed -> real-save window instead of the single
+        # save tick. Weight 15.0 carried over from airborne_at_save's own
+        # tier as a first guess, not re-derived -- see rewards.py:
+        # clearance_at_save for the full design rationale.
+        "clearance_at_save": RewardTermCfg(
+            func=gk_mdp.clearance_at_save,
+            weight=15.0,
+            params={"ball_name": BALL_NAME, "target_height": 0.05, "asset_cfg": _FEET_CFG},
+        ),
         # --- goalkeeper stance ---
         "stayonline": RewardTermCfg(
             func=gk_mdp.stayonline,
