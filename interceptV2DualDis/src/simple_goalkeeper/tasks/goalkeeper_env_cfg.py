@@ -930,10 +930,12 @@ def goalkeeper_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
             params={"ball_name": BALL_NAME, "promptness_ref": 1.5, "asset_cfg": _FEET_CFG},
         ),
         # --- active stepping: reward lifting feet during approach ---
+        # FIX 2026-08-23 (user request): target_height 0.10 -> 0.05 (10cm ->
+        # 5cm), same change mirrored below in trailing_foot_lift.
         "foot_clearance": RewardTermCfg(
             func=gk_mdp.foot_clearance,
             weight=2.0,
-            params={"ball_name": BALL_NAME, "target_height": 0.10, "asset_cfg": _FEET_CFG},
+            params={"ball_name": BALL_NAME, "target_height": 0.05, "asset_cfg": _FEET_CFG},
         ),
         # NEW 2026-08-17 (user request): "an incentive that raises the foot"
         # for the TRAILING foot specifically during its start->orange and
@@ -942,10 +944,12 @@ def goalkeeper_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
         # foot's own lift unrewarded during this journey. Same target
         # height/weight as foot_clearance (0.10m / 2.0), scoped to one foot
         # instead of max(both) -- see rewards.py:trailing_foot_lift.
+        # FIX 2026-08-23 (user request): target_height 0.10 -> 0.05, same
+        # change as foot_clearance above.
         "trailing_foot_lift": RewardTermCfg(
             func=gk_mdp.trailing_foot_lift,
             weight=2.0,
-            params={"ball_name": BALL_NAME, "target_height": 0.10, "asset_cfg": _FEET_CFG},
+            params={"ball_name": BALL_NAME, "target_height": 0.05, "asset_cfg": _FEET_CFG},
         ),
         # --- goalkeeper stance ---
         "stayonline": RewardTermCfg(
