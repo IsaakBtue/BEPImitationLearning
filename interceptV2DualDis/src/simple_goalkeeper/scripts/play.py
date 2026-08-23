@@ -746,11 +746,16 @@ def _patch_viewer_contact_yield_vis(native_viewer: "NativeMujocoViewer", env) ->
     on a plot. Two lines from the assigned foot's current position:
     - GREEN: the rewarded ("yield") direction, `-target_dir_w`, fixed
       visual length 0.3m -- this is what the foot SHOULD move along.
-    - ORANGE: the foot's ACTUAL current velocity direction, scaled to a
-      fixed 0.3m visual length (direction only, not true magnitude) --
-      lets you see at a glance how aligned actual motion is with the
-      reward's target (parallel = high reward, opposite = the new
-      negative-penalty branch, perpendicular = ~0).
+    - ORANGE: the foot's ACTUAL current velocity direction, projected onto
+      the XY plane (Z zeroed -- FIX 2026-08-23, user request, "only
+      planar to the xy plane not the noisy z height": the reward's own
+      `target_dir_w` has Z=0 too, so vertical velocity never affects the
+      actual reward -- including it here only added noisy jitter from
+      bounce/landing to a line meant to show the in-plane alignment),
+      scaled to a fixed 0.3m visual length (direction only, not true
+      magnitude) -- lets you see at a glance how aligned actual motion is
+      with the reward's target (parallel = high reward, opposite = the
+      new negative-penalty branch, perpendicular = ~0).
 
     Drawn every frame (not just at the fire instant) so the direction is
     visible during the whole approach, not only for one tick at contact.
@@ -782,8 +787,12 @@ def _patch_viewer_contact_yield_vis(native_viewer: "NativeMujocoViewer", env) ->
         origin = foot_pos_w[foot_idx]
         vel = foot_vel_w[foot_idx]
 
+        # FIX 2026-08-23 (user report, "left correct, right is not"): must
+        # mirror the rotation itself with expected_sign, not just apply it
+        # to the X component -- see rewards.py:contact_yield_velocity's
+        # matching FIX comment for the full derivation. Keep in sync.
         target_dir = np.array(
-            [expected_sign * _FOOT_TARGET_SIN, -_FOOT_TARGET_COS, 0.0], dtype=np.float64,
+            [_FOOT_TARGET_SIN, -expected_sign * _FOOT_TARGET_COS, 0.0], dtype=np.float64,
         )
         yield_dir = -target_dir  # the rewarded direction (see rewards.py:contact_yield_velocity)
 
@@ -804,9 +813,17 @@ def _patch_viewer_contact_yield_vis(native_viewer: "NativeMujocoViewer", env) ->
 
         _add_line(origin, origin + yield_dir * _VIS_LEN, 0.01, [0.1, 1.0, 0.2, 0.9])
 
-        vel_speed = float(np.linalg.norm(vel))
+        # FIX 2026-08-23 (user request, "only planar to the xy plane not
+        # the noisy z height"): contact_yield_velocity's own dot product
+        # only ever reads target_dir_w's X/Y (Z is always 0 there too), so
+        # the vertical component of vel never affects the actual reward --
+        # including it here just made the line jump around with vertical
+        # bounce/landing noise, unrelated to what's being visualized.
+        vel_xy = vel.copy()
+        vel_xy[2] = 0.0
+        vel_speed = float(np.linalg.norm(vel_xy))
         if vel_speed > 1e-4:
-            vel_dir = vel / vel_speed
+            vel_dir = vel_xy / vel_speed
             _add_line(origin, origin + vel_dir * _VIS_LEN, 0.01, [1.0, 0.6, 0.0, 0.9])
 
     native_viewer._update_debug_visualizers = _patched_update
@@ -1638,7 +1655,11 @@ def _patch_viewer_foot_restitution_plot(native_viewer: "NativeMujocoViewer", env
         if native_viewer._show_plots and not native_viewer._is_paused:
             if _ALSO_PROMOTED in native_viewer._histories:
                 # max = 1.0 (raw) * 5.0 (weight) = 5.0
-                _write_fixed_range(_ALSO_PROMOTED, -0.5, 5.5)
+                # FIX 2026-08-23: range was (-0.5, 5.5), stale from before
+                # the symmetric-penalty fix (rewards.py) -- true range is
+                # now weight * [-1,1] = [-5.0, 5.0], and the old range
+                # clipped anything below -0.5.
+                _write_fixed_range(_ALSO_PROMOTED, -5.5, 5.5)
             if "cleanstop" in native_viewer._histories:
                 # FIX 2026-08-23 (user request, "fix cleanstop aswell"):
                 # max = 1.0 (raw scale) * 34.72 (cleanstop_curriculum's own

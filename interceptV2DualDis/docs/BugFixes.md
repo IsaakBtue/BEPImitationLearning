@@ -3622,3 +3622,27 @@ Not yet validated against a live training run.
 **Fix 2 (3D visualization, user request "could u plot that vector in the play script"):** new `_patch_viewer_contact_yield_vis` (`play.py`), chains onto `_update_debug_visualizers`. Draws two lines from the leading foot's current position, every frame: GREEN = the rewarded yield direction (`-target_dir_w`, fixed 0.3m visual length), ORANGE = the foot's actual current velocity direction (same 0.3m length, direction only). Lets the alignment between target and actual motion be inspected visually, not just read off a number.
 
 **Evidence:** full suite 90/90 pass. Live checkpoint replay (`model_10000.pt`, 128 envs, 400 steps): 117 nonzero fires now counted (both positive AND negative deltas, vs. 62 positive-only before) — values span the full `[-0.1000, 0.1000]` episode-sum-delta range, confirming both the reward and penalty branches genuinely fire, not just the positive one. No NaN/Inf. Visualization geometry (body resolution, position/velocity read, vector math) live-verified exception-free on a real 4-env build — full rendering itself not visually confirmed in this headless environment.
+
+---
+
+## 2026-08-23 (later same day) — `contact_yield_velocity`: left/right mirror bug (rotation didn't commute with the reflection)
+
+**User report:** "the left green yield velocity direction is correct but the right one is not."
+
+**Root cause:** the -90° rotation used to derive the "normal" direction (see the two prior entries above) was applied as a FIXED rotation to each side's own already-mirrored target vector `(cos(A), sign·sin(A))`. Rotation and mirror reflection don't commute in general. Applying `(x,y)->(y,-x)` gives `(sign·sin(A), -cos(A))` — the sign now multiplies the X (forward) component instead of Y (lateral), which flips which LONGITUDINAL sense each foot's normal points in. Concretely: left ended up `(0.94, -0.34)` (pointing forward), right ended up `(-0.94, -0.34)` (pointing backward) — opposite senses on the dominant axis, not a mirror pair at all. Left looked right by construction (its formula happened to be unaffected by the bug for `sign=+1`); right was actually wrong.
+
+**Fix:** the rotation direction itself now mirrors with `sign`: `target_dir_w = (sin(A), -sign·cos(A))`. Verified algebraically: `dot(original, rotated) = cos·sin - sign²·sin·cos = 0` for both signs (still perpendicular to the original target), `|rotated|² = sin² + sign²·cos² = 1` (still unit length), and X (`sin(A)`) is now sign-independent while Y (`-sign·cos(A)`) carries the flip — the same mirror structure the original toe-axis target itself has. `rewards.py:contact_yield_velocity` and `play.py`'s matching visualization both updated and kept in sync.
+
+**Evidence:** `left: old=(0.94,-0.34) new=(0.94,-0.34)` (unchanged, confirms why left looked correct), `right: old=(-0.94,-0.34) new=(0.94,0.34)` (X flips from backward to forward, now a proper mirror of left's Y-only flip) — verified numerically with the actual `_FOOT_TARGET_ANGLE_DEG=70°` constant. Full suite 90/90 pass. Live checkpoint replay (`model_10000.pt`, 128 envs, 400 steps): 109 nonzero fires, values still span `[-0.1000, 0.1000]`, no NaN/Inf. Not yet visually confirmed in this headless environment (no display).
+
+---
+
+## 2026-08-23 (later same day) — orange velocity-vis line: project to XY plane, drop Z
+
+**User request:** "have the orange velocity tracker only planar to the xy plane not the noisy z height." The reward's own `target_dir_w` always has `Z=0` (it's a purely horizontal direction), so vertical foot velocity (bounce/landing noise) never actually affects `contact_yield_velocity`'s value — but the orange line was drawing the FULL 3D velocity direction, so vertical jitter made the line swing around for reasons unrelated to what the reward measures. `play.py`: zero `vel[2]` before normalizing to get the line direction. Syntax-checked, full suite 90/90 pass.
+
+---
+
+## 2026-08-23 (later same day) — stale P-panel range on `contact_yield_velocity` clipping negative values
+
+**Found while answering a user question** ("what is the max reward term"): the fixed plot range set when the plot was first added was `(-0.5, 5.5)` — correct at the time (reward was one-sided, `[0, weight]`), but never updated when the symmetric-penalty fix (see the 3rd entry above) changed the true range to `weight*[-1,1] = [-5.0, 5.0]`. The old range would have silently clipped any negative (penalty) value below -0.5 on the plot. Fixed to `(-5.5, 5.5)`. `play.py`. Syntax-checked, full suite 90/90 pass.
