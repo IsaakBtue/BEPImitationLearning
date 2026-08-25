@@ -1226,15 +1226,17 @@ def footreach(
     asset_cfg: SceneEntityCfg = _DEFAULT_FEET_CFG,
     reach_th: float = 0.3,
     sigma: float = 5.0,
+    phase2_threshold: float = 1.5,
 ) -> torch.Tensor:
     """Reach reward adapted from Imitationlearningbooster eereach, for feet instead of hands.
 
-    Phase 1 (ball x_local > 1.5 m): reward lateral alignment with the FROZEN crossing Y
-    (where the ball will cross the goal line), not the live ball Y. This gives a stable
-    pre-positioning target even for angled shots where live ball Y != arrival Y.
+    Phase 1 (ball x_local > phase2_threshold, default 1.5 m): reward lateral alignment
+    with the FROZEN crossing Y (where the ball will cross the goal line), not the live
+    ball Y. This gives a stable pre-positioning target even for angled shots where live
+    ball Y != arrival Y.
 
-    Phase 2 (ball x_local <= 1.5 m): sigmoid reach reward × lateral vel_sigma so actively
-    diving/stepping toward the ball gives up to 10× the static reach reward.
+    Phase 2 (ball x_local <= phase2_threshold): sigmoid reach reward × lateral vel_sigma
+    so actively diving/stepping toward the ball gives up to 10× the static reach reward.
 
     vel_sigma = 1 + 3 * clamp(vel_toward_crossing_side, 0, 3).
 
@@ -1428,7 +1430,11 @@ def footreach(
     vel_sigma = torch.where(near_decel, torch.ones_like(vel_sigma), vel_sigma)
 
     # Combine: phase1 when ball is far, phase2 sigmoid when close.
-    phase1_mask = ball_x_local > 1.5
+    # FIX 2026-08-25 (user request): phase2_threshold param added (was a
+    # hardcoded 1.5) so this term's registration can widen the vel_sigma
+    # speed-urgency window without affecting other callers' default. See
+    # docs/BugFixes.md, 2026-08-25 "faster blue/green approach" entry.
+    phase1_mask = ball_x_local > phase2_threshold
     taskrew = torch.where(phase1_mask, phase1_rew, reach_rew * vel_sigma)
 
     # Upright gate: suppress reward when robot is falling.

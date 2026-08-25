@@ -3646,3 +3646,26 @@ Not yet validated against a live training run.
 ## 2026-08-23 (later same day) — stale P-panel range on `contact_yield_velocity` clipping negative values
 
 **Found while answering a user question** ("what is the max reward term"): the fixed plot range set when the plot was first added was `(-0.5, 5.5)` — correct at the time (reward was one-sided, `[0, weight]`), but never updated when the symmetric-penalty fix (see the 3rd entry above) changed the true range to `weight*[-1,1] = [-5.0, 5.0]`. The old range would have silently clipped any negative (penalty) value below -0.5 on the plot. Fixed to `(-5.5, 5.5)`. `play.py`. Syntax-checked, full suite 90/90 pass.
+
+---
+
+## 2026-08-25 — faster blue/green approach: widened footreach speed window, raised trunk/trailing-foot drive, halved the close-and-slow family
+
+**User report:** an early checkpoint (`model_2000`, `6144_yieldweightrescale_2026-08-25` run) reaches the ball noticeably faster than the current checkpoint (`model_11500`) — but `model_2000` does this by sliding on the ground without lifting its feet at all, a degenerate gait the later checkpoint has since learned to avoid via `foot_clearance`/`trailing_foot_lift`/`feet_slippage`/AMP naturalness. User wants the fully-trained (proper-gait) policy to move faster to blue/green targets, not a return to the sliding exploit.
+
+**Root cause:** the reward terms that positively reward speed toward a waypoint (`footreach`'s phase-2 vel_sigma, `blue_trunk_drive`, `trailing_foot_reach`) coexist with terms that reward the OPPOSITE — decelerating and stopping AT a waypoint (`blue_stick_landing`/`orange_stick_landing`/`red_stick_landing`/`near_stick_reach`, the "close AND slow" family, added earlier to stop oscillation-farming — see their own docstrings). Raising only the speed side without touching the slow side would fight itself; user explicitly asked to balance the two.
+
+**Fix (7 changes, all `AskUserQuestion`-confirmed before editing, none touch `foot_clearance`/`trailing_foot_lift`/`feet_slippage`/AMP — the actual anti-sliding mechanisms stay intact):**
+
+1. `footreach` (`rewards.py`): new `phase2_threshold: float = 1.5` param (was a hardcoded `1.5` literal at the `phase1_mask = ball_x_local > 1.5` line) so callers can widen the vel_sigma speed-urgency window without changing other callers' default.
+2. `footreach` registration (`goalkeeper_env_cfg.py`): `phase2_threshold=2.5` passed explicitly — leading foot gets the up-to-10× speed multiplier starting 1m earlier.
+3. `blue_trunk_drive_curriculum` base_weight `10.0 -> 20.0` (peak `25.0 -> 50.0`) + static weight `10.0 -> 20.0` — whole-body trunk velocity toward blue/green, independent of foot mechanics.
+4. `trailing_foot_reach` weight `10.0 -> 20.0` (flat, no curriculum) — same idea for the trailing foot's orange->red leg.
+5. `blue_stick_landing_curriculum` base_weight `8.0 -> 4.0` (peak `20.0 -> 10.0`) + static weight `8.0 -> 4.0`.
+6. `orange_stick_landing_curriculum` base_weight `4.0 -> 2.0` (peak `10.0 -> 5.0`) + static weight `4.0 -> 2.0`.
+7. `red_stick_landing_curriculum` base_weight `4.0 -> 2.0` (peak `10.0 -> 5.0`) + static weight `4.0 -> 2.0`.
+8. `near_stick_reach_curriculum` base_weight `8.0 -> 4.0` (peak `16.0 -> 8.0`) + static weight `8.0 -> 4.0`.
+
+(Numbered 1-8 above; called "7 changes" in the user-facing summary since #1/#2 are one conceptual edit.) `blue_overshoot_penalty`/`orange_overshoot_penalty`/`red_overshoot_penalty` (-60.0/-30.0/-30.0 curriculum) deliberately left untouched — they remain the hard backstop against carrying speed past an unlanded waypoint, now doing relatively more work since the stick_landing family's deceleration pull is halved.
+
+**Evidence:** full suite 90/90 pass (`PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 uv run pytest tests/ -q` — a stray ROS `launch_testing` pytest entry point in this machine's global site-packages otherwise crashes collection with `PluginValidationError: unknown hook 'pytest_launch_collect_makemodule'`, an unrelated pre-existing environment issue, not caused by this change). Not yet validated against a live training run — risk is sloppier plants at blue/orange/red (less deceleration pressure), watch `blue_ball_landed`/`orange_ball_landed`/`red_ball_landed` rates and the overshoot penalties' fire rate on the next run for regression.

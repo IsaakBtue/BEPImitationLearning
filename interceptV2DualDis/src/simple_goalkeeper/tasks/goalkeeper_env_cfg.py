@@ -313,11 +313,19 @@ def goalkeeper_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
         # a reward value that is already zero for wide/far envs, so it
         # cannot influence far-region training despite living in this same
         # shared config file.
+        # FIX 2026-08-25 (user request, "faster blue/green approach" --
+        # balancing half of the "raise speed rewards" set): base_weight
+        # 8.0 -> 4.0 (peak 16.0 -> 8.0). near_stick_reach directly rewards
+        # "close AND slow" -- the opposite force to the speed incentives
+        # raised alongside this change (footreach's widened vel_sigma
+        # window, blue_trunk_drive, trailing_foot_reach). Halved rather
+        # than removed since it still guards the near-region oscillation
+        # exploit it was added for (2026-07-26). See docs/BugFixes.md.
         cfg.curriculum["near_stick_reach_curriculum"] = CurriculumTermCfg(
             func=gk_mdp.reward_curriculum_ep_len,
             params={
                 "reward_name": "near_stick_reach",
-                "base_weight": 8.0,
+                "base_weight": 4.0,
                 "update_interval": 500,
                 "ep_len_divisor":  50,
             },
@@ -359,11 +367,17 @@ def goalkeeper_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
                 "ep_len_divisor":  50,
             },
         )
+        # FIX 2026-08-25 (user request, "faster blue/green approach" --
+        # balancing half of the "raise speed rewards" set): base_weight
+        # 8.0 -> 4.0 (peak 20.0 -> 10.0), same "close AND slow" vs. speed
+        # tension as near_stick_reach above. blue_overshoot_penalty
+        # (-60.0->-150.0 curriculum) is untouched and stays the backstop
+        # against carrying speed past blue unlanded. See docs/BugFixes.md.
         cfg.curriculum["blue_stick_landing_curriculum"] = CurriculumTermCfg(
             func=gk_mdp.reward_curriculum_ep_len,
             params={
                 "reward_name": "blue_stick_landing",
-                "base_weight": 8.0,
+                "base_weight": 4.0,
                 "update_interval": 500,
                 "ep_len_divisor":  50,
             },
@@ -395,11 +409,21 @@ def goalkeeper_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
         # exactly that unguarded mechanism (near_stick_reach/blue_stick_landing,
         # see their docstrings) -- so the weight bump is the lower-risk lever
         # to test first. Not yet validated against a live training run.
+        # FIX 2026-08-25 (user request, "faster blue/green approach"):
+        # base_weight 10.0 -> 20.0 (peak 25.0 -> 50.0), doubling this
+        # term's whole-body trunk-velocity-toward-target incentive. Chosen
+        # (alongside trailing_foot_reach and footreach's widened
+        # phase2_threshold below) because it rewards speed independent of
+        # HOW the feet get there -- foot_clearance/trailing_foot_lift/
+        # feet_slippage still separately enforce genuine stepping instead
+        # of the sliding gait a much earlier checkpoint (model_2000,
+        # 6144_yieldweightrescale_2026-08-25 run) exhibited. See
+        # docs/BugFixes.md.
         cfg.curriculum["blue_trunk_drive_curriculum"] = CurriculumTermCfg(
             func=gk_mdp.reward_curriculum_ep_len,
             params={
                 "reward_name": "blue_trunk_drive",
-                "base_weight": 10.0,
+                "base_weight": 20.0,
                 "update_interval": 500,
                 "ep_len_divisor":  50,
             },
@@ -425,11 +449,16 @@ def goalkeeper_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
                 "ep_len_divisor":  50,
             },
         )
+        # FIX 2026-08-25 (user request, "faster blue/green approach" --
+        # balancing half of the "raise speed rewards" set): base_weight
+        # 4.0 -> 2.0 (peak 10.0 -> 5.0), same reasoning as
+        # blue_stick_landing above. orange_overshoot_penalty (-30.0
+        # curriculum) untouched, stays the backstop. See docs/BugFixes.md.
         cfg.curriculum["orange_stick_landing_curriculum"] = CurriculumTermCfg(
             func=gk_mdp.reward_curriculum_ep_len,
             params={
                 "reward_name": "orange_stick_landing",
-                "base_weight": 4.0,
+                "base_weight": 2.0,
                 "update_interval": 500,
                 "ep_len_divisor":  50,
             },
@@ -458,11 +487,16 @@ def goalkeeper_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
                 "ep_len_divisor":  50,
             },
         )
+        # FIX 2026-08-25 (user request, "faster blue/green approach" --
+        # balancing half of the "raise speed rewards" set): base_weight
+        # 4.0 -> 2.0 (peak 10.0 -> 5.0), same reasoning as
+        # blue_stick_landing/orange_stick_landing above. red_overshoot_penalty
+        # (-30.0 curriculum) untouched, stays the backstop. See docs/BugFixes.md.
         cfg.curriculum["red_stick_landing_curriculum"] = CurriculumTermCfg(
             func=gk_mdp.reward_curriculum_ep_len,
             params={
                 "reward_name": "red_stick_landing",
-                "base_weight": 4.0,
+                "base_weight": 2.0,
                 "update_interval": 500,
                 "ep_len_divisor":  50,
             },
@@ -821,10 +855,15 @@ def goalkeeper_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
             params={"ball_name": BALL_NAME},
         ),
         # --- ball interception (feet-only) ---
+        # FIX 2026-08-25 (user request, "faster blue/green approach"):
+        # phase2_threshold 1.5->2.5 -- widens the vel_sigma speed-urgency
+        # window (footreach's own docstring) so the leading foot gets the
+        # up-to-10x speed multiplier sooner instead of only in the final
+        # 1.5m. See docs/BugFixes.md, 2026-08-25.
         "footreach": RewardTermCfg(
             func=gk_mdp.footreach,
             weight=10.0,
-            params={"ball_name": BALL_NAME, "reach_th": 0.3, "sigma": 5.0, "asset_cfg": _FEET_CFG},
+            params={"ball_name": BALL_NAME, "reach_th": 0.3, "sigma": 5.0, "asset_cfg": _FEET_CFG, "phase2_threshold": 2.5},
         ),
         "foot_proximity": RewardTermCfg(
             func=gk_mdp.foot_proximity,
@@ -837,9 +876,11 @@ def goalkeeper_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
         # wide/far-region envs by construction (near_stick_reach's own
         # env._blue_wide gate), so this entry cannot influence far-region
         # behavior despite sharing this config file with the blue_* terms.
+        # FIX 2026-08-25 (user request, "faster blue/green approach"):
+        # weight 8.0 -> 4.0, matches curriculum's base_weight halving above.
         "near_stick_reach": RewardTermCfg(
             func=gk_mdp.near_stick_reach,
-            weight=8.0,
+            weight=4.0,
             params={"ball_name": BALL_NAME, "asset_cfg": _FEET_CFG},
         ),
         # --- two-stage blue->green waypoint bonus, v2 reimplementation
@@ -865,9 +906,11 @@ def goalkeeper_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
         ),
         # Dense reward for "close AND slow" near blue -- the exact joint
         # condition the settle-window landing check requires.
+        # FIX 2026-08-25 (user request, "faster blue/green approach"):
+        # weight 8.0 -> 4.0, matches curriculum's base_weight halving above.
         "blue_stick_landing": RewardTermCfg(
             func=gk_mdp.blue_stick_landing,
-            weight=8.0,
+            weight=4.0,
             params={"ball_name": BALL_NAME, "asset_cfg": _FEET_CFG},
         ),
         # NEW 2026-07-24 (user request): trunk (whole-body), not foot-specific,
@@ -881,9 +924,11 @@ def goalkeeper_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
         # cu=0 static weight and the curriculum's cu=0 baseline in sync, per
         # this file's own stated invariant ("matches this term's static
         # play-mode weight").
+        # FIX 2026-08-25 (user request, "faster blue/green approach"):
+        # weight 10.0 -> 20.0, matching curriculum base_weight bump above.
         "blue_trunk_drive": RewardTermCfg(
             func=gk_mdp.blue_trunk_drive,
-            weight=10.0,
+            weight=20.0,
             params={"ball_name": BALL_NAME, "asset_cfg": _FEET_CFG},
         ),
         # --- trailing-foot ("orange") mirror of the blue waypoint above,
@@ -907,9 +952,11 @@ def goalkeeper_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
             weight=-30.0,
             params={"ball_name": BALL_NAME, "asset_cfg": _FEET_CFG},
         ),
+        # FIX 2026-08-25 (user request, "faster blue/green approach"):
+        # weight 4.0 -> 2.0, matches curriculum's base_weight halving above.
         "orange_stick_landing": RewardTermCfg(
             func=gk_mdp.orange_stick_landing,
-            weight=4.0,
+            weight=2.0,
             params={"ball_name": BALL_NAME, "asset_cfg": _FEET_CFG},
         ),
         # --- trailing-foot second waypoint ("red"), active only once both
@@ -933,9 +980,11 @@ def goalkeeper_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
             weight=-30.0,
             params={"ball_name": BALL_NAME, "asset_cfg": _FEET_CFG},
         ),
+        # FIX 2026-08-25 (user request, "faster blue/green approach"):
+        # weight 4.0 -> 2.0, matches curriculum's base_weight halving above.
         "red_stick_landing": RewardTermCfg(
             func=gk_mdp.red_stick_landing,
-            weight=4.0,
+            weight=2.0,
             params={"ball_name": BALL_NAME, "asset_cfg": _FEET_CFG},
         ),
         # NEW 2026-08-15 (user request): trailing-foot analog of footreach's
@@ -946,9 +995,11 @@ def goalkeeper_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
         # own weight -- this is the direct trailing-foot analog of that
         # term, not of the smaller flat foot_proximity/orange_foot_proximity
         # terms.
+        # FIX 2026-08-25 (user request, "faster blue/green approach"):
+        # weight 10.0 -> 20.0 (flat, no curriculum on this term).
         "trailing_foot_reach": RewardTermCfg(
             func=gk_mdp.trailing_foot_reach,
-            weight=10.0,
+            weight=20.0,
             params={"ball_name": BALL_NAME, "reach_th": 0.3, "sigma": 5.0, "asset_cfg": _FEET_CFG},
         ),
         # NEW 2026-08-15 (user request): one-shot bonus for completing the
