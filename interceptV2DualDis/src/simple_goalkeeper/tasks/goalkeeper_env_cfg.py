@@ -487,11 +487,23 @@ def goalkeeper_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
         # weight ceiling). base=5.0 -> max 12.5 at cu=3, matching G1's
         # success_init=5.0 (g1_29_config.py:300) exactly under the same
         # weight=base*(1+0.5*cu) formula. See rewards.py:success docstring.
+        # FIX 2026-08-25 (user request, delegated to Claude's judgment):
+        # base_weight 5.0 -> 3.5 (30% trim, max 12.5 -> 8.75 at cu=3) --
+        # deliberate divergence from the G1-matched value above. A live
+        # 16224-iteration run (6144_footangle55deg_2026-08-23) showed
+        # success logging ~10-11 per episode, the single largest reward in
+        # the table -- roughly 300x the entire possible range of the new
+        # contact_yield_velocity term (max ~0.033 at weight=5.0, one-shot,
+        # normalized to [-1,1]), which never learned to yield and drifted
+        # slightly negative instead. This trim is a rebalancing move to give
+        # contact_yield_velocity's now-larger weight (see below) genuine
+        # room to matter, not a claim that G1's value was wrong for G1's own
+        # task. Not yet validated against a live training run.
         cfg.curriculum["success_curriculum"] = CurriculumTermCfg(
             func=gk_mdp.reward_curriculum_ep_len,
             params={
                 "reward_name": "success",
-                "base_weight": 5.0,
+                "base_weight": 3.5,
                 "update_interval": 500,
                 "ep_len_divisor":  50,
             },
@@ -700,11 +712,22 @@ def goalkeeper_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
         # rewards the leading foot's velocity yielding backward along its own
         # orientation target direction (conservation of momentum -> lower
         # post-contact ball speed, directly targeting cleanstop's own goal).
-        # See rewards.py:contact_yield_velocity. Weight 5.0 is a first guess,
-        # not yet validated against a live training run.
+        # See rewards.py:contact_yield_velocity.
+        # FIX 2026-08-25 (user request, delegated to Claude's judgment):
+        # weight 5.0 -> 25.0 (5x), moving it into the same tier as this
+        # table's other one-shot save-quality bonuses at the same contact
+        # event (inner_face_orientation_save=17.36, cleanstop=17.36,
+        # single_foot_save~34-69 curriculum-scaled). At weight=5.0 this
+        # one-shot, [-1,1]-normalized term's entire possible range topped
+        # out at a logged Episode_Reward of ~0.033 even at perfect
+        # behavior every episode -- ~300x smaller than success's own
+        # logged ~10-11 in the same 16224-iteration run
+        # (6144_footangle55deg_2026-08-23), mathematically too small to
+        # move the policy at all (it drifted slightly negative instead of
+        # learning to yield). Not yet validated against a live training run.
         "contact_yield_velocity": RewardTermCfg(
             func=gk_mdp.contact_yield_velocity,
-            weight=5.0,
+            weight=25.0,
             params={"ball_name": BALL_NAME, "asset_cfg": _FEET_CFG, "max_credit_speed": 0.5},
         ),
         # --- continuing close-to-target signal, tiered 1.0x/2.0x/3.0x by softstop/cleanstop
@@ -712,9 +735,11 @@ def goalkeeper_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
         # MUST stay registered after "cleanstop" above: success() reads env._cleanstop_flag,
         # which cleanstop() only sets when IT runs -- registering success first would read a
         # one-tick-stale value on the exact step cleanstop first fires. ---
+        # FIX 2026-08-25: initial weight 5.0 -> 3.5, matching success_curriculum's
+        # new base_weight above (this is the pre-curriculum starting value).
         "success": RewardTermCfg(
             func=gk_mdp.success,
-            weight=5.0,
+            weight=3.5,
             params={"ball_name": BALL_NAME, "asset_cfg": _FEET_CFG, "strict_th": 0.15},
         ),
         # --- save quality bonuses (fire on top of softstop, not as a gate) ---
