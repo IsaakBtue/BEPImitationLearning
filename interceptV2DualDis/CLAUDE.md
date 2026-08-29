@@ -359,6 +359,12 @@ If yes, set up a session cron job with this standing behavior:
 
 **Always push the latest checkpoint before stopping or restarting any run**, whether for a scheduled-monitoring fix or an ad hoc one — never let a checkpoint go un-pushed when a run is about to be killed.
 
+**Nightly autotrain script:** `/home/robocup/IsaakB/intercept_autotrain.sh` (cron, 23:59 daily) checks whether the GPU is idle and, if so, whether there's a training-relevant commit since `/home/robocup/IsaakB/intercept_autotrain_logs/last_trained_commit.txt` (the marker) — only launching if both are true. **Every time a training run is launched manually (not by the script itself), update that marker file to the commit just launched on**, e.g.:
+```bash
+git rev-parse HEAD > /home/robocup/IsaakB/intercept_autotrain_logs/last_trained_commit.txt
+```
+Otherwise the script sees the same commit as still untrained on its next run and launches a redundant duplicate. Do this every time, not just when asked.
+
 ## Reading TensorBoard / WandB Episode Reward Metrics
 
 mjlab's `reward_manager` logs `Episode_Reward/X` with **two scaling factors** baked in:
