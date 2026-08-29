@@ -740,7 +740,7 @@ def goalkeeper_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
         "cleanstop": RewardTermCfg(
             func=gk_mdp.cleanstop,
             weight=17.36,
-            params={"ball_name": BALL_NAME, "speed_threshold": 1.0, "best_speed": 0.2, "decay_rate": 3.75},
+            params={"ball_name": BALL_NAME, "speed_threshold": 1.0, "steepness": 2.0},
         ),
         # --- one-shot, fires at the genuine contact instant (env._sb_deflection_now):
         # rewards the leading foot's velocity yielding backward along its own
@@ -758,10 +758,26 @@ def goalkeeper_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
         # logged ~10-11 in the same 16224-iteration run
         # (6144_footangle55deg_2026-08-23), mathematically too small to
         # move the policy at all (it drifted slightly negative instead of
-        # learning to yield). Not yet validated against a live training run.
+        # learning to yield).
+        # FIX 2026-08-29 (user request): weight 25.0 -> 50.0. Live-checkpoint
+        # replay of model_39750 (from a run trained entirely at weight=25)
+        # confirmed the term's DIRECTION is correct (corr(foot_vx_at_contact,
+        # reward) = -0.72 left / -0.44 right -- it does reward yielding -X
+        # and penalize +X) but it's still LOSING: mean foot vx at the
+        # contact instant was net positive (+0.37 left / +0.17 right m/s),
+        # i.e. moving further INTO the ball, not yielding away from it --
+        # the "robot learns to kick the ball" symptom this term exists to
+        # counter. One-shot single-tick weight=25 apparently isn't enough to
+        # outweigh the accumulated per-step momentum from footreach/
+        # blue_trunk_drive/trailing_foot_reach, all of which explicitly
+        # carry full, undecayed speed into the real ball by design. Not yet
+        # validated against a live training run -- if 50 still loses, the
+        # next lever is attacking the momentum at its source (an
+        # early-window foot-speed penalty as the foot closes the last
+        # ~0.2-0.3m to the ball), not just raising this weight further.
         "contact_yield_velocity": RewardTermCfg(
             func=gk_mdp.contact_yield_velocity,
-            weight=25.0,
+            weight=50.0,
             params={"ball_name": BALL_NAME, "asset_cfg": _FEET_CFG, "max_credit_speed": 0.5},
         ),
         # --- continuing close-to-target signal, tiered 1.0x/2.0x/3.0x by softstop/cleanstop
@@ -1019,10 +1035,14 @@ def goalkeeper_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
         # --- active stepping: reward lifting feet during approach ---
         # FIX 2026-08-23 (user request): target_height 0.10 -> 0.05 (10cm ->
         # 5cm), same change mirrored below in trailing_foot_lift.
+        # FIX 2026-08-29 (user request): reverted 0.05 -> 0.10 -- deployment
+        # showed the 5cm target clipping the floor; wants more clearance.
+        # clearance_at_save (below) intentionally NOT reverted -- user
+        # explicitly asked to keep that one at 5cm.
         "foot_clearance": RewardTermCfg(
             func=gk_mdp.foot_clearance,
             weight=2.0,
-            params={"ball_name": BALL_NAME, "target_height": 0.05, "asset_cfg": _FEET_CFG},
+            params={"ball_name": BALL_NAME, "target_height": 0.10, "asset_cfg": _FEET_CFG},
         ),
         # NEW 2026-08-17 (user request): "an incentive that raises the foot"
         # for the TRAILING foot specifically during its start->orange and
@@ -1033,10 +1053,12 @@ def goalkeeper_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
         # instead of max(both) -- see rewards.py:trailing_foot_lift.
         # FIX 2026-08-23 (user request): target_height 0.10 -> 0.05, same
         # change as foot_clearance above.
+        # FIX 2026-08-29 (user request): reverted 0.05 -> 0.10, same reason
+        # as foot_clearance above.
         "trailing_foot_lift": RewardTermCfg(
             func=gk_mdp.trailing_foot_lift,
             weight=2.0,
-            params={"ball_name": BALL_NAME, "target_height": 0.05, "asset_cfg": _FEET_CFG},
+            params={"ball_name": BALL_NAME, "target_height": 0.10, "asset_cfg": _FEET_CFG},
         ),
         # NEW 2026-08-23 (user request): successor to the removed (2026-06-29)
         # airborne_at_save -- continuous (not one-shot binary), leading foot

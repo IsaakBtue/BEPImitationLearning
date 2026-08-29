@@ -1371,63 +1371,77 @@ def footreach(
     # always-grounded task has no equivalent of).
     vel_sigma = 1.0 + 3.0 * vel_toward.clamp(0.0, 3.0)
 
-    # Blue decel-zone: decay the speed bonus toward neutral as the assigned
-    # foot closes on blue specifically (wide, unlanded crossing) -- without
-    # this, vel_sigma keeps rewarding carrying speed straight through the
-    # zone the foot should be planting in. Reaches full neutral at the SAME
-    # curriculum-eased landing_radius _get_reach_target_y computed this call.
-    # FIX 2026-07-24: env._blue_landed -> env._blue_landed_genuine (see
-    # _get_reach_target_y) -- a free landing must not neutralize this decel
-    # zone either.
-    blue_approach = env._blue_wide & ~env._blue_landed_genuine
-    _BLUE_DECEL_ZONE = 0.30
-    _BLUE_DECEL_FLOOR = float(getattr(env, "_blue_landing_radius_current", 0.08))
-    decay_frac = ((dist_to_crossing - _BLUE_DECEL_FLOOR) / (_BLUE_DECEL_ZONE - _BLUE_DECEL_FLOOR)).clamp(0.0, 1.0)
-    vel_sigma = torch.where(blue_approach, 1.0 + (vel_sigma - 1.0) * decay_frac, vel_sigma)
+    # REMOVED 2026-08-29 (user request), was: "Blue decel-zone" -- decayed
+    # the speed bonus toward neutral as the assigned foot closed on blue
+    # specifically (wide, unlanded crossing), added 2026-07-24 so vel_sigma
+    # wouldn't keep rewarding carrying speed straight through the zone the
+    # foot should be planting in.
+    #
+    # Root cause of the removal: this is the wide-crossing sibling of the
+    # `near_decel` block just removed above (narrow crossings) -- and
+    # `blue_stick_landing`'s own docstring already states, for this exact
+    # wide-crossing case, that IT is "the real reason the [oscillation]
+    # problem doesn't surface [here], not the decay" (see near_stick_reach's
+    # docstring, which quotes this). Same redundancy, same fix: rely on
+    # `blue_stick_landing` alone (rewards.py, "close AND slow" near blue) as
+    # the anti-oscillation/plant mechanism instead of a blanket vel_sigma
+    # kill-switch. This one wasn't caught by the narrow-crossing fix earlier
+    # today because it's a SEPARATE code block gated on the opposite
+    # condition (`env._blue_wide` here vs `~env._blue_wide` for the removed
+    # `near_decel`) -- both lived in this same function but only ever apply
+    # to disjoint crossing types, so fixing one had zero effect on the
+    # other.
+    #
+    # `blue_trunk_drive`'s own matching decel-zone (its own `blue_approach`
+    # block) removed the same day, same reasoning -- see that function.
+    #
+    # Not yet validated against a live training run -- this is a genuine
+    # experiment (user: "im curious if that will work"), not a proven fix
+    # like near_decel's removal was. Watch for the wide-crossing oscillation
+    # exploit's return (footreach spiking while the assigned foot swings
+    # back and forth across blue without landing) -- if it reappears,
+    # strengthen blue_stick_landing rather than reinstating this block.
 
-    # FIX 2026-07-26: near-region velocity neutralization -- narrow crossings
-    # have no blue-midpoint landing concept, so blue_approach above
-    # (env._blue_wide-gated) never applies to them, leaving near-region
-    # vel_sigma fully live and uncapped for the entire pre-arrival window
-    # (ball_x_local in (0.5, 1.5], reach_rew already ~saturated since the
-    # foot is pre-positioned at the frozen target). vel_toward flips sign
-    # each time the assigned foot crosses the target, so the policy learned
-    # to oscillate back and forth across it to farm repeated
-    # velocity-toward-target bursts before the ball even arrives -- reported
-    # live by the user watching model_13750 (blue_v2_overshootradius_
-    # 2026-07-25). Structurally identical exploit class to the wide-crossing
-    # one blue_approach already guards against, just never extended to the
-    # narrow case. See docs/BugFixes.md.
+    # REMOVED 2026-08-29 (user request), was: FIX 2026-07-26 near-region
+    # velocity neutralization -- held vel_sigma flat at neutral (1.0x, no
+    # speed boost) for the ENTIRE pre-arrival window on narrow crossings
+    # (~blue_wide & ~ball_close), added to kill an oscillation-farming
+    # exploit (policy swinging back and forth across the target to farm
+    # repeated velocity-toward-target bursts, model_13750,
+    # blue_v2_overshootradius_2026-07-25).
     #
-    # SUPERSEDES an earlier version of this fix (same day) that mirrored
-    # blue_approach's distance-gated decay (decaying vel_sigma toward
-    # neutral only within 0.30m of the target). Live evidence from a
-    # sgk_play analytics trace showed footreach still spiking 17-30 while
-    # bx (ball_x_local) sat at 1.14-1.29m -- solidly inside the supposedly-
-    # decayed window -- because the oscillation's swing radius is wider than
-    # the 0.30m decel zone, so most of the velocity burst happens OUTSIDE
-    # the radius the decay even looks at. A distance-gated decay is the
-    # right shape for blue's converge-then-land dynamic (foot approaches
-    # once, should be slow right at the end); it's the wrong shape for an
-    # oscillation with no single approach to slow down into.
+    # Root cause of the removal: `near_stick_reach` (added the SAME DAY,
+    # same window, see that function below) already fixes this exploit
+    # class directly -- it rewards "close AND slow" (a fast oscillating
+    # pass scores near zero at the distance peak because the speed term
+    # collapses), which is a strictly more targeted mechanism than a blanket
+    # "no speed credit at all" gate. near_stick_reach's own docstring
+    # already said as much for the analogous wide-crossing case
+    # ("blue_stick_landing is the real reason the problem doesn't surface
+    # there, not the decay") -- this removal is applying that same
+    # conclusion to the narrow case it was written about.
     #
-    # Fix: no distance gating at all -- vel_sigma is held flat at neutral
-    # (1.0x, no boost) for the ENTIRE ~ball_close window on narrow
-    # crossings, regardless of how far the foot is from the target. This is
-    # the same principle G1's own phase1 already uses (zero velocity credit
-    # when there's nothing real to react to yet), extended further than G1
-    # literally goes: G1's own vel_sigma is fully live and uncapped between
-    # 1.5m and arrival too (confirmed by reading _reward_eereach directly,
-    # legged_robot.py:1361-1400 -- a real, unguarded gap in G1 itself, just
-    # never manifesting as a reported problem there). This is a deliberate
-    # divergence beyond G1, justified by the live exploit evidence above,
-    # not a parity port.
+    # Side effect this blanket gate was ALSO causing (found investigating a
+    # 2026-08-29 user report that a fully-trained near-region checkpoint
+    # commits to the reach target much later than an early checkpoint does,
+    # "stops ~75% of the way, then does the last 25%" once the ball closes
+    # to <0.5m): zeroing vel_sigma for the whole ~2m-to-0.5m approach window
+    # removes ANY reward benefit to moving fast until the very end, so a
+    # policy with enough training time to fully exploit the reward landscape
+    # learns to coast to "close enough" (reach_rew's own sigmoid already
+    # near-saturates well before exact alignment) and only burst in the
+    # final 0.5m where vel_sigma is live again -- worse the more it
+    # converges, matching the reported early-vs-late-checkpoint difference.
+    # near_stick_reach does not have this failure mode: it's a continuous
+    # exp(-dist)*exp(-speed) reward, so it naturally gives ~zero credit for
+    # "far and slow" too, rather than removing all speed credit outright.
     #
-    # Turns off the instant ball_close triggers (ball_x_local < 0.5m, live-
-    # ball tracking begins), so the genuine last-moment interception dive
-    # keeps full, uncapped vel_sigma credit.
-    near_decel = (~env._blue_wide) & (~ball_close)
-    vel_sigma = torch.where(near_decel, torch.ones_like(vel_sigma), vel_sigma)
+    # Not yet validated against a live training run -- watch for the
+    # oscillation exploit's return (footreach spiking while ball_x_local
+    # sits mid-range, same signature as the original 2026-07-25 report) now
+    # that near_stick_reach is the sole guard; if it reappears, the fix is a
+    # stronger near_stick_reach (higher weight/sharper speed_sigma), not
+    # reintroducing this blanket neutralization.
 
     # Combine: phase1 when ball is far, phase2 sigmoid when close.
     # FIX 2026-08-25 (user request): phase2_threshold param added (was a
@@ -1798,15 +1812,15 @@ def blue_trunk_drive(
     vel_toward = torch.where(lateral_error > 0, trunk_vel_y, -trunk_vel_y)
     drive = vel_toward.clamp(0.0, 3.0)                                  # 0..3 m/s, same clamp range as footreach's vel_sigma
 
-    # Blue decel-zone: same mechanism/constants as footreach's vel_sigma, but
-    # decaying all the way to 0 (not a 1x floor) since this term has no
-    # separate proximity reward underneath it to protect.
-    blue_approach = env._blue_wide & ~env._blue_landed_genuine
-    _BLUE_DECEL_ZONE = 0.30
-    _BLUE_DECEL_FLOOR = float(getattr(env, "_blue_landing_radius_current", 0.08))
-    dist_to_target = lateral_error.abs()
-    decay_frac = ((dist_to_target - _BLUE_DECEL_FLOOR) / (_BLUE_DECEL_ZONE - _BLUE_DECEL_FLOOR)).clamp(0.0, 1.0)
-    drive = torch.where(blue_approach, drive * decay_frac, drive)
+    # REMOVED 2026-08-29 (user request), was: Blue decel-zone -- same
+    # mechanism/constants as footreach's own (just-removed) blue decel-zone,
+    # but decaying all the way to 0 (not a 1x floor) since this term has no
+    # separate proximity reward underneath it to protect. Removed for the
+    # same reason as footreach's: redundant with `blue_stick_landing`, which
+    # already handles anti-oscillation/plant credit for wide crossings (see
+    # footreach's own removal comment above for the full evidence). Not yet
+    # validated against a live training run -- same watch-list as footreach's
+    # removal (wide-crossing oscillation exploit returning).
 
     behind = _ball_is_behind(env, ball_name)
     active = env._blue_wide & (~behind)
@@ -4971,95 +4985,135 @@ def cleanstop(
     env: "ManagerBasedRlEnv",
     ball_name: str,
     speed_threshold: float = 1.0,
-    best_speed: float = 0.2,
-    decay_rate: float = 3.75,
-    settle_steps: int = 10,
+    steepness: float = 2.0,
+    window_start: int = 8,   # ticks after softstop fires, ~0.16s @ dt=0.02s
+    window_end: int = 12,    # ticks after softstop fires, ~0.24s @ dt=0.02s
 ) -> torch.Tensor:
-    """One-time reward, scaled by how dead the ball is, when the correct foot deflects it.
+    """One-time reward, fires a FIXED delay after softstop, scored by ball speed
+    averaged over that window -- can go NEGATIVE for a hard/violent deflection.
 
-    Fires once per episode when softstop has already triggered AND the ball's total
-    speed drops below speed_threshold (1.0 m/s) AND the correct foot was in contact
-    at softstop moment -- same one-time latch and gates as before. The PAYOUT is no
-    longer binary: it's `clamp(exp(-decay_rate*(speed-best_speed)), 0, 1)`, worst
-    (~0.05) at speed_threshold=1.0 m/s and best (1.0) at best_speed=0.2 m/s or below.
+    REWORKED 2026-08-29 (user request), replacing the settle-window design
+    below (kept in this docstring for history). Root cause: investigating a
+    separate "the robot learns to kick the ball" report, a live-checkpoint
+    probe (`model_39750`, 1181 tracked contacts) found the ball is often
+    still well above speed_threshold (1.0 m/s) for a long time after a
+    genuine deflection -- mean total speed 1.84 m/s at the contact instant,
+    still 1.73 m/s a full 0.4s later. The OLD design below only fired once
+    the ball's speed happened to drop under 1.0 m/s and stay there for 10
+    consecutive ticks -- for a hard kick, that could take far longer than
+    any reasonable window, or never trigger within an episode at all. When
+    it eventually did fire (via ordinary rolling friction, seconds later,
+    fully decoupled from how violent the original contact was), it could
+    only ever score in [0, 1] -- a violent kick that never settles just
+    silently pays 0 and vanishes, giving ZERO gradient against kicking.
+    Merged (per user, "why don't we integrate this in cleanstop... i think
+    that is the better solution") into a single term rather than adding a
+    second sibling reward alongside stopball/softstop/cleanstop/
+    contact_yield_velocity: one FIXED-delay measurement now serves both
+    "reward a genuinely clean stop" and "penalize a violent one" instead of
+    two overlapping mechanisms.
 
+    New design: once `softstop` fires (genuine correct-foot deflection,
+    same eligibility gates as before -- correct foot, not a sole-contact
+    save), average the ball's total speed over ticks [window_start,
+    window_end] after that instant (8-12 ticks @ dt=0.02s = 0.16-0.24s,
+    approximating the requested 0.15-0.25s average window under this sim's
+    discrete tick size), then fire EXACTLY ONCE using that average --
+    unconditional on whether the ball ever actually got slow. Averaging
+    (not a single instant sample) absorbs a transient mid-bounce spike/dip,
+    serving the same role the old settle-counter served, without the old
+    design's open-ended "wait however long it takes" failure mode.
+
+    Payout: `scale = tanh(steepness * (speed_threshold - avg_speed))` -- a
+    single continuous function, symmetric around `speed_threshold`: exactly
+    0.0 there, approaching +1 for slow/clean stops and -1 for fast/violent
+    ones. `steepness=2.0` chosen for a gentle-ish slope near typical clean
+    speeds (0.35 m/s -> +0.86, 0.5 m/s -> +0.76) while still reaching
+    strongly negative for clearly bad speeds (1.5 m/s -> -0.76, 1.8 m/s ->
+    -0.92).
+
+    FIX 2026-08-29 (same day, user correction): the very first version of
+    this payout kept the OLD `exp(-decay_rate*(speed-best_speed))` kernel
+    and linearly rescaled it to try to reach `[-1,1]` -- but a plain
+    exponential is always positive and only decays toward 0 as speed grows,
+    so after rescaling it asymptoted around -0.05, NEVER actually reaching
+    anywhere near -1 in practice despite the `clamp(-1,1)` being present in
+    the code (the clamp just never engaged). Caught by plotting the shape
+    and having the user look at it. A first fix tried a two-piece
+    (separate positive/negative branches, different steepness each) design,
+    which did reach -1 properly but the user asked for "just one function"
+    instead -- replaced with the single symmetric `tanh` above, which
+    reaches a genuine floor near -1 by construction (`tanh` is bounded)
+    without any branching or explicit clamp needed at all.
+
+    Not yet validated against a live training run -- first-guess window
+    bounds/floor, same "document now, tune from real training data next"
+    convention this project already uses throughout. Watch `cleanstop`'s
+    own Episode_Reward for whether it goes meaningfully negative early in
+    training (expected -- current checkpoints kick) and trends back toward
+    positive as `contact_yield_velocity` (raised 25->50 same day) and this
+    term's own new negative gradient both push against it.
+
+    --- HISTORY (previous design, replaced above) ---
     FIX 2026-07-28 (user request): was a hard binary bonus gated on
-    `speed < 0.10` -- an all-or-nothing cliff that gave zero gradient anywhere
-    in the 0.10-1.0 m/s range a real (if imperfect) deflection lands in. Ball
-    speed at the softstop moment is a direct, controllable consequence of the
-    foot's contact velocity/orientation (the same mechanism `stopball`/
-    `softstop` already exploit), so a continuous payout gives denser signal
-    without changing what triggers it. Deliberately kept single-fire (not a
-    continuous per-step reward): a per-step version would pay out on every
-    remaining tick of the episode once the ball is naturally at rest,
-    overshooting the peak-magnitude budget the 2026-07-20 fix (item 8)
-    capped this reward group to, and -- the concern that blocked a naive
-    "just remove the fire event" design -- would let ball rolling-friction
-    alone (no genuine foot contact) farm reward for free. The `softstop_fired`
-    gate (a genuine velocity-reversal event) and `correct_foot` gate are
-    unchanged, so friction-only deceleration still can never trigger this.
-    decay_rate=3.75 solves `exp(-3.75*(1.0-0.2)) = exp(-3.0) ~= 0.05` at the
-    threshold edge, so a bare deflection right at the old cutoff still earns
-    a small but non-zero credit rather than a wall at zero.
-
-    FIX 2026-07-28 (same day, user request): added a settle window
-    (`settle_steps=10`, ~0.2s), same "consecutive ticks under threshold"
-    pattern the `blue` landing mechanism already uses. Without it, this
-    fired on the FIRST tick crossing under speed_threshold -- which can be a
-    transient dip mid-bounce, not the ball's actual settled speed (user
-    spotted a live episode where the ball was still visibly rolling at
-    0.3-0.5 m/s well after cleanstop had already fired and paid out). Now
-    requires speed to stay below speed_threshold for `settle_steps`
-    consecutive ticks before firing, and scores the LATER, more-settled
-    speed at that point instead of the first crossing.
+    `speed < 0.10` -- an all-or-nothing cliff that gave zero gradient
+    anywhere in the 0.10-1.0 m/s range a real (if imperfect) deflection
+    lands in. Switched to a continuous `clamp(exp(-decay_rate*(speed-
+    best_speed)), 0, 1)` payout, `decay_rate=3.75` chosen so
+    `exp(-3.75*(1.0-0.2))~=0.05` at the old threshold edge.
+    FIX 2026-07-28 (same day): added a settle window (`settle_steps=10`,
+    consecutive ticks under `speed_threshold`, leaky-decremented per the
+    2026-08-23 fix) so a transient mid-bounce dip wouldn't fire this on a
+    ball that was still genuinely rolling fast.
     """
     ball: Entity = env.scene[ball_name]
     ball_speed = ball.data.root_link_lin_vel_w.norm(dim=-1)  # (N,)
 
     if not hasattr(env, "_cleanstop_flag"):
         env._cleanstop_flag = torch.zeros(env.num_envs, dtype=torch.bool, device=env.device)
-    if not hasattr(env, "_cleanstop_settle_count"):
-        env._cleanstop_settle_count = torch.zeros(env.num_envs, dtype=torch.long, device=env.device)
+        env._cleanstop_prev_softstop = torch.zeros(env.num_envs, dtype=torch.bool, device=env.device)
+        env._cleanstop_since = torch.full((env.num_envs,), -1, dtype=torch.long, device=env.device)
+        env._cleanstop_speed_sum = torch.zeros(env.num_envs, device=env.device)
+        env._cleanstop_speed_count = torch.zeros(env.num_envs, dtype=torch.long, device=env.device)
 
     just_reset = env.episode_length_buf <= 1
     env._cleanstop_flag[just_reset] = False
-    env._cleanstop_settle_count[just_reset] = 0
+    env._cleanstop_prev_softstop[just_reset] = False
+    env._cleanstop_since[just_reset] = -1
+    env._cleanstop_speed_sum[just_reset] = 0.0
+    env._cleanstop_speed_count[just_reset] = 0
 
     softstop_fired = getattr(env, "_softstop_flag", None)
     if softstop_fired is None:
         return torch.zeros(env.num_envs, device=env.device)
 
     correct_foot = getattr(env, "_softstop_correct_foot", torch.zeros(env.num_envs, dtype=torch.bool, device=env.device))
-    # NEW 2026-08-15 (user request): "if the contact is detected between the
-    # sole of the foot and the ball that the reward for cleanstop is not
-    # given... only want to save with the side of the feet." Latched in
-    # softstop() (see that function's own comment for why -- asset_cfg
-    # resolution) across the WHOLE episode, not just softstop's own firing
-    # instant -- FIX 2026-08-15 (user report, "still see a spike in
-    # cleanstop"): the original single-instant capture missed sole contact
-    # happening before softstop fired or during cleanstop's own settle
-    # window afterward.
+    # Same "only save with the side of the foot" gate as before (2026-08-15).
     sole_contact = getattr(env, "_episode_sole_contact", torch.zeros(env.num_envs, dtype=torch.bool, device=env.device))
-    eligible = softstop_fired & correct_foot & ~sole_contact & ~env._cleanstop_flag
-    below = ball_speed < speed_threshold
+    eligible = correct_foot & ~sole_contact & ~env._cleanstop_flag
 
-    env._cleanstop_settle_count[eligible & below] += 1
-    # FIX 2026-08-23 (user request): was a hard reset to 0 on any single
-    # tick over threshold -- live checkpoint replay found ~36% of save
-    # attempts (84/231) hit at least one such bounce mid-settle, wiping
-    # out however many consecutive good ticks had already accumulated and
-    # forcing a fresh count from 0. Changed to a leaky decrement (-3) so
-    # one transient bounce costs progress, not the whole count -- same
-    # pattern this project already used to fix the analogous blue-ball
-    # landing-gate settle counter. Still fires only firmly under threshold.
-    env._cleanstop_settle_count[~(eligible & below)] = torch.clamp(
-        env._cleanstop_settle_count[~(eligible & below)] - 3, min=0
-    )
+    # Arm the fixed-delay window on the RISING EDGE of softstop's flag (this
+    # function has no direct access to softstop's own one-shot pulse, so the
+    # edge is detected locally against last call's snapshot -- cleanstop is
+    # registered after softstop, so softstop_fired is already fresh this tick).
+    was_armed = env._cleanstop_since >= 0
+    env._cleanstop_since[was_armed] += 1
+    just_softstopped = softstop_fired & ~env._cleanstop_prev_softstop & eligible & ~was_armed
+    env._cleanstop_since[just_softstopped] = 0
+    env._cleanstop_prev_softstop = softstop_fired.clone()
 
-    fired = eligible & (env._cleanstop_settle_count >= settle_steps)
+    armed = env._cleanstop_since >= 0
+    in_window = armed & (env._cleanstop_since >= window_start) & (env._cleanstop_since <= window_end)
+    env._cleanstop_speed_sum[in_window] += ball_speed[in_window]
+    env._cleanstop_speed_count[in_window] += 1
+
+    fired = armed & (env._cleanstop_since > window_end) & eligible
+    avg_speed = env._cleanstop_speed_sum / env._cleanstop_speed_count.clamp(min=1)
+
+    scale = torch.tanh(steepness * (speed_threshold - avg_speed))
+
     env._cleanstop_flag |= fired
-
-    scale = torch.clamp(torch.exp(-decay_rate * (ball_speed - best_speed)), min=0.0, max=1.0)
+    env._cleanstop_since[fired] = -1
     return fired.float() * scale
 
 
