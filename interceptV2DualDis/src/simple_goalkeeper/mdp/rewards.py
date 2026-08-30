@@ -5117,128 +5117,210 @@ def cleanstop(
     return fired.float() * scale
 
 
-def contact_yield_velocity(
+def _contact_yield_state(
+    env: "ManagerBasedRlEnv",
+    ball_name: str,
+    asset_cfg: SceneEntityCfg,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    """Shared one-shot contact-instant state for contact_yield_velocity_x/y.
+
+    REWORKED 2026-08-30 (user report: "why is there a delay between the
+    softstop reward and the contact yield velocity... the foot goes
+    backwards getting positive reward when the contact already happened and
+    some time has past so we get fake reward"). Confirmed via a live-
+    checkpoint probe (`model_14250`, 598 save events) comparing the TRUE
+    first foot-ball touch (the dedicated `ball_contact` ContactSensor,
+    correct foot) against `env._sb_deflection_now`'s own firing instant
+    (what this term used to sample):
+
+        lag        | % of events | vx at TRUE touch | vx when OLD code sampled
+        0 ticks     | 77%        | +0.66            | +0.66 (no issue)
+        1-4 ticks   | 12%        | +0.25            | +0.82 (drifts, still fwd)
+        5+ ticks    | 11%        | +0.19 (forward!) | -0.07 (already reversed)
+
+    For the 11% "5+ ticks" group, the foot is genuinely moving FORWARD
+    (into the ball) at the moment of physical contact, but `deflection_now`
+    doesn't fire until 0.1s+ later (waiting on `delta_vx` to build up past
+    stopball's 0.6 m/s threshold, or on the `landing_ok` gate) -- by then
+    the foot has already started its natural post-contact recovery motion,
+    which this term then credited as if it were genuine yielding-at-impact.
+    Real bug, confirmed, ~1 in 9 save events affected.
+
+    Fix: trigger directly off the `ball_contact` sensor's own first-true
+    instant for the correct foot (same sensor `penalize_wrong_foot_ball_
+    contact`/`feet_slippage` already use for foot-vs-ball detection),
+    instead of `env._sb_deflection_now`. Keeps the `in_front`/`landing_ok`
+    sanity gates `deflection_now` had (so a premature touch before a
+    genuine wide-crossing blue landing, or a touch already past the goal
+    line, still doesn't fire) but drops the `delta_vx` threshold entirely
+    -- that threshold was the actual source of the lag, not a meaningful
+    filter for THIS term's purpose (unlike stopball/softstop, this doesn't
+    need to distinguish a real deflection from a graze; it only needs the
+    true instant of first touch).
+
+    Memoized per-tick via `env._cyv_last_step` vs `env.episode_length_buf`
+    (same idiom `_get_reach_target_y` uses for its own settle counter) since
+    both contact_yield_velocity_x and contact_yield_velocity_y call this
+    every step and must see the identical `fired`/`assigned_vel_w` snapshot,
+    with the one-shot latch mutated exactly once per tick regardless of how
+    many callers.
+
+    Not yet validated against a live training run.
+    """
+    n = env.num_envs
+    device = env.device
+    if not hasattr(env, "_cyv_prev_touch"):
+        env._cyv_prev_touch = torch.zeros(n, dtype=torch.bool, device=device)
+        env._cyv_flag = torch.zeros(n, dtype=torch.bool, device=device)
+        env._cyv_last_step = torch.full((n,), -1, dtype=torch.long, device=device)
+        env._cyv_fired_cache = torch.zeros(n, dtype=torch.bool, device=device)
+        env._cyv_vel_cache = torch.zeros(n, 3, device=device)
+        env._cyv_foot_idx_cache = torch.zeros(n, dtype=torch.long, device=device)
+
+    just_reset = env.episode_length_buf <= 1
+    env._cyv_flag[just_reset] = False
+    env._cyv_prev_touch[just_reset] = False
+
+    if bool((env._cyv_last_step == env.episode_length_buf).all().item()):
+        return env._cyv_fired_cache, env._cyv_vel_cache, env._cyv_foot_idx_cache
+
+    foot_idx = _get_correct_foot_idx(env, ball_name)                        # (N,) 0=left, 1=right
+    arange = torch.arange(n, device=device)
+
+    ball_sensor: ContactSensor = env.scene["ball_contact"]
+    found = ball_sensor.data.found                                          # (N, n_geoms)
+    half = found.shape[1] // 2
+    left_touch = (found[:, :half] > 0).any(dim=-1)
+    right_touch = (found[:, half:] > 0).any(dim=-1)
+    per_foot_touch = torch.stack([left_touch, right_touch], dim=-1)         # (N, 2)
+    correct_touch_now = per_foot_touch[arange, foot_idx]
+
+    ball: Entity = env.scene[ball_name]
+    ball_x_local = ball.data.root_link_pos_w[:, 0] - env.scene.env_origins[:, 0]
+    in_front = ball_x_local > -0.3
+    landing_ok = ~env._blue_wide | env._blue_landed_genuine
+
+    new_touch = correct_touch_now & in_front & landing_ok & ~env._cyv_prev_touch
+    env._cyv_prev_touch = correct_touch_now
+    fired = new_touch & ~env._cyv_flag
+    env._cyv_flag = env._cyv_flag | fired
+
+    robot: Entity = env.scene[asset_cfg.name]
+    foot_vel_w = robot.data.body_link_lin_vel_w[:, asset_cfg.body_ids, :]   # (N, 2, 3)
+    assigned_vel_w = foot_vel_w[arange, foot_idx]                           # (N, 3)
+
+    env._cyv_fired_cache = fired
+    env._cyv_vel_cache = assigned_vel_w
+    env._cyv_foot_idx_cache = foot_idx
+    env._cyv_last_step = env.episode_length_buf.clone()
+    return fired, assigned_vel_w, foot_idx
+
+
+def contact_yield_velocity_x(
     env: "ManagerBasedRlEnv",
     ball_name: str,
     asset_cfg: SceneEntityCfg = _DEFAULT_FEET_CFG,
     max_credit_speed: float = 0.5,
 ) -> torch.Tensor:
-    """One-shot reward, fires exactly once at the genuine foot-ball contact
-    instant, for the leading foot's velocity 'giving' backward along the
-    direction NORMAL to (90 deg rotated from) its own orientation target
-    (`_FOOT_TARGET_COS`/`_FOOT_TARGET_SIN`, mirrored per assigned side --
-    the vector `foot_inner_face_continuous`/`inner_face_orientation_save`
-    target for the foot's TOE axis), rather than presenting a rigid,
-    stationary block face.
+    """X-axis half of contact_yield_velocity (see `_contact_yield_state` for
+    the shared contact-instant detection and its 2026-08-30 timing fix).
 
-    NEW 2026-08-23 (user request), successor to an earlier CONTINUOUS
-    version of this idea that the user explicitly corrected: "the other
-    mechanism is wrong it should be a one off reward since you only have
-    one contact moment for the booster to save the ball." Physical
-    reasoning (user's own): via conservation of momentum, a foot moving
-    backward (yielding) at contact absorbs some of the ball's incoming
-    momentum instead of rigidly rebounding it, lowering the post-contact
-    ball speed -- directly targets `cleanstop`'s own best_speed=0.2 goal,
-    which a live checkpoint replay (2026-08-23) found the policy currently
-    satisfies only marginally (mean ball speed at `cleanstop`-firing time
-    0.79 m/s, mean payout scale 0.13) -- consistent with there being no
-    reward anywhere that shapes the CONTACT itself, only the outcome after
-    the fact.
+    SPLIT 2026-08-30 (user request, "split up the contact_yield velocity in
+    its y and x component"). Root cause this closes: the original single
+    dot-product (`-dot(vel, target_dir_w)`, target_dir_w's X component
+    `_FOOT_TARGET_SIN~=0.82`, Y component `~=0.57`) let a large lateral (Y)
+    swing at contact compensate for a bad (forward, +X) X velocity BEFORE
+    either was clamped -- confirmed live: on `model_14250`, this term's
+    total reward rose 2.09->11.27 across training while raw foot vx at
+    contact got WORSE (+0.01->+0.19, i.e. more forward), and contact-instant
+    lateral velocity std ballooned 0.28->0.95 in the same window -- directly
+    consistent with the reward being satisfied via Y motion, not genuine -X
+    yielding. Splitting into two independently-clamped terms means a bad X
+    can no longer be masked by a good Y.
 
-    FIX 2026-08-23 (user correction, same day): first version used the
-    SAME direction as the foot-orientation target (the toe axis) --
-    corrected per explicit user request to use the NORMAL to it instead.
-    The toe-axis target `(cos, sign*sin)` points mostly sideways (70 deg
-    off forward); its normal points mostly along the robot's forward axis
-    -- i.e. roughly toward where the ball is coming from, a physically
-    sensible "block-face normal" (the direction the flat blocking surface
-    actually faces the incoming ball, as opposed to the toe-axis direction
-    the foot is rotated to). Yielding is then "backward" relative to THAT
-    normal, which points back toward -X -- the same direction the ball
-    itself is already travelling (`Frame Convention`: ball always
-    approaches in world -X).
-
-    FIX 2026-08-23 (user report, "the left green yield velocity direction
-    is correct but the right one is not"): a FIXED -90 deg rotation
-    (`(x,y) -> (y,-x)`) applied to each side's own already-mirrored
-    target vector does NOT produce a mirrored pair -- rotation and mirror
-    reflection don't commute. Applying `(x,y)->(y,-x)` to `(cos,sign*sin)`
-    gives `(sign*sin,-cos)`: X now carries the sign flip instead of Y,
-    which flips which LONGITUDINAL direction (forward vs backward) each
-    foot's normal points in -- concretely, left ended up pointing mostly
-    +X (forward) while right pointed mostly -X (backward), opposite
-    senses, not a mirror pair. Fixed by making the rotation ITSELF mirror
-    with `sign` (`+90 deg` for one side, `-90 deg` for the other, i.e.
-    `-sign*90 deg` uniformly): `target_dir_w = (sin, -sign*cos)`. Verified
-    algebraically: `dot(original, rotated) = cos*sin - sign^2*sin*cos = 0`
-    for both signs (still perpendicular), `|rotated|^2 = sin^2+sign^2*cos^2
-    = 1` (still unit length), and X (`sin`) is now sign-independent while
-    Y (`-sign*cos`) carries the flip -- the same mirror structure the
-    original toe-axis target itself has, this time correctly preserved
-    through the rotation.
-
-    Gated on `env._sb_deflection_now` -- `stopball`'s own raw per-tick
-    "is a genuine single-contact deflection happening right now" flag
-    (already correct-foot- and landing-gated, same event `softstop` keys
-    off) -- the correct, already-proven instant to sample foot velocity at,
-    reused rather than inventing a second contact-detection mechanism.
-
-    `yield_component = -dot(foot_vel_w, target_dir_w)`: positive when the
-    foot moves opposite to the block-face normal (retreating/yielding),
-    negative when it moves INTO that normal instead (bracing/ramming
-    rather than yielding). Scaled linearly by `max_credit_speed` (a plain
-    ratio, not a peaked/exp kernel -- this is a "more yield is better, up
-    to a point" quantity, not a target value to hit exactly, so a simple
-    linear scale gives gradient across the whole useful range rather than
-    concentrating it around one point) and clamped to `[-1, 1]`.
-
-    FIX 2026-08-23 (user request, "make the reward negative if it is
-    opposite the velocity because i only see a constant 0 reward"): was
-    clamped to `[0, max_credit_speed]` -- a non-yielding contact scored
-    exactly 0, indistinguishable from "no contact happened at all" from
-    the policy's perspective, giving no gradient AWAY from the wrong
-    behavior. Same reasoning already applied in this file to
-    `foot_inner_face_continuous` (see that function's own docstring: "a
-    mild, informative penalty gives clearer gradient... than merely
-    withholding reward, which would look identical to 'never rotated at
-    all'"). Now symmetric: `[-max_credit_speed, max_credit_speed]`,
-    normalized to `[-1, 1]`.
-
-    `max_credit_speed=0.5` m/s (user-set, was 1.0) is still a first guess
-    for the ceiling itself, not yet calibrated against a measured
-    foot-velocity-at-contact distribution; not yet validated against a
-    live training run.
+    This is the PRIMARY physical intent (user, when this term was first
+    designed: "the m/s should be roughly in the minus -x direction... that
+    is what the reward is for"): rewards -X (yielding backward, away from
+    where the ball is coming from), penalizes +X (moving forward into the
+    ball). Weight given the larger share of the original combined weight
+    (X:Y split 30:20, matching the original target_dir_w's own X:Y
+    magnitude ratio, sin(55)=0.82 vs cos(55)=0.57 ~= 59:41) -- first guess,
+    not yet validated against a live training run.
     """
-    if not hasattr(env, "_contact_yield_flag"):
-        env._contact_yield_flag = torch.zeros(env.num_envs, dtype=torch.bool, device=env.device)
-    just_reset = env.episode_length_buf <= 1
-    env._contact_yield_flag[just_reset] = False
-
-    deflection_now = getattr(
-        env, "_sb_deflection_now", torch.zeros(env.num_envs, dtype=torch.bool, device=env.device)
-    )
-    fired = deflection_now & ~env._contact_yield_flag
-    env._contact_yield_flag |= fired
-
-    robot: Entity = env.scene[asset_cfg.name]
-    foot_idx = _get_correct_foot_idx(env, ball_name)                        # (N,) 0=left, 1=right
-    expected_sign = torch.where(foot_idx == 0, 1.0, -1.0)                   # (N,) left=+Y, right=-Y
-
-    foot_vel_w = robot.data.body_link_lin_vel_w[:, asset_cfg.body_ids, :]   # (N, 2, 3)
-    arange = torch.arange(env.num_envs, device=env.device)
-    assigned_vel_w = foot_vel_w[arange, foot_idx]                           # (N, 3)
-
-    # Normal to the foot-orientation target vector, rotation itself mirrored
-    # by `sign` so left/right stay a proper mirror pair -- see FIX comment
-    # above (a fixed-direction rotation does NOT commute with the mirror).
-    target_dir_w = torch.zeros_like(assigned_vel_w)
-    target_dir_w[:, 0] = _FOOT_TARGET_SIN
-    target_dir_w[:, 1] = -expected_sign * _FOOT_TARGET_COS
-
-    yield_component = -torch.sum(assigned_vel_w * target_dir_w, dim=-1)     # (N,)
-    reward = torch.clamp(yield_component, min=-max_credit_speed, max=max_credit_speed) / max_credit_speed
-
+    fired, assigned_vel_w, foot_idx = _contact_yield_state(env, ball_name, asset_cfg)
+    yield_x = -assigned_vel_w[:, 0] * _FOOT_TARGET_SIN
+    reward = torch.clamp(yield_x, min=-max_credit_speed, max=max_credit_speed) / max_credit_speed
     return fired.float() * reward
+
+
+def contact_yield_velocity_y(
+    env: "ManagerBasedRlEnv",
+    ball_name: str,
+    asset_cfg: SceneEntityCfg = _DEFAULT_FEET_CFG,
+    max_credit_speed: float = 0.5,
+) -> torch.Tensor:
+    """Y-axis half of contact_yield_velocity -- see contact_yield_velocity_x's
+    docstring for the split rationale and `_contact_yield_state` for the
+    shared contact-instant detection/timing fix.
+
+    Secondary component (the original target_dir_w's lateral contribution,
+    `-sign*_FOOT_TARGET_COS`) -- not the primary intent, kept separate so it
+    can no longer substitute for a missing X-yield, but still credited on
+    its own terms. Not yet validated against a live training run.
+    """
+    fired, assigned_vel_w, foot_idx = _contact_yield_state(env, ball_name, asset_cfg)
+    expected_sign = torch.where(foot_idx == 0, 1.0, -1.0)                   # (N,) left=+Y, right=-Y
+    yield_y = assigned_vel_w[:, 1] * expected_sign * _FOOT_TARGET_COS
+    reward = torch.clamp(yield_y, min=-max_credit_speed, max=max_credit_speed) / max_credit_speed
+    return fired.float() * reward
+
+
+def _clearance_reward(
+    height: torch.Tensor,
+    target_height: float,
+    rise_steepness: float = 3.0,
+    fall_sigma: float = 300.0,
+) -> torch.Tensor:
+    """Shared asymmetric kernel for foot_clearance/trailing_foot_lift: steep,
+    monotonic rise from height=0, Gaussian-style falloff past target_height.
+
+    FIX 2026-08-30 (user request, "make the gradient better"): replaces the
+    OLD symmetric Gaussian bump (`exp(-sigma*(height-target)^2)`) both terms
+    used to share. Root cause found investigating a live-checkpoint report
+    ("trailing foot is clipping the floor a lot"): a live replay of a
+    trained checkpoint found the trailing foot's real height flat at ~0m
+    clearance the ENTIRE episode, gated or not -- the old kernel simply
+    wasn't pulling it off the ground.
+
+    Math: a Gaussian bump's gradient is `2*sigma*|h-target|*value(h)`, which
+    is maximized only near its own inflection point (`|h-target| =
+    1/sqrt(2*sigma)`, ~0.041m for sigma=300) and shrinks in BOTH directions
+    away from there -- including toward h=0. At target_height=0.10,
+    sigma=300, the gradient AT h=0 (2.99) is ~50x smaller than at the
+    inflection point (~148.6): h=0 sits deep in the tail, exactly where a
+    foot that has never lifted starts from, so the old kernel gave almost
+    no pull to leave the ground in the first place -- a policy that never
+    randomly explores into the inflection zone never discovers the reward
+    is there at all.
+
+    New shape: `tanh(rise_steepness * height / target_height) *
+    exp(-fall_sigma * max(height-target_height, 0)^2)`. The rise half is
+    STEEPEST exactly at height=0 (tanh'(0) is tanh's maximum slope, unlike a
+    Gaussian's vanishing tail there) and reaches near-1 by target_height
+    (rise_steepness=3.0 -> tanh(3.0)=0.995) -- e.g. at height=0.05 (halfway
+    to a 0.10 target) this scores ~0.90 vs the old kernel's ~0.47, a much
+    denser intermediate-progress signal. The fall half is UNCHANGED in
+    shape/constant (`fall_sigma` defaults to the old `clearance_sigma=300`)
+    so overshoot-past-target is still discouraged exactly as before (a
+    height 0.05m past target still scores ~0.47, matching the old
+    symmetric bump's overshoot side almost exactly).
+
+    Not yet validated against a live training run.
+    """
+    rise = torch.tanh(rise_steepness * height / target_height)
+    excess = (height - target_height).clamp(min=0.0)
+    fall = torch.exp(-fall_sigma * excess ** 2)
+    return rise * fall
 
 
 def foot_clearance(
@@ -5246,7 +5328,8 @@ def foot_clearance(
     ball_name: str,
     asset_cfg: SceneEntityCfg = _DEFAULT_FEET_CFG,
     target_height: float = 0.10,
-    clearance_sigma: float = 300.0,
+    rise_steepness: float = 3.0,
+    fall_sigma: float = 300.0,
 ) -> torch.Tensor:
     """Reward for lifting a foot to (not past) a target height during ball approach.
 
@@ -5259,19 +5342,16 @@ def foot_clearance(
 
     FIX 2026-07-27 (user request): was a linear ramp clamped at target_height
     (10 cm) -- 10cm, 20cm, and 1m all scored the identical 1.0 ceiling, so
-    nothing discouraged lifting the foot far higher than needed. Now a smooth
-    bump `exp(-clearance_sigma * (height - target_height)^2)`, peaking at
-    exactly 1.0 at target_height and decaying symmetrically on both sides --
-    matches this reward table's existing exp(-k*err) kernel convention
-    (feetorientation, footreach's phase1, etc.) instead of a hard clamp.
-    clearance_sigma=300 chosen so the shape tracks the old linear ramp
-    closely below the peak (h=0 -> ~0.05, h=0.05 -> ~0.47, close to the old
-    ramp's exact 0.0/0.5) while now also decaying above 10cm instead of
-    plateauing (h=0.15 -> ~0.47, h=0.20 -> ~0.05, mirroring the low side).
-    No G1 equivalent exists for this term at all (checked -- no
-    `_reward_feet_clearance`-style function anywhere in legged_robot.py), so
-    this remains a pure SGK design choice, not a G1-parity change. Not yet
-    validated against a live training run.
+    nothing discouraged lifting the foot far higher than needed. Replaced
+    with a symmetric Gaussian bump.
+
+    FIX 2026-08-30 (user request, "make the gradient better"): the Gaussian
+    bump replaced above with `_clearance_reward` (see that function's own
+    docstring for the full root-cause/math) -- steep monotonic rise from 0,
+    unchanged Gaussian falloff past target. No G1 equivalent exists for this
+    term at all (checked -- no `_reward_feet_clearance`-style function
+    anywhere in legged_robot.py), so this remains a pure SGK design choice.
+    Not yet validated against a live training run.
     """
     behind = _ball_is_behind(env, ball_name)
     robot: Entity = env.scene[asset_cfg.name]
@@ -5279,7 +5359,7 @@ def foot_clearance(
     floor_z = env.scene.env_origins[:, 2]                                     # (N,)
     foot_z_above_floor = (foot_pos_w[:, :, 2] - floor_z[:, None]).clamp(0.0, None)  # (N, 2)
     max_foot_height = foot_z_above_floor.max(dim=-1).values                   # (N,)
-    reward = torch.exp(-clearance_sigma * (max_foot_height - target_height) ** 2)
+    reward = _clearance_reward(max_foot_height, target_height, rise_steepness, fall_sigma)
     return reward * (~behind).float()
 
 
@@ -5288,7 +5368,8 @@ def trailing_foot_lift(
     ball_name: str,
     asset_cfg: SceneEntityCfg = _DEFAULT_FEET_CFG,
     target_height: float = 0.10,
-    clearance_sigma: float = 300.0,
+    rise_steepness: float = 3.0,
+    fall_sigma: float = 300.0,
 ) -> torch.Tensor:
     """Reward for lifting the TRAILING (non-assigned) foot during the
     blue->orange and orange->red waypoint journey.
@@ -5301,9 +5382,14 @@ def trailing_foot_lift(
     journey (mirrors the gap `orange_foot_proximity` closed for trailing-foot
     *position* on 2026-08-08, this time for height).
 
-    Same Gaussian-bump shape/constants as foot_clearance (target_height=0.10,
-    clearance_sigma=300) -- consistent kernel convention across the reward
-    table, scoped to one foot instead of max(both).
+    Same shared kernel as foot_clearance -- see `_clearance_reward`'s own
+    docstring for the full shape/rationale. FIX 2026-08-30 (user request,
+    "make the gradient better"): was the same symmetric Gaussian bump
+    foot_clearance used to have, replaced same day, same reasoning -- a live
+    checkpoint replay (this exact reward's own investigation) found the
+    trailing foot's real height flat at ~0m clearance the entire episode,
+    consistent with the old kernel's near-zero gradient right at height=0
+    (see `_clearance_reward` docstring for the math).
 
     Active window: `env._orange_wide & ~env._red_landed_genuine` -- a single
     gate spanning BOTH requested spans (start->orange, i.e. before orange
@@ -5335,7 +5421,7 @@ def trailing_foot_lift(
     floor_z = env.scene.env_origins[:, 2]                                    # (N,)
     trailing_z = (trailing_z_w - floor_z).clamp(0.0, None)                   # (N,)
 
-    reward = torch.exp(-clearance_sigma * (trailing_z - target_height) ** 2)
+    reward = _clearance_reward(trailing_z, target_height, rise_steepness, fall_sigma)
 
     active = env._orange_wide & ~env._red_landed_genuine
     return reward * active.float()

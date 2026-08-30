@@ -775,9 +775,25 @@ def goalkeeper_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
         # next lever is attacking the momentum at its source (an
         # early-window foot-speed penalty as the foot closes the last
         # ~0.2-0.3m to the ball), not just raising this weight further.
-        "contact_yield_velocity": RewardTermCfg(
-            func=gk_mdp.contact_yield_velocity,
-            weight=50.0,
+        # FIX 2026-08-30 (user request): split into X/Y components (see
+        # rewards.py:contact_yield_velocity_x/_y for the full rationale --
+        # the combined dot-product let a big lateral swing mask a bad,
+        # forward X velocity) AND retimed off the true first ball-contact
+        # instant instead of stopball's own sometimes-delayed
+        # `_sb_deflection_now` (user report + confirmed live: ~11% of save
+        # events had a 0.1s+ lag during which the foot had already reversed
+        # from a genuinely forward contact-instant velocity, crediting a
+        # later recovery motion as if it were yielding-at-impact). Weight
+        # split 30/20 (was a single 50), matching the original combined
+        # vector's own X:Y magnitude ratio (sin(55)=0.82 : cos(55)=0.57).
+        "contact_yield_velocity_x": RewardTermCfg(
+            func=gk_mdp.contact_yield_velocity_x,
+            weight=30.0,
+            params={"ball_name": BALL_NAME, "asset_cfg": _FEET_CFG, "max_credit_speed": 0.5},
+        ),
+        "contact_yield_velocity_y": RewardTermCfg(
+            func=gk_mdp.contact_yield_velocity_y,
+            weight=20.0,
             params={"ball_name": BALL_NAME, "asset_cfg": _FEET_CFG, "max_credit_speed": 0.5},
         ),
         # --- continuing close-to-target signal, tiered 1.0x/2.0x/3.0x by softstop/cleanstop

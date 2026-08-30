@@ -1160,26 +1160,23 @@ def _patch_viewer_wrong_foot_contact_plot(native_viewer: "NativeMujocoViewer", e
     native_viewer._update_reward_figures = _patched_update_reward_figures
 
 
-_FOOT_TARGET_ANGLE_DEG = 70.0
-"""Must match rewards.py's _FOOT_TARGET_ANGLE_DEG (leading-foot block-posture
-target, 2026-08-01, retargeted 60->45 2026-08-07, reverted 45->60 2026-08-08
-per user request -- back to the original 2026-08-01 value; retargeted again
-60->75 2026-08-10 per user request, "15 degrees from the y axis", after a
-model_11250.pt replay found the foot almost not rotating toward the target
-at all. FIX 2026-08-13: reverted 75->60. FIX 2026-08-15: retargeted 60->50 --
-FK/render analysis found Hip_Yaw's physical reach ceiling (~54.17deg from
-neutral) is below 60deg -- since superseded, see below. FIX 2026-08-16
-(user request, "i want the target of the foot to be at 80 degrees, because
-left near literally shows it is possible"): retargeted 50->80. The 54.17deg
-ceiling above only accounted for Hip_Yaw's own joint range -- the same-day
-Waist/toe-azimuth investigation found a second yaw source (Waist, +/-90deg)
-plus a real Ankle_Pitch gimbal-coupling contribution at large yaw, both
-missed by that earlier FK analysis; see rewards.py's _FOOT_TARGET_ANGLE_DEG
-docstring and docs/BugFixes.md). FIX 2026-08-22 (user request, "make it 70
-degrees"): retargeted 80->70. Kept as a separate literal here
-(viewer-only display, no runtime dependency on rewards.py's private
-constant) purely for the plot title -- verify against rewards.py if that
-constant ever changes."""
+# FIX 2026-08-30: this used to be a manually-duplicated literal here
+# ("Kept as a separate literal... verify against rewards.py if that constant
+# ever changes") -- found desynced while adding a target-vs-current color
+# split to this same plot: this file's copy still read 70.0 (last touched
+# 2026-08-22, "make it 70 degrees") while rewards.py's real
+# `_FOOT_TARGET_ANGLE_DEG` had since moved to 55.0 (commit `9f6d20a`,
+# 2026-08-23) -- the plot title's "target=70" was stale and had been
+# silently wrong for a week of sessions. Now imported directly from
+# rewards.py (single source of truth, see `_patched_setup` below) instead of
+# duplicated -- can never drift again. History of the old literal's own
+# retargeting preserved here: 2026-08-01 introduced, 60->45 (2026-08-07),
+# 45->60 (2026-08-08, reverted), 60->75 (2026-08-10, "15 degrees from the y
+# axis"), 75->60 (2026-08-13), 60->50 (2026-08-15, Hip_Yaw's ~54.17deg reach
+# ceiling), 50->80 (2026-08-16, after finding Waist yaw + Ankle_Pitch gimbal
+# coupling raised the real ceiling well past 54deg), 80->70 (2026-08-22) --
+# and then, in rewards.py only (this file's copy stopped tracking it),
+# 70->55 (2026-08-23).
 
 _INNER_FOOT_TARGET_OFFSET = 0.05
 """Must match rewards.py's _get_foot_block_offset helper (NEW 2026-08-15, user
@@ -1307,6 +1304,7 @@ def _patch_viewer_foot_orientation_plot(native_viewer: "NativeMujocoViewer", env
     def _patched_setup() -> None:
         orig_setup()
         from mjlab.viewer.native.viewer import make_empty_figure
+        from simple_goalkeeper.mdp.rewards import _FOOT_TARGET_ANGLE_DEG
         cfg = native_viewer._plot_cfg
         native_viewer._figures[_NAME] = make_empty_figure(
             # FIX 2026-08-16 (SAME DAY, user request, "i want 80 degrees in
@@ -1326,6 +1324,7 @@ def _patch_viewer_foot_orientation_plot(native_viewer: "NativeMujocoViewer", env
 
     def _patched_update_reward_figures(viewer_handle: "mujoco.viewer.Handle") -> None:
         if native_viewer._show_plots and native_viewer._term_names and not native_viewer._is_paused:
+            from simple_goalkeeper.mdp.rewards import _FOOT_TARGET_ANGLE_DEG
             angle_deg = _compute_assigned_foot_angle_deg(env, native_viewer.env_idx)
             native_viewer._append_point(_NAME, angle_deg)
             native_viewer._write_history_to_figure(_NAME)
@@ -1354,6 +1353,26 @@ def _patch_viewer_foot_orientation_plot(native_viewer: "NativeMujocoViewer", env
                 fig.range[1][0] = 0.0
             if fig.range[1][1] > 100.0 * scale:
                 fig.range[1][1] = 100.0 * scale
+
+            # FIX 2026-08-30 (user request, "use different colors for target
+            # and current angle"): the target was previously only visible as
+            # a static number in the title string (see _patched_setup above)
+            # -- easy to lose track of while watching the live current-angle
+            # line move, and (see the _FOOT_TARGET_ANGLE_DEG desync fixed
+            # same day above) had no way to catch itself going stale. Draws
+            # a second line (mjlab's MjvFigure supports up to 100 lines per
+            # figure via linedata/linepnt/linergb, this plot only ever used
+            # line index 0 before) holding a flat horizontal reference at
+            # the current target value, same x-range/scale as the current-
+            # angle line so both stay visually aligned. mujoco's own default
+            # figure palette already gives line index 1 a distinct color
+            # (green, vs line 0's default red/pink) -- no manual rgba needed.
+            n = int(fig.linepnt[0])
+            fig.linepnt[1] = n
+            target_scaled = float(_FOOT_TARGET_ANGLE_DEG) * scale
+            for i in range(n):
+                fig.linedata[1][2 * i] = float(-i)
+                fig.linedata[1][2 * i + 1] = target_scaled
         orig_update_reward_figures(viewer_handle)
 
     native_viewer.setup = _patched_setup
@@ -1603,7 +1622,9 @@ def _patch_viewer_foot_restitution_plot(native_viewer: "NativeMujocoViewer", env
     orig_update_reward_figures = native_viewer._update_reward_figures
 
     _RAW_NAME = "foot_restitution_dampratio"
-    _ALSO_PROMOTED = "contact_yield_velocity"  # ordinary reward term, already has an auto-created figure
+    # FIX 2026-08-30: contact_yield_velocity split into X/Y components
+    # (rewards.py) -- promote both, same auto-created-figure mechanism.
+    _ALSO_PROMOTED = ("contact_yield_velocity_x", "contact_yield_velocity_y")
     _DEMOTED = ("trailing_foot_forward_continuous", "wrong_foot_ball_contact")
     _FIXED_LO, _FIXED_HI = -0.5, 1.5
 
@@ -1617,8 +1638,8 @@ def _patch_viewer_foot_restitution_plot(native_viewer: "NativeMujocoViewer", env
         )
         native_viewer._histories[_RAW_NAME] = deque(maxlen=cfg.history)
         native_viewer._scale[_RAW_NAME] = 1.0
-        rest = [n for n in native_viewer._term_names if n not in (_RAW_NAME, _ALSO_PROMOTED, *_DEMOTED)]
-        front = [_RAW_NAME] + ([_ALSO_PROMOTED] if _ALSO_PROMOTED in native_viewer._term_names else [])
+        rest = [n for n in native_viewer._term_names if n not in (_RAW_NAME, *_ALSO_PROMOTED, *_DEMOTED)]
+        front = [_RAW_NAME] + [n for n in _ALSO_PROMOTED if n in native_viewer._term_names]
         native_viewer._term_names = front + rest
 
     def _write_fixed_range(name: str, lo: float, hi: float) -> None:
@@ -1653,13 +1674,17 @@ def _patch_viewer_foot_restitution_plot(native_viewer: "NativeMujocoViewer", env
         # each with a fixed, correct-units range afterward, same bypass
         # already used for foot_restitution_dampratio.
         if native_viewer._show_plots and not native_viewer._is_paused:
-            if _ALSO_PROMOTED in native_viewer._histories:
-                # max = 1.0 (raw) * 5.0 (weight) = 5.0
-                # FIX 2026-08-23: range was (-0.5, 5.5), stale from before
-                # the symmetric-penalty fix (rewards.py) -- true range is
-                # now weight * [-1,1] = [-5.0, 5.0], and the old range
-                # clipped anything below -0.5.
-                _write_fixed_range(_ALSO_PROMOTED, -5.5, 5.5)
+            # FIX 2026-08-30: this range was already stale even before
+            # today's X/Y split -- comment claimed "weight=5.0" but the
+            # actual registered weight had moved to 25.0 (2026-08-25) then
+            # 50.0 (2026-08-29) without this plot ever being updated to
+            # match. Now two separate terms with their own weights
+            # (goalkeeper_env_cfg.py: X=30.0, Y=20.0), true range for each
+            # is weight * [-1,1].
+            if "contact_yield_velocity_x" in native_viewer._histories:
+                _write_fixed_range("contact_yield_velocity_x", -30.0, 30.0)
+            if "contact_yield_velocity_y" in native_viewer._histories:
+                _write_fixed_range("contact_yield_velocity_y", -20.0, 20.0)
             if "cleanstop" in native_viewer._histories:
                 # FIX 2026-08-23 (user request, "fix cleanstop aswell"):
                 # max = 1.0 (raw scale) * 34.72 (cleanstop_curriculum's own
