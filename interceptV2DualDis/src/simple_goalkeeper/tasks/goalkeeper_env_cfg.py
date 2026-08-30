@@ -231,9 +231,45 @@ def goalkeeper_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
     cfg.commands.clear()
 
     # ------------------------------------------------------------------
-    # Curriculum: ramp ball difficulty 0→1 over training
-    # Stages match upstream: stage1 at 600 iters, stage2 at 1200 iters
-    # (num_steps_per_env=24 by default → same thresholds as Imitationlearningbooster).
+    # Curriculum
+    #
+    # FIX 2026-08-30 (user request, "organise this... give same curriculum
+    # to a group of rewards... make logical groups"): reorganized into 3
+    # tiers by importance -- previously one long list in whatever order
+    # each reward happened to be introduced, across ~2 months of dated
+    # fixes. Tiers only affect WHERE an entry is grouped/registered in this
+    # file, not which curriculum mechanism it uses -- reward_curriculum_ep_len
+    # (smooth ramp, weight=base*(1+0.5*cu)) vs correct_foot_save_curriculum
+    # (step-double at cu>=activate_at_cu) stays per-term, unchanged.
+    #
+    # A literal single CurriculumTermCfg cannot drive several rewards'
+    # weights at once (each reward needs its own base_weight), so "grouping"
+    # here means physical placement + tier-header comments, not a shared
+    # object -- see docs/BugFixes.md for the full reasoning (a
+    # dict-driven grouped_reward_curriculum class was considered and
+    # deferred as a separate, optional follow-up).
+    #
+    # Two curricula exist OUTSIDE the tiers below -- not reward weights:
+    #   - ball_difficulty (right below): spawn difficulty, not a reward.
+    #   - far_travel_curriculum (mdp/events.py): far-region spawn Y-range --
+    #     a genuine outlier, not registered via cfg.curriculum[...] at all,
+    #     instantiated directly inside reset_ball_rolling/region-spawn
+    #     events. Flagged here so the next "what curricula exist" survey
+    #     doesn't miss it (it did, until this same reorg).
+    #
+    # FIX 2026-08-30 (user report, confirmed): correct_foot_save_curriculum's
+    # activate_at_cu=3 was UNREACHABLE in practice. cu=int(smoothed_ep_len/50);
+    # episode_length_s=3.0 @ dt=0.02s = 150 steps max, so cu=3 requires the
+    # training batch's SMOOTHED MEAN episode length to hit that absolute
+    # ceiling -- effectively zero early terminations
+    # (bad_orientation/base_height/sharpforce/ball_exit) averaged across the
+    # whole batch. Any nonzero rate on those channels (there is always one)
+    # caps the mean below 150, so cu never reaches 3 -- all 7 step-doubling
+    # entries below ran at flat base_weight the ENTIRE run, never their
+    # documented doubled value. Lowered activate_at_cu 3 -> 2 for all 7
+    # (surgical: only this group's own threshold, doesn't touch the shared
+    # env._curriculumupdate computation the reward_curriculum_ep_len entries
+    # also depend on).
     # ------------------------------------------------------------------
     _num_steps = 24
     cfg.curriculum.clear()
@@ -251,41 +287,21 @@ def goalkeeper_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
                 "step_size":       0.01,  # difficulty units per curriculumupdate per check
             },
         )
+
+        # ================================================================
+        # TIER 1 -- core save mechanics (essential to the final product):
+        # the actual save event, its quality bonuses, the core approach
+        # signal, and the primary (X) contact-yield direction.
+        # ================================================================
         # Episode-length-driven weight curriculum — mirrors G1 compute_reward() lines 359-364:
         #   weight = base * (1 + 0.5 * curriculumupdate)  where cu = int(mean_ep_len / 50)
-        # All three terms share env._curriculumupdate (set by whichever runs first each window).
+        # All entries below share env._curriculumupdate (set by whichever runs first each window).
         # G1 max (cu=3, ep_len=150): softstop 105→262.5, footreach 10→25.
-        #
-        # FIX 2026-07-20 (reward audit item 8, peak-magnitude cap): the six
-        # terms that can all fire around a single save event -- stopball,
-        # softstop, single_foot_save, cleanstop, inner_face_orientation_save,
-        # foot_inner_face_continuous -- summed to a combined max-curriculum
-        # peak of 18.75+131.25+100+50+50+10 = 360 even after the same-day
-        # halving pass above, still 1.44x G1's own ceiling for the equivalent
-        # single "did you stop it" event (_reward_stopball, curriculum-scaled
-        # 100->250, no per-foot/orientation/cleanliness sub-bonuses). Scaled
-        # this whole group down by a further 25/36 (0.69444) so the combined
-        # peak lands at exactly 250, preserving each term's relative share of
-        # the group (SGK's feet-specific quality bonuses stay individually
-        # reasoned, just resized to fit under G1's ceiling as a group):
-        #   stopball                    7.5   -> 5.21   (max 18.75 -> 13.02)
-        #   softstop                   52.5   -> 36.46  (max 131.25 -> 91.15)
-        #   single_foot_save           50.0   -> 34.72  (max 100 -> 69.44)
-        #   cleanstop                  25.0   -> 17.36  (max 50 -> 34.72)
-        #   inner_face_orientation_save 25.0  -> 17.36  (max 50 -> 34.72)
-        #   foot_inner_face_continuous  5.0   -> 3.47   (max 10 -> 6.94)
-        # New combined peak: 13.02+91.15+69.44+34.72+34.72+6.94 = 250.0 (exact,
-        # 25/36 chosen precisely so the sum lands on G1's ceiling). See
-        # docs/BugFixes.md for the full derivation. Static `weight=` values in
-        # cfg.rewards below (stopball/softstop) are also updated to match
-        # these new base weights -- they were previously stale pre-halving
-        # values only used in play mode (no curriculum there); this also
-        # fixes that pre-existing static/curriculum mismatch as a side effect.
         cfg.curriculum["softstop_curriculum"] = CurriculumTermCfg(
             func=gk_mdp.reward_curriculum_ep_len,
             params={
                 "reward_name": "softstop",
-                "base_weight": 36.46,   # 52.5 * 25/36 -- see item-8 cap comment above
+                "base_weight": 36.46,   # 52.5 * 25/36 -- see item-8 cap comment below
                 "update_interval": 500,
                 "ep_len_divisor":  50,
             },
@@ -304,6 +320,96 @@ def goalkeeper_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
                 "ep_len_divisor":  50,
             },
         )
+        # G1 lines 363-364: stopball weight also grows with curriculum (same formula as eereach).
+        cfg.curriculum["stopball_curriculum"] = CurriculumTermCfg(
+            func=gk_mdp.reward_curriculum_ep_len,
+            params={
+                "reward_name": "stopball",
+                "base_weight": 5.21,    # 7.5 * 25/36 -- see item-8 cap comment below
+                "update_interval": 500,
+                "ep_len_divisor":  50,
+            },
+        )
+        # G1's own `success` reward (legged_robot.py:1402-1403): continuing,
+        # doubled-after-save, close-to-target signal -- NOT part of the item-8
+        # group below (G1 itself keeps it outside _reward_stopball's own
+        # weight ceiling). base=5.0 -> max 12.5 at cu=3, matching G1's
+        # success_init=5.0 (g1_29_config.py:300) exactly under the same
+        # weight=base*(1+0.5*cu) formula. See rewards.py:success docstring.
+        # FIX 2026-08-25 (user request, delegated to Claude's judgment):
+        # base_weight 5.0 -> 3.5 (30% trim, max 12.5 -> 8.75 at cu=3) --
+        # deliberate divergence from the G1-matched value above. A live
+        # 16224-iteration run (6144_footangle55deg_2026-08-23) showed
+        # success logging ~10-11 per episode, the single largest reward in
+        # the table -- roughly 300x the entire possible range of the new
+        # contact_yield_velocity term (max ~0.033 at weight=5.0, one-shot,
+        # normalized to [-1,1]), which never learned to yield and drifted
+        # slightly negative instead. This trim is a rebalancing move to give
+        # contact_yield_velocity's now-larger weight genuine room to matter,
+        # not a claim that G1's value was wrong for G1's own task. Not yet
+        # validated against a live training run.
+        cfg.curriculum["success_curriculum"] = CurriculumTermCfg(
+            func=gk_mdp.reward_curriculum_ep_len,
+            params={
+                "reward_name": "success",
+                "base_weight": 3.5,
+                "update_interval": 500,
+                "ep_len_divisor":  50,
+            },
+        )
+        # Correct-foot-save quality bonuses (one-shot, at the genuine
+        # contact instant): step-double at cu >= 2 (was 3 -- see the
+        # activate_at_cu fix note at the top of this section). Only makes
+        # sense once the robot already saves reliably.
+        #
+        # FIX 2026-07-20 (reward audit item 8, peak-magnitude cap): the six
+        # terms that can all fire around a single save event -- stopball,
+        # softstop, single_foot_save, cleanstop, inner_face_orientation_save,
+        # foot_inner_face_continuous (the last now lives in Tier 3 below,
+        # base weight unchanged, still part of this same derivation) --
+        # summed to a combined max-curriculum peak of
+        # 18.75+131.25+100+50+50+10 = 360, 1.44x G1's own ceiling for the
+        # equivalent single "did you stop it" event (_reward_stopball,
+        # curriculum-scaled 100->250, no per-foot/orientation/cleanliness
+        # sub-bonuses). Scaled this whole group down by 25/36 (0.69444) so
+        # the combined peak lands at exactly 250, preserving each term's
+        # relative share of the group:
+        #   stopball                    7.5   -> 5.21   (max 18.75 -> 13.02)
+        #   softstop                   52.5   -> 36.46  (max 131.25 -> 91.15)
+        #   single_foot_save           50.0   -> 34.72  (max 100 -> 69.44)
+        #   cleanstop                  25.0   -> 17.36  (max 50 -> 34.72)
+        #   inner_face_orientation_save 25.0  -> 17.36  (max 50 -> 34.72)
+        #   foot_inner_face_continuous  5.0   -> 3.47   (max 10 -> 6.94)
+        # New combined peak: 13.02+91.15+69.44+34.72+34.72+6.94 = 250.0
+        # (exact, 25/36 chosen precisely so the sum lands on G1's ceiling).
+        # See docs/BugFixes.md for the full derivation.
+        #
+        # FIX 2026-08-30 (user request, "add [contact_yield_velocity] also
+        # with trailing foot clearance because those are important"): added
+        # contact_yield_velocity_x here -- same event class as the item-8
+        # group above (one-shot bonus at the genuine contact instant), same
+        # "only makes sense once the robot already saves reliably" reasoning.
+        # Base weight matches its current static weight (2026-08-30
+        # rebalance: X=45.0 dominant over Y) -- doubles to 90.0 at cu=2.
+        # contact_yield_velocity_y and trailing_foot_lift deliberately NOT
+        # here -- see Tier 2/3 below.
+        for _name, _base in (
+            ("single_foot_save",             34.72),
+            ("cleanstop",                    17.36),
+            ("inner_face_orientation_save",  17.36),
+            ("contact_yield_velocity_x",     45.0),
+        ):
+            cfg.curriculum[f"{_name}_curriculum"] = CurriculumTermCfg(
+                func=gk_mdp.correct_foot_save_curriculum,
+                params={"reward_name": _name, "base_weight": _base, "activate_at_cu": 2},
+            )
+
+        # ================================================================
+        # TIER 2 -- waypoint scaffolding + trailing-foot mechanics: the
+        # wide-crossing blue/orange/red mechanism and near-region analog,
+        # plus trailing_foot_lift (user-confirmed just as important as the
+        # rest of this tier, not a Tier-3 afterthought).
+        # ================================================================
         # FIX 2026-07-26 (near-region oscillation): near-region analog of
         # blue_stick_landing_curriculum below -- same base_weight (8.0),
         # ported for the same reason (dense "close AND slow" anti-
@@ -326,16 +432,6 @@ def goalkeeper_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
             params={
                 "reward_name": "near_stick_reach",
                 "base_weight": 4.0,
-                "update_interval": 500,
-                "ep_len_divisor":  50,
-            },
-        )
-        # G1 lines 363-364: stopball weight also grows with curriculum (same formula as eereach).
-        cfg.curriculum["stopball_curriculum"] = CurriculumTermCfg(
-            func=gk_mdp.reward_curriculum_ep_len,
-            params={
-                "reward_name": "stopball",
-                "base_weight": 5.21,    # 7.5 * 25/36 -- see item-8 cap comment above
                 "update_interval": 500,
                 "ep_len_divisor":  50,
             },
@@ -501,47 +597,49 @@ def goalkeeper_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
                 "ep_len_divisor":  50,
             },
         )
-        # Correct-foot-save quality bonuses: weights double at cu >= 3 (ep_len ≈ 144 steps).
-        # Only makes sense once the robot already saves reliably (cu=3 = footreach fully ramped).
-        # One entry per reward, same pattern as reward_curriculum_ep_len.
-        # Base weights scaled by 25/36 (item-8 peak-magnitude cap, see comment above).
+        # FIX 2026-08-30 (user request, "trailing foot lift is quite
+        # important... just as important as the stuff from tier 2"):
+        # step-doubles at cu>=2 same as Tier 1's correct-foot-save group --
+        # base weight matches current static weight, doubles 2.0 -> 4.0.
+        # FIX 2026-08-30 (later same day, user request, weight-audit
+        # follow-up): added foot_clearance alongside it -- the two share
+        # the EXACT SAME kernel (`_clearance_reward`, unified earlier
+        # today) and target_height (0.10), scoped to max(both feet) vs the
+        # trailing foot only, but foot_clearance had been left flat while
+        # trailing_foot_lift got curriculum-scaled -- an inconsistency
+        # between two sibling terms using identical math, found during the
+        # weight-distribution audit. Same base weight/doubling as
+        # trailing_foot_lift.
         for _name, _base in (
-            ("single_foot_save",             34.72),
-            ("cleanstop",                    17.36),
-            ("inner_face_orientation_save",  17.36),
-            ("foot_inner_face_continuous",    3.47),
+            ("trailing_foot_lift", 2.0),
+            ("foot_clearance",     2.0),
         ):
             cfg.curriculum[f"{_name}_curriculum"] = CurriculumTermCfg(
                 func=gk_mdp.correct_foot_save_curriculum,
-                params={"reward_name": _name, "base_weight": _base, "activate_at_cu": 3},
+                params={"reward_name": _name, "base_weight": _base, "activate_at_cu": 2},
             )
-        # G1's own `success` reward (legged_robot.py:1402-1403): continuing,
-        # doubled-after-save, close-to-target signal -- NOT part of the item-8
-        # group above (G1 itself keeps it outside _reward_stopball's own
-        # weight ceiling). base=5.0 -> max 12.5 at cu=3, matching G1's
-        # success_init=5.0 (g1_29_config.py:300) exactly under the same
-        # weight=base*(1+0.5*cu) formula. See rewards.py:success docstring.
-        # FIX 2026-08-25 (user request, delegated to Claude's judgment):
-        # base_weight 5.0 -> 3.5 (30% trim, max 12.5 -> 8.75 at cu=3) --
-        # deliberate divergence from the G1-matched value above. A live
-        # 16224-iteration run (6144_footangle55deg_2026-08-23) showed
-        # success logging ~10-11 per episode, the single largest reward in
-        # the table -- roughly 300x the entire possible range of the new
-        # contact_yield_velocity term (max ~0.033 at weight=5.0, one-shot,
-        # normalized to [-1,1]), which never learned to yield and drifted
-        # slightly negative instead. This trim is a rebalancing move to give
-        # contact_yield_velocity's now-larger weight (see below) genuine
-        # room to matter, not a claim that G1's value was wrong for G1's own
-        # task. Not yet validated against a live training run.
-        cfg.curriculum["success_curriculum"] = CurriculumTermCfg(
-            func=gk_mdp.reward_curriculum_ep_len,
-            params={
-                "reward_name": "success",
-                "base_weight": 3.5,
-                "update_interval": 500,
-                "ep_len_divisor":  50,
-            },
-        )
+
+        # ================================================================
+        # TIER 3 -- secondary / reconsider whether curriculum is warranted
+        # at all for these. Kept curriculum-scaled for now (not reverted to
+        # flat) -- revisit once a live training run gives real evidence.
+        # ================================================================
+        # foot_inner_face_continuous: the 6th member of Tier 1's item-8
+        # peak-magnitude-cap group above (base weight/derivation unchanged,
+        # only its file position moved) -- small weight (3.47), continuous
+        # face-orientation term, judged less essential than the Tier 1 save
+        # events it shares that derivation with.
+        # contact_yield_velocity_y: deliberately de-emphasized (weight 5,
+        # was 20) as secondary to contact_yield_velocity_x -- open question
+        # whether doubling 5->10 at cu=2 is even worth it; left in for now.
+        for _name, _base in (
+            ("foot_inner_face_continuous", 3.47),
+            ("contact_yield_velocity_y",   5.0),
+        ):
+            cfg.curriculum[f"{_name}_curriculum"] = CurriculumTermCfg(
+                func=gk_mdp.correct_foot_save_curriculum,
+                params={"reward_name": _name, "base_weight": _base, "activate_at_cu": 2},
+            )
 
     # ------------------------------------------------------------------
     # Observations
@@ -786,14 +884,21 @@ def goalkeeper_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
         # later recovery motion as if it were yielding-at-impact). Weight
         # split 30/20 (was a single 50), matching the original combined
         # vector's own X:Y magnitude ratio (sin(55)=0.82 : cos(55)=0.57).
+        # FIX 2026-08-30 (later same day, user request, "i dont want that
+        # the most important velocity is the [equal-ish split]... i want
+        # you to decrease the y velocity drastically and put it towards the
+        # x"): 30/20 -> 45/5. X is now the dominant, primary signal (9x Y,
+        # was 1.5x); Y kept small but nonzero so the corrected toward-center
+        # direction (see contact_yield_velocity_y's 2026-08-30 sign-flip
+        # fix) still has some gradient. Total unchanged at 50.
         "contact_yield_velocity_x": RewardTermCfg(
             func=gk_mdp.contact_yield_velocity_x,
-            weight=30.0,
+            weight=45.0,
             params={"ball_name": BALL_NAME, "asset_cfg": _FEET_CFG, "max_credit_speed": 0.5},
         ),
         "contact_yield_velocity_y": RewardTermCfg(
             func=gk_mdp.contact_yield_velocity_y,
-            weight=20.0,
+            weight=5.0,
             params={"ball_name": BALL_NAME, "asset_cfg": _FEET_CFG, "max_credit_speed": 0.5},
         ),
         # --- continuing close-to-target signal, tiered 1.0x/2.0x/3.0x by softstop/cleanstop

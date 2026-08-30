@@ -735,27 +735,40 @@ def _patch_viewer_intercept_vis(native_viewer: "NativeMujocoViewer", env) -> Non
 
 
 def _patch_viewer_contact_yield_vis(native_viewer: "NativeMujocoViewer", env) -> None:
-    """Draw `contact_yield_velocity`'s target direction and the leading
-    foot's actual velocity as two lines from the foot, every frame.
+    """Draw `contact_yield_velocity_x`/`_y`'s combined rewarded direction and
+    the leading foot's actual velocity as two lines from the foot, every
+    frame.
 
     NEW 2026-08-23 (user request), "could u plot that vector in the play
-    script" -- `contact_yield_velocity` (`rewards.py`) rewards the
-    leading foot's velocity component along a specific direction (the
-    -90deg rotation of the foot-orientation target vector); this draws
-    that same direction so it's visually inspectable, not just a number
-    on a plot. Two lines from the assigned foot's current position:
-    - GREEN: the rewarded ("yield") direction, `-target_dir_w`, fixed
-      visual length 0.3m -- this is what the foot SHOULD move along.
+    script" -- rewards the leading foot's velocity component along a
+    specific direction; this draws that direction so it's visually
+    inspectable, not just a number on a plot. Two lines from the assigned
+    foot's current position:
+    - GREEN: the combined rewarded ("yield") direction, fixed visual length
+      0.3m -- this is what the foot SHOULD move along.
     - ORANGE: the foot's ACTUAL current velocity direction, projected onto
       the XY plane (Z zeroed -- FIX 2026-08-23, user request, "only
-      planar to the xy plane not the noisy z height": the reward's own
-      `target_dir_w` has Z=0 too, so vertical velocity never affects the
-      actual reward -- including it here only added noisy jitter from
-      bounce/landing to a line meant to show the in-plane alignment),
-      scaled to a fixed 0.3m visual length (direction only, not true
-      magnitude) -- lets you see at a glance how aligned actual motion is
-      with the reward's target (parallel = high reward, opposite = the
-      new negative-penalty branch, perpendicular = ~0).
+      planar to the xy plane not the noisy z height": neither reward term
+      reads vertical velocity, so including it here only added noisy
+      jitter from bounce/landing to a line meant to show the in-plane
+      alignment), scaled to a fixed 0.3m visual length (direction only, not
+      true magnitude) -- lets you see at a glance how aligned actual motion
+      is with the reward's target (parallel = high reward, opposite = the
+      negative-penalty branch, perpendicular = ~0).
+
+    FIX 2026-08-30 (user report, "the green vector didn't change its
+    angle... it should be pointed -x and -y direction when the ball is on
+    the side for the +y side"): `contact_yield_velocity` was split into
+    independent X/Y terms same day, and `contact_yield_velocity_y`'s own
+    direction was flipped (now rewards yielding TOWARD the robot's midline,
+    not away from it) -- but this viewer line still drew the OLD combined
+    `-target_dir_w`, unchanged, so it silently stopped matching what's
+    actually rewarded. Rebuilt directly from each term's own formula
+    instead of the old single vector: X component `-_FOOT_TARGET_SIN`
+    (unchanged, matches contact_yield_velocity_x), Y component
+    `-expected_sign*_FOOT_TARGET_COS` (matches contact_yield_velocity_y's
+    2026-08-30 sign flip). For the assigned foot on the +Y (left) side this
+    now correctly points into the (-X,-Y) quadrant, as reported.
 
     Drawn every frame (not just at the fire instant) so the direction is
     visible during the whole approach, not only for one tick at contact.
@@ -787,14 +800,12 @@ def _patch_viewer_contact_yield_vis(native_viewer: "NativeMujocoViewer", env) ->
         origin = foot_pos_w[foot_idx]
         vel = foot_vel_w[foot_idx]
 
-        # FIX 2026-08-23 (user report, "left correct, right is not"): must
-        # mirror the rotation itself with expected_sign, not just apply it
-        # to the X component -- see rewards.py:contact_yield_velocity's
-        # matching FIX comment for the full derivation. Keep in sync.
-        target_dir = np.array(
-            [_FOOT_TARGET_SIN, -expected_sign * _FOOT_TARGET_COS, 0.0], dtype=np.float64,
+        # Built directly from contact_yield_velocity_x/_y's own formulas
+        # (see FIX 2026-08-30 above), not derived from a single rotated
+        # vector anymore -- the two terms are independent since the split.
+        yield_dir = np.array(
+            [-_FOOT_TARGET_SIN, -expected_sign * _FOOT_TARGET_COS, 0.0], dtype=np.float64,
         )
-        yield_dir = -target_dir  # the rewarded direction (see rewards.py:contact_yield_velocity)
 
         scn = viewer_handle.user_scn
 
@@ -1678,13 +1689,15 @@ def _patch_viewer_foot_restitution_plot(native_viewer: "NativeMujocoViewer", env
             # today's X/Y split -- comment claimed "weight=5.0" but the
             # actual registered weight had moved to 25.0 (2026-08-25) then
             # 50.0 (2026-08-29) without this plot ever being updated to
-            # match. Now two separate terms with their own weights
-            # (goalkeeper_env_cfg.py: X=30.0, Y=20.0), true range for each
-            # is weight * [-1,1].
+            # match. Now two separate terms with their own weights, true
+            # range for each is weight * [-1,1].
+            # FIX 2026-08-30 (later same day, user request, "decrease the y
+            # velocity drastically and put it towards the x"): weights
+            # 30/20 -> 45/5 (goalkeeper_env_cfg.py) -- ranges updated to match.
             if "contact_yield_velocity_x" in native_viewer._histories:
-                _write_fixed_range("contact_yield_velocity_x", -30.0, 30.0)
+                _write_fixed_range("contact_yield_velocity_x", -45.0, 45.0)
             if "contact_yield_velocity_y" in native_viewer._histories:
-                _write_fixed_range("contact_yield_velocity_y", -20.0, 20.0)
+                _write_fixed_range("contact_yield_velocity_y", -5.0, 5.0)
             if "cleanstop" in native_viewer._histories:
                 # FIX 2026-08-23 (user request, "fix cleanstop aswell"):
                 # max = 1.0 (raw scale) * 34.72 (cleanstop_curriculum's own
@@ -1980,13 +1993,19 @@ def _patch_viewer_all_footorientation_plots(native_viewer: "NativeMujocoViewer",
         # foot_ang_vel_xy deleted entirely (goalkeeper_env_cfg.py/rewards.py/
         # mdp/__init__.py) -- superseded by ankle_pitch_vel/ankle_roll_vel
         # below, see docs/BugFixes.md.
-        # NEW 2026-08-15 (user request): ankle_pitch_vel is the new
-        # always-on Ankle_Pitch-specific joint_vel_l2 penalty
-        # (goalkeeper_env_cfg.py) -- probe evidence (docs/BugFixes.md,
-        # 2026-08-15) found Ankle_Pitch's own joint velocity, not the
-        # whole-body world-frame sum foot_ang_vel_xy used to measure,
-        # actually leads the leading foot's pre-save pitch spike.
-        "ankle_pitch_vel",
+        # SWAPPED 2026-08-30 (user request): ankle_pitch_vel -> softstop.
+        # ankle_pitch_vel's own slot history: added 2026-08-15 -- probe
+        # evidence (docs/BugFixes.md, 2026-08-15) found Ankle_Pitch's own
+        # joint velocity, not the whole-body world-frame sum foot_ang_vel_xy
+        # used to measure, actually leads the leading foot's pre-save pitch
+        # spike. Removed from this panel (not from the reward table --
+        # still registered/trained in goalkeeper_env_cfg.py, just no longer
+        # promoted to an always-visible front slot) to make room for
+        # `softstop` -- the single biggest weight in the whole reward table
+        # (up to 262.5) and the save-quality investigation's own trigger
+        # event, worth watching directly alongside cleanstop/contact_yield_
+        # velocity_x/_y rather than only inferring it from _softstop_flag.
+        "softstop",
         # REMOVED 2026-08-15 (user request, "drop the _pos"): ankle_pitch_pos/
         # ankle_roll_pos deleted from the reward manager entirely (see
         # goalkeeper_env_cfg.py) -- removed from this panel too. ankle_roll_vel

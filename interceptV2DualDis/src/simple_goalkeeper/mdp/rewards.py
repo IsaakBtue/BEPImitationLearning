@@ -5263,14 +5263,34 @@ def contact_yield_velocity_y(
     docstring for the split rationale and `_contact_yield_state` for the
     shared contact-instant detection/timing fix.
 
-    Secondary component (the original target_dir_w's lateral contribution,
-    `-sign*_FOOT_TARGET_COS`) -- not the primary intent, kept separate so it
-    can no longer substitute for a missing X-yield, but still credited on
-    its own terms. Not yet validated against a live training run.
+    FIX 2026-08-30 (user request, "i want the y contact yield velocity in
+    the y direction to be pointed towards the center"): sign flipped from
+    the split's initial version. That version reused the ORIGINAL combined
+    term's Y-contribution as-is (`+sign*_FOOT_TARGET_COS`) -- which, worked
+    through geometrically, actually rewarded the foot retreating LATERALLY
+    OUTWARD (away from the robot's own midline) at contact, not inward.
+    That direction is a side effect of how `target_dir_w` was originally
+    built for the X axis (rotate the toe-axis orientation target `(cos,
+    sign*sin)` by `-sign*90deg` to get the X-axis "block-face normal") --
+    correct for X, but never independently chosen for Y once split out.
+
+    User's ask ("rotate the correct vector... 90 degrees" [for the Y
+    velocity]): rotate the SAME toe-axis target vector by the OTHER
+    mirrored 90 degrees (`+sign*90deg` instead of `-sign*90deg`) to get a
+    fresh, independent Y reference pointing inward. Worked through:
+    rotating `(cos, sign*sign_component)`... by `+sign*90deg` gives
+    `(-sin, sign*cos)` (vs. the original `-sign*90deg` giving `(sin,
+    -sign*cos)`, `target_dir_w`'s literal value) -- a 180deg swing from the
+    original, i.e. exactly its negation. So this is algebraically just
+    `-sign*_FOOT_TARGET_COS`, the previous formula's sign flipped: positive
+    reward now when the assigned foot's Y-velocity points back toward the
+    robot's own midline (left foot at +Y moving in -Y, right foot at -Y
+    moving in +Y), negative when it flings further outward instead. Not
+    yet validated against a live training run.
     """
     fired, assigned_vel_w, foot_idx = _contact_yield_state(env, ball_name, asset_cfg)
     expected_sign = torch.where(foot_idx == 0, 1.0, -1.0)                   # (N,) left=+Y, right=-Y
-    yield_y = assigned_vel_w[:, 1] * expected_sign * _FOOT_TARGET_COS
+    yield_y = -assigned_vel_w[:, 1] * expected_sign * _FOOT_TARGET_COS
     reward = torch.clamp(yield_y, min=-max_credit_speed, max=max_credit_speed) / max_credit_speed
     return fired.float() * reward
 
