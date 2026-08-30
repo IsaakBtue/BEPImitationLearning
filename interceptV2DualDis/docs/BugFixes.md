@@ -3827,3 +3827,60 @@ Not yet validated against a live training run.
 **My own assessment (asked for directly, "think to yourself we dont need weight reshuffle?"):** no, I don't think a broader reshuffle is warranted right now. The `foot_clearance` fix above closes the one concrete inconsistency the audit turned up. The rest of the spread reflects real, defensible priority differences once one-shot vs. continuous firing is accounted for -- core save events (`softstop`, `contact_yield_velocity_x`, `single_foot_save`) legitimately dominate, continuous shaping terms are smaller per-tick by design (they accumulate), and the smallest flat terms (`postlinvel`, `postlegdofpos`, `angular_momentum_penalty`) are narrow post-save nudges, not oversights. This is a judgment call from static analysis, not a live-training result -- the real test is whether a training run shows any of these terms failing to move the policy at all, which would be the actual evidence for revisiting this.
 
 **Evidence:** 90/90 tests pass. Live smoke test (train-mode env, 32 envs, 50 steps): `foot_clearance`/`trailing_foot_lift`/`contact_yield_velocity_x`/`_y` all register correctly, base weights read correctly at cu=0. Not yet validated against a live training run.
+
+---
+
+## 2026-08-30 (later still) — Tier 3 merged into Tier 2 (grouping only)
+
+**User request:** "put tier 3 in tier 2 no reason to seperate, and according to your explenation that wont change anything about training." Correct -- confirmed. Merged `foot_inner_face_continuous` and `contact_yield_velocity_y` (former Tier 3) into the same `correct_foot_save_curriculum` for-loop as `trailing_foot_lift`/`foot_clearance` (Tier 2), now 4 entries in one loop. Base weights, mechanism, and `activate_at_cu=2` unchanged for both -- pure file-organization change, no training-affecting edit. 90/90 tests pass.
+
+---
+
+## 2026-08-30 (later still) — contact_yield_velocity_x/_y trigger reverted to `_sb_deflection_now`: the ball_contact-sensor retiming broke firing entirely
+
+**User report:** watching `model_8250` (from `6144_yieldflip_curriculum_2026-08-30`, the first live run since the earlier same-day retiming) in `play.py`, `contact_yield_velocity_x`/`_y` never fire -- confirmed live, zero events.
+
+**Root cause of the zero-fire regression:** not fully isolated. The retiming (see the entry above this one) switched the trigger from `env._sb_deflection_now` to the `ball_contact` sensor's own first-true instant, splitting the sensor's geom columns via `found[:, :half]`/`found[:, half:]` -- that split was never verified against `sensor.primary_names` (the exact check `debugging-mujoco-contact-sensors`, `.claude/skills/`, requires before trusting a combined sensor's column order). Other candidate: `env._blue_wide`/`env._blue_landed_genuine` (read by the new `landing_ok` gate) not being fresh yet at this term's registration position. Not isolated further -- reverted instead per explicit user request ("please keep using the stopball flag").
+
+**Fix:** `_contact_yield_state` (`rewards.py`) reverted to `env._sb_deflection_now` as the trigger -- same simple one-shot latch pattern the term used before the retiming, `ball_contact`-sensor logic removed entirely. The ~11% contact-instant timing lag this retiming was meant to fix (previous entry) is real but a strictly smaller problem than a term that fires 0% of the time.
+
+**Evidence:** 90/90 tests pass. Live smoke test (`model_8250`, 128 envs, 800 steps): `contact_yield_velocity_x` n=248 fires (mean -16.2), `contact_yield_velocity_y` n=248 fires (mean -0.54) -- confirmed firing again on the exact checkpoint that showed zero fires. If the `ball_contact`-based timing fix is revisited later, use the contact-sensor debugging skill's probe pattern (print `sensor.primary_names`, verify column order live) instead of reasoning about geom order from source alone -- that skill exists specifically because this codebase has hit this exact mistake class before (`penalize_wrong_foot_ball_contact`, 3+ rounds).
+
+---
+
+## 2026-08-30 (later still) — contact_yield_velocity_x/_y now average 4 backward ticks; Y's max_credit_speed lowered to 0.3
+
+**User request:** "i want 4 ticks before hand only and then compute it" (backward-only averaging window, discussed and asked for after confirming a forward-looking window was feasible but would reintroduce the just-reverted recovery-motion risk) "also set the target y velocity for contact yield to something small like 0.3 max."
+
+**Fix 1 -- 4-tick backward average:** `_contact_yield_state` (`rewards.py`) now maintains a small ring buffer (`env._cyv_vel_history`, shape `(N,4,3)`) of the assigned foot's velocity, updated every tick. When `_sb_deflection_now` fires on tick t, the reward is scored on the MEAN of ticks t-4..t-1 (read from the buffer BEFORE the current tick's velocity is folded in) -- never tick t itself or anything after it, so no delayed payout and no reintroduction of the recovery-motion contamination risk the earlier ball_contact-based retiming had (that one looked forward; this one only ever looks backward). Smooths out single-tick noise from the discrete collision impulse.
+
+**Fix 2 -- Y's `max_credit_speed` 0.5 -> 0.3:** raw lateral speed needed to reach full credit shrinks from ~0.87 m/s to ~0.52 m/s (the formula scales by `cos(55deg)~=0.574`). Updated both the registration (`goalkeeper_env_cfg.py`) and the function's own default (`rewards.py`) so they stay in sync.
+
+**Evidence:** 90/90 tests pass. Live smoke test (`model_8250`, 128 envs, 800 steps): `contact_yield_velocity_x` n=243 fires (mean -25.8), `contact_yield_velocity_y` n=243 fires (mean -0.58) -- still firing correctly after both changes. Not yet validated against a live training run.
+
+---
+
+## 2026-08-30 (later still) — investigated far-region blue approach speed; added a landing_radius ground-circle viewer overlay
+
+**User report:** "still not satisfied with the speed the booster goes towards [blue] ball... specifically talking about the far range." Investigated live on `model_8250` before proposing any fix (systematic-debugging: gather evidence first).
+
+**Root cause found:** measured actual foot/trunk velocity toward blue during far-region approach (28,288 samples, wide+unlanded window): median foot |vy|=**0.002 m/s**, median trunk |vy|=**0.009 m/s** -- essentially stationary for most of the window, and 0% of samples ever reached the existing 3.0 m/s `footreach`/`blue_trunk_drive` vel_sigma clamp ceiling. So the positive speed incentive isn't the bottleneck -- the policy isn't using the incentive it already has. Cross-checked `blue_overshoot_penalty` (a CONTINUOUS per-step penalty, by its own docstring design, curriculum peak -150) and found it firing 20,238 times across far-region ticks in the same run, against a strict landing tolerance of only 0.08m. Conclusion: the policy has learned extreme caution (near-zero approach speed) to avoid triggering/prolonging this large, easily-tripped, continuously-paid penalty -- a classic risk-aversion pattern, not an under-incentivized-speed problem. Raising the positive speed weight further was NOT recommended for this reason (see chat) -- proposed instead: lower `blue_overshoot_penalty`'s magnitude, and/or widen `landing_radius`. Neither implemented yet, awaiting user's choice.
+
+**Added (user request, viewer-only):** a ground-circle overlay in `play.py`'s `_patch_viewer_intercept_vis`, drawn at the blue waypoint showing `landing_radius` (hardcoded to the strict 0.08m/ball_difficulty=1 value, per explicit user request -- not read live from the curriculum-eased value) as a ring of connected line segments (`_add_ground_circle`, new helper -- mujoco has no native ring/annulus decor geom, so it's built from `_add_line` segments the same way every other marker in this file already is). Lets a human visually compare where the foot actually lands against the true tolerance zone.
+
+**Evidence:** 90/90 tests pass, `python3 -m py_compile` clean. Pure viewer/geometry addition, no reward-manager dependency -- not separately live-smoke-tested beyond the syntax/import check.
+
+**Correction (same session, self-caught):** the circle above was drawn at radius 0.08 -- stale. The strict `landing_radius` default has actually been **0.15** since a 2026-07-24 fix (`rewards.py:_get_reach_target_y`'s own comment: "was 0.08... too strict, widened to 0.15") -- I used stale memory instead of checking the current code, and the diagnosis two entries above ("8cm tolerance") inherited the same error (the underlying finding -- near-zero approach speed, `blue_overshoot_penalty` firing constantly -- still stands independent of the exact radius number). User asked to "increase it to 0.15" based on my wrong framing; since 0.15 is already current, clarified with the user and, pending their answer on whether to raise it further, fixed the visualization's radius to the correct current value (0.15) so at least the circle matches reality. `landing_radius` itself not changed.
+
+---
+
+## 2026-08-30 (later still) — landing_radius widened for blue/orange/red (strict settled at 0.18, easy at 0.30); overshoot penalties switched to a shared live radius (found: they never tracked the gate's own value AT ALL, stuck at 0.08 since 2026-07-23)
+
+**Sequence of user requests, all same session:**
+1. "increase the radius to 0.2 and easy to 0.3, also do this for orange and red" -- `_get_reach_target_y`/`_get_orange_reach_target_y`/`_get_red_reach_target_y`'s `landing_radius` default 0.15->0.20, easy-end hardcode 0.20->0.30, all three waypoints (`rewards.py`).
+2. "update it so it uses a common variable" -- while widening, found `blue_overshoot_penalty`/`orange_overshoot_penalty`/`red_overshoot_penalty` each had their OWN separate hardcoded `landing_radius=0.08` parameter, never wired to the gate's value at all. Confirmed: this wasn't just stale after the 2026-07-24 widening (0.08->0.15) -- these three penalties had used a static 0.08m since their ORIGINAL 2026-07-23 implementation, un-eased by curriculum and untouched by every later widening. Removed the separate parameter from all three; they now read `env._blue_landing_radius_current`/`_orange_landing_radius_current`/`_red_landing_radius_current` directly (the exact live value the corresponding `_get_*_reach_target_y` function -- already called at the top of each penalty function -- just computed and cached). Can't drift apart again.
+3. "lets have the strict at the real 0.15 then... matter of fact have it 0.18" -- after confirming the overshoot-penalty bug, reconsidered the strict end down from 0.20 to **0.18** (settled value). Easy end (0.30) unchanged. Updated all three waypoints' defaults plus the ground-circle viewer overlay (0.15) and `_get_reach_target_y`'s own easing-formula comment to match.
+
+**Final state:** strict `landing_radius` = 0.18 (was 0.15 for ~5 weeks, 0.08 before that), easy = 0.30 (was 0.20). All three overshoot penalties now track this live, no separate stale copy possible.
+
+**Evidence:** 90/90 tests pass at every step. Live smoke test (`model_8250`): `env._blue_landing_radius_current` correctly reads the updated value, `blue_overshoot_penalty` still fires (expected -- this checkpoint was trained under the old mismatched radii, so nothing changes retroactively for it). `python3 -m py_compile` clean on `play.py`. None of these changes validated against a live training run yet -- the actual test is whether a new run shows less far-region caution now that the overshoot penalty tracks a genuinely reachable radius instead of a phantom 0.08m one.

@@ -611,6 +611,36 @@ def _patch_viewer_intercept_vis(native_viewer: "NativeMujocoViewer", env) -> Non
                 to=to,
             )
 
+        def _add_ground_circle(cx: float, cy: float, z: float, r: float, width: float, rgba, n_segments: int = 32) -> None:
+            """Draw a circle outline on the ground as N connected line
+            segments -- mujoco has no native ring/annulus decor geom, so this
+            approximates one the same way _add_line already draws everything
+            else in this file (mjGEOM_LINE segments via mjv_connector).
+
+            NEW 2026-08-30 (user request): "visualise a circle where the
+            blue ball spawns... shows the radius" -- landing_radius, the
+            deadband _get_reach_target_y/blue_overshoot_penalty use to
+            decide "at blue" vs "overshot" (rewards.py). User specifically
+            asked for the STRICT end (ball_difficulty=1) rather than the
+            curriculum-eased loose end (0.20m at difficulty=0) -- hardcoded
+            here rather than read from env, since this is a fixed reference
+            circle for visual comparison against wherever the foot actually
+            lands, not a live readout of the current difficulty-eased
+            radius (see the assigned_foot_angle_deg-style plots for that
+            pattern if a live-radius version is wanted later).
+
+            FIX 2026-08-30 (correction, same session): the strict value
+            passed at the call site was 0.08 -- stale, that's the value
+            from BEFORE a 2026-07-24 fix already widened it to 0.15
+            (rewards.py:_get_reach_target_y's own FIX comment: "was 0.08,
+            too strict... widened to 0.15"). Caught from stale memory
+            rather than the current code; fixed at the call site to 0.15.
+            """
+            angles = np.linspace(0.0, 2.0 * np.pi, n_segments, endpoint=True)
+            pts = np.stack([cx + r * np.cos(angles), cy + r * np.sin(angles), np.full_like(angles, z)], axis=-1)
+            for i in range(n_segments - 1):
+                _add_line(pts[i], pts[i + 1], width, rgba)
+
         # Two-stage schedule -- read the cached state _get_reach_target_y
         # (rewards.py) sets every step, rather than recomputing wide/region
         # here (see docstring).
@@ -629,6 +659,15 @@ def _patch_viewer_intercept_vis(native_viewer: "NativeMujocoViewer", env) -> Non
                 np.array([goal_x, mid_y, sphere_z], dtype=np.float64),
                 0.008, [0.15, 0.4, 1.0, 0.6],
             )
+            # Strict landing_radius (0.15m, ball_difficulty=1) as a ground
+            # ring around the blue target -- see _add_ground_circle above.
+            # FIX 2026-08-30 (correction): was drawn at 0.08 -- stale, that
+            # was the pre-2026-07-24 value (rewards.py:_get_reach_target_y's
+            # own FIX comment: "was 0.08, too strict, widened to 0.15").
+            # Caught from stale memory, not the current code -- verified
+            # against rewards.py's actual `landing_radius: float = 0.15`
+            # default before fixing.
+            _add_ground_circle(goal_x, mid_y, floor_z + 0.002, 0.18, 0.006, [0.15, 0.4, 1.0, 0.9])
         else:
             # Phase 2 (or narrow crossing): GREEN sphere at the foot's aim point
             # (the true crossing point + a small outward offset, see

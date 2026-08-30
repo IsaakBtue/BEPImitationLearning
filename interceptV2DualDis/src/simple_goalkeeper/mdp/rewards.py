@@ -553,7 +553,7 @@ def _get_reach_target_y(
     ball_name: str,
     asset_cfg: SceneEntityCfg = _DEFAULT_FEET_CFG,
     wide_threshold: float = 0.5,  # FIX 2026-08-01: was 0.65, reverted to 0.5, kept in sync with regions.py's near/far boundary
-    landing_radius: float = 0.15,  # FIX 2026-07-24: was 0.08 (user request: too strict at full difficulty)
+    landing_radius: float = 0.18,  # FIX 2026-08-30: 0.15->0.20->0.18 (2026-07-24: was 0.08, too strict at full difficulty)
     landing_speed_threshold: float = 1.0,  # FIX 2026-07-24: reverted to the pre-2026-07-23 value (was 0.15); see below
 ) -> torch.Tensor:
     """Two-stage reach target for wide crossings: v2 reimplementation of the
@@ -696,11 +696,16 @@ def _get_reach_target_y(
     env._blue_landed_genuine[just_reset] = False
 
     # Curriculum-eased landing radius (branch mechanism #1) -- eases
-    # 0.20m -> 0.15m with difficulty, giving an early policy a bigger
+    # 0.30m -> 0.18m with difficulty, giving an early policy a bigger
     # target. FIX 2026-07-24: strict end was 0.08m; widened to 0.15m
     # (user request -- too strict to reliably land in at full difficulty).
+    # FIX 2026-08-30 (user request, investigating far-region approach
+    # speed -- see docs/BugFixes.md): widened again, strict 0.15->0.20,
+    # easy 0.20->0.30. Same change mirrored in _get_orange_reach_target_y/
+    # _get_red_reach_target_y below (user: "also do this for orange and
+    # red").
     d = float(min(max(getattr(env, "_ball_difficulty", 1.0), 0.0), 1.0))
-    landing_radius = 0.20 + (landing_radius - 0.20) * d
+    landing_radius = 0.30 + (landing_radius - 0.30) * d
     env._blue_landing_radius_current = landing_radius
 
     # FIX 2026-07-24: reverted to the pre-2026-07-23 band (2.0 m/s at d=0
@@ -905,7 +910,7 @@ def _get_orange_reach_target_y(
     env: "ManagerBasedRlEnv",
     ball_name: str,
     asset_cfg: SceneEntityCfg = _DEFAULT_FEET_CFG,
-    landing_radius: float = 0.15,
+    landing_radius: float = 0.18,  # FIX 2026-08-30: 0.15->0.20->0.18, mirrors _get_reach_target_y's own widening
     landing_speed_threshold: float = 1.0,
 ) -> torch.Tensor:
     """Trailing-foot ("orange") mirror of _get_reach_target_y -- see that
@@ -971,8 +976,10 @@ def _get_orange_reach_target_y(
     env._orange_landed_was_free[just_reset] = False
     env._orange_landed_genuine[just_reset] = False
 
+    # FIX 2026-08-30 (user request): easy end 0.20 -> 0.30, mirrors
+    # _get_reach_target_y's own widening (see that function's comment).
     d = float(min(max(getattr(env, "_ball_difficulty", 1.0), 0.0), 1.0))
-    landing_radius = 0.20 + (landing_radius - 0.20) * d
+    landing_radius = 0.30 + (landing_radius - 0.30) * d
     env._orange_landing_radius_current = landing_radius
 
     _EASY_LANDING_SPEED_THRESHOLD = 2.0
@@ -1057,7 +1064,7 @@ def _get_red_reach_target_y(
     env: "ManagerBasedRlEnv",
     ball_name: str,
     asset_cfg: SceneEntityCfg = _DEFAULT_FEET_CFG,
-    landing_radius: float = 0.15,
+    landing_radius: float = 0.18,  # FIX 2026-08-30: 0.15->0.20->0.18, mirrors _get_reach_target_y's own widening
     landing_speed_threshold: float = 1.0,
 ) -> torch.Tensor:
     """Trailing-foot ("red") second-stage mirror of _get_orange_reach_target_y --
@@ -1144,8 +1151,10 @@ def _get_red_reach_target_y(
     env._red_landed_was_free[just_reset] = False
     env._red_landed_genuine[just_reset] = False
 
+    # FIX 2026-08-30 (user request): easy end 0.20 -> 0.30, mirrors
+    # _get_reach_target_y's own widening (see that function's comment).
     d = float(min(max(getattr(env, "_ball_difficulty", 1.0), 0.0), 1.0))
-    landing_radius = 0.20 + (landing_radius - 0.20) * d
+    landing_radius = 0.30 + (landing_radius - 0.30) * d
     env._red_landing_radius_current = landing_radius
 
     _EASY_LANDING_SPEED_THRESHOLD = 2.0
@@ -1620,7 +1629,6 @@ def blue_overshoot_penalty(
     env: "ManagerBasedRlEnv",
     ball_name: str,
     asset_cfg: SceneEntityCfg = _DEFAULT_FEET_CFG,
-    landing_radius: float = 0.08,
     max_overshoot: float = 0.5,
 ) -> torch.Tensor:
     """Penalize the assigned foot for advancing past the blue midpoint,
@@ -1642,9 +1650,19 @@ def blue_overshoot_penalty(
     rewards approaching blue fast, while this term makes carrying that
     speed past blue without stopping costly.
 
-    landing_radius matches _get_reach_target_y's own arrival radius (0.08)
-    as a deadband -- being within it counts as "at blue", not overshooting.
-    max_overshoot bounds the per-step penalty so a single step can't
+    FIX 2026-08-30 (user request, "update it so it uses a common variable"):
+    the deadband used to be a SEPARATE hardcoded `landing_radius=0.08`
+    parameter here, out of sync with `_get_reach_target_y`'s own
+    curriculum-eased radius (widened 0.08->0.15 back on 2026-07-24, and to
+    0.20/easy-0.30 earlier today -- this function's own default never
+    tracked either change). Confirmed: this penalty really was using a
+    static, non-curriculum-eased 0.08m the entire time, tighter than
+    whatever the landing GATE itself required for a genuine landing credit
+    -- a real inconsistency, not just a stale comment. Now reads
+    `env._blue_landing_radius_current` directly (the exact same live value
+    `_get_reach_target_y`, called immediately below, just computed and
+    cached) instead of its own parameter -- the two can no longer drift
+    apart. max_overshoot bounds the per-step penalty so a single step can't
     dominate the return.
 
     Zero on narrow crossings and once genuinely landed.
@@ -1681,7 +1699,7 @@ def blue_overshoot_penalty(
     assigned_foot_y = foot_pos_w[arange_n, foot_idx, 1]                # (N,)
 
     signed_progress = direction * (assigned_foot_y - half_y)
-    overshoot = torch.clamp(signed_progress - landing_radius, min=0.0, max=max_overshoot)
+    overshoot = torch.clamp(signed_progress - env._blue_landing_radius_current, min=0.0, max=max_overshoot)
 
     # FIX 2026-07-24: env._blue_landed -> env._blue_landed_genuine -- a free
     # landing must not silence this penalty either. See _get_reach_target_y.
@@ -1887,13 +1905,18 @@ def orange_overshoot_penalty(
     env: "ManagerBasedRlEnv",
     ball_name: str,
     asset_cfg: SceneEntityCfg = _DEFAULT_FEET_CFG,
-    landing_radius: float = 0.08,
     max_overshoot: float = 0.5,
 ) -> torch.Tensor:
     """Trailing-foot mirror of blue_overshoot_penalty -- penalizes the
     trailing foot for advancing past the orange target, toward the true
     crossing point, before landing there. See
     docs/superpowers/specs/2026-08-08-orange-ball-trailing-foot-design.md.
+
+    FIX 2026-08-30 (user request, "update it so it uses a common
+    variable"): same fix as blue_overshoot_penalty -- reads
+    `env._orange_landing_radius_current` (set fresh by
+    `_get_orange_reach_target_y`, called below) instead of its own
+    separate, previously out-of-sync `landing_radius=0.08` parameter.
 
     Not yet validated against a live training run.
     """
@@ -1911,7 +1934,7 @@ def orange_overshoot_penalty(
     assigned_foot_y = foot_pos_w[arange_n, trailing_idx, 1]            # (N,)
 
     signed_progress = direction * (assigned_foot_y - orange_y)
-    overshoot = torch.clamp(signed_progress - landing_radius, min=0.0, max=max_overshoot)
+    overshoot = torch.clamp(signed_progress - env._orange_landing_radius_current, min=0.0, max=max_overshoot)
 
     phase1_active = env._orange_wide & ~env._orange_landed_genuine
     return overshoot * phase1_active.float()
@@ -2223,7 +2246,6 @@ def red_overshoot_penalty(
     env: "ManagerBasedRlEnv",
     ball_name: str,
     asset_cfg: SceneEntityCfg = _DEFAULT_FEET_CFG,
-    landing_radius: float = 0.08,
     max_overshoot: float = 0.5,
 ) -> torch.Tensor:
     """Trailing-foot mirror of orange_overshoot_penalty -- penalizes the
@@ -2231,6 +2253,12 @@ def red_overshoot_penalty(
     before landing there. Gated additionally on env._red_active (unlike
     orange_overshoot_penalty, which has no upstream landing gate) so this
     can't fire before the trailing foot is even allowed to target red.
+
+    FIX 2026-08-30 (user request, "update it so it uses a common
+    variable"): same fix as blue_overshoot_penalty -- reads
+    `env._red_landing_radius_current` (set fresh by
+    `_get_red_reach_target_y`, called below) instead of its own separate,
+    previously out-of-sync `landing_radius=0.08` parameter.
 
     Not yet validated against a live training run.
     """
@@ -2248,7 +2276,7 @@ def red_overshoot_penalty(
     assigned_foot_y = foot_pos_w[arange_n, trailing_idx, 1]            # (N,)
 
     signed_progress = direction * (assigned_foot_y - red_y)
-    overshoot = torch.clamp(signed_progress - landing_radius, min=0.0, max=max_overshoot)
+    overshoot = torch.clamp(signed_progress - env._red_landing_radius_current, min=0.0, max=max_overshoot)
 
     phase1_active = env._red_wide & env._red_active & ~env._red_landed_genuine
     return overshoot * phase1_active.float()
@@ -5124,39 +5152,45 @@ def _contact_yield_state(
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     """Shared one-shot contact-instant state for contact_yield_velocity_x/y.
 
-    REWORKED 2026-08-30 (user report: "why is there a delay between the
-    softstop reward and the contact yield velocity... the foot goes
-    backwards getting positive reward when the contact already happened and
-    some time has past so we get fake reward"). Confirmed via a live-
-    checkpoint probe (`model_14250`, 598 save events) comparing the TRUE
-    first foot-ball touch (the dedicated `ball_contact` ContactSensor,
-    correct foot) against `env._sb_deflection_now`'s own firing instant
-    (what this term used to sample):
+    REVERTED 2026-08-30 (user report: "contact yield doesn't even fire
+    anymore in the play script"): the same-day earlier retiming (below,
+    kept in this docstring for history) switched the trigger from
+    `env._sb_deflection_now` to the `ball_contact` sensor's own first-true
+    instant, and broke firing entirely in practice -- confirmed live via
+    play.py, zero fires. Root cause of the zero-fire regression not
+    isolated (candidates: the `ball_contact` sensor's geom order/split
+    assumption was never verified against `sensor.primary_names` the way
+    `debugging-mujoco-contact-sensors` [.claude/skills] requires before
+    trusting a `found[:, :half]`-style slice -- see that skill for the
+    correct verification procedure before attempting this retiming again;
+    or `env._blue_wide`/`env._blue_landed_genuine` not being fresh yet at
+    this term's registration position). Reverted to `env._sb_deflection_now`
+    per explicit user request ("please keep using the stopball flag") --
+    the ~11% contact-instant timing lag this retiming was meant to fix (see
+    docs/BugFixes.md, same-day entry) is real but strictly smaller than a
+    term that fires 0% of the time. Revisit the ball_contact-based version
+    later using the contact-sensor debugging skill's probe pattern instead
+    of reasoning about geom order from source alone.
+
+    ORIGINAL FIX 2026-08-30 (superseded above, kept for context): user
+    reported "why is there a delay between the softstop reward and the
+    contact yield velocity... the foot goes backwards getting positive
+    reward when the contact already happened and some time has past so we
+    get fake reward". Confirmed via a live-checkpoint probe (`model_14250`,
+    598 save events) comparing the TRUE first foot-ball touch against
+    `env._sb_deflection_now`'s own firing instant:
 
         lag        | % of events | vx at TRUE touch | vx when OLD code sampled
         0 ticks     | 77%        | +0.66            | +0.66 (no issue)
         1-4 ticks   | 12%        | +0.25            | +0.82 (drifts, still fwd)
         5+ ticks    | 11%        | +0.19 (forward!) | -0.07 (already reversed)
 
-    For the 11% "5+ ticks" group, the foot is genuinely moving FORWARD
-    (into the ball) at the moment of physical contact, but `deflection_now`
-    doesn't fire until 0.1s+ later (waiting on `delta_vx` to build up past
-    stopball's 0.6 m/s threshold, or on the `landing_ok` gate) -- by then
-    the foot has already started its natural post-contact recovery motion,
-    which this term then credited as if it were genuine yielding-at-impact.
-    Real bug, confirmed, ~1 in 9 save events affected.
-
-    Fix: trigger directly off the `ball_contact` sensor's own first-true
-    instant for the correct foot (same sensor `penalize_wrong_foot_ball_
-    contact`/`feet_slippage` already use for foot-vs-ball detection),
-    instead of `env._sb_deflection_now`. Keeps the `in_front`/`landing_ok`
-    sanity gates `deflection_now` had (so a premature touch before a
-    genuine wide-crossing blue landing, or a touch already past the goal
-    line, still doesn't fire) but drops the `delta_vx` threshold entirely
-    -- that threshold was the actual source of the lag, not a meaningful
-    filter for THIS term's purpose (unlike stopball/softstop, this doesn't
-    need to distinguish a real deflection from a graze; it only needs the
-    true instant of first touch).
+    For the 11% "5+ ticks" group the foot is genuinely moving FORWARD at
+    the moment of physical contact, but `deflection_now` doesn't fire until
+    0.1s+ later -- by then the foot has already started its natural
+    post-contact recovery motion, credited as if it were genuine
+    yielding-at-impact. Real, confirmed, but reverted anyway per above --
+    a smaller-magnitude timing error beats a term that never fires.
 
     Memoized per-tick via `env._cyv_last_step` vs `env.episode_length_buf`
     (same idiom `_get_reach_target_y` uses for its own settle counter) since
@@ -5165,49 +5199,57 @@ def _contact_yield_state(
     with the one-shot latch mutated exactly once per tick regardless of how
     many callers.
 
-    Not yet validated against a live training run.
+    NEW 2026-08-30 (user request, "4 ticks before hand only"): `assigned_vel_w`
+    is now the MEAN of the assigned foot's velocity over the 4 ticks strictly
+    BEFORE the current one (t-4..t-1), not the single instantaneous reading
+    at the fired tick. Smooths out single-tick noise from the discrete
+    collision impulse without reintroducing the delayed-payout / post-contact
+    -recovery-motion risk a forward-looking window would (no ticks after the
+    fired instant are ever included -- deliberately, per the same-day revert
+    above: this project just found that measuring ANY ticks after the true
+    contact instant can contaminate the signal with recovery motion, so the
+    window only extends backward). Maintained via a small ring buffer
+    (`env._cyv_vel_history`, shape (N,4,3)) updated every tick BEFORE this
+    tick's own velocity is folded in -- so at the instant `fired` is read,
+    the buffer holds exactly t-4..t-1, never the current tick.
     """
     n = env.num_envs
     device = env.device
-    if not hasattr(env, "_cyv_prev_touch"):
-        env._cyv_prev_touch = torch.zeros(n, dtype=torch.bool, device=device)
+    if not hasattr(env, "_cyv_flag"):
         env._cyv_flag = torch.zeros(n, dtype=torch.bool, device=device)
         env._cyv_last_step = torch.full((n,), -1, dtype=torch.long, device=device)
         env._cyv_fired_cache = torch.zeros(n, dtype=torch.bool, device=device)
         env._cyv_vel_cache = torch.zeros(n, 3, device=device)
         env._cyv_foot_idx_cache = torch.zeros(n, dtype=torch.long, device=device)
+        env._cyv_vel_history = torch.zeros(n, 4, 3, device=device)  # [t-1, t-2, t-3, t-4]
 
     just_reset = env.episode_length_buf <= 1
     env._cyv_flag[just_reset] = False
-    env._cyv_prev_touch[just_reset] = False
+    env._cyv_vel_history[just_reset] = 0.0
 
     if bool((env._cyv_last_step == env.episode_length_buf).all().item()):
         return env._cyv_fired_cache, env._cyv_vel_cache, env._cyv_foot_idx_cache
 
-    foot_idx = _get_correct_foot_idx(env, ball_name)                        # (N,) 0=left, 1=right
-    arange = torch.arange(n, device=device)
-
-    ball_sensor: ContactSensor = env.scene["ball_contact"]
-    found = ball_sensor.data.found                                          # (N, n_geoms)
-    half = found.shape[1] // 2
-    left_touch = (found[:, :half] > 0).any(dim=-1)
-    right_touch = (found[:, half:] > 0).any(dim=-1)
-    per_foot_touch = torch.stack([left_touch, right_touch], dim=-1)         # (N, 2)
-    correct_touch_now = per_foot_touch[arange, foot_idx]
-
-    ball: Entity = env.scene[ball_name]
-    ball_x_local = ball.data.root_link_pos_w[:, 0] - env.scene.env_origins[:, 0]
-    in_front = ball_x_local > -0.3
-    landing_ok = ~env._blue_wide | env._blue_landed_genuine
-
-    new_touch = correct_touch_now & in_front & landing_ok & ~env._cyv_prev_touch
-    env._cyv_prev_touch = correct_touch_now
-    fired = new_touch & ~env._cyv_flag
+    deflection_now = getattr(
+        env, "_sb_deflection_now", torch.zeros(n, dtype=torch.bool, device=device)
+    )
+    fired = deflection_now & ~env._cyv_flag
     env._cyv_flag = env._cyv_flag | fired
 
+    foot_idx = _get_correct_foot_idx(env, ball_name)                        # (N,) 0=left, 1=right
+    arange = torch.arange(n, device=device)
     robot: Entity = env.scene[asset_cfg.name]
     foot_vel_w = robot.data.body_link_lin_vel_w[:, asset_cfg.body_ids, :]   # (N, 2, 3)
-    assigned_vel_w = foot_vel_w[arange, foot_idx]                           # (N, 3)
+    current_vel_w = foot_vel_w[arange, foot_idx]                            # (N, 3), this tick (t)
+
+    # Read the 4-tick backward average BEFORE folding the current tick in --
+    # so a fire on tick t is scored on t-4..t-1 only, never t itself.
+    assigned_vel_w = env._cyv_vel_history.mean(dim=1)                       # (N, 3)
+
+    # Shift the ring buffer and push the current tick in for future reads.
+    env._cyv_vel_history = torch.cat(
+        [current_vel_w.unsqueeze(1), env._cyv_vel_history[:, :-1, :]], dim=1
+    )
 
     env._cyv_fired_cache = fired
     env._cyv_vel_cache = assigned_vel_w
@@ -5257,7 +5299,7 @@ def contact_yield_velocity_y(
     env: "ManagerBasedRlEnv",
     ball_name: str,
     asset_cfg: SceneEntityCfg = _DEFAULT_FEET_CFG,
-    max_credit_speed: float = 0.5,
+    max_credit_speed: float = 0.3,
 ) -> torch.Tensor:
     """Y-axis half of contact_yield_velocity -- see contact_yield_velocity_x's
     docstring for the split rationale and `_contact_yield_state` for the

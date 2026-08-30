@@ -405,10 +405,13 @@ def goalkeeper_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
             )
 
         # ================================================================
-        # TIER 2 -- waypoint scaffolding + trailing-foot mechanics: the
-        # wide-crossing blue/orange/red mechanism and near-region analog,
-        # plus trailing_foot_lift (user-confirmed just as important as the
-        # rest of this tier, not a Tier-3 afterthought).
+        # TIER 2 -- everything not in Tier 1: the wide-crossing blue/
+        # orange/red waypoint mechanism and near-region analog,
+        # trailing_foot_lift/foot_clearance (user-confirmed just as
+        # important as the rest of this tier), and foot_inner_face_
+        # continuous/contact_yield_velocity_y (originally a separate Tier
+        # 3 "secondary" group -- merged in per user request, "no reason to
+        # seperate", 2026-08-30: grouping only, no training effect).
         # ================================================================
         # FIX 2026-07-26 (near-region oscillation): near-region analog of
         # blue_stick_landing_curriculum below -- same base_weight (8.0),
@@ -610,29 +613,18 @@ def goalkeeper_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
         # between two sibling terms using identical math, found during the
         # weight-distribution audit. Same base weight/doubling as
         # trailing_foot_lift.
+        # FIX 2026-08-30 (later still, user request, "put tier 3 in tier 2
+        # no reason to seperate"): merged the former Tier 3 (secondary/
+        # reconsider) group in here too -- foot_inner_face_continuous (the
+        # 6th member of Tier 1's item-8 peak-magnitude-cap derivation above,
+        # base weight/derivation unchanged, only its grouping moved) and
+        # contact_yield_velocity_y (deliberately de-emphasized vs. X, base
+        # weight unchanged). Purely a grouping/label change -- doesn't
+        # affect training, each entry keeps its own base_weight/mechanism/
+        # activate_at_cu regardless of which tier comment it sits under.
         for _name, _base in (
-            ("trailing_foot_lift", 2.0),
-            ("foot_clearance",     2.0),
-        ):
-            cfg.curriculum[f"{_name}_curriculum"] = CurriculumTermCfg(
-                func=gk_mdp.correct_foot_save_curriculum,
-                params={"reward_name": _name, "base_weight": _base, "activate_at_cu": 2},
-            )
-
-        # ================================================================
-        # TIER 3 -- secondary / reconsider whether curriculum is warranted
-        # at all for these. Kept curriculum-scaled for now (not reverted to
-        # flat) -- revisit once a live training run gives real evidence.
-        # ================================================================
-        # foot_inner_face_continuous: the 6th member of Tier 1's item-8
-        # peak-magnitude-cap group above (base weight/derivation unchanged,
-        # only its file position moved) -- small weight (3.47), continuous
-        # face-orientation term, judged less essential than the Tier 1 save
-        # events it shares that derivation with.
-        # contact_yield_velocity_y: deliberately de-emphasized (weight 5,
-        # was 20) as secondary to contact_yield_velocity_x -- open question
-        # whether doubling 5->10 at cu=2 is even worth it; left in for now.
-        for _name, _base in (
+            ("trailing_foot_lift",         2.0),
+            ("foot_clearance",             2.0),
             ("foot_inner_face_continuous", 3.47),
             ("contact_yield_velocity_y",   5.0),
         ):
@@ -896,10 +888,15 @@ def goalkeeper_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
             weight=45.0,
             params={"ball_name": BALL_NAME, "asset_cfg": _FEET_CFG, "max_credit_speed": 0.5},
         ),
+        # FIX 2026-08-30 (later same day, user request, "set the target y
+        # velocity for contact yield to something small like 0.3 max"):
+        # max_credit_speed 0.5 -> 0.3 -- the raw lateral speed needed to
+        # reach full credit shrinks accordingly (was ~0.87 m/s given the
+        # cos(55) scaling in the formula, now ~0.52 m/s).
         "contact_yield_velocity_y": RewardTermCfg(
             func=gk_mdp.contact_yield_velocity_y,
             weight=5.0,
-            params={"ball_name": BALL_NAME, "asset_cfg": _FEET_CFG, "max_credit_speed": 0.5},
+            params={"ball_name": BALL_NAME, "asset_cfg": _FEET_CFG, "max_credit_speed": 0.3},
         ),
         # --- continuing close-to-target signal, tiered 1.0x/2.0x/3.0x by softstop/cleanstop
         # (ports G1 _reward_success; FIX 2026-07-27 retiered off stopball -- see rewards.py).
