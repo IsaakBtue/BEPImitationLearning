@@ -365,6 +365,14 @@ git rev-parse HEAD > /home/robocup/IsaakB/intercept_autotrain_logs/last_trained_
 ```
 Otherwise the script sees the same commit as still untrained on its next run and launches a redundant duplicate. Do this every time, not just when asked.
 
+**Nightly resume script:** `/home/robocup/IsaakB/intercept_nightly_resume.sh` (cron, 00:00 daily, separate from the autotrain script above and independent of git state) checks whether the GPU is idle and, if so, resumes the run directory recorded in `/home/robocup/IsaakB/intercept_autotrain_logs/resume_run_dir.txt` from its latest checkpoint, aimed at absolute iteration 20000 (computes the correct additive `--agent.max-iterations` offset itself — resuming is additive to the loaded checkpoint's iteration, not absolute).
+
+**When the user says something like "stop [training] and resume later" (or otherwise clearly signals they want to pick this run back up, not abandon it):** after pushing the checkpoint and stopping the process as usual, also update the resume pointer to that exact run directory:
+```bash
+echo "/full/path/to/the/run/directory" > /home/robocup/IsaakB/intercept_autotrain_logs/resume_run_dir.txt
+```
+This way both a later "resume" request from the user and the nightly script automatically pick up the same checkpoint without re-deriving which one. If the user later just says "resume" (or "continue"), read this file to find the run dir + its latest checkpoint and launch with `--agent.resume True --agent.load-run <dir> --agent.load-checkpoint <file>` rather than asking which checkpoint they mean.
+
 ## Reading TensorBoard / WandB Episode Reward Metrics
 
 mjlab's `reward_manager` logs `Episode_Reward/X` with **two scaling factors** baked in:
