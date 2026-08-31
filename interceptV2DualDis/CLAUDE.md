@@ -359,22 +359,21 @@ If yes, set up a session cron job with this standing behavior:
 
 **Always push the latest checkpoint before stopping or restarting any run**, whether for a scheduled-monitoring fix or an ad hoc one — never let a checkpoint go un-pushed when a run is about to be killed.
 
-**Nightly autotrain script:** `/home/robocup/IsaakB/intercept_autotrain.sh` (cron, 23:59 daily) checks whether the GPU is idle and, if so, whether there's a training-relevant commit since `/home/robocup/IsaakB/intercept_autotrain_logs/last_trained_commit.txt` (the marker) — only launching if both are true. **Every time a training run is launched manually (not by the script itself), update that marker file to the commit just launched on**, e.g.:
+**Unified GPU watchdog:** `/home/robocup/IsaakB/intercept_gpu_watchdog.sh` (cron, `*/30 * * * *`) is the single automation for this project — it supersedes both the old 23:59 fresh-launch-on-commit script (`intercept_autotrain.sh`) and the old fixed-00:00 resume script (`intercept_nightly_resume.sh`); neither is scheduled anymore, both kept only for reference. Every 30 minutes it classifies GPU state (`nvidia-smi` PIDs cross-checked against each process's own cmdline — ours = matches `sgk_train.*MultiDisc`) and applies one priority order:
+
+1. **We're running AND someone else's job also appears (contention):** pauses first, above everything else, including a pending new commit — pushes the latest checkpoint (stashing/restoring the persistent unrelated local edits around it, same as any manual push) and stops our process, yielding the GPU. The resume pointer (`resume_run_dir.txt`) is left pointing at that same run dir, so the next tick picks it back up automatically once free.
+2. **Someone else's job only, we're not running:** waits — can't launch into an occupied GPU even if a new commit is pending.
+3. **A new training-relevant commit exists** (compared against `last_trained_commit.txt`, same training-relevant path filter as the old autotrain script): overrides whatever's running — if we were mid-resume on the old lineage, pushes+stops it first (the old lineage's remaining iterations toward 20k are abandoned, not finished first) — then pulls and launches **fresh** on the new commit, updating both `last_trained_commit.txt` and `resume_run_dir.txt` to the new run.
+4. **No new commit, already running, no contention:** nothing to do.
+5. **No new commit, GPU idle:** resumes the run directory recorded in `resume_run_dir.txt` from its latest checkpoint, aimed at absolute iteration 20000 (computes the correct additive `--agent.max-iterations` offset itself — resuming is additive to the loaded checkpoint's iteration, not absolute). Throttled to ~hourly actual attempts via `last_idle_attempt_epoch.txt`, even though the cron itself fires every 30 min.
+6. **No new commit, GPU idle, tracked lineage already ≥20000 or none exists:** nothing to do.
+
+**Every time a training run is launched or resumed manually (not by the script itself), update both marker files** so the watchdog doesn't redo the same work or lose track of the current lineage:
 ```bash
 git rev-parse HEAD > /home/robocup/IsaakB/intercept_autotrain_logs/last_trained_commit.txt
-```
-Otherwise the script sees the same commit as still untrained on its next run and launches a redundant duplicate. Do this every time, not just when asked.
-
-**GPU-sharing watchdog:** `/home/robocup/IsaakB/intercept_gpu_watchdog.sh` (cron, `*/30 * * * *`, separate from the autotrain script above and independent of git state) supersedes the old fixed-midnight-only resume script (`intercept_nightly_resume.sh`, no longer scheduled, kept only for reference). Every 30 minutes it classifies GPU state by checking `nvidia-smi` PIDs against each process's own cmdline (ours = matches `sgk_train.*MultiDisc`):
-- **Fully idle:** attempts to resume the run directory recorded in `/home/robocup/IsaakB/intercept_autotrain_logs/resume_run_dir.txt` from its latest checkpoint, aimed at absolute iteration 20000 (computes the correct additive `--agent.max-iterations` offset itself). Throttled to ~hourly actual attempts via `last_idle_attempt_epoch.txt`, even though the cron itself fires every 30 min.
-- **We're running, nothing else on the GPU:** nothing to do.
-- **We're running AND someone else's job also appears:** pauses — pushes the latest checkpoint (stashing/restoring the persistent unrelated local edits around it, same as any manual push) and stops our process, yielding the GPU. `resume_run_dir.txt` is left pointing at the same run dir, so the next idle tick picks it back up automatically.
-- **Someone else's job only, we're not running:** waits.
-
-**When the user says something like "stop [training] and resume later" (or otherwise clearly signals they want to pick this run back up, not abandon it):** after pushing the checkpoint and stopping the process as usual, also update the resume pointer to that exact run directory:
-```bash
 echo "/full/path/to/the/run/directory" > /home/robocup/IsaakB/intercept_autotrain_logs/resume_run_dir.txt
 ```
+Do this every time, not just when asked — including whenever the user says something like "stop [training] and resume later" (or otherwise clearly signals they want to pick this run back up, not abandon it). If the user later just says "resume" (or "continue"), read `resume_run_dir.txt` to find the run dir + its latest checkpoint and launch with `--agent.resume True --agent.load-run <dir> --agent.load-checkpoint <file>` rather than asking which checkpoint they mean.
 This way both a later "resume" request from the user and the nightly script automatically pick up the same checkpoint without re-deriving which one. If the user later just says "resume" (or "continue"), read this file to find the run dir + its latest checkpoint and launch with `--agent.resume True --agent.load-run <dir> --agent.load-checkpoint <file>` rather than asking which checkpoint they mean.
 
 ## Reading TensorBoard / WandB Episode Reward Metrics
