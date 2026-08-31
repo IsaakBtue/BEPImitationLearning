@@ -365,7 +365,11 @@ git rev-parse HEAD > /home/robocup/IsaakB/intercept_autotrain_logs/last_trained_
 ```
 Otherwise the script sees the same commit as still untrained on its next run and launches a redundant duplicate. Do this every time, not just when asked.
 
-**Nightly resume script:** `/home/robocup/IsaakB/intercept_nightly_resume.sh` (cron, 00:00 daily, separate from the autotrain script above and independent of git state) checks whether the GPU is idle and, if so, resumes the run directory recorded in `/home/robocup/IsaakB/intercept_autotrain_logs/resume_run_dir.txt` from its latest checkpoint, aimed at absolute iteration 20000 (computes the correct additive `--agent.max-iterations` offset itself — resuming is additive to the loaded checkpoint's iteration, not absolute).
+**GPU-sharing watchdog:** `/home/robocup/IsaakB/intercept_gpu_watchdog.sh` (cron, `*/30 * * * *`, separate from the autotrain script above and independent of git state) supersedes the old fixed-midnight-only resume script (`intercept_nightly_resume.sh`, no longer scheduled, kept only for reference). Every 30 minutes it classifies GPU state by checking `nvidia-smi` PIDs against each process's own cmdline (ours = matches `sgk_train.*MultiDisc`):
+- **Fully idle:** attempts to resume the run directory recorded in `/home/robocup/IsaakB/intercept_autotrain_logs/resume_run_dir.txt` from its latest checkpoint, aimed at absolute iteration 20000 (computes the correct additive `--agent.max-iterations` offset itself). Throttled to ~hourly actual attempts via `last_idle_attempt_epoch.txt`, even though the cron itself fires every 30 min.
+- **We're running, nothing else on the GPU:** nothing to do.
+- **We're running AND someone else's job also appears:** pauses — pushes the latest checkpoint (stashing/restoring the persistent unrelated local edits around it, same as any manual push) and stops our process, yielding the GPU. `resume_run_dir.txt` is left pointing at the same run dir, so the next idle tick picks it back up automatically.
+- **Someone else's job only, we're not running:** waits.
 
 **When the user says something like "stop [training] and resume later" (or otherwise clearly signals they want to pick this run back up, not abandon it):** after pushing the checkpoint and stopping the process as usual, also update the resume pointer to that exact run directory:
 ```bash
