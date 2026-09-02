@@ -396,7 +396,10 @@ def goalkeeper_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
         for _name, _base in (
             ("single_foot_save",             34.72),
             ("cleanstop",                    17.36),
-            ("inner_face_orientation_save",  17.36),
+            # inner_face_orientation_save curriculum entry removed 2026-09-02
+            # (user request, temporary) alongside the reward's own removal --
+            # see the foot_inner_face_continuous curriculum removal below for
+            # why this is required, not optional.
             ("contact_yield_velocity_x",     45.0),
         ):
             cfg.curriculum[f"{_name}_curriculum"] = CurriculumTermCfg(
@@ -625,7 +628,12 @@ def goalkeeper_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
         for _name, _base in (
             ("trailing_foot_lift",         2.0),
             ("foot_clearance",             2.0),
-            ("foot_inner_face_continuous", 3.47),
+            # foot_inner_face_continuous curriculum entry removed 2026-09-02
+            # (user request, temporary) alongside the reward's own removal
+            # from cfg.rewards below -- correct_foot_save_curriculum.__init__
+            # does env.reward_manager.get_term_cfg(reward_name), which would
+            # crash at env construction if this stayed registered while the
+            # reward itself is gone.
             ("contact_yield_velocity_y",   5.0),
         ):
             cfg.curriculum[f"{_name}_curriculum"] = CurriculumTermCfg(
@@ -693,11 +701,16 @@ def goalkeeper_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
         # gated zeros into a phantom ball. G1 noises first, then masks
         # (legged_robot.py:425-426) — noise_scale reproduces that ordering.
         # Unscaled — see item-21 note above (G1's ball_pos scale is dead code).
+        # RE-ENABLED 2026-09-02 (user request): full G1 pre-save visibility
+        # gate (warmup + FOV-ish flying + random mid-flight vanish) restored
+        # -- always_visible True->False. hide_behind_torso/hide_after_steps
+        # (the v2 post-save release gate) are untouched, a separate concept
+        # layered on top -- see ball_pos_xy_b's own docstring.
         "ball_pos_b": ObservationTermCfg(
             func=gk_mdp.ball_pos_xy_b,
             params={
                 "ball_name": BALL_NAME,
-                "always_visible": True,
+                "always_visible": False,
                 "hide_behind_torso": True,
                 "hide_after_steps": 75,
                 "noise_scale": 0.05,
@@ -716,15 +729,26 @@ def goalkeeper_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
         k: ObservationTermCfg(func=v.func, params=v.params, scale=v.scale)
         for k, v in actor_terms.items()
     }
+    # RE-ENABLED 2026-09-02 (user request): warmup-only gate, matching G1's
+    # real privileged-obs behavior -- critic loses the ball only during the
+    # brief initial_vanish blackout, NOT the actor's flying/random_vanish
+    # gates (G1 never applies those past end_target_local's own mask --
+    # see ball_pos_b's warmup_only param docstring). NOT the same as the
+    # actor's full gate above -- do not set always_visible=True nor
+    # warmup_only=False here without re-checking G1's split first.
     critic_terms["ball_pos_b"] = ObservationTermCfg(
         func=gk_mdp.ball_pos_b,
-        params={"ball_name": BALL_NAME, "always_visible": True},
+        params={"ball_name": BALL_NAME, "always_visible": False, "warmup_only": True},
     )
     critic_terms.update({
         "base_lin_vel": ObservationTermCfg(
             func=gk_mdp.base_lin_vel,
             scale=2.0,  # matches G1 obs_scales.lin_vel
         ),
+        # Left always_visible=True (2026-09-02 visibility re-enable pass) --
+        # this already matches G1: current_obs's ball velocity term is never
+        # gated at any level, not even by initial_vanish (only end_target_
+        # local gets that multiply, legged_robot.py:398/443). Not a gap.
         "ball_vel_b": ObservationTermCfg(
             func=gk_mdp.ball_vel_b,
             params={"ball_name": BALL_NAME, "always_visible": True},
@@ -911,29 +935,27 @@ def goalkeeper_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
             params={"ball_name": BALL_NAME, "asset_cfg": _FEET_CFG, "strict_th": 0.15},
         ),
         # --- save quality bonuses (fire on top of softstop, not as a gate) ---
-        "inner_face_orientation_save": RewardTermCfg(
-            func=gk_mdp.inner_face_orientation_save,
-            weight=17.36,
-            # FIX 2026-08-07 (user request): alignment_threshold 0.7->0.85,
-            # tightened alongside rewards.py's _FOOT_TARGET_ANGLE_DEG 60->45
-            # -- see that constant's docstring and inner_face_orientation_save's.
-            # FIX 2026-08-13 (user request): reverted 0.85->0.7, back to the
-            # value that trained model_17250.pt, alongside _FOOT_TARGET_ANGLE_DEG's
-            # matching 75->60 revert (rewards.py) and foot_ang_vel_z's new
-            # post-save-only gate. See docs/BugFixes.md.
-            # FIX 2026-08-22 (user request): alignment_threshold 0.7->0.8,
-            # alongside _FOOT_TARGET_ANGLE_DEG's 80->70 retarget (rewards.py).
-            # FIX 2026-08-22 (later same day, user request, "only 5 above or
-            # below"): replaced the cosine-threshold param entirely with a
-            # plain tolerance_deg=5.0 window -- see rewards.py's docstring.
-            # docs/BugFixes.md.
-            params={"ball_name": BALL_NAME, "tolerance_deg": 5.0, "asset_cfg": _FEET_CFG},
-        ),
-        "foot_inner_face_continuous": RewardTermCfg(
-            func=gk_mdp.foot_inner_face_continuous,
-            weight=3.47,
-            params={"ball_name": BALL_NAME, "asset_cfg": _FEET_CFG},
-        ),
+        # inner_face_orientation_save / foot_inner_face_continuous TEMPORARILY
+        # REMOVED 2026-09-02 (user request): disable the leading foot's
+        # y-axis/off-forward rotation target (block posture) entirely, both
+        # the one-shot save bonus and the dense continuous pull, so the foot
+        # settles back to pointing straight at save. feetorientation (flatness,
+        # roll/pitch) is untouched -- orthogonal reward, not this one. Not
+        # zero-weighted: zero-weighting foot_inner_face_continuous alone isn't
+        # enough since its curriculum entry (correct_foot_save_curriculum)
+        # directly overwrites term_cfg.weight once cu>=2, which would silently
+        # re-enable it -- see that curriculum entry's own removal above.
+        # Commented out (not deleted) for an easy revert.
+        # "inner_face_orientation_save": RewardTermCfg(
+        #     func=gk_mdp.inner_face_orientation_save,
+        #     weight=17.36,
+        #     params={"ball_name": BALL_NAME, "tolerance_deg": 5.0, "asset_cfg": _FEET_CFG},
+        # ),
+        # "foot_inner_face_continuous": RewardTermCfg(
+        #     func=gk_mdp.foot_inner_face_continuous,
+        #     weight=3.47,
+        #     params={"ball_name": BALL_NAME, "asset_cfg": _FEET_CFG},
+        # ),
         # --- NEW 2026-07-27 (user request): trailing foot has no orientation
         # shaping anywhere else in this table (the two terms above only ever
         # touch the leading/assigned foot) -- always active, no ~behind gate.

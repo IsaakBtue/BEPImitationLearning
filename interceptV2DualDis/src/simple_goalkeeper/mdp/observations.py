@@ -93,6 +93,29 @@ def _compute_ball_visibility(env: "ManagerBasedRlEnv", ball_name: str) -> torch.
 _BEHIND_TORSO_X = 0.05
 
 
+def _compute_initial_vanish(env: "ManagerBasedRlEnv") -> torch.Tensor:
+    """G1's privileged-obs gate: the brief post-throw warmup blackout only.
+
+    G1's end_target_local is multiplied by `initial_vanish` alone before it
+    is written into BOTH obs_buf and privileged_obs_buf (legged_robot.py:397-
+    398, 442-443) -- `flying`/`random_vanish` are applied afterward, and only
+    to the actor's obs_buf slice (line 426). So the critic (privileged_obs_buf
+    = current_obs, unmasked past this point) sees the ball through the whole
+    flight except this initial few-step warmup -- unlike the actor, which is
+    also gated by the FOV-ish `flying` check and the random mid-flight
+    dropout. Ball velocity in G1's current_obs isn't gated at all, at any
+    level (only end_target_local gets the `* initial_vanish` multiply) --
+    see ball_vel_b's always_visible=True, which is correct as-is, not a gap.
+    """
+    catchstep = getattr(env, "_catchstep", None)
+    startstep = getattr(env, "_startstep", None)
+    if catchstep is None:
+        return torch.ones(env.num_envs, dtype=torch.bool, device=env.device)
+    if startstep is None:
+        return catchstep < 43
+    return catchstep < startstep
+
+
 def ball_pos_xy_b(
     env: "ManagerBasedRlEnv",
     ball_name: str = "ball",
@@ -147,12 +170,19 @@ def ball_pos_b(
     env: "ManagerBasedRlEnv",
     ball_name: str = "ball",
     always_visible: bool = False,
+    warmup_only: bool = False,
 ) -> torch.Tensor:
     """Ball position in robot body frame, optionally gated by visibility. Shape (N, 3).
 
     Set always_visible=True during Phase 1 training so the policy always has the ball
     position as input. The visibility system (warmup + random vanish) is enabled for
     play/evaluation to simulate partial observability.
+
+    warmup_only: use only the initial_vanish warmup gate, not the full
+    flying/random_vanish mask -- matches G1's own privileged-obs gate, which
+    is strictly weaker than the actor's (see _compute_initial_vanish's
+    docstring). Intended for the critic term specifically; ignored if
+    always_visible=True.
     """
     robot: Entity = env.scene["robot"]
     ball: Entity = env.scene[ball_name]
@@ -162,7 +192,7 @@ def ball_pos_b(
     )
     if always_visible:
         return ball_pos_b_val
-    visible = _compute_ball_visibility(env, ball_name)
+    visible = _compute_initial_vanish(env) if warmup_only else _compute_ball_visibility(env, ball_name)
     return ball_pos_b_val * visible.float().unsqueeze(-1)
 
 
