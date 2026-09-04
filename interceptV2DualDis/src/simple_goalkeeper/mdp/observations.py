@@ -68,11 +68,39 @@ def _compute_ball_visibility(env: "ManagerBasedRlEnv", ball_name: str) -> torch.
         approaching
     )
 
-    # random_vanish: ball disappears after a random number of consecutive flying steps.
+    # random_vanish: ball disappears after a random number of consecutive
+    # flying steps.
+    #
+    # FIX 2026-09-04 (user request/bug fix): `_vanish_step` was only ever
+    # randomized ONCE per env, on the very first call (`if not hasattr`
+    # guard) -- never re-rolled on episode reset, unlike G1
+    # (`self.vanish_step[ball_ids] = randint(...)` inside G1's own reset,
+    # legged_robot.py:725). This froze each env slot at whatever vanish_step
+    # it happened to draw at startup for the ENTIRE run -- roughly 1-in-30
+    # envs permanently hid the ball after a single tick every episode,
+    # forever, while others never hid it at all. Now re-rolled every reset
+    # via `just_reset`, matching G1's per-reset resampling.
+    #
+    # Also skewed toward higher (more-visible) values early in training,
+    # tied to the existing `env._ball_difficulty` curriculum (0->1, already
+    # used elsewhere, e.g. events.py's y_end_range coupling): the random
+    # range's floor starts at 20 (mostly visible, ball can only hide in the
+    # last ~10 flying ticks) at difficulty=0, and linearly drops to 0 (full
+    # G1 randomness) at difficulty=1 -- gives an easier on-ramp without ever
+    # fully excluding low-visibility episodes, and reaches exact G1 parity
+    # once fully trained.
+    ball_difficulty = float(getattr(env, "_ball_difficulty", 1.0))
+    vanish_floor = int(round(20.0 * (1.0 - ball_difficulty)))
+
     if not hasattr(env, "_vanish_step"):
-        env._vanish_step = torch.randint(0, 30, (env.num_envs,), device=env.device)
+        env._vanish_step = torch.randint(vanish_floor, 30, (env.num_envs,), device=env.device)
     if not hasattr(env, "_ball_visible_step"):
         env._ball_visible_step = torch.zeros(env.num_envs, dtype=torch.long, device=env.device)
+
+    just_reset = env.episode_length_buf <= 1
+    if just_reset.any():
+        n_reset = int(just_reset.sum().item())
+        env._vanish_step[just_reset] = torch.randint(vanish_floor, 30, (n_reset,), device=env.device)
 
     env._ball_visible_step = torch.where(
         flying,

@@ -8,6 +8,7 @@
 - Just tell the user what to do — skip explanation/rationale unless asked.
 - **Hard cap: a handful of short bullets per response, not a report.** No multi-paragraph investigations, no restating evidence already given earlier in the conversation, no hedging/caveat paragraphs. If more detail is truly needed, give the one-line conclusion first and wait to be asked before expanding. (2026-08-13 user request: "your claude outputs of texts are too long.")
 - **Reinforced 2026-08-23** ("also answer shorter in your outputs") — still too long even during research/investigation turns. Applies to research/diagnosis responses too, not just implementation ones.
+- **Reinforced 2026-09-04** ("write in plain english and write short answers because these are too long and too complicated") — third time this has needed saying. Explain mechanisms (e.g. "what is catchstep") in one or two plain sentences, not a docstring-style breakdown. Don't dump full before/after tables or multi-paragraph investigation writeups unless explicitly asked for a deep dive — short summary first, offer to expand.
 
 ## Phase 1 Scope
 

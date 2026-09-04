@@ -3884,3 +3884,88 @@ Not yet validated against a live training run.
 **Final state:** strict `landing_radius` = 0.18 (was 0.15 for ~5 weeks, 0.08 before that), easy = 0.30 (was 0.20). All three overshoot penalties now track this live, no separate stale copy possible.
 
 **Evidence:** 90/90 tests pass at every step. Live smoke test (`model_8250`): `env._blue_landing_radius_current` correctly reads the updated value, `blue_overshoot_penalty` still fires (expected -- this checkpoint was trained under the old mismatched radii, so nothing changes retroactively for it). `python3 -m py_compile` clean on `play.py`. None of these changes validated against a live training run yet -- the actual test is whether a new run shows less far-region caution now that the overshoot penalty tracks a genuinely reachable radius instead of a phantom 0.08m one.
+
+---
+
+## 2026-09-04: Re-added inner_face_orientation_save/foot_inner_face_continuous, retargeted 55->0 deg off forward
+
+**Context:** these two rewards were disabled 2026-09-02 (`632cbbc`) because their 55 deg off-forward (sideways block posture) target was the suspected cause of the leading foot visibly rotating sideways at save, even on a freshly-trained checkpoint (`6144_watchdogresume`, post-fix lineage). `success` and `postleadfootorientation` were checked and ruled out (`success` is pure distance-to-target, no orientation term; `postleadfootorientation` targets forward, not sideways).
+
+**Fix (user request, "put back the orientation rewards, but point them 90 degrees from the y axis so just straight forward"):**
+1. `rewards.py`: `_FOOT_TARGET_ANGLE_DEG` 55.0 -> **0.0** (0 deg off forward = 90 deg off Y = straight forward). Verified the math in both reward functions degrades harmlessly at target=0 (no divide-by-zero; the `expected_sign` left/right mirroring becomes a no-op since forward is now the same target for both feet, which is correct -- the sideways mirroring only ever existed to support a nonzero target).
+2. Re-enabled `inner_face_orientation_save`/`foot_inner_face_continuous` (uncommented in `goalkeeper_env_cfg.py`, and their curriculum entries) at their original base weights (17.36 / 3.47) -- same mechanism, opposite intent: now rewards the leading foot for staying pointed forward instead of turning sideways.
+3. **Option B (user-chosen, via `AskUserQuestion`):** `contact_yield_velocity_x`/`_y` (added 2026-08-23) also read the same target-angle constant for their own yield-direction math -- retargeting `_FOOT_TARGET_ANGLE_DEG` to 0 would have silently changed their target too (from a diagonal yield direction to pure lateral). Split off a new `_YIELD_TARGET_ANGLE_DEG = 55.0` (the old value, unchanged) with its own `_YIELD_TARGET_COS`/`_YIELD_TARGET_SIN`; `contact_yield_velocity_x`/`_y` now read the new constants exclusively. Decouples the two concepts (block-face orientation vs. contact-yield direction) that happened to share one constant only by historical accident.
+
+**Evidence:** `ast.parse` clean on both `rewards.py` and `goalkeeper_env_cfg.py`. Grepped every remaining `_FOOT_TARGET_COS`/`_FOOT_TARGET_SIN` reference in `rewards.py` -- only docstrings/comments remain, no live code path still reads the old constants from `contact_yield_velocity_x`/`_y`. Not yet validated against a live training run.
+
+---
+
+## 2026-09-04: cleanstop decoupled from softstop's trigger + made asymmetric
+
+**Context:** user reported cleanstop "not firing sometimes... it is just flat" and worried the reward system was broken -- a genuinely hard/violent touch on the ball could get ZERO feedback (not negative) if it didn't happen to also satisfy softstop's gate. Root-caused: `cleanstop` only arms its measurement window on the rising edge of `env._softstop_flag`, and `softstop`'s own `fired` condition is a strict superset of stopball's `deflection_now` (adds a redundant `ball_x_vel > 0.05` check that must ALSO hold on the exact same tick as stopball's `delta_vx > 1.0` check) -- any 1-tick misalignment between the two thresholds can leave `_softstop_flag` permanently unset for the rest of an episode, silently starving `cleanstop` even when a genuine hard correct-foot deflection happened.
+
+**Fix 1 (retrigger):** `cleanstop` now arms off `env._sb_flag` (stopball's own one-shot latch) instead of `env._softstop_flag`. `_sb_flag`'s underlying `deflection_now` condition already requires `correct_foot_contact`/`landing_ok`, so the separate `correct_foot` gate `cleanstop` used to read from `env._softstop_correct_foot` is now provably redundant -- removed. Renamed `_cleanstop_prev_softstop` -> `_cleanstop_prev_trigger` to match. This fires whenever `stopball` itself fires -- strictly more often than the old softstop-gated version, since softstop's extra threshold is gone.
+
+**Known remaining limitation (not fixed here, flagged for future work):** `correct_foot_contact` (inside `_sb_deflection_now`) is still the GROUND-contact sensor (`feet_contact`), not a ball-contact sensor -- an assigned foot that deflects the ball while fully airborne (never touching the ground that same tick) still won't set `_sb_flag`, so `cleanstop` still can't score that case. A ball-contact-sensor-based version of this detection has been tried and reverted twice already in this codebase (stopball/softstop's 2026-07-15 fix, contact_yield_velocity's 2026-08-30 fix) -- both times MuJoCo's contact window for the small rolling ball proved too narrow to reliably catch. Revisit using `.claude/skills/debugging-mujoco-contact-sensors`'s probe pattern before attempting this again, don't re-guess from source alone.
+
+**Fix 2 (avoidance-risk mitigation, user request):** payout is now asymmetric -- new `negative_scale=0.4` parameter scales the negative branch only (`scale = raw_tanh if raw_tanh>=0 else raw_tanh*0.4`), capping the worst case at -0.4 instead of -1.0 while leaving the positive side at +1.0 unchanged. Rationale: engaging the ball also earns from `stopball`/`softstop`/`single_foot_save` (none of which care about stop quality) -- keeping cleanstop's downside shallow relative to those guarantees "attempt and mess up" still beats "never engage" in expectation, without a from-scratch numeric audit of the full reward budget. Chosen as a smooth scale (not a hard clamp) to avoid a flat, zero-gradient dead zone at the floor. Deliberately did NOT touch `softstop`'s own weight in the same pass -- shrinking the guaranteed on-contact bonus at the same time as widening cleanstop's negative reach would have been the actual dangerous combination.
+
+**Evidence:** `ast.parse` clean on both files. Not yet validated against a live training run.
+
+---
+
+## 2026-09-04 (second pass): cleanstop given its own trigger, decoupled from `_sb_flag`/`landing_ok`
+
+**Context:** live-checkpoint probe (`.claude/skills/debugging-mujoco-contact-sensors` methodology -- real trained checkpoint `model_20750.pt`, 6144_watchdogresume lineage, primary_names printed before assuming geom order, cross-checked reward gate state against live sensor data across ~4000 real steps) run to investigate the previous entry's "known remaining limitation." Found the airborne-kick hypothesis was WRONG (0/400 genuine assigned-foot ball touches happened while ungrounded) -- but found the REAL gap: of 246 genuine correct-foot touches with zero stopball credit, 52% were blocked purely by `landing_ok` (the wide-crossing "genuinely landed at blue first" gate), many at delta_vx of 4-10 m/s -- clearly hard, legitimate contact, not the beeline-past-blue exploit `landing_ok` exists to prevent.
+
+**Fix (user request):** `cleanstop` now computes its own independent trigger inline, decoupled from `_sb_flag` (and therefore from `landing_ok`) entirely: correct-foot `ball_contact` sensor (genuine foot-vs-ball touch, not the `feet_contact` ground sensor stopball/softstop use) AND `delta_vx > 1.0` (reusing stopball's own `_sb_init_vx` baseline) AND `in_front`. `stopball`/`softstop` themselves are UNCHANGED -- still require `landing_ok`, still use ground contact; this only widens what CAN be quality-scored after a touch, not whether the positive on-contact bonus itself is earned. `rewards.py:cleanstop`.
+
+**Evidence:** `ast.parse` clean. Live smoke test (`model_20750.pt`, 2500 steps, 64 envs): no exceptions; `cleanstop` fired 224 times vs. `stopball`'s 332 in the same rollout (ratio 0.67, up from the old softstop+landing_ok-gated version which could only ever fire at or below softstop's own, stricter rate). Not yet validated against a live training run.
+
+---
+
+## 2026-09-04: softstop weight halved (36.46 -> 18.23, peak 91.15 -> 45.58)
+
+**Context (user request):** `softstop`'s own one-shot bonus was found to be effectively double-counted -- `success`'s 1x/2x/3x tiering ladder already doubles ITS OWN ongoing per-step reward for the rest of the episode the instant `_softstop_flag` fires (not just once). Rough math: `success`'s curriculum peak is 12.5; the softstop-triggered delta (1.0x extra) accumulates `12.5 * dt * (qualifying steps)` -- over ~30 post-save steps with the foot parked at the target (which the post-save recovery rewards actively encourage), that raw contribution (~7.5) exceeds `softstop`'s own one-shot raw contribution (`91.15 * dt ~= 1.82`). So `softstop`'s own weight was carrying more incentive than its raw number suggested.
+
+**Fix:** halved in both places it's declared -- `softstop_curriculum`'s `base_weight` and `"softstop"` `RewardTermCfg`'s static pre-curriculum `weight` (36.46 -> 18.23 each, matching the existing convention that these two must stay in sync). Curriculum peak 91.15 -> 45.58.
+
+**Why this is low-risk:** `_softstop_flag` itself (read by `_ball_is_behind`, `success`'s tiering, `single_foot_save`, and now nothing in `cleanstop` per the entry above) is set by whether `softstop()` FIRES, not by its reward weight -- lowering the weight only shrinks softstop's own payout magnitude, it changes no downstream gating logic at all.
+
+**Evidence:** `ast.parse` clean. Not yet validated against a live training run.
+
+---
+
+## 2026-09-04: play.py's contact-yield viewer arrow left reading the wrong (repurposed) constant
+
+**Context (user report):** "the green target for the contact yield velocity is not the same anymore... the green arrow shows directly in the y direction." Root cause: `_patch_viewer_contact_yield_vis` (`play.py`) live-imports `_FOOT_TARGET_COS`/`_FOOT_TARGET_SIN` from `rewards.py` to draw the `contact_yield_velocity_x`/`_y` target arrow. Those constants were retargeted 55->0 deg the same session (see the "Re-added inner_face_orientation_save/foot_inner_face_continuous" entry above) for a DIFFERENT reward -- `rewards.py` itself was fixed to split off `_YIELD_TARGET_COS`/`_YIELD_TARGET_SIN` (still 55 deg) for `contact_yield_velocity_x`/`_y`'s own use, but this one viewer-only import site was missed. With target=0 deg, `_FOOT_TARGET_SIN=0`/`_FOOT_TARGET_COS=1`, so the arrow's formula `[-_FOOT_TARGET_SIN, -sign*_FOOT_TARGET_COS, 0]` collapsed to pure `(0, +/-1, 0)` -- exactly the reported "directly in the y direction."
+
+**Fix:** `_patch_viewer_contact_yield_vis` now imports and uses `_YIELD_TARGET_COS`/`_YIELD_TARGET_SIN` instead. `scripts/play.py`. Viewer-only, no training effect -- applied directly per this project's own viewer/diagnostic-code exception to the change-approval rule. Confirmed no other `_FOOT_TARGET_COS`/`_FOOT_TARGET_SIN` live-code references remain in `play.py` (only historical docstring text). The separate `assigned_foot_angle_deg` P-panel plot correctly still reads `_FOOT_TARGET_ANGLE_DEG` (0 deg) -- that one IS about `inner_face_orientation_save`/`foot_inner_face_continuous`, not contact-yield, so it was already correct and untouched.
+
+**Evidence:** `ast.parse` clean on `play.py`.
+
+---
+
+## 2026-09-04: stopball/softstop's landing_ok no longer requires a "genuine" (non-free) blue landing
+
+**Context (user report):** "if the booster immediately lands on the blue ball marker, softstop doesn't fire." Root cause: `stopball`/`softstop`'s `landing_ok` gate read `env._blue_landed_genuine` (== `blue_landed & ~blue_landed_was_free`). `_blue_landed_was_free` flags a landing as suspicious whenever it happens within the first 10 episode steps (`_get_reach_target_y`, `_BLUE_LANDING_FREE_STEP_THRESHOLD=10`) -- RSI reset placing the foot already near blue by construction, or a trivially-close crossing. This classification is a permanent per-episode latch: once flagged free, `blue_landed_genuine` stays False for the REST of the episode, so `stopball`/`softstop` could never fire again even after a completely genuine, hard, correct-foot deflection happened many ticks later.
+
+**Fix:** `stopball`/`softstop`'s own `landing_ok` now reads raw `env._blue_landed` instead of `env._blue_landed_genuine` -- any landing counts, regardless of how early/suspicious it was. Deliberately scoped narrow: every OTHER consumer of `_blue_landed_genuine` (`phase1_active`, `blue_overshoot_penalty`, `blue_stick_landing`, `footreach`'s targeting switch, orange/red waypoint activation, etc.) is UNCHANGED, since those exist to stop a free/RSI-seeded landing from silently skipping the whole two-stage waypoint mechanism for the rest of the episode (the actual bug `_blue_landed_genuine` was introduced to fix, 2026-07-24) -- that concern is real and orthogonal to whether a LATER, independent deflection event should be scored. `success` (a third, separate `landing_ok` site) is left unchanged -- not reported as broken, out of scope. `rewards.py:stopball,softstop`.
+
+**Evidence:** `ast.parse` clean. Live smoke test (`model_20750.pt`, 2500 steps, 64 envs): no exceptions; 51 genuine `stopball` fires occurred in episodes that had an earlier free/early blue landing -- under the old code these would have been permanently blocked for the whole episode. `stopball` fire count 380, `softstop` 322, both up from the equivalent-length pre-fix rollout. Not yet validated against a live training run.
+
+---
+
+## 2026-09-04: t_flight_range shrunk 0.7-1.1 -> 0.4-1.0 (user request, matches G1 exactly)
+
+Fixes the catchstep/visibility mismatch from the other side (flight time now fits inside catchstep's 50-tick/1.0s ceiling instead of raising catchstep) and matches G1's own reaction-time range exactly. Confirmed via `legged_robot.py`: G1 never curriculum-ramps `catchstep`/`vanish_step`/`t_flight` -- all fixed from iteration 0. `goalkeeper_env_cfg.py`, both train and play blocks. `ast.parse` clean. Not yet validated against a live training run.
+
+---
+
+## 2026-09-04: `_vanish_step` bug -- never re-rolled per episode, now re-rolled + difficulty-skewed
+
+**Bug found while researching the visibility-curriculum question:** `_compute_ball_visibility` (`observations.py`) only ever randomized `_vanish_step` ONCE per env, guarded by `if not hasattr(env, "_vanish_step")` -- never re-rolled on episode reset. G1 re-rolls it every reset (`self.vanish_step[ball_ids] = randint(...)`, `legged_robot.py:725`). Consequence: each of the ~4096-6144 parallel env slots got ONE fixed vanish_step value for the ENTIRE training run -- roughly 1-in-30 slots permanently hid the ball after a single flying tick, every episode, forever, while others never hid it at all. Not random per-episode partial observability as G1 intends -- a frozen per-slot property.
+
+**Fix (user request):** `_vanish_step` now re-rolls on every episode reset (`just_reset` mask, same idiom used throughout this codebase). Also skewed toward higher (more-visible) values early in training, tied to the existing `env._ball_difficulty` curriculum (0->1, already used elsewhere e.g. `events.py`'s y_end_range coupling, same `getattr(env, "_ball_difficulty", 1.0)` play-mode-defaults-to-1.0 convention): random range floor = `round(20*(1-difficulty))`, so difficulty=0 samples `[20,30)` (mostly visible), difficulty=1 samples `[0,30)` (exact G1 randomness). `mdp/observations.py:_compute_ball_visibility`.
+
+**Evidence:** `ast.parse` clean. Live smoke test (`model_20750.pt`, 1500 steps, 32 envs): env 0's `_vanish_step` varied across its own resets (`[25, 0, 26, 12]`) -- confirmed re-rolling, previously would have been frozen at one value for the whole run. Play mode confirmed `_ball_difficulty` absent (defaults to 1.0, matching this codebase's existing convention), `vanish_step` range across all envs `[4,29]` observed, consistent with the expected `[0,30)` full-difficulty range. Not yet validated against a live training run.
