@@ -2,6 +2,7 @@ import torch
 import torch.nn as nn
 import torch.utils.data
 from torch import autograd
+from torch.nn import Parameter
 
 from rsl_rl_amp.utils import utils
 
@@ -16,6 +17,95 @@ from rsl_rl_amp.utils import utils
 # ~16x smaller than G1's uniform(-1,1), plausibly producing a systematically
 # muted initial logit/reward magnitude. See docs/BugFixes.md.
 DISC_LOGIT_INIT_SCALE = 1.0
+
+
+def _l2normalize(v, eps=1e-12):
+    return v / (v.norm() + eps)
+
+
+class SpectralNorm(nn.Module):
+    """Power-iteration spectral normalization, ported verbatim from G1
+    (Humanoid-Goalkeeper/rsl_rl/rsl_rl/modules/amp.py:22-80).
+
+    NEW 2026-09-05 (user request, "the one with spectral norm is better"):
+    G1's own amp.py file contains this EXACT class, fully implemented, sitting
+    right next to its AMP discriminator -- but never actually applies it to
+    any layer (confirmed: AMPDiscriminator's __init__ there uses plain
+    nn.Linear throughout). So this isn't matching G1's shipped behavior; it's
+    finishing something G1's own authors apparently built and never wired in.
+
+    Motivation: this project's own AMP reward reportedly peaks early in
+    training (~iteration 300) then declines -- a textbook symptom of
+    discriminator overconfidence/saturation ("perfect discriminator" collapse,
+    a well-documented GAN failure mode -- see docs/BugFixes.md for the web
+    research). Spectral norm bounds each layer's Lipschitz constant, directly
+    countering that. Full comparison against G1 done first (hidden dims,
+    init scheme, loss formula, reward formula, gradient penalty, discriminator
+    weight decay, learning rate/epochs/mini-batches all already match or are
+    documented deliberate divergences) -- this was the one remaining,
+    unapplied difference. Also confirmed present (applied, unlike G1) in an
+    external mjlab-based AMP reference implementation
+    (TeleHuman/humanoid_skateboarding's DiscriminatorMulti), which wraps
+    every discriminator layer in spectral_norm -- same pattern applied here,
+    to every trunk layer and the final amp_linear output layer.
+
+    Deliberately using this manual power-iteration implementation (not
+    torch.nn.utils.spectral_norm) to stay maximally consistent with G1's own
+    unused reference class rather than introducing an unrelated third
+    implementation.
+    """
+
+    def __init__(self, module, name="weight", power_iterations=1):
+        super(SpectralNorm, self).__init__()
+        self.module = module
+        self.name = name
+        self.power_iterations = power_iterations
+        if not self._made_params():
+            self._make_params()
+
+    def _update_u_v(self):
+        u = getattr(self.module, self.name + "_u")
+        v = getattr(self.module, self.name + "_v")
+        w = getattr(self.module, self.name + "_bar")
+
+        height = w.data.shape[0]
+        for _ in range(self.power_iterations):
+            v.data = _l2normalize(torch.mv(torch.t(w.view(height, -1).data), u.data))
+            u.data = _l2normalize(torch.mv(w.view(height, -1).data, v.data))
+
+        sigma = u.dot(w.view(height, -1).mv(v))
+        setattr(self.module, self.name, w / sigma.expand_as(w))
+
+    def _made_params(self):
+        try:
+            getattr(self.module, self.name + "_u")
+            getattr(self.module, self.name + "_v")
+            getattr(self.module, self.name + "_bar")
+            return True
+        except AttributeError:
+            return False
+
+    def _make_params(self):
+        w = getattr(self.module, self.name)
+
+        height = w.data.shape[0]
+        width = w.view(height, -1).data.shape[1]
+
+        u = Parameter(w.data.new(height).normal_(0, 1), requires_grad=False)
+        v = Parameter(w.data.new(width).normal_(0, 1), requires_grad=False)
+        u.data = _l2normalize(u.data)
+        v.data = _l2normalize(v.data)
+        w_bar = Parameter(w.data)
+
+        del self.module._parameters[self.name]
+
+        self.module.register_parameter(self.name + "_u", u)
+        self.module.register_parameter(self.name + "_v", v)
+        self.module.register_parameter(self.name + "_bar", w_bar)
+
+    def forward(self, *args):
+        self._update_u_v()
+        return self.module.forward(*args)
 
 
 class AMPDiscriminator(nn.Module):
@@ -36,13 +126,17 @@ class AMPDiscriminator(nn.Module):
                 # subsequent trunk layer gets G1's explicit init.
                 torch.nn.init.uniform_(linear.weight, -DISC_LOGIT_INIT_SCALE, DISC_LOGIT_INIT_SCALE)
                 torch.nn.init.zeros_(linear.bias)
-            amp_layers.append(linear)
+            # NEW 2026-09-05: spectral norm wraps AFTER init, so it normalizes
+            # from the actual initial weight values -- see SpectralNorm's own
+            # docstring above for the full rationale.
+            amp_layers.append(SpectralNorm(linear))
             amp_layers.append(nn.ReLU())
             curr_in_dim = hidden_dim
         self.trunk = nn.Sequential(*amp_layers).to(device)
-        self.amp_linear = nn.Linear(hidden_layer_sizes[-1], 1).to(device)
-        torch.nn.init.uniform_(self.amp_linear.weight, -DISC_LOGIT_INIT_SCALE, DISC_LOGIT_INIT_SCALE)
-        torch.nn.init.zeros_(self.amp_linear.bias)
+        amp_linear_raw = nn.Linear(hidden_layer_sizes[-1], 1)
+        torch.nn.init.uniform_(amp_linear_raw.weight, -DISC_LOGIT_INIT_SCALE, DISC_LOGIT_INIT_SCALE)
+        torch.nn.init.zeros_(amp_linear_raw.bias)
+        self.amp_linear = SpectralNorm(amp_linear_raw).to(device)
 
         self.trunk.train()
         self.amp_linear.train()
