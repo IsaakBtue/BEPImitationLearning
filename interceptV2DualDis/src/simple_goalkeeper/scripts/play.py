@@ -466,6 +466,12 @@ class AnalyticsPolicy:
             radius = getattr(env, "_blue_dbg_radius", float("nan"))
             speed_th = getattr(env, "_blue_dbg_speed_th", float("nan"))
             landed_t = getattr(env, "_blue_landed", None)
+            # NEW 2026-09-04 (user request): displacement-based "was this a
+            # free landing" fields, alongside the step-count-only fields
+            # this line already prints -- see rewards.py's
+            # _get_reach_target_y FIX 2026-09-04 for the classifier itself.
+            moved_t = getattr(env, "_blue_dbg_foot_displacement", None)
+            free_t = getattr(env, "_blue_landed_was_free", None)
             half_off_t = getattr(env, "_blue_dbg_half_off", None)
             full_off_t = getattr(env, "_blue_dbg_full_off", None)
             foot_off_t = getattr(env, "_blue_dbg_foot_off", None)
@@ -485,7 +491,9 @@ class AnalyticsPolicy:
                 f"contact={bool(contact_t[0].item()) if contact_t is not None else None} "
                 f"foot={foot_idx_t[0].item() if foot_idx_t is not None else None} "
                 f"settle={settle_t[0].item() if settle_t is not None else None}/3 "
-                f"landed={bool(landed_t[0].item()) if landed_t is not None else None} || "
+                f"landed={bool(landed_t[0].item()) if landed_t is not None else None} "
+                f"moved={moved_t[0].item() if moved_t is not None else float('nan'):.3f}m "
+                f"free={bool(free_t[0].item()) if free_t is not None else None} || "
                 f"halfOff={half_off_t[0].item() if half_off_t is not None else float('nan'):+.2f} "
                 f"fullOff={full_off_t[0].item() if full_off_t is not None else float('nan'):+.2f} "
                 f"footOff={foot_off_t[0].item() if foot_off_t is not None else float('nan'):+.2f} "
@@ -1438,6 +1446,64 @@ def _patch_viewer_foot_orientation_plot(native_viewer: "NativeMujocoViewer", env
             for i in range(n):
                 fig.linedata[1][2 * i] = float(-i)
                 fig.linedata[1][2 * i + 1] = target_scaled
+        orig_update_reward_figures(viewer_handle)
+
+    native_viewer.setup = _patched_setup
+    native_viewer._update_reward_figures = _patched_update_reward_figures
+
+
+def _patch_viewer_blue_free_landing_plot(native_viewer: "NativeMujocoViewer", env) -> None:
+    """Add a "blue_foot_displacement" P-panel plot -- the assigned foot's
+    distance traveled since episode reset, with a reference line at the
+    "free landing" distance threshold.
+
+    NEW 2026-09-04 (user request, "put it also in the mujoco p viewer"),
+    same structural pattern as _patch_viewer_foot_orientation_plot. Lets a
+    human watching sgk_play see directly whether a blue landing was
+    classified "free" because the foot genuinely never moved (displacement
+    stays near/under the threshold line) vs. a fast but real approach
+    (displacement clears the line quickly, landing still not "free" even
+    if it happened in a handful of ticks) -- see rewards.py's
+    _get_reach_target_y FIX 2026-09-04 for the classifier itself.
+    """
+    orig_setup = native_viewer.setup
+    orig_update_reward_figures = native_viewer._update_reward_figures
+
+    _NAME = "blue_foot_displacement"
+
+    def _patched_setup() -> None:
+        orig_setup()
+        from mjlab.viewer.native.viewer import make_empty_figure
+        from simple_goalkeeper.mdp.rewards import _BLUE_LANDING_FREE_DIST_THRESHOLD
+        cfg = native_viewer._plot_cfg
+        native_viewer._figures[_NAME] = make_empty_figure(
+            f"{_NAME}_m (free_below={_BLUE_LANDING_FREE_DIST_THRESHOLD:.2f})",
+            cfg.grid_size, cfg.init_yrange, cfg.history, cfg.background_alpha,
+        )
+        native_viewer._histories[_NAME] = deque(maxlen=cfg.history)
+        native_viewer._yrange[_NAME] = cfg.init_yrange
+        native_viewer._scale[_NAME] = 1.0
+        rest = [n for n in native_viewer._term_names]
+        native_viewer._term_names = [_NAME] + rest
+
+    def _patched_update_reward_figures(viewer_handle: "mujoco.viewer.Handle") -> None:
+        if native_viewer._show_plots and native_viewer._term_names and not native_viewer._is_paused:
+            from simple_goalkeeper.mdp.rewards import _BLUE_LANDING_FREE_DIST_THRESHOLD
+            moved_t = getattr(env, "_blue_dbg_foot_displacement", None)
+            value = float(moved_t[native_viewer.env_idx].item()) if moved_t is not None else 0.0
+            native_viewer._append_point(_NAME, value)
+            native_viewer._write_history_to_figure(_NAME)
+
+            # Reference line at the free-landing distance threshold, same
+            # pattern as _patch_viewer_foot_orientation_plot's target line.
+            fig = native_viewer._figures[_NAME]
+            scale = native_viewer._scale[_NAME]
+            threshold_scaled = float(_BLUE_LANDING_FREE_DIST_THRESHOLD) * scale
+            n = int(fig.linepnt[0])
+            fig.linepnt[1] = n
+            for i in range(n):
+                fig.linedata[1][2 * i] = float(-i)
+                fig.linedata[1][2 * i + 1] = threshold_scaled
         orig_update_reward_figures(viewer_handle)
 
     native_viewer.setup = _patched_setup
@@ -2502,6 +2568,7 @@ def run_play(task_id: str, cfg: PlayConfig) -> None:
         _patch_viewer_postupperdofpos_plot(native_viewer, env)
         _patch_viewer_wrong_foot_contact_plot(native_viewer, env)
         _patch_viewer_foot_orientation_plot(native_viewer, env)
+        _patch_viewer_blue_free_landing_plot(native_viewer, env)
         _patch_viewer_postsave_airtime_plot(native_viewer, env)
         _patch_viewer_post_recovery_plots(native_viewer, env)
         _patch_viewer_all_footorientation_plots(native_viewer, env)

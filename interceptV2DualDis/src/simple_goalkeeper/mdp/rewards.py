@@ -506,6 +506,22 @@ def _robot_x_axis_w(env: "ManagerBasedRlEnv") -> torch.Tensor:
     return quat_apply(robot.data.root_link_quat_w, x_local)
 
 
+_BLUE_LANDING_FREE_STEP_THRESHOLD = 5
+"""_get_reach_target_y's "was this blue landing free" step-count fallback
+(OR'd with the displacement check below). FIX 2026-09-04 (user request):
+10 -> 5. Module-level (not a local) so play.py's P-panel plot can import it
+alongside _BLUE_LANDING_FREE_DIST_THRESHOLD."""
+
+_BLUE_LANDING_FREE_DIST_THRESHOLD = 0.05
+"""_get_reach_target_y's primary "was this blue landing free" signal: the
+assigned foot's displacement (meters) since episode reset must be below
+this to count as free. Replaces the old step-count-only proxy, which a live
+probe found flagged 80% of ALL genuine landings (vs. under 10% actually
+"just standing still" per direct viewer observation) -- step-count alone
+can't distinguish "moved fast" from "didn't move". First-guess value, not
+yet tuned from data. Module-level so play.py's P-panel plot can import it."""
+
+
 def _get_ball_crossing_y(env: "ManagerBasedRlEnv", ball_name: str) -> torch.Tensor:
     """Frozen Y coordinate where the ball will cross the goal line (x_local = 0).
 
@@ -709,6 +725,11 @@ def _get_reach_target_y(
         env._blue_landed_was_free = torch.zeros(n, dtype=torch.bool, device=env.device)
         env._blue_landed_genuine = torch.zeros(n, dtype=torch.bool, device=env.device)
         env._blue_last_settle_step = torch.full((n,), -1, dtype=torch.int64, device=env.device)
+        # FIX 2026-09-04 (user request): displacement-based "was this a free
+        # landing" classification, replacing the pure step-count proxy --
+        # see this docstring's own "was_free classification" bullet and the
+        # matching FIX comment further down where it's actually computed.
+        env._blue_foot_start_pos = torch.zeros(n, 3, device=env.device)
     just_reset = env.episode_length_buf <= 1
     env._blue_was_airborne[just_reset] = False
     env._blue_landed[just_reset] = False
@@ -763,6 +784,13 @@ def _get_reach_target_y(
         arange_n = torch.arange(n, device=env.device)
         assigned_foot_pos = foot_pos_w[arange_n, foot_idx]                  # (N, 3)
         assigned_foot_vel = foot_vel_w[arange_n, foot_idx]                  # (N, 3)
+
+        # FIX 2026-09-04 (user request): snapshot the assigned foot's
+        # position at episode reset, for the displacement-based was_free
+        # check below. Idempotent across this function's multiple
+        # per-tick callers (just_reset/assigned_foot_pos don't change
+        # within the same tick).
+        env._blue_foot_start_pos[just_reset] = assigned_foot_pos[just_reset]
 
         found = feet_contact.data.found                                    # (N, 8)
         left_in_contact = (found[:, :4] > 0).any(dim=-1)
@@ -863,13 +891,37 @@ def _get_reach_target_y(
         )
         env._blue_landed |= newly_landed
 
-        # Per-landing-event free classification: a landing achieved
-        # suspiciously early (few steps since reset) can't reflect real
-        # approach work; RSI donor poses are mid-motion by construction.
-        _BLUE_LANDING_FREE_STEP_THRESHOLD = 10
+        # Per-landing-event free classification.
+        #
+        # FIX 2026-09-04 (user request): was PURE step-count
+        # (`episode_length_buf < 10`) -- a crude proxy for "no real approach
+        # work" that turned out to also flag genuine fast athletic landings,
+        # not just true stand-still/RSI-cheese cases. A live probe found
+        # this classifier fired on 80% of all genuine wide-crossing
+        # landings, while the user's own direct viewer observation found
+        # actual "just standing still" cases under 10% -- the step-count
+        # threshold alone cannot tell "moved fast" from "didn't move".
+        # Replaced with a DISPLACEMENT check: the assigned foot's distance
+        # traveled since episode reset (env._blue_foot_start_pos, captured
+        # above) must also be small for a landing to count as free -- this
+        # directly tests "was the foot already there," matching what the
+        # user actually sees in the viewer, regardless of how many ticks
+        # elapsed. Step-count threshold also tightened 10->5 (user request,
+        # "i think that is enough") and kept as an OR alongside displacement
+        # -- still catches a same-tick RSI placement outright even if noisy
+        # first-tick physics settling produces a nonzero displacement
+        # reading, without being the primary signal anymore. Both
+        # thresholds are module-level constants now (see their own
+        # docstrings above _get_ball_crossing_y) so play.py's P-panel plot
+        # can import them.
+        foot_displacement_since_reset = torch.norm(
+            assigned_foot_pos[:, :2] - env._blue_foot_start_pos[:, :2], dim=-1
+        )
+        env._blue_dbg_foot_displacement = foot_displacement_since_reset
         env._blue_landed_was_free = torch.where(
             newly_landed,
-            env.episode_length_buf < _BLUE_LANDING_FREE_STEP_THRESHOLD,
+            (env.episode_length_buf < _BLUE_LANDING_FREE_STEP_THRESHOLD)
+            | (foot_displacement_since_reset < _BLUE_LANDING_FREE_DIST_THRESHOLD),
             env._blue_landed_was_free,
         )
 
@@ -2427,23 +2479,20 @@ def stopball(
     foot_in_contact = torch.stack([left_in_contact, right_in_contact], dim=-1)  # (B, 2)
     correct_foot_contact = foot_in_contact[torch.arange(env.num_envs, device=env.device), foot_idx]
 
-    # FIX 2026-09-04 (user request): reads raw env._blue_landed, not
-    # env._blue_landed_genuine (== blue_landed & ~blue_landed_was_free).
-    # `_blue_landed_was_free` flags a landing as suspicious whenever it
-    # happens within the first 10 episode steps (RSI reset placing the foot
-    # already near blue, or a trivially-close crossing) -- exists to stop
-    # the CONTINUOUS targeting phase (phase1_active/footreach/
-    # blue_overshoot_penalty/etc., still all keyed off `_blue_landed_genuine`,
-    # UNCHANGED) from silently skipping the two-stage waypoint for the
-    # whole rest of the episode. But that's irrelevant to THIS gate: if the
-    # foot immediately lands on the blue marker, then a genuine hard
-    # correct-foot deflection happens some ticks later, that deflection is
-    # a real event regardless of how the earlier landing tick got
-    # classified -- excluding it meant softstop/stopball could NEVER fire
-    # for the rest of an episode purely because the landing happened to be
-    # "free," even with a perfectly good save afterward. `success` (below,
-    # different function) still uses `_blue_landed_genuine` -- not in scope
-    # of this fix (not reported as broken).
+    # FIX 2026-09-04 (final, user request): reads raw env._blue_landed, not
+    # env._blue_landed_genuine. Went back and forth same day (briefly used
+    # raw _blue_landed -> reverted to _blue_landed_genuine once a "free"
+    # classifier bug seemed to explain a one-shotting regression -> found
+    # the classifier fix didn't actually change the underlying picture,
+    # RSI's random-donor-env mechanism means most blue landings look
+    # "already there" regardless of which classifier is used). User's
+    # actual original goal (stated explicitly): more gradient for dives
+    # when blue is already effectively satisfied at reset, not a perfect
+    # RSI-cheese classifier -- raw env._blue_landed does exactly that,
+    # directly. `_blue_landed_genuine`/`_blue_landed_was_free` (now
+    # displacement-based, see _get_reach_target_y) are UNCHANGED and still
+    # used by every other consumer (phase1_active/footreach/
+    # blue_overshoot_penalty/etc.) -- only stopball/softstop bypass it.
     landing_ok = ~env._blue_wide | env._blue_landed
 
     # Raw condition (not gated by the one-shot ~env._sb_flag latch) -- this
@@ -2576,10 +2625,9 @@ def softstop(
     same_step_as_stopball = getattr(
         env, "_sb_deflection_now", torch.zeros(env.num_envs, dtype=torch.bool, device=env.device)
     )
-    # FIX 2026-09-04 (user request): reads raw env._blue_landed, not
-    # env._blue_landed_genuine -- see stopball's matching fix (above,
-    # same file) for the full rationale. `success` (below) is unchanged,
-    # not in scope of this fix.
+    # FIX 2026-09-04 (final, user request): see stopball's matching comment
+    # (above, same file) for the full back-and-forth -- raw env._blue_landed,
+    # not env._blue_landed_genuine.
     landing_ok = ~env._blue_wide | env._blue_landed
 
     fired = (
