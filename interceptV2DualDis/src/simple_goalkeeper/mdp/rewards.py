@@ -112,30 +112,9 @@ _DEFAULT_ROBOT_CFG = SceneEntityCfg("robot")
 # past it. Not yet validated against a live training run under this target.
 # FIX 2026-08-22 (user request): retargeted 80->70 -- see docs/BugFixes.md.
 # FIX 2026-08-23 (user request): retargeted 70->55.
-# FIX 2026-09-04 (user request, "re-add the orientation rewards, but point
-# them straight forward instead of sideways"): retargeted 55->0 (0 deg off
-# forward = 90 deg off Y = straight forward) -- these two rewards now
-# reward the leading foot for NOT rotating off-forward, the opposite of
-# their original "turn sideways to block" intent, since the sideways turn
-# was the root cause of the reported unwanted foot rotation. Split off
-# `_YIELD_TARGET_ANGLE_DEG` (below) to keep contact_yield_velocity_x/y's
-# own target (which shares this constant) at the old 55 deg value --
-# these two concepts are independent (block-face orientation vs.
-# contact-yield direction) and the user chose to decouple them (option B)
-# rather than let contact_yield's target silently move to 0 too.
-_FOOT_TARGET_ANGLE_DEG = 0.0
+_FOOT_TARGET_ANGLE_DEG = 55.0
 _FOOT_TARGET_COS = math.cos(math.radians(_FOOT_TARGET_ANGLE_DEG))
 _FOOT_TARGET_SIN = math.sin(math.radians(_FOOT_TARGET_ANGLE_DEG))
-
-# NEW 2026-09-04 (user request, option B): contact_yield_velocity_x/y's own
-# target direction, split off from _FOOT_TARGET_ANGLE_DEG above so
-# retargeting the leading-foot block-orientation rewards to 0 deg (straight
-# forward) doesn't also silently change contact_yield's yield-direction
-# target. Carries forward the exact 55 deg value _FOOT_TARGET_ANGLE_DEG had
-# immediately before this split (FIX 2026-08-23 above).
-_YIELD_TARGET_ANGLE_DEG = 55.0
-_YIELD_TARGET_COS = math.cos(math.radians(_YIELD_TARGET_ANGLE_DEG))
-_YIELD_TARGET_SIN = math.sin(math.radians(_YIELD_TARGET_ANGLE_DEG))
 
 # FIX 2026-08-05 (user request): overshoot-side steepening for
 # foot_inner_face_continuous. Was a plain cos(angle-target) on both sides of
@@ -506,22 +485,6 @@ def _robot_x_axis_w(env: "ManagerBasedRlEnv") -> torch.Tensor:
     return quat_apply(robot.data.root_link_quat_w, x_local)
 
 
-_BLUE_LANDING_FREE_STEP_THRESHOLD = 5
-"""_get_reach_target_y's "was this blue landing free" step-count fallback
-(OR'd with the displacement check below). FIX 2026-09-04 (user request):
-10 -> 5. Module-level (not a local) so play.py's P-panel plot can import it
-alongside _BLUE_LANDING_FREE_DIST_THRESHOLD."""
-
-_BLUE_LANDING_FREE_DIST_THRESHOLD = 0.05
-"""_get_reach_target_y's primary "was this blue landing free" signal: the
-assigned foot's displacement (meters) since episode reset must be below
-this to count as free. Replaces the old step-count-only proxy, which a live
-probe found flagged 80% of ALL genuine landings (vs. under 10% actually
-"just standing still" per direct viewer observation) -- step-count alone
-can't distinguish "moved fast" from "didn't move". First-guess value, not
-yet tuned from data. Module-level so play.py's P-panel plot can import it."""
-
-
 def _get_ball_crossing_y(env: "ManagerBasedRlEnv", ball_name: str) -> torch.Tensor:
     """Frozen Y coordinate where the ball will cross the goal line (x_local = 0).
 
@@ -725,11 +688,6 @@ def _get_reach_target_y(
         env._blue_landed_was_free = torch.zeros(n, dtype=torch.bool, device=env.device)
         env._blue_landed_genuine = torch.zeros(n, dtype=torch.bool, device=env.device)
         env._blue_last_settle_step = torch.full((n,), -1, dtype=torch.int64, device=env.device)
-        # FIX 2026-09-04 (user request): displacement-based "was this a free
-        # landing" classification, replacing the pure step-count proxy --
-        # see this docstring's own "was_free classification" bullet and the
-        # matching FIX comment further down where it's actually computed.
-        env._blue_foot_start_pos = torch.zeros(n, 3, device=env.device)
     just_reset = env.episode_length_buf <= 1
     env._blue_was_airborne[just_reset] = False
     env._blue_landed[just_reset] = False
@@ -784,13 +742,6 @@ def _get_reach_target_y(
         arange_n = torch.arange(n, device=env.device)
         assigned_foot_pos = foot_pos_w[arange_n, foot_idx]                  # (N, 3)
         assigned_foot_vel = foot_vel_w[arange_n, foot_idx]                  # (N, 3)
-
-        # FIX 2026-09-04 (user request): snapshot the assigned foot's
-        # position at episode reset, for the displacement-based was_free
-        # check below. Idempotent across this function's multiple
-        # per-tick callers (just_reset/assigned_foot_pos don't change
-        # within the same tick).
-        env._blue_foot_start_pos[just_reset] = assigned_foot_pos[just_reset]
 
         found = feet_contact.data.found                                    # (N, 8)
         left_in_contact = (found[:, :4] > 0).any(dim=-1)
@@ -891,37 +842,13 @@ def _get_reach_target_y(
         )
         env._blue_landed |= newly_landed
 
-        # Per-landing-event free classification.
-        #
-        # FIX 2026-09-04 (user request): was PURE step-count
-        # (`episode_length_buf < 10`) -- a crude proxy for "no real approach
-        # work" that turned out to also flag genuine fast athletic landings,
-        # not just true stand-still/RSI-cheese cases. A live probe found
-        # this classifier fired on 80% of all genuine wide-crossing
-        # landings, while the user's own direct viewer observation found
-        # actual "just standing still" cases under 10% -- the step-count
-        # threshold alone cannot tell "moved fast" from "didn't move".
-        # Replaced with a DISPLACEMENT check: the assigned foot's distance
-        # traveled since episode reset (env._blue_foot_start_pos, captured
-        # above) must also be small for a landing to count as free -- this
-        # directly tests "was the foot already there," matching what the
-        # user actually sees in the viewer, regardless of how many ticks
-        # elapsed. Step-count threshold also tightened 10->5 (user request,
-        # "i think that is enough") and kept as an OR alongside displacement
-        # -- still catches a same-tick RSI placement outright even if noisy
-        # first-tick physics settling produces a nonzero displacement
-        # reading, without being the primary signal anymore. Both
-        # thresholds are module-level constants now (see their own
-        # docstrings above _get_ball_crossing_y) so play.py's P-panel plot
-        # can import them.
-        foot_displacement_since_reset = torch.norm(
-            assigned_foot_pos[:, :2] - env._blue_foot_start_pos[:, :2], dim=-1
-        )
-        env._blue_dbg_foot_displacement = foot_displacement_since_reset
+        # Per-landing-event free classification: a landing achieved
+        # suspiciously early (few steps since reset) can't reflect real
+        # approach work; RSI donor poses are mid-motion by construction.
+        _BLUE_LANDING_FREE_STEP_THRESHOLD = 10
         env._blue_landed_was_free = torch.where(
             newly_landed,
-            (env.episode_length_buf < _BLUE_LANDING_FREE_STEP_THRESHOLD)
-            | (foot_displacement_since_reset < _BLUE_LANDING_FREE_DIST_THRESHOLD),
+            env.episode_length_buf < _BLUE_LANDING_FREE_STEP_THRESHOLD,
             env._blue_landed_was_free,
         )
 
@@ -2479,18 +2406,10 @@ def stopball(
     foot_in_contact = torch.stack([left_in_contact, right_in_contact], dim=-1)  # (B, 2)
     correct_foot_contact = foot_in_contact[torch.arange(env.num_envs, device=env.device), foot_idx]
 
-    # FIX 2026-09-04 (reverted again, user request): back to
-    # env._blue_landed_genuine. Full history: was genuine originally ->
-    # changed to raw _blue_landed in the 87a936c batch (user request: more
-    # gradient for dives when blue is already satisfied at reset) -> a
-    # one-shotting regression was observed on the checkpoint trained under
-    # that batch -> since that batch changed 5+ things at once (this,
-    # cleanstop's trigger, softstop's weight, t_flight_range, ball
-    # visibility), the actual cause was never isolated -> reverting this
-    # specific piece back to genuine as the first candidate to rule out via
-    # a controlled comparison, rather than leaving 87a936c's un-isolated
-    # raw-_blue_landed change in place on a guess. If a bisect later shows
-    # this wasn't the cause, it can go back to raw _blue_landed.
+    # FIX 2026-07-24: reuses env._blue_landed_genuine (== env._blue_landed &
+    # ~env._blue_landed_was_free, computed once in _get_reach_target_y,
+    # already called above this line) instead of recomputing the same
+    # expression locally -- pure dedup, same value as before.
     landing_ok = ~env._blue_wide | env._blue_landed_genuine
 
     # Raw condition (not gated by the one-shot ~env._sb_flag latch) -- this
@@ -2623,10 +2542,10 @@ def softstop(
     same_step_as_stopball = getattr(
         env, "_sb_deflection_now", torch.zeros(env.num_envs, dtype=torch.bool, device=env.device)
     )
-    # FIX 2026-09-04 (reverted again, user request): see stopball's matching
-    # comment (above, same file) for the full history -- back to
-    # env._blue_landed_genuine, isolating this as one candidate for the
-    # one-shotting regression rather than leaving it changed on a guess.
+    # FIX 2026-07-24: reuses env._blue_landed_genuine (== env._blue_landed &
+    # ~env._blue_landed_was_free, computed once in _get_reach_target_y,
+    # already called above this line) instead of recomputing the same
+    # expression locally -- pure dedup, same value as before.
     landing_ok = ~env._blue_wide | env._blue_landed_genuine
 
     fired = (
@@ -5095,60 +5014,11 @@ def cleanstop(
     ball_name: str,
     speed_threshold: float = 1.0,
     steepness: float = 2.0,
-    window_start: int = 8,   # ticks after the trigger fires, ~0.16s @ dt=0.02s
-    window_end: int = 12,    # ticks after the trigger fires, ~0.24s @ dt=0.02s
-    negative_scale: float = 0.4,
+    window_start: int = 8,   # ticks after softstop fires, ~0.16s @ dt=0.02s
+    window_end: int = 12,    # ticks after softstop fires, ~0.24s @ dt=0.02s
 ) -> torch.Tensor:
-    """One-time reward, fires a FIXED delay after the trigger, scored by ball speed
-    averaged over that window -- can go NEGATIVE for a hard/violent deflection,
-    capped shallower than the positive side (see `negative_scale` below).
-
-    FIX 2026-09-04 (user request, first pass): trigger switched from
-    `env._softstop_flag` to `env._sb_flag` (stopball's own one-shot latch) --
-    fixed the same-tick-coincidence gap between softstop's extra
-    `ball_x_vel > velocity_threshold` check and stopball's `delta_vx` check.
-
-    FIX 2026-09-04 (user request, SECOND pass, same day): a live-checkpoint
-    probe (`.claude/skills/debugging-mujoco-contact-sensors`'s methodology --
-    real trained checkpoint, cross-checked contact-sensor state against the
-    reward's own gates) found `_sb_flag` itself was still starving
-    `cleanstop` on a large fraction of genuine correct-foot touches: of 246
-    genuine touches with no stopball credit yet, 52% were blocked purely by
-    `landing_ok` (the wide-crossing "must have genuinely landed at blue
-    first" gate) -- many at delta_vx of 4-10 m/s, i.e. clearly hard,
-    legitimate contact events, not the "beeline past blue straight to the
-    final target" exploit `landing_ok` exists to prevent. `cleanstop` now
-    has its OWN independent trigger, computed inline, decoupled from
-    `_sb_flag` entirely: correct-foot `ball_contact` sensor (genuine foot-
-    vs-ball contact, not the ground-contact sensor stopball/softstop use)
-    AND `delta_vx > 1.0` AND `in_front` -- deliberately WITHOUT `landing_ok`.
-    `stopball`/`softstop` themselves are UNCHANGED (still require
-    `landing_ok`, still use the ground-contact sensor) -- this only widens
-    what CAN be quality-scored after the fact, it doesn't touch whether the
-    positive stopball/softstop bonus itself is earned. Verified live: 0
-    airborne (ground-vs-ball-contact) false negatives in the same 400-event
-    probe sample, so the ball_contact sensor read here is trustworthy for
-    this specific correct-foot case (unlike the reverted 2026-07-15/08-30
-    attempts to use it as the SOLE trigger for stopball/softstop/
-    contact_yield_velocity, which failed for other reasons -- see that
-    history in this function's own prior fix entries and
-    `.claude/skills/debugging-mujoco-contact-sensors`).
-
-    FIX 2026-09-04 (user request, avoidance-risk mitigation): payout is now
-    ASYMMETRIC, not the plain symmetric tanh described below -- the negative
-    branch is scaled down by `negative_scale=0.4` (worst case -0.4, not -1.0)
-    while the positive branch is untouched (best case still +1.0). Rationale:
-    a fully symmetric [-1,1] penalty risks teaching the policy that NOT
-    engaging the ball at all (0 reward from this term, but also 0 risk) can
-    beat a low-confidence attempt, if the guaranteed on-contact bonuses
-    (stopball/softstop/single_foot_save, none of which care about stop
-    quality) don't comfortably outweigh cleanstop's worst case. Softening the
-    downside keeps a real gradient against violent kicks while guaranteeing
-    engaging the ball is still worth strictly more in expectation than
-    avoiding it, without having to re-derive the exact reward-budget margin
-    against every other term. Chosen as a smooth scale (not a hard clamp) so
-    the negative branch keeps a live, non-flat gradient rather than a dead
-    zone at the floor.
+    """One-time reward, fires a FIXED delay after softstop, scored by ball speed
+    averaged over that window -- can go NEGATIVE for a hard/violent deflection.
 
     REWORKED 2026-08-29 (user request), replacing the settle-window design
     below (kept in this docstring for history). Root cause: investigating a
@@ -5229,55 +5099,36 @@ def cleanstop(
 
     if not hasattr(env, "_cleanstop_flag"):
         env._cleanstop_flag = torch.zeros(env.num_envs, dtype=torch.bool, device=env.device)
-        env._cleanstop_prev_trigger = torch.zeros(env.num_envs, dtype=torch.bool, device=env.device)
+        env._cleanstop_prev_softstop = torch.zeros(env.num_envs, dtype=torch.bool, device=env.device)
         env._cleanstop_since = torch.full((env.num_envs,), -1, dtype=torch.long, device=env.device)
         env._cleanstop_speed_sum = torch.zeros(env.num_envs, device=env.device)
         env._cleanstop_speed_count = torch.zeros(env.num_envs, dtype=torch.long, device=env.device)
 
     just_reset = env.episode_length_buf <= 1
     env._cleanstop_flag[just_reset] = False
-    env._cleanstop_prev_trigger[just_reset] = False
+    env._cleanstop_prev_softstop[just_reset] = False
     env._cleanstop_since[just_reset] = -1
     env._cleanstop_speed_sum[just_reset] = 0.0
     env._cleanstop_speed_count[just_reset] = 0
 
-    # FIX 2026-09-04 (second pass): own independent trigger, NOT gated by
-    # landing_ok -- see docstring. correct-foot ball_contact (genuine
-    # foot-vs-ball touch) & delta_vx>1.0 & in_front. Reuses stopball's own
-    # `_sb_init_vx` baseline (stopball is registered before cleanstop, so
-    # it's already fresh/reset-handled this tick) rather than duplicating
-    # the reset-tracking logic.
-    sb_init_vx = getattr(env, "_sb_init_vx", None)
-    if sb_init_vx is None:
+    softstop_fired = getattr(env, "_softstop_flag", None)
+    if softstop_fired is None:
         return torch.zeros(env.num_envs, device=env.device)
 
-    ball_x_vel = ball.data.root_link_lin_vel_w[:, 0]
-    ball_x_local = ball.data.root_link_pos_w[:, 0] - env.scene.env_origins[:, 0]
-    delta_vx = ball_x_vel - sb_init_vx
-    in_front = ball_x_local > -0.3
-
-    ball_sensor: ContactSensor = env.scene["ball_contact"]
-    ball_found = ball_sensor.data.found  # (N, 8): 0-3 left foot geoms, 4-7 right
-    left_ball_touch = (ball_found[:, :4] > 0).any(dim=-1)
-    right_ball_touch = (ball_found[:, 4:] > 0).any(dim=-1)
-    foot_idx = _get_correct_foot_idx(env, ball_name)
-    correct_foot_ball_touch = torch.where(foot_idx == 0, left_ball_touch, right_ball_touch)
-
-    trigger_fired = correct_foot_ball_touch & (delta_vx > 1.0) & in_front
-
+    correct_foot = getattr(env, "_softstop_correct_foot", torch.zeros(env.num_envs, dtype=torch.bool, device=env.device))
     # Same "only save with the side of the foot" gate as before (2026-08-15).
     sole_contact = getattr(env, "_episode_sole_contact", torch.zeros(env.num_envs, dtype=torch.bool, device=env.device))
-    eligible = ~sole_contact & ~env._cleanstop_flag
+    eligible = correct_foot & ~sole_contact & ~env._cleanstop_flag
 
-    # Arm the fixed-delay window on the RISING EDGE of stopball's flag (this
-    # function has no direct access to stopball's own one-shot pulse, so the
+    # Arm the fixed-delay window on the RISING EDGE of softstop's flag (this
+    # function has no direct access to softstop's own one-shot pulse, so the
     # edge is detected locally against last call's snapshot -- cleanstop is
-    # registered after stopball, so trigger_fired is already fresh this tick).
+    # registered after softstop, so softstop_fired is already fresh this tick).
     was_armed = env._cleanstop_since >= 0
     env._cleanstop_since[was_armed] += 1
-    just_triggered = trigger_fired & ~env._cleanstop_prev_trigger & eligible & ~was_armed
-    env._cleanstop_since[just_triggered] = 0
-    env._cleanstop_prev_trigger = trigger_fired.clone()
+    just_softstopped = softstop_fired & ~env._cleanstop_prev_softstop & eligible & ~was_armed
+    env._cleanstop_since[just_softstopped] = 0
+    env._cleanstop_prev_softstop = softstop_fired.clone()
 
     armed = env._cleanstop_since >= 0
     in_window = armed & (env._cleanstop_since >= window_start) & (env._cleanstop_since <= window_end)
@@ -5287,8 +5138,7 @@ def cleanstop(
     fired = armed & (env._cleanstop_since > window_end) & eligible
     avg_speed = env._cleanstop_speed_sum / env._cleanstop_speed_count.clamp(min=1)
 
-    raw_scale = torch.tanh(steepness * (speed_threshold - avg_speed))
-    scale = torch.where(raw_scale >= 0.0, raw_scale, raw_scale * negative_scale)
+    scale = torch.tanh(steepness * (speed_threshold - avg_speed))
 
     env._cleanstop_flag |= fired
     env._cleanstop_since[fired] = -1
@@ -5440,12 +5290,7 @@ def contact_yield_velocity_x(
     not yet validated against a live training run.
     """
     fired, assigned_vel_w, foot_idx = _contact_yield_state(env, ball_name, asset_cfg)
-    # FIX 2026-09-04 (user request, option B): reads _YIELD_TARGET_SIN, not
-    # _FOOT_TARGET_SIN -- the two constants were split so retargeting
-    # inner_face_orientation_save/foot_inner_face_continuous to 0 deg
-    # (straight forward) doesn't also move this term's yield-direction
-    # target. Value unchanged (55 deg) from before the split.
-    yield_x = -assigned_vel_w[:, 0] * _YIELD_TARGET_SIN
+    yield_x = -assigned_vel_w[:, 0] * _FOOT_TARGET_SIN
     reward = torch.clamp(yield_x, min=-max_credit_speed, max=max_credit_speed) / max_credit_speed
     return fired.float() * reward
 
@@ -5487,9 +5332,7 @@ def contact_yield_velocity_y(
     """
     fired, assigned_vel_w, foot_idx = _contact_yield_state(env, ball_name, asset_cfg)
     expected_sign = torch.where(foot_idx == 0, 1.0, -1.0)                   # (N,) left=+Y, right=-Y
-    # FIX 2026-09-04 (user request, option B): reads _YIELD_TARGET_COS, not
-    # _FOOT_TARGET_COS -- see contact_yield_velocity_x's matching fix above.
-    yield_y = -assigned_vel_w[:, 1] * expected_sign * _YIELD_TARGET_COS
+    yield_y = -assigned_vel_w[:, 1] * expected_sign * _FOOT_TARGET_COS
     reward = torch.clamp(yield_y, min=-max_credit_speed, max=max_credit_speed) / max_credit_speed
     return fired.float() * reward
 
