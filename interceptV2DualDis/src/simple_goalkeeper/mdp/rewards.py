@@ -112,9 +112,28 @@ _DEFAULT_ROBOT_CFG = SceneEntityCfg("robot")
 # past it. Not yet validated against a live training run under this target.
 # FIX 2026-08-22 (user request): retargeted 80->70 -- see docs/BugFixes.md.
 # FIX 2026-08-23 (user request): retargeted 70->55.
-_FOOT_TARGET_ANGLE_DEG = 55.0
+# FIX 2026-09-04 (re-applied after a session-wide revert): retargeted 55->0
+# (0 deg off forward = 90 deg off Y = straight forward) -- these two rewards
+# now reward the leading foot for NOT rotating off-forward, the opposite of
+# their original "turn sideways to block" intent, since the sideways turn
+# was the root cause of a reported unwanted foot rotation. Split off
+# `_YIELD_TARGET_ANGLE_DEG` (below) to keep contact_yield_velocity_x/y's
+# own target (which shares this constant) at the old 55 deg value -- these
+# two concepts are independent (block-face orientation vs. contact-yield
+# direction), decoupled per user request.
+_FOOT_TARGET_ANGLE_DEG = 0.0
 _FOOT_TARGET_COS = math.cos(math.radians(_FOOT_TARGET_ANGLE_DEG))
 _FOOT_TARGET_SIN = math.sin(math.radians(_FOOT_TARGET_ANGLE_DEG))
+
+# NEW 2026-09-04 (re-applied after a session-wide revert): contact_yield_
+# velocity_x/y's own target direction, split off from _FOOT_TARGET_ANGLE_DEG
+# above so retargeting the leading-foot block-orientation rewards to 0 deg
+# (straight forward) doesn't also silently change contact_yield's yield-
+# direction target. Carries forward the exact 55 deg value
+# _FOOT_TARGET_ANGLE_DEG had immediately before this split.
+_YIELD_TARGET_ANGLE_DEG = 55.0
+_YIELD_TARGET_COS = math.cos(math.radians(_YIELD_TARGET_ANGLE_DEG))
+_YIELD_TARGET_SIN = math.sin(math.radians(_YIELD_TARGET_ANGLE_DEG))
 
 # FIX 2026-08-05 (user request): overshoot-side steepening for
 # foot_inner_face_continuous. Was a plain cos(angle-target) on both sides of
@@ -5290,7 +5309,12 @@ def contact_yield_velocity_x(
     not yet validated against a live training run.
     """
     fired, assigned_vel_w, foot_idx = _contact_yield_state(env, ball_name, asset_cfg)
-    yield_x = -assigned_vel_w[:, 0] * _FOOT_TARGET_SIN
+    # FIX 2026-09-04 (re-applied after a session-wide revert): reads
+    # _YIELD_TARGET_SIN, not _FOOT_TARGET_SIN -- the two constants were
+    # split so retargeting inner_face_orientation_save/foot_inner_face_
+    # continuous to 0 deg (straight forward) doesn't also move this term's
+    # yield-direction target. Value unchanged (55 deg) from before the split.
+    yield_x = -assigned_vel_w[:, 0] * _YIELD_TARGET_SIN
     reward = torch.clamp(yield_x, min=-max_credit_speed, max=max_credit_speed) / max_credit_speed
     return fired.float() * reward
 
@@ -5332,7 +5356,10 @@ def contact_yield_velocity_y(
     """
     fired, assigned_vel_w, foot_idx = _contact_yield_state(env, ball_name, asset_cfg)
     expected_sign = torch.where(foot_idx == 0, 1.0, -1.0)                   # (N,) left=+Y, right=-Y
-    yield_y = -assigned_vel_w[:, 1] * expected_sign * _FOOT_TARGET_COS
+    # FIX 2026-09-04 (re-applied after a session-wide revert): reads
+    # _YIELD_TARGET_COS, not _FOOT_TARGET_COS -- see contact_yield_velocity_x's
+    # matching fix above.
+    yield_y = -assigned_vel_w[:, 1] * expected_sign * _YIELD_TARGET_COS
     reward = torch.clamp(yield_y, min=-max_credit_speed, max=max_credit_speed) / max_credit_speed
     return fired.float() * reward
 

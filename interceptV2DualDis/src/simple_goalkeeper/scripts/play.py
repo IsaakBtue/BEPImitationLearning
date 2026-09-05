@@ -814,9 +814,18 @@ def _patch_viewer_contact_yield_vis(native_viewer: "NativeMujocoViewer", env) ->
     Chains onto whatever `_update_debug_visualizers` already is
     (`_patch_viewer_intercept_vis` runs first in `run_play`'s own
     registration order) rather than replacing it.
+
+    FIX 2026-09-04 (re-applied after a session-wide revert): was importing
+    `_FOOT_TARGET_COS`/`_FOOT_TARGET_SIN` -- which retargeted to 0 deg
+    (straight forward) alongside `inner_face_orientation_save`/
+    `foot_inner_face_continuous` being re-added -- so this arrow would
+    silently draw THAT reward's target instead of `contact_yield_velocity_
+    x/_y`'s own, which is deliberately split off into `_YIELD_TARGET_COS`/
+    `_YIELD_TARGET_SIN` (still 55 deg, unchanged). Swapped to the
+    yield-specific constants.
     """
     from simple_goalkeeper.mdp.rewards import (
-        _get_correct_foot_idx, _FOOT_TARGET_COS, _FOOT_TARGET_SIN,
+        _get_correct_foot_idx, _YIELD_TARGET_COS, _YIELD_TARGET_SIN,
     )
 
     orig_update = native_viewer._update_debug_visualizers
@@ -842,8 +851,10 @@ def _patch_viewer_contact_yield_vis(native_viewer: "NativeMujocoViewer", env) ->
         # Built directly from contact_yield_velocity_x/_y's own formulas
         # (see FIX 2026-08-30 above), not derived from a single rotated
         # vector anymore -- the two terms are independent since the split.
+        # FIX 2026-09-04: _YIELD_TARGET_SIN/_COS, not _FOOT_TARGET_SIN/_COS
+        # -- see this function's docstring.
         yield_dir = np.array(
-            [-_FOOT_TARGET_SIN, -expected_sign * _FOOT_TARGET_COS, 0.0], dtype=np.float64,
+            [-_YIELD_TARGET_SIN, -expected_sign * _YIELD_TARGET_COS, 0.0], dtype=np.float64,
         )
 
         scn = viewer_handle.user_scn

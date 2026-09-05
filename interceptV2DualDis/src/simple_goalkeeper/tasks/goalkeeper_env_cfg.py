@@ -396,10 +396,12 @@ def goalkeeper_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
         for _name, _base in (
             ("single_foot_save",             34.72),
             ("cleanstop",                    17.36),
-            # inner_face_orientation_save curriculum entry removed 2026-09-02
-            # (user request, temporary) alongside the reward's own removal --
-            # see the foot_inner_face_continuous curriculum removal below for
-            # why this is required, not optional.
+            # RE-ADDED 2026-09-04 (re-applied after a session-wide revert):
+            # inner_face_orientation_save re-enabled, retargeted to 0 deg
+            # off forward (was 55 deg, sideways block posture) -- see
+            # rewards.py's _FOOT_TARGET_ANGLE_DEG docstring. Same base
+            # weight as before removal.
+            ("inner_face_orientation_save",  17.36),
             ("contact_yield_velocity_x",     45.0),
         ):
             cfg.curriculum[f"{_name}_curriculum"] = CurriculumTermCfg(
@@ -628,12 +630,12 @@ def goalkeeper_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
         for _name, _base in (
             ("trailing_foot_lift",         2.0),
             ("foot_clearance",             2.0),
-            # foot_inner_face_continuous curriculum entry removed 2026-09-02
-            # (user request, temporary) alongside the reward's own removal
-            # from cfg.rewards below -- correct_foot_save_curriculum.__init__
-            # does env.reward_manager.get_term_cfg(reward_name), which would
-            # crash at env construction if this stayed registered while the
-            # reward itself is gone.
+            # RE-ADDED 2026-09-04 (re-applied after a session-wide revert):
+            # foot_inner_face_continuous re-enabled, retargeted to 0 deg off
+            # forward -- see inner_face_orientation_save's matching re-add
+            # above and rewards.py's _FOOT_TARGET_ANGLE_DEG docstring. Same
+            # base weight as before removal.
+            ("foot_inner_face_continuous", 3.47),
             ("contact_yield_velocity_y",   5.0),
         ):
             cfg.curriculum[f"{_name}_curriculum"] = CurriculumTermCfg(
@@ -935,27 +937,29 @@ def goalkeeper_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
             params={"ball_name": BALL_NAME, "asset_cfg": _FEET_CFG, "strict_th": 0.15},
         ),
         # --- save quality bonuses (fire on top of softstop, not as a gate) ---
-        # inner_face_orientation_save / foot_inner_face_continuous TEMPORARILY
-        # REMOVED 2026-09-02 (user request): disable the leading foot's
-        # y-axis/off-forward rotation target (block posture) entirely, both
-        # the one-shot save bonus and the dense continuous pull, so the foot
-        # settles back to pointing straight at save. feetorientation (flatness,
-        # roll/pitch) is untouched -- orthogonal reward, not this one. Not
-        # zero-weighted: zero-weighting foot_inner_face_continuous alone isn't
-        # enough since its curriculum entry (correct_foot_save_curriculum)
-        # directly overwrites term_cfg.weight once cu>=2, which would silently
-        # re-enable it -- see that curriculum entry's own removal above.
-        # Commented out (not deleted) for an easy revert.
-        # "inner_face_orientation_save": RewardTermCfg(
-        #     func=gk_mdp.inner_face_orientation_save,
-        #     weight=17.36,
-        #     params={"ball_name": BALL_NAME, "tolerance_deg": 5.0, "asset_cfg": _FEET_CFG},
-        # ),
-        # "foot_inner_face_continuous": RewardTermCfg(
-        #     func=gk_mdp.foot_inner_face_continuous,
-        #     weight=3.47,
-        #     params={"ball_name": BALL_NAME, "asset_cfg": _FEET_CFG},
-        # ),
+        # inner_face_orientation_save / foot_inner_face_continuous were
+        # TEMPORARILY REMOVED 2026-09-02 (user request) because their 55 deg
+        # off-forward (sideways block posture) target was causing unwanted
+        # foot rotation. RE-ADDED 2026-09-04 (re-applied after a session-wide
+        # revert): same mechanism, retargeted to 0 deg off forward (straight
+        # forward, was 55 deg sideways) via rewards.py's
+        # `_FOOT_TARGET_ANGLE_DEG` -- these two terms now reward the leading
+        # foot staying pointed forward rather than turning sideways.
+        # `contact_yield_velocity_x`/`_y` (which also read a target-angle
+        # constant) were split onto their own `_YIELD_TARGET_ANGLE_DEG`
+        # (still 55 deg, unchanged) so they aren't silently retargeted too --
+        # see rewards.py. feetorientation (flatness, roll/pitch) is
+        # untouched -- orthogonal reward, not this one.
+        "inner_face_orientation_save": RewardTermCfg(
+            func=gk_mdp.inner_face_orientation_save,
+            weight=17.36,
+            params={"ball_name": BALL_NAME, "tolerance_deg": 5.0, "asset_cfg": _FEET_CFG},
+        ),
+        "foot_inner_face_continuous": RewardTermCfg(
+            func=gk_mdp.foot_inner_face_continuous,
+            weight=3.47,
+            params={"ball_name": BALL_NAME, "asset_cfg": _FEET_CFG},
+        ),
         # --- NEW 2026-07-27 (user request): trailing foot has no orientation
         # shaping anywhere else in this table (the two terms above only ever
         # touch the leading/assigned foot) -- always active, no ~behind gate.
@@ -1792,7 +1796,14 @@ def goalkeeper_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
             "dist_range":     (1.5, 3.5),
             "y_start_range":  (-0.3, 0.3),
             "y_end_range":    (-1.0, 1.0),  # FIX 2026-08-06: 1.1 -> 1.0 (user request)
-            "t_flight_range": (0.7, 1.1),
+            # FIX 2026-09-04 (re-applied after a session-wide revert): 0.7-1.1
+            # -> 0.4-1.0, matching G1's own t_flight range exactly. Fixes a
+            # catchstep/visibility mismatch: G1's ball-visibility catchstep
+            # ceiling is a hardcoded 50 ticks (1.0s), sized to G1's own
+            # 0.4-1.0s t_flight range -- SGK's ball could still be mid-flight
+            # past that 1.0s ceiling for its top ~25% of flights, going
+            # invisible before arrival on slow flights.
+            "t_flight_range": (0.4, 1.0),
             "spawn_z":        0.12,
         },
     )
@@ -1914,7 +1925,7 @@ def goalkeeper_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
                 "dist_range":    (1.5, 3.5),
                 "y_start_range": (-0.3, 0.3),
                 "y_end_range":   (-1.0, 1.0),  # FIX 2026-08-06: 1.1 -> 1.0 (user request)
-                "t_flight_range": (0.7, 1.1),
+                "t_flight_range": (0.4, 1.0),  # FIX 2026-09-04: matches train block, see that comment
                 "spawn_z":       0.12,
             },
         )
