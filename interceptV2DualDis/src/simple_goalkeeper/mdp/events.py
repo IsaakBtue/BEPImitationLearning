@@ -861,14 +861,17 @@ class far_travel_curriculum:
     command_ranges[:,0] -= 0.3*cu / command_ranges[:,1] += 0.3*cu, same step
     for both edges) instead of a single growing fraction. Both are seeded
     using STEP's own init-fraction-of-span, applied to this task's own
-    floor/ceiling (lo=0.5, the near/far boundary -- a structural constraint
-    G1 doesn't have, since G1 separates regions by height, not width, so its
-    width curricula are free to shrink toward a true geometric floor of 0;
-    ours can't go below 0.5 without re-colliding with the near region):
+    floor/ceiling (lo=0.5, the near/far boundary -- FIX 2026-08-01, reverted
+    from 0.65 back to 0.5, user request, kept in sync with regions.py's
+    _REGION_Y_END_RANGE and rewards.py's wide_threshold -- a structural
+    constraint G1 doesn't have, since G1 separates regions by height, not
+    width, so its width curricula are free to shrink toward a true
+    geometric floor of 0; ours can't go below 0.5 without re-colliding
+    with the near region):
         inner_frac = 0.2/1.8 = 0.1111  (G1 step ranges_4 width[0] / maxw[1])
         outer_frac = 1.2/1.8 = 0.6667  (G1 step ranges_4 width[1] / maxw[1])
-        far_inner starts at lo + inner_frac*(hi-lo) ~= 0.589, shrinks to lo (0.5)
-        far_outer starts at lo + outer_frac*(hi-lo) ~= 1.033, grows to hi (1.3)
+        far_inner starts at lo + inner_frac*(hi-lo) ~= 0.567, shrinks to lo (0.5)
+        far_outer starts at lo + outer_frac*(hi-lo) ~= 0.900, grows to hi (1.1)
     Both driven by the same shared EMA-smoothed episode-length signal (cu) and
     the same step_size per update, matching G1's identical 0.3*cu for both
     edges.
@@ -905,8 +908,8 @@ class far_travel_curriculum:
         self._step_size       = p.get("step_size",       0.0013)
         self._update_interval = p.get("update_interval", 500)
         self._ep_len_divisor  = p.get("ep_len_divisor",   50)
-        self._lo              = p.get("lo", 0.5)
-        self._hi              = p.get("hi", 1.3)
+        self._lo              = p.get("lo", 0.5)  # FIX 2026-08-01: reverted to 0.5 (was 0.65 since 2026-07-23)
+        self._hi              = p.get("hi", 1.0)  # FIX 2026-08-06: 1.1 -> 1.0 (was 1.3 pre-2026-08-01)
         # FIX 2026-07-20: was -(update_interval) -- see reward_curriculum_ep_len's
         # __init__ comment for the full explanation. 0 matches G1's
         # last_step_counter=0 init, requiring a full window before first fire.
@@ -1086,6 +1089,12 @@ def reset_ball_rolling(
         lo = min(abs(y_end_range[0]), abs(y_end_range[1]))
         hi = max(abs(y_end_range[0]), abs(y_end_range[1]))
         sign_val = 1.0 if y_end_range[1] > 0 else -1.0
+        # FIX 2026-08-15 (user request, near-region-only skewed sampling):
+        # True only in the near-region `else` branch below, False for the
+        # `y_end_outer_frac` override and `use_far_travel_curriculum` (far)
+        # branches -- both left as plain uniform, per the user's explicit
+        # "for the near region" scoping.
+        is_near_region_branch = False
         if y_end_outer_frac is not None:
             inner = lo + (hi - lo) * max(0.0, min(1.0, y_end_outer_frac))
             outer = hi
@@ -1111,14 +1120,32 @@ def reset_ball_rolling(
             # separate decoupled signal needed here -- near doesn't require
             # a genuine multi-step skill, so there's no "races ball_difficulty"
             # concern the way there was for far) advances from 0 to 1.
-            # inner stays fixed at lo (0.15 for near): unlike far's inner,
-            # this is a deliberate leg-clearance dead-zone minimum inherited
-            # from the two-sided branch's own _Y_INNER constant below, not a
-            # partition artifact -- it should never shrink toward 0.
+            # inner stays fixed at lo -- FIX 2026-08-15 (user request):
+            # regions.py's _REGION_Y_END_RANGE near-region lo lowered
+            # 0.15 -> 1e-4 (effectively 0; see that file's own comment for
+            # why not a literal 0.0), so `inner` now allows the target to
+            # land almost exactly at center.
             inner = lo
             outer_seed = lo + _G1_STEP_OUTER_FRAC * (hi - lo)
             outer = outer_seed + (hi - outer_seed) * d
-        mag = sample_uniform(inner, outer, (n,), env.device)
+            is_near_region_branch = True
+        if is_near_region_branch:
+            # FIX 2026-08-15 (user request): "i want it a little rare to be
+            # in the center because there is nothing much to learn from
+            # those." Was a plain uniform sample over [inner, outer] --
+            # replaced with a power-transform skew (u~Uniform(0,1),
+            # mag=inner+(outer-inner)*u**0.5) that biases density toward the
+            # outer/harder end. p=0.5 chosen via AskUserQuestion (offered
+            # 0.6/0.35/custom -- user picked a milder custom 0.5, "a little
+            # rare," not the aggressive 0.35 option). Only applied to the
+            # near-region branch (`is_near_region_branch`, set just above)
+            # -- far regions (use_far_travel_curriculum) and the one-sided-
+            # outer-frac override (y_end_outer_frac) are unaffected, per
+            # explicit "for the near region" scoping.
+            u = sample_uniform(0.0, 1.0, (n,), env.device)
+            mag = inner + (outer - inner) * u.pow(0.5)
+        else:
+            mag = sample_uniform(inner, outer, (n,), env.device)
         y_end = sign_val * mag
     else:
         # Two-sided dead zone for y_end (mirrors G1's ±0.2 m minimum offset).
@@ -1216,3 +1243,96 @@ def ball_exit_termination(
     ball: Entity = env.scene[ball_name]
     ball_x_local = ball.data.root_link_pos_w[:, 0] - env.scene.env_origins[:, 0]
     return ball_x_local < behind_threshold
+
+
+# Matches t1_constants.py's own `_foot_regex` -- the 8 foot collision geoms
+# (left/right_foot1..4_collision) that FULL_COLLISION gives priority=1,
+# solref=(0.01, 1.0). Since foot priority beats the ball's own solref for
+# ANY foot-ball contact (confirmed live, 2026-08-23: varying the ball's own
+# solref changed foot-ball bounce restitution 0.0% -- identical 0.1289 at
+# every value tested), THIS is the geom that has to be randomized to vary
+# save-contact bounciness at all, not the ball. See rewards on restitution
+# investigation, 2026-08-23.
+_FOOT_COLLISION_CFG = SceneEntityCfg(
+    "robot", geom_names=(r"^(left|right)_foot\d+_collision$",)
+)
+
+
+def randomize_foot_ball_restitution(
+    env: "ManagerBasedRlEnv",
+    env_ids: torch.Tensor | None,
+    dampratio_range: tuple[float, float] = (0.35, 1.0),
+    asset_cfg: SceneEntityCfg = _FOOT_COLLISION_CFG,
+) -> None:
+    """Randomize save-contact bounciness per env, matching G1's own
+    `randomize_restitution` (`g1_29_config.py`: `restitution_range=[0.0,1.0]`,
+    resampled every reset).
+
+    G1 randomizes the BALL's restitution directly (Isaac Gym/PhysX resolves
+    contact restitution as a genuine per-shape material property). MuJoCo has
+    no literal restitution scalar -- bounciness is emergent from a
+    (timeconst, dampratio) solref pair -- AND this project's foot geoms
+    already carry `priority=1` (`FULL_COLLISION`, `t1_constants.py`), which
+    makes MuJoCo use the foot's own solref *entirely* for foot-ball contact,
+    ignoring the ball's. So randomizing the ball (the literal G1-equivalent
+    target) would be a no-op for the actual save; this randomizes the winning
+    geom (the foot) instead to get the same real effect G1 gets.
+
+    `dampratio_range=(0.35, 1.0)` was calibrated live against the real
+    `mujoco_warp` engine (production's own timestep=0.005,
+    integrator=implicitfast, iterations=10, ls_iterations=20 --
+    `velocity_env_cfg.py`, no override in this project), holding
+    `timeconst=0.01` fixed (production's own value) and sweeping only
+    dampratio -- the two-parameter version was non-monotonic. Measured
+    first-bounce restitution across the calibrated range:
+
+        dampratio=1.00 (current production) -> restitution 0.129
+        dampratio=0.70                      -> restitution 0.231
+        dampratio=0.50                      -> restitution 0.424
+        dampratio=0.35                      -> restitution 0.834
+        dampratio=0.30                      -> restitution 1.124 (unphysical -- excluded)
+
+    So dampratio=1.0 is the LEAST bouncy end (matches current production
+    exactly, restitution~0.13) and dampratio=0.35 is the MOST bouncy end of
+    the verified-stable range (restitution~0.83) -- sampling uniform over
+    dampratio does not give a uniform restitution distribution (the mapping
+    is nonlinear), a known simplification, not yet refit to be
+    restitution-uniform. `timeconst` is deliberately NOT randomized -- values
+    below ~0.005 (this project's timestep) were confirmed live to explode
+    (NaN) on the real mujoco_warp engine.
+
+    All 8 foot geoms (both feet, all 4 capsules each) get the SAME per-env
+    value -- a physical foot doesn't have per-capsule independent
+    bounciness. Only the dampratio axis (index 1) is touched; `timeconst`
+    (index 0) and every other FULL_COLLISION field (condim, friction,
+    priority itself) are untouched.
+
+    FIX 2026-08-23: does NOT use mjlab's own `dr._core._randomize_model_field`
+    (what every other DR function in this file's sibling `dr/geom.py` uses)
+    -- confirmed live it computes a DIFFERENT, off-by-one geom index set
+    than `asset_cfg.geom_ids`/`robot.find_geoms()` for this scene (wrote to
+    `left_foot2/3/4_collision` + one unrelated extra geom, never
+    `left_foot1_collision`, same one-off pattern on the right side) --
+    likely a genuine indexing bug in that private helper for this asset,
+    not something to route around by guessing at a fix. Writes directly to
+    `env.sim.model.geom_solref` using `asset_cfg.geom_ids`, independently
+    verified twice (matches a fresh `robot.find_geoms()` call exactly) to
+    be correct for this scene.
+
+    Not yet validated against a live training run.
+    """
+    if env_ids is None:
+        env_ids = torch.arange(env.num_envs, device=env.device, dtype=torch.long)
+    geom_ids = torch.as_tensor(asset_cfg.geom_ids, device=env.device, dtype=torch.long)
+
+    lo, hi = dampratio_range
+    sampled = sample_uniform(lo, hi, (len(env_ids),), env.device)  # (n_envs,)
+
+    env_grid, geom_grid = torch.meshgrid(env_ids, geom_ids, indexing="ij")
+    env.sim.model.geom_solref[env_grid, geom_grid, 1] = sampled.unsqueeze(-1).expand(-1, len(geom_ids))
+
+    # Stash the sampled per-env value for the P-panel plot (play.py) and any
+    # reward/diagnostic code that wants it.
+    if not hasattr(env, "_foot_restitution_dampratio"):
+        env._foot_restitution_dampratio = torch.ones(env.num_envs, device=env.device)
+    env._foot_restitution_dampratio[env_ids] = sampled

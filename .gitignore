@@ -57,6 +57,14 @@ runs/
 !interceptV2DualDis/src/simple_goalkeeper/motions/data/*.npz
 !interceptV2DualDis/src/simple_goalkeeper/motions/raw/*.pkl
 
+# interceptV2DualDis project-scoped Claude skills — deliberately tracked and
+# pushed (unlike the rest of .claude/, which is local-only settings/worktrees).
+# Both ".claude/" and "*.claude" above match ".claude" dirs at any depth, so
+# each level must be re-included explicitly for git to recurse into it.
+!interceptV2DualDis/.claude/
+!interceptV2DualDis/.claude/skills/
+!interceptV2DualDis/.claude/skills/**
+
 # Model checkpoints (wandb training runs)
 my_mjlab_project_booster_t1/wandb/
 Imitationlearningbooster/wandb/

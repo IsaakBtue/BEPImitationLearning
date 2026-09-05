@@ -21,16 +21,44 @@ Usage:
     uv run sgk_play Mjlab-BeyondAMP-Goalkeeper-T1-WithOverlay \\
         --agent zero --no-terminations True
 
+    # Same, but rendered as AMP's discriminator actually perceives it
+    # (re-anchored to whichever foot is planted each frame, root orientation
+    # cancelled out -- reveals whether an edit to a reference clip is real
+    # training signal or purely a root-orientation visual):
+    uv run sgk_play Mjlab-BeyondAMP-Goalkeeper-T1-WithOverlay \\
+        --agent zero --no-terminations True --amp-eye-view True \\
+        --motion-file src/simple_goalkeeper/motions/data/<clip>.npz
+
     # Multi-disc (intercept) checkpoint, with ghost overlay cycling through
     # this task's own 4-motion AMP dataset (REGION_MOTION_FILES):
     uv run sgk_play Mjlab-BeyondAMP-Goalkeeper-T1-MultiDisc-WithOverlay \\
         --checkpoint-file logs/rsl_rl/intercept_simple_goalkeeper_multidisc/<run>/model_5250.pt
+
+    # Motion-sample probe: scripted Left_Hip_Yaw sine sweep (the only joint
+    # that can rotate a foot about world Z -- T1's ankle has no yaw DOF), no
+    # policy involved. --force-region left_near pins the ball to the left so
+    # the P-panel's assigned-foot plots (foot_ang_vel_xy, ankle_pitch_vel,
+    # feetorientation, foot_inner_face_continuous, ...) track this foot and
+    # show the reward response live as the hip sweeps +/-30deg:
+    uv run sgk_play Mjlab-BeyondAMP-Goalkeeper-T1-MultiDisc \\
+        --agent scripted_yaw --num-envs 1 --force-region left_near \\
+        --scripted-yaw-deg 30 --no-terminations True
+
+    # Static-pose probe: hold the HOME_KEYFRAME joint pose with the root
+    # pitched to postorientation's own forward-lean target (default 15deg,
+    # matching _HOME_LEAN_TARGET in rewards.py) so you can watch it live in
+    # the real viewer instead of an offline render. No policy involved, ball
+    # parked out of the way, root+joints re-pinned every step:
+    uv run sgk_play Mjlab-BeyondAMP-Goalkeeper-T1-MultiDisc \\
+        --agent scripted_lean --num-envs 1 --no-terminations True \\
+        --scripted-lean-deg 15
 """
 from __future__ import annotations
 
 import os
 import sys
 import types
+from collections import deque
 from sys import stderr
 from dataclasses import asdict, dataclass
 from pathlib import Path
@@ -55,10 +83,89 @@ from simple_goalkeeper.rsl_rl_multi.him_amp_on_policy_runner import (
 
 @dataclass(frozen=True)
 class PlayConfig:
-    agent: Literal["zero", "random", "trained"] = "trained"
+    agent: Literal["zero", "random", "trained", "scripted_yaw", "scripted_lean"] = "trained"
     checkpoint_file: str | None = None
+    scripted_yaw_joint: str = "Left_Hip_Yaw"
+    """--agent scripted_yaw only: which joint to drive. T1's ankle has no yaw
+    DOF (confirmed in t1_headless.xml) -- Hip_Yaw is the only joint that can
+    rotate a foot's heading, so a pure foot-Z-rotation motion sample is
+    necessarily a Hip_Yaw sweep, not a foot-local joint. Use --force-region
+    left_near/left_far so the ball-assigned foot matches this side (the
+    P-panel's foot-orientation plots are gated to the assigned/leading foot)."""
+    scripted_yaw_deg: float = 30.0
+    """--agent scripted_yaw only: peak commanded joint angle, degrees, both
+    directions (a symmetric +/- sweep, not a one-sided ramp)."""
+    scripted_yaw_period_steps: int = 100
+    """--agent scripted_yaw only: steps per full sine cycle (dt=0.02s, so 100
+    = 2s/cycle). Ramps with episode_length_buf, so it repeats every episode
+    with no manual restart needed to watch the P-panel plots respond again."""
+    scripted_yaw_pin_root: bool = True
+    """--agent scripted_yaw only: freeze the robot's root pose/velocity every
+    step (re-written back to its post-reset value after each env.step()).
+    Live-verified (2026-08-15) necessary: rotating a PLANTED, weight-bearing
+    foot's Hip_Yaw against ground friction reaction-torques the whole robot
+    over within ~1.5 sine cycles regardless of the ball -- the same failure
+    class `postleadfootorientation`'s airborne-only gate exists for. Pinning
+    isolates the reward response to the foot rotation itself from this
+    unrelated balance failure. Set False to see the (unstable) unpinned
+    behavior instead."""
+    scripted_yaw_park_ball: bool = True
+    """--agent scripted_yaw only: teleport the ball far away (and hold it
+    there) every step so it can never roll into the robot mid-sweep. On by
+    default so the motion sample stays isolated to the foot -- set False to
+    let the ball behave normally (e.g. to test foot-rotation rewards during
+    a real approach)."""
+    scripted_yaw_lift_height: float = 0.4
+    """--agent scripted_yaw only: extra root-Z offset (metres) added to the
+    pinned root height, so both feet clear the ground entirely. Live-verified
+    (2026-08-15) necessary: pinning the ROOT alone still leaves the foot free
+    to stay in ground contact, which fights the scripted rotation with real
+    contact/friction forces at the foot itself (the root pin only stops the
+    TRUNK from tipping, it can't stop the foot from being "limited by the
+    ground" locally). Lifting the whole pinned pose 0.4m clears T1's ~0.66m
+    standing height comfortably clear of the floor, so the leg swings freely
+    with no contact of any kind. Set to 0.0 to keep the feet grounded instead
+    (e.g. to specifically study ground-contact effects)."""
+    scripted_lean_deg: float = 15.0
+    """--agent scripted_lean only: forward-pitch angle (degrees, about body-Y)
+    to hold the root at, matching rewards.py's _HOME_LEAN_TARGET convention
+    (positive = forward lean, render-verified 2026-08-17 -- see docs/BugFixes.md).
+    Joints are held at robot.data.default_joint_pos (HOME_KEYFRAME) throughout --
+    only the root orientation is scripted."""
+    scripted_lean_root_height: float = 0.665
+    """--agent scripted_lean only: root Z to hold (metres), matches
+    HOME_KEYFRAME's own pos[2] in t1_constants.py."""
+    scripted_lean_park_ball: bool = True
+    """--agent scripted_lean only: teleport the ball far away every step, same
+    mechanism as --scripted-yaw-park-ball -- this is a static-pose probe, not
+    a save-interaction one."""
+    scripted_lean_pose: Literal["post_save", "reset"] = "post_save"
+    """--agent scripted_lean only: which joint stance to hold the legs/arms at.
+    "post_save" (default) uses rewards.py's _POST_SAVE_STANCE_MAP -- the ACTUAL
+    target postlegdofpos/postupperdofpos/postshoulderdofpos/postwaistdofpos
+    steer toward post-save (straight legs, all leg joints 0.0). "reset" uses
+    robot.data.default_joint_pos (HOME_KEYFRAME, crouched legs) -- the
+    episode-start stance, not the recovery target. These differ only in the
+    legs; arm values are identical between the two maps. Get this wrong and
+    the rendered pose isn't the one the reward stack actually targets."""
     motion_file: str | None = None
     """Optional NPZ motion file for the WithOverlay task (overrides default)."""
+    amp_eye_view: bool = False
+    """When set with --motion-file: re-anchor the ghost, every frame, to
+    whichever foot is currently planted (canonical: flat, fixed position)
+    before rendering, instead of the file's own root frame. This cancels out
+    root orientation entirely (a rigid re-expression relative to a body
+    already known to be flat/grounded), so what's left is driven purely by
+    relative joint angles -- exactly what AMP's discriminator perceives
+    (joint_pos/joint_vel only; it never observes root orientation). Without
+    this flag, the ghost faithfully replays the file's real root+joint data,
+    which is correct for judging what a clip LOOKS like but is easy to
+    mistake for what AMP is actually trained on whenever the clip's root
+    orientation itself carries information (see docs/BugFixes.md,
+    2026-08-01, and the Visualization Honesty Rule in CLAUDE.md). Expect a
+    visible jump in the render each time stance switches feet -- that's
+    expected, not a bug. Never use the derived file this produces as
+    training data -- see scripts/amp_eye_view.py's module docstring."""
     num_envs: int | None = None
     device: str | None = None
     no_terminations: bool = False
@@ -80,6 +187,12 @@ class PlayConfig:
     analytics: bool = True
     """Print ball velocity, delta_vx, foot heights, and stopball/softstop state to stdout each step.
     Also toggleable at runtime with the V key."""
+    # REMOVED 2026-08-07 (user request: "ignore the whole head thing, even
+    # remove the whole head touch penalty for now"): force_head_contact_test
+    # existed solely to verify the "HD" console indicator / head_ball_contact
+    # P-panel plot, both of which were removed the same day alongside the
+    # reward's head/chin sub-condition itself (rewards.py:
+    # penalize_wrong_foot_ball_contact). See docs/BugFixes.md.
 
 
 class AnalyticsPolicy:
@@ -96,6 +209,10 @@ class AnalyticsPolicy:
         self._step = 0
         self._ep = 0
         self._prev_ep_buf: "torch.Tensor | None" = None
+        self._wf_flash = 0.0
+        self._knee_flash = 0.0
+        self._shin_flash = 0.0
+        self._chin_flash = 0.0
         # FIX 2026-07-22 (research: shank_height vs base_height termination
         # tuning): per-episode running minimums, so a deep-lunge episode's
         # worst height is captured even though the live status line
@@ -103,6 +220,23 @@ class AnalyticsPolicy:
         self._min_base_h = float("inf")
         self._min_lsh_h = float("inf")
         self._min_rsh_h = float("inf")
+        # DEBUG 2026-07-23 (TEMPORARY, remove after landing-gate investigation):
+        # per-episode closest approach to the blue target + highest settle
+        # count reached + whether landed ever fired, across many episodes at
+        # once, instead of eyeballing single scrolling lines.
+        self._min_blue_dist = float("inf")
+        self._max_settle = 0
+        self._ep_was_wide = False
+        self._ep_landed = False
+        # NEW 2026-08-08 (user request, final-review follow-up): same
+        # per-episode accumulator pattern for the orange (trailing-foot)
+        # mechanism -- shares blue's own _ep_was_wide (orange is only ever
+        # active when env._blue_wide is true, see rewards.py's
+        # _get_orange_reach_target_y), so only its own min-dist/max-settle/
+        # landed fields are separate.
+        self._min_orange_dist = float("inf")
+        self._max_orange_settle = 0
+        self._ep_orange_landed = False
 
     def toggle(self) -> None:
         self.enabled = not self.enabled
@@ -135,17 +269,48 @@ class AnalyticsPolicy:
                     for name in term_mgr.active_terms:
                         if bool(term_mgr.get_term(name)[0].item()):
                             fired.append(name)
+                blue_summary = (
+                    f" | BLUE min_dist={self._min_blue_dist:.2f} "
+                    f"max_settle={self._max_settle}/3 landed={self._ep_landed}"
+                    if self._ep_was_wide else " | BLUE narrow-crossing"
+                )
+                # NEW 2026-08-08: orange (trailing-foot) summary, same shape
+                # as blue's -- shares self._ep_was_wide since orange is only
+                # ever active on the same wide crossings blue is.
+                orange_summary = (
+                    f" | ORANGE min_dist={self._min_orange_dist:.2f} "
+                    f"max_settle={self._max_orange_settle}/3 landed={self._ep_orange_landed}"
+                    if self._ep_was_wide else " | ORANGE narrow-crossing"
+                )
                 print(
                     f"\n[EpEnd] terminated_by={','.join(fired) or 'none'} | "
-                    f"min_base={self._min_base_h:.3f} "
-                    f"min_Lsh={self._min_lsh_h:.3f} min_Rsh={self._min_rsh_h:.3f}",
+                    f"min_base={self._min_base_h:.2f} "
+                    f"min_Lsh={self._min_lsh_h:.2f} min_Rsh={self._min_rsh_h:.2f}"
+                    f"{blue_summary}{orange_summary}",
                     file=stderr,
                 )
             self._ep += 1
             self._min_base_h = float("inf")
             self._min_lsh_h = float("inf")
             self._min_rsh_h = float("inf")
+            self._min_blue_dist = float("inf")
+            self._max_settle = 0
+            self._ep_was_wide = False
+            self._ep_landed = False
+            self._min_orange_dist = float("inf")
+            self._max_orange_settle = 0
+            self._ep_orange_landed = False
         self._prev_ep_buf = ep_buf.clone()
+
+        # DEBUG 2026-07-28: called unconditionally (before the enabled-gate
+        # below, and independent of the viewer's _show_plots/_is_paused
+        # state) so the wrong-foot contact latch keeps advancing every
+        # step regardless of whether analytics printing or the P-panel
+        # plots happen to be toggled on -- the viewer-only version of this
+        # call (_patch_viewer_wrong_foot_contact_plot) only runs while
+        # _show_plots is True, which made it an unreliable ground-truth
+        # source for confirming whether contact is actually being detected.
+        self._wf_flash, self._knee_flash, self._shin_flash, self._chin_flash = _compute_wrong_foot_contact_flash(env, 0)
 
         if not self.enabled:
             return actions
@@ -166,6 +331,23 @@ class AnalyticsPolicy:
         stopball_fired  = sb_flag[0].item()  if sb_flag  is not None else False
         softstop_fired  = ss_flag[0].item()  if ss_flag  is not None else False
         cleanstop_fired = cs_flag[0].item()  if cs_flag  is not None else False
+
+        # DEBUG 2026-08-21 (user request): make red's activation gate
+        # (env._red_active = _blue_landed_genuine & _orange_landed_genuine)
+        # directly visible on the console status line, alongside the red
+        # sphere play.py already draws in the native viewer once red_active
+        # (see _patch_viewer_debug_visualizers). User wants to confirm
+        # whether RD actually flips true and stays true through the
+        # save/softstop/ball-behind sequence, not just whether the code
+        # exists.
+        blue_landed_genuine_t = getattr(env, "_blue_landed_genuine", None)
+        orange_landed_genuine_t = getattr(env, "_orange_landed_genuine", None)
+        red_active_t = getattr(env, "_red_active", None)
+        red_landed_genuine_t = getattr(env, "_red_landed_genuine", None)
+        blue_landed_genuine = bool(blue_landed_genuine_t[0].item()) if blue_landed_genuine_t is not None else False
+        orange_landed_genuine = bool(orange_landed_genuine_t[0].item()) if orange_landed_genuine_t is not None else False
+        red_active = bool(red_active_t[0].item()) if red_active_t is not None else False
+        red_landed_genuine = bool(red_landed_genuine_t[0].item()) if red_landed_genuine_t is not None else False
 
         # Foot heights + slip velocities.
         from simple_goalkeeper.robots.t1_constants import HOME_KEYFRAME  # noqa: F401 (unused val)
@@ -191,6 +373,33 @@ class AnalyticsPolicy:
         self._min_lsh_h = min(self._min_lsh_h, lsh_h)
         self._min_rsh_h = min(self._min_rsh_h, rsh_h)
 
+        # DEBUG 2026-07-23 (TEMPORARY, remove after landing-gate investigation):
+        # per-episode blue-landing accumulators (see __init__ + [EpEnd] print).
+        wide_t = getattr(env, "_blue_wide", None)
+        if wide_t is not None and bool(wide_t[0].item()):
+            self._ep_was_wide = True
+            dist_t = getattr(env, "_blue_dbg_dist", None)
+            settle_t = getattr(env, "_blue_dbg_settle", None)
+            if dist_t is not None:
+                self._min_blue_dist = min(self._min_blue_dist, dist_t[0].item())
+            if settle_t is not None:
+                self._max_settle = max(self._max_settle, int(settle_t[0].item()))
+            # NEW 2026-08-08: orange (trailing-foot) accumulator, same
+            # wide-gate as blue's above (rewards.py's env._orange_dbg_* is
+            # only ever set inside the same env._blue_wide-gated branch).
+            orange_dist_t = getattr(env, "_orange_dbg_dist", None)
+            orange_settle_t = getattr(env, "_orange_dbg_settle", None)
+            if orange_dist_t is not None:
+                self._min_orange_dist = min(self._min_orange_dist, orange_dist_t[0].item())
+            if orange_settle_t is not None:
+                self._max_orange_settle = max(self._max_orange_settle, int(orange_settle_t[0].item()))
+        landed_t = getattr(env, "_blue_landed", None)
+        if landed_t is not None and bool(landed_t[0].item()):
+            self._ep_landed = True
+        orange_landed_t = getattr(env, "_orange_landed", None)
+        if orange_landed_t is not None and bool(orange_landed_t[0].item()):
+            self._ep_orange_landed = True
+
         ball_speed = bv.norm().item()
 
         # Interception point in robot's local frame.
@@ -213,22 +422,113 @@ class AnalyticsPolicy:
             int_x = float("nan")
             int_y = float("nan")
 
+        # Per-step reward breakdown (unscaled rate = raw_value * weight, dt-scaling
+        # divided back out -- see mjlab RewardManager._step_reward docstring), read
+        # the same way termination_manager.get_term() is read above.
+        rew_mgr = getattr(env, "reward_manager", None)
+        if rew_mgr is not None:
+            reward_terms = dict(rew_mgr.get_active_iterable_terms(0))
+            reward_total = sum(v[0] for v in reward_terms.values())
+            rew_dbg = " | REW total={:.2f} [{}]".format(
+                reward_total,
+                " ".join(f"{name}={v[0]:.2f}" for name, v in reward_terms.items()),
+            )
+        else:
+            rew_dbg = ""
+
         flags = (
             f"{'SB✓' if stopball_fired else 'SB·'} "
             f"{'SS✓' if softstop_fired else 'SS·'} "
-            f"{'CS✓' if cleanstop_fired else 'CS·'}"
+            f"{'CS✓' if cleanstop_fired else 'CS·'} "
+            f"{'WF✓' if self._wf_flash else 'WF·'} "
+            f"{'KN✓' if self._knee_flash else 'KN·'} "
+            f"{'SH✓' if self._shin_flash else 'SH·'} "
+            f"{'HD✓' if self._chin_flash else 'HD·'} "
+            f"{'BL✓' if blue_landed_genuine else 'BL·'} "
+            f"{'OR✓' if orange_landed_genuine else 'OR·'} "
+            f"{'RD✓' if red_active else 'RD·'} "
+            f"{'RDL✓' if red_landed_genuine else 'RDL·'}"
         )
         lf_tag = f"{'G' if lf_contact else 'A'}{lf_slip:.2f}"
         rf_tag = f"{'G' if rf_contact else 'A'}{rf_slip:.2f}"
+
+        # DEBUG 2026-07-23 (TEMPORARY, remove after landing-gate investigation):
+        # blue-ball landing-gate internals, cached onto env by rewards.py's
+        # _get_reach_target_y (env._blue_dbg_*). Only meaningful once wide=True.
+        blue_dbg = ""
+        wide_t = getattr(env, "_blue_wide", None)
+        if wide_t is not None and bool(wide_t[0].item()):
+            dist_t = getattr(env, "_blue_dbg_dist", None)
+            speed_t = getattr(env, "_blue_dbg_speed", None)
+            contact_t = getattr(env, "_blue_dbg_contact", None)
+            settle_t = getattr(env, "_blue_dbg_settle", None)
+            foot_idx_t = getattr(env, "_blue_dbg_foot_idx", None)
+            radius = getattr(env, "_blue_dbg_radius", float("nan"))
+            speed_th = getattr(env, "_blue_dbg_speed_th", float("nan"))
+            landed_t = getattr(env, "_blue_landed", None)
+            # NEW 2026-09-04 (user request): displacement-based "was this a
+            # free landing" fields, alongside the step-count-only fields
+            # this line already prints -- see rewards.py's
+            # _get_reach_target_y FIX 2026-09-04 for the classifier itself.
+            moved_t = getattr(env, "_blue_dbg_foot_displacement", None)
+            free_t = getattr(env, "_blue_landed_was_free", None)
+            half_off_t = getattr(env, "_blue_dbg_half_off", None)
+            full_off_t = getattr(env, "_blue_dbg_full_off", None)
+            foot_off_t = getattr(env, "_blue_dbg_foot_off", None)
+            wide_dist_t = getattr(env, "_blue_dbg_wide_by_dist", None)
+            airborne_t = getattr(env, "_blue_dbg_was_airborne", None)
+            touch_ball_t = getattr(env, "_blue_dbg_touching_ball", None)
+            candidate_t = getattr(env, "_blue_dbg_candidate", None)
+            first_call_t = getattr(env, "_blue_dbg_first_call", None)
+            gate_wide_t = getattr(env, "_blue_dbg_wide", None)
+            ep_len_t = getattr(env, "_blue_dbg_ep_len", None)
+            last_settle_before_t = getattr(env, "_blue_dbg_last_settle_step_before", None)
+            blue_dbg = (
+                f" | BLUE dist={dist_t[0].item() if dist_t is not None else float('nan'):.2f}"
+                f"(<{radius:.2f}) "
+                f"spd={speed_t[0].item() if speed_t is not None else float('nan'):.2f}"
+                f"(<{speed_th:.2f}) "
+                f"contact={bool(contact_t[0].item()) if contact_t is not None else None} "
+                f"foot={foot_idx_t[0].item() if foot_idx_t is not None else None} "
+                f"settle={settle_t[0].item() if settle_t is not None else None}/3 "
+                f"landed={bool(landed_t[0].item()) if landed_t is not None else None} "
+                f"moved={moved_t[0].item() if moved_t is not None else float('nan'):.3f}m "
+                f"free={bool(free_t[0].item()) if free_t is not None else None} || "
+                f"halfOff={half_off_t[0].item() if half_off_t is not None else float('nan'):+.2f} "
+                f"fullOff={full_off_t[0].item() if full_off_t is not None else float('nan'):+.2f} "
+                f"footOff={foot_off_t[0].item() if foot_off_t is not None else float('nan'):+.2f} "
+                f"wideByDist={bool(wide_dist_t[0].item()) if wide_dist_t is not None else None} "
+                f"wasAirborne={bool(airborne_t[0].item()) if airborne_t is not None else None} "
+                f"touchingBall={bool(touch_ball_t[0].item()) if touch_ball_t is not None else None} || "
+                f"candidate={bool(candidate_t[0].item()) if candidate_t is not None else None} "
+                f"firstCallThisTick={bool(first_call_t[0].item()) if first_call_t is not None else None} "
+                f"gateWide={bool(gate_wide_t[0].item()) if gate_wide_t is not None else None} || "
+                f"epLen={ep_len_t[0].item() if ep_len_t is not None else None} "
+                f"lastSettleStepBefore={last_settle_before_t[0].item() if last_settle_before_t is not None else None}"
+            )
+
+        # DEBUG 2026-07-23 (TEMPORARY): epLen/settle/candidate moved to the
+        # FRONT of the line -- terminal column-width truncation of this \r
+        # overwriting line was hiding them on all but the last print of a
+        # burst, making it impossible to see settle's progression tick to
+        # tick across a whole pasted trace.
+        ep_len_front = getattr(env, "_blue_dbg_ep_len", None)
+        settle_front = getattr(env, "_blue_dbg_settle", None)
+        candidate_front = getattr(env, "_blue_dbg_candidate", None)
+        front_dbg = (
+            f"epLen={ep_len_front[0].item() if ep_len_front is not None else None} "
+            f"settle={settle_front[0].item() if settle_front is not None else None} "
+            f"cand={bool(candidate_front[0].item()) if candidate_front is not None else None} | "
+        )
         print(
-            f"\rEp{self._ep:3d} | "
+            f"\rEp{self._ep:3d} | {front_dbg}"
             f"bvx={bv[0].item():+6.2f} bvy={bv[1].item():+5.2f} spd={ball_speed:.2f} "
             f"bx={bx_local:+5.2f} | "
             f"int(x={int_x:+5.2f} y={int_y:+5.2f}) | "
             f"dvx={delta_vx:+5.2f} | "
-            f"LF={lf_h:.3f}({lf_tag}) RF={rf_h:.3f}({rf_tag}) | "
-            f"base={base_h:.3f} Lsh={lsh_h:.3f} Rsh={rsh_h:.3f} | "
-            f"{flags}",
+            f"LF={lf_h:.2f}({lf_tag}) RF={rf_h:.2f}({rf_tag}) | "
+            f"base={base_h:.2f} Lsh={lsh_h:.2f} Rsh={rsh_h:.2f} | "
+            f"{flags}{blue_dbg}{rew_dbg}",
             end="",
             flush=True,
             file=stderr,
@@ -250,9 +550,20 @@ def _patch_viewer_intercept_vis(native_viewer: "NativeMujocoViewer", env) -> Non
     each render frame — it moves when a new episode starts and the crossing_y
     changes.
 
-    green-ball-baseline (2026-07-10): always draws a GREEN sphere at the
-    direct crossing point -- the two-stage blue-waypoint mechanism has been
-    removed on this branch, see docs/BugFixes.md.
+    Two-stage wide-crossing visualization (v2 reimplementation, 2026-07-23, of
+    the blue-ball-waypoint branch's mechanism -- see rewards.py's
+    _get_reach_target_y). When |crossing_y - start_y| > wide_threshold (0.5
+    as of the 2026-08-01 revert -- kept symbolic here rather than
+    hardcoded so this comment can't drift out of sync with rewards.py's
+    actual default again) or the region is a far region, and the assigned
+    foot has not yet landed at the midpoint,
+    draws a BLUE sphere there instead of the usual green one. Once landing has
+    occurred (or the crossing is narrow), draws the usual GREEN sphere at the
+    full crossing point. Lets a human watching sgk_play confirm landing
+    timing visually. Reads env._blue_wide/_blue_landed directly -- cached
+    every step by _get_reach_target_y -- rather than recomputing the
+    wide/region check here, so the marker can't drift out of sync with what
+    footreach/foot_proximity/stopball/softstop are actually gating on.
     """
     orig_update = native_viewer._update_debug_visualizers
 
@@ -308,16 +619,1527 @@ def _patch_viewer_intercept_vis(native_viewer: "NativeMujocoViewer", env) -> Non
                 to=to,
             )
 
-        # green-ball-baseline (2026-07-10): two-stage blue-waypoint mechanism
-        # removed on this branch -- always show the direct crossing point.
-        _add_sphere(goal_x, cross_y, sphere_z, 0.08, [0.1, 1.0, 0.2, 0.75])
-        _add_line(
-            np.array([goal_x, cross_y, floor_z], dtype=np.float64),
-            np.array([goal_x, cross_y, sphere_z], dtype=np.float64),
-            0.008, [0.1, 1.0, 0.2, 0.6],
-        )
+        def _add_ground_circle(cx: float, cy: float, z: float, r: float, width: float, rgba, n_segments: int = 32) -> None:
+            """Draw a circle outline on the ground as N connected line
+            segments -- mujoco has no native ring/annulus decor geom, so this
+            approximates one the same way _add_line already draws everything
+            else in this file (mjGEOM_LINE segments via mjv_connector).
+
+            NEW 2026-08-30 (user request): "visualise a circle where the
+            blue ball spawns... shows the radius" -- landing_radius, the
+            deadband _get_reach_target_y/blue_overshoot_penalty use to
+            decide "at blue" vs "overshot" (rewards.py). User specifically
+            asked for the STRICT end (ball_difficulty=1) rather than the
+            curriculum-eased loose end (0.20m at difficulty=0) -- hardcoded
+            here rather than read from env, since this is a fixed reference
+            circle for visual comparison against wherever the foot actually
+            lands, not a live readout of the current difficulty-eased
+            radius (see the assigned_foot_angle_deg-style plots for that
+            pattern if a live-radius version is wanted later).
+
+            FIX 2026-08-30 (correction, same session): the strict value
+            passed at the call site was 0.08 -- stale, that's the value
+            from BEFORE a 2026-07-24 fix already widened it to 0.15
+            (rewards.py:_get_reach_target_y's own FIX comment: "was 0.08,
+            too strict... widened to 0.15"). Caught from stale memory
+            rather than the current code; fixed at the call site to 0.15.
+            """
+            angles = np.linspace(0.0, 2.0 * np.pi, n_segments, endpoint=True)
+            pts = np.stack([cx + r * np.cos(angles), cy + r * np.sin(angles), np.full_like(angles, z)], axis=-1)
+            for i in range(n_segments - 1):
+                _add_line(pts[i], pts[i + 1], width, rgba)
+
+        # Two-stage schedule -- read the cached state _get_reach_target_y
+        # (rewards.py) sets every step, rather than recomputing wide/region
+        # here (see docstring).
+        wide_t = getattr(raw_env, "_blue_wide", None)
+        landed_t = getattr(raw_env, "_blue_landed", None)
+        wide = bool(wide_t[0].item()) if wide_t is not None else False
+        landed = bool(landed_t[0].item()) if landed_t is not None else False
+        start_y = float(origins[1])
+
+        if wide and not landed:
+            # Phase 1: BLUE sphere at the midpoint — half the distance, half as far.
+            mid_y = start_y + (cross_y - start_y) / 2.0
+            _add_sphere(goal_x, mid_y, sphere_z, 0.08, [0.15, 0.4, 1.0, 0.75])
+            _add_line(
+                np.array([goal_x, mid_y, floor_z], dtype=np.float64),
+                np.array([goal_x, mid_y, sphere_z], dtype=np.float64),
+                0.008, [0.15, 0.4, 1.0, 0.6],
+            )
+            # Strict landing_radius (0.15m, ball_difficulty=1) as a ground
+            # ring around the blue target -- see _add_ground_circle above.
+            # FIX 2026-08-30 (correction): was drawn at 0.08 -- stale, that
+            # was the pre-2026-07-24 value (rewards.py:_get_reach_target_y's
+            # own FIX comment: "was 0.08, too strict, widened to 0.15").
+            # Caught from stale memory, not the current code -- verified
+            # against rewards.py's actual `landing_radius: float = 0.15`
+            # default before fixing.
+            _add_ground_circle(goal_x, mid_y, floor_z + 0.002, 0.18, 0.006, [0.15, 0.4, 1.0, 0.9])
+        else:
+            # Phase 2 (or narrow crossing): GREEN sphere at the foot's aim point
+            # (the true crossing point + a small outward offset, see
+            # _INNER_FOOT_TARGET_OFFSET), decoupled from the rod below it.
+            #
+            # NEW 2026-08-15 (user request): previously the rod (ground-truth
+            # marker for the ball's actual calculated landing spot) and the
+            # sphere (what a human reads as "where to put the foot") sat at
+            # the exact same Y, conflating two different things. User wants
+            # to save with the INNER part of the foot rather than dead
+            # center, which means slightly overshooting outward past the
+            # ball's true line -- so the rod now stays pinned to the real,
+            # unmodified crossing_y (still an honest ball-physics marker),
+            # while the sphere moves to crossing_y + _INNER_FOOT_TARGET_OFFSET
+            # (outward, away from center) to show the actual foot-placement
+            # target. See rewards.py's matching `_get_foot_block_offset` helper
+            # -- this marker must stay in sync with whatever the reward
+            # terms actually optimize for, same discipline as the
+            # blue/orange/red spheres already follow.
+            outward_sign = 1.0 if (cross_y - start_y) >= 0.0 else -1.0
+            foot_target_y = cross_y + outward_sign * _INNER_FOOT_TARGET_OFFSET
+            _add_sphere(goal_x, foot_target_y, sphere_z, 0.08, [0.1, 1.0, 0.2, 0.75])
+            _add_line(
+                np.array([goal_x, cross_y, floor_z], dtype=np.float64),
+                np.array([goal_x, cross_y, sphere_z], dtype=np.float64),
+                0.008, [0.1, 1.0, 0.2, 0.6],
+            )
+
+        # NEW 2026-08-08: orange sphere -- trailing-foot ("orange") mirror of
+        # the blue midpoint above, recomputed inline the same way blue's own
+        # mid_y is (not read from a cached env attribute) so this marker can't
+        # drift out of sync with what orange_foot_proximity/orange_ball_landed/
+        # orange_overshoot_penalty/orange_stick_landing (rewards.py) actually
+        # target. See rewards.py:_get_orange_reach_target_y and
+        # docs/superpowers/specs/2026-08-08-orange-ball-trailing-foot-design.md.
+        #
+        # FIX 2026-08-15 (user request, "orange ball now doesn't disappear
+        # the same way blue does, so how do i know it worked?"): the
+        # original 2026-08-08 design deliberately never changed color on
+        # landing, reasoned as "no live-ball-tracking phase to graduate
+        # into" -- true when written, but "red" (below) now IS that
+        # graduation target, so the original reasoning no longer holds and
+        # the lack of any landed-state feedback is a genuine viewer gap, not
+        # a considered design choice anymore. Now 3 visual states:
+        #   1. unlanded (env._orange_landed_genuine False): original orange,
+        #      [1.0, 0.55, 0.0].
+        #   2. landed but red not yet active (orange done, waiting on blue):
+        #      distinct gold/landed color, [1.0, 0.85, 0.0], so a genuine
+        #      landing is visible immediately even if blue hasn't landed
+        #      yet and red can't activate.
+        #   3. red active: orange sphere hidden entirely (red, below, is the
+        #      active target now) -- mirrors blue's own "one active target
+        #      sphere at a time" pattern instead of leaving a stale marker
+        #      onscreen once its job is done.
+        red_active_t = getattr(raw_env, "_red_active", None)
+        red_active = bool(red_active_t[0].item()) if red_active_t is not None else False
+        orange_landed_t = getattr(raw_env, "_orange_landed_genuine", None)
+        orange_landed = bool(orange_landed_t[0].item()) if orange_landed_t is not None else False
+        if wide and not red_active:
+            start_y = float(origins[1])
+            delta = cross_y - start_y
+            sign = 1.0 if delta >= 0 else -1.0
+            shrunk = sign * max(abs(delta) - 0.50, 0.0)  # FIX 2026-08-08 (user request): 0.30 -> 0.60 -> 0.50
+            orange_y = start_y + shrunk / 2.0
+            orange_color = [1.0, 0.85, 0.0, 0.75] if orange_landed else [1.0, 0.55, 0.0, 0.75]
+            orange_line_color = [1.0, 0.85, 0.0, 0.6] if orange_landed else [1.0, 0.55, 0.0, 0.6]
+            _add_sphere(goal_x, orange_y, sphere_z, 0.08, orange_color)
+            _add_line(
+                np.array([goal_x, orange_y, floor_z], dtype=np.float64),
+                np.array([goal_x, orange_y, sphere_z], dtype=np.float64),
+                0.008, orange_line_color,
+            )
+
+        # NEW 2026-08-15: red sphere -- trailing-foot second-stage mirror,
+        # recomputed inline the same way orange's own orange_y is (not read
+        # from a cached env attribute). Only shown once env._red_active
+        # (both blue and orange genuinely landed) -- unlike blue/orange, red
+        # isn't a real target before that gate opens.
+        #
+        # FIX 2026-08-15 (user request, "just like -0.4 away from green
+        # ball full_Y because it is way too close now"): the original
+        # shrink-then-halve formula (mirrored from orange, anchored at
+        # cross_y) collapsed to near-zero distance from green for crossings
+        # just over the 0.5m wide threshold. Replaced with a flat 0.4m
+        # offset -- FIX (same day, live-checked): an uncapped 0.4m offset
+        # can place red before blue for crossings under ~0.8m total
+        # distance, so it's clamped to never exceed blue's own distance
+        # from green (|delta|/2). See rewards.py:_get_red_reach_target_y's
+        # docstring for the live numbers behind both fixes.
+        if wide and red_active:
+            start_y = float(origins[1])
+            delta = cross_y - start_y
+            sign = 1.0 if delta >= 0 else -1.0
+            red_offset = min(0.25, abs(delta) / 2.0)  # FIX 2026-08-17: 0.4 -> 0.25, mirrors rewards.py
+            red_y = cross_y - sign * red_offset
+            _add_sphere(goal_x, red_y, sphere_z, 0.08, [0.9, 0.1, 0.1, 0.75])
+            _add_line(
+                np.array([goal_x, red_y, floor_z], dtype=np.float64),
+                np.array([goal_x, red_y, sphere_z], dtype=np.float64),
+                0.008, [0.9, 0.1, 0.1, 0.6],
+            )
 
     native_viewer._update_debug_visualizers = _patched_update
+
+
+def _patch_viewer_contact_yield_vis(native_viewer: "NativeMujocoViewer", env) -> None:
+    """Draw `contact_yield_velocity_x`/`_y`'s combined rewarded direction and
+    the leading foot's actual velocity as two lines from the foot, every
+    frame.
+
+    NEW 2026-08-23 (user request), "could u plot that vector in the play
+    script" -- rewards the leading foot's velocity component along a
+    specific direction; this draws that direction so it's visually
+    inspectable, not just a number on a plot. Two lines from the assigned
+    foot's current position:
+    - GREEN: the combined rewarded ("yield") direction, fixed visual length
+      0.3m -- this is what the foot SHOULD move along.
+    - ORANGE: the foot's ACTUAL current velocity direction, projected onto
+      the XY plane (Z zeroed -- FIX 2026-08-23, user request, "only
+      planar to the xy plane not the noisy z height": neither reward term
+      reads vertical velocity, so including it here only added noisy
+      jitter from bounce/landing to a line meant to show the in-plane
+      alignment), scaled to a fixed 0.3m visual length (direction only, not
+      true magnitude) -- lets you see at a glance how aligned actual motion
+      is with the reward's target (parallel = high reward, opposite = the
+      negative-penalty branch, perpendicular = ~0).
+
+    FIX 2026-08-30 (user report, "the green vector didn't change its
+    angle... it should be pointed -x and -y direction when the ball is on
+    the side for the +y side"): `contact_yield_velocity` was split into
+    independent X/Y terms same day, and `contact_yield_velocity_y`'s own
+    direction was flipped (now rewards yielding TOWARD the robot's midline,
+    not away from it) -- but this viewer line still drew the OLD combined
+    `-target_dir_w`, unchanged, so it silently stopped matching what's
+    actually rewarded. Rebuilt directly from each term's own formula
+    instead of the old single vector: X component `-_FOOT_TARGET_SIN`
+    (unchanged, matches contact_yield_velocity_x), Y component
+    `-expected_sign*_FOOT_TARGET_COS` (matches contact_yield_velocity_y's
+    2026-08-30 sign flip). For the assigned foot on the +Y (left) side this
+    now correctly points into the (-X,-Y) quadrant, as reported.
+
+    Drawn every frame (not just at the fire instant) so the direction is
+    visible during the whole approach, not only for one tick at contact.
+    Chains onto whatever `_update_debug_visualizers` already is
+    (`_patch_viewer_intercept_vis` runs first in `run_play`'s own
+    registration order) rather than replacing it.
+
+    FIX 2026-09-04 (user report, "the green target for contact yield is not
+    the same anymore... shows directly in the y direction"): was importing
+    `_FOOT_TARGET_COS`/`_FOOT_TARGET_SIN` -- which retargeted to 0 deg
+    (straight forward) the same day `inner_face_orientation_save`/
+    `foot_inner_face_continuous` were re-added (see rewards.py's
+    `_FOOT_TARGET_ANGLE_DEG` docstring) -- so this arrow silently started
+    drawing THAT reward's target instead of `contact_yield_velocity_x/_y`'s
+    own, which was deliberately split off into `_YIELD_TARGET_COS`/
+    `_YIELD_TARGET_SIN` (still 55 deg, unchanged) specifically so the two
+    concepts wouldn't move together. This viewer line was the one place
+    still reading the old (now-repurposed) constant -- `rewards.py` itself
+    was already fixed. Swapped to the yield-specific constants.
+    """
+    from simple_goalkeeper.mdp.rewards import (
+        _get_correct_foot_idx, _YIELD_TARGET_COS, _YIELD_TARGET_SIN,
+    )
+
+    orig_update = native_viewer._update_debug_visualizers
+    _VIS_LEN = 0.3
+
+    def _patched_update(viewer_handle: "mujoco.viewer.Handle") -> None:
+        orig_update(viewer_handle)
+
+        raw_env = env.unwrapped if hasattr(env, "unwrapped") else env
+        robot = raw_env.scene["robot"]
+        env_idx = native_viewer.env_idx
+
+        foot_idx_t = _get_correct_foot_idx(raw_env, "ball")
+        foot_idx = int(foot_idx_t[env_idx].item())
+        expected_sign = 1.0 if foot_idx == 0 else -1.0
+
+        foot_body_ids, _ = robot.find_bodies(("left_foot_link", "right_foot_link"))
+        foot_pos_w = robot.data.body_link_pos_w[env_idx, foot_body_ids, :].detach().cpu().numpy()
+        foot_vel_w = robot.data.body_link_lin_vel_w[env_idx, foot_body_ids, :].detach().cpu().numpy()
+        origin = foot_pos_w[foot_idx]
+        vel = foot_vel_w[foot_idx]
+
+        # Built directly from contact_yield_velocity_x/_y's own formulas
+        # (see FIX 2026-08-30 above), not derived from a single rotated
+        # vector anymore -- the two terms are independent since the split.
+        # FIX 2026-09-04: _YIELD_TARGET_SIN/_COS, not _FOOT_TARGET_SIN/_COS
+        # -- see this function's docstring.
+        yield_dir = np.array(
+            [-_YIELD_TARGET_SIN, -expected_sign * _YIELD_TARGET_COS, 0.0], dtype=np.float64,
+        )
+
+        scn = viewer_handle.user_scn
+
+        def _add_line(from_: np.ndarray, to: np.ndarray, width: float, rgba) -> None:
+            if scn.ngeom >= scn.maxgeom:
+                return
+            scn.ngeom += 1
+            g = scn.geoms[scn.ngeom - 1]
+            g.category = mujoco.mjtCatBit.mjCAT_DECOR
+            mujoco.mjv_initGeom(
+                geom=g, type=mujoco.mjtGeom.mjGEOM_LINE,
+                size=np.zeros(3, dtype=np.float64), pos=np.zeros(3, dtype=np.float64),
+                mat=np.zeros(9, dtype=np.float64), rgba=np.array(rgba, dtype=np.float32),
+            )
+            mujoco.mjv_connector(geom=g, type=mujoco.mjtGeom.mjGEOM_LINE, width=width, from_=from_, to=to)
+
+        _add_line(origin, origin + yield_dir * _VIS_LEN, 0.01, [0.1, 1.0, 0.2, 0.9])
+
+        # FIX 2026-08-23 (user request, "only planar to the xy plane not
+        # the noisy z height"): contact_yield_velocity's own dot product
+        # only ever reads target_dir_w's X/Y (Z is always 0 there too), so
+        # the vertical component of vel never affects the actual reward --
+        # including it here just made the line jump around with vertical
+        # bounce/landing noise, unrelated to what's being visualized.
+        vel_xy = vel.copy()
+        vel_xy[2] = 0.0
+        vel_speed = float(np.linalg.norm(vel_xy))
+        if vel_speed > 1e-4:
+            vel_dir = vel_xy / vel_speed
+            _add_line(origin, origin + vel_dir * _VIS_LEN, 0.01, [1.0, 0.6, 0.0, 0.9])
+
+    native_viewer._update_debug_visualizers = _patched_update
+
+
+def _patch_viewer_new_reward_plots(native_viewer: "NativeMujocoViewer", env) -> None:
+    """Promote the 2026-07-28 cleanstop/arm-penalty reward-term plots into the
+    always-visible front slots, replacing the 3 feet-slippage plots that used
+    to occupy them (2 custom raw slip-speed plots + the promoted
+    `feet_slippage` reward term -- removed by this same change; see
+    docs/BugFixes.md).
+
+    No new custom raw plots needed here (unlike the removed feet-slip patch):
+    `cleanstop`, `arm_torque_limits`, `arm_action_rate_l2`, `arm_action_acc_l2`
+    are already ordinary reward terms with their own auto-created figures --
+    they just need to be moved to the front of `_term_names`, same mechanism
+    `postupperdofpos`'s promotion in `_patch_viewer_postupperdofpos_plot` uses.
+    Without this, they're silently never rendered: this task registers ~48
+    active reward terms against `max_viewports` (12), so anything past index
+    12 in declaration order never appears no matter what `_show_plots` says.
+    """
+    orig_setup = native_viewer.setup
+
+    _PROMOTED_REWARD_TERMS = (
+        "cleanstop", "arm_torque_limits", "arm_action_rate_l2", "arm_action_acc_l2",
+    )
+
+    def _patched_setup() -> None:
+        orig_setup()
+        rest = [n for n in native_viewer._term_names if n not in _PROMOTED_REWARD_TERMS]
+        promoted = [n for n in _PROMOTED_REWARD_TERMS if n in native_viewer._term_names]
+        native_viewer._term_names = promoted + rest
+
+    native_viewer.setup = _patched_setup
+
+
+_WRONG_FOOT_FLASH_STEPS = 15
+"""Steps to hold the wrong-foot-contact plot signal high after a touch (~0.3s
+at dt=0.02s). A genuine ball-vs-foot contact often lasts only 1-3 physics
+steps, well under the ~7-sample (2.3% of the 300-sample history window)
+floor _write_history_to_figure's percentile-based autoscale (viewer.py,
+p_lo=2/p_hi=98) needs to widen the y-range at all -- below that floor the
+spike is computed correctly but clipped out of the plotted range entirely,
+looking like no reaction. 15 steps clears that floor with margin."""
+
+
+def _compute_wrong_foot_contact_flash(env, env_idx: int) -> tuple[float, float, float, float]:
+    """Raw "bad ball contact" signals for the viewer's P-panel, each latched
+    high for _WRONG_FOOT_FLASH_STEPS steps after a detected touch: (1) any
+    ball contact penalize_wrong_foot_ball_contact treats as bad (wrong-side
+    foot sole OR either side's knee/shin OR leading knee proximity), (2) NEW
+    2026-08-07 (user request) -- JUST the leading-knee proximity
+    sub-condition of (1), isolated on its own so it can be verified
+    independently of the wrong-side sole/leg conditions it's normally OR'd
+    with in (1). This is the exact "knee contact with a distance calculator"
+    mechanism the user asked to re-find in git history -- confirmed via
+    `git log`: rewards.py:penalize_wrong_foot_ball_contact's leading_knee_touch,
+    introduced in commit c55786c (2026-07-30), the SAME commit that tried
+    and reverted a chin/head penalty. No separate "knee distance" reward
+    function exists or ever existed -- it has always been this one
+    sub-condition inside penalize_wrong_foot_ball_contact.
+
+    (1) mirrors penalize_wrong_foot_ball_contact's own detection exactly (same
+    "ball_contact"/"leg_ball_contact" sensors + _get_correct_foot_idx) -- does
+    NOT read the reward term itself, since promoting that raw reward value
+    (tried first) plots a signal too sparse for the viewer's autoscale to
+    ever show (see docs/BugFixes.md).
+
+    (1) EXTENDED 2026-07-28: user spotted an orange MuJoCo contact-point dot
+    between the trailing leg and the ball while (1) still read 0 -- confirmed
+    via a real-checkpoint replay that the shin/knee (not covered by
+    ball_contact's foot[1-4]_collision pattern) genuinely touches the ball,
+    sometimes on the wrong side. Added "leg_ball_contact" (goalkeeper_env_cfg.py).
+
+    (1) REVISED 2026-07-30 (user request, after a live-checkpoint probe found
+    the "knee/shin" label was misleading -- nearly every firing was genuinely
+    the SHIN, never the knee sphere itself, see docs/BugFixes.md): now mirrors
+    penalize_wrong_foot_ball_contact's final asymmetric shape exactly --
+    WRONG side: whole leg (sole OR shin OR knee, contact-sensor based).
+    CORRECT/leading side: KNEE PROXIMITY (distance-based, not contact-sensor
+    "found" -- see rewards.py's docstring for why: the contact flag needs
+    real geometric overlap and under-fires relative to visible near-misses).
+
+    leg_ball_contact geom-index order: 0=left_shin, 1=left_knee, 2=right_knee,
+    3=right_shin (same as penalize_wrong_foot_ball_contact, rewards.py).
+
+    FIX 2026-08-07 (user request: "i only want the treshold of the chin so
+    revert back again, and ignore the whole head thing, even remove the
+    whole head touch penalty for now"): the head/chin sub-condition (a
+    distance check against the H2 body's head_collision sphere, wired into
+    the return value earlier this same session) is removed entirely,
+    matching the same-day removal from rewards.py:penalize_wrong_foot_ball_
+    contact -- this function must keep mirroring that reward exactly. The
+    "head_ball_contact" P-panel plot / "HD" console flag / "HDdist" readout
+    that read this function's now-removed 3rd return value are removed the
+    same way (see _patch_viewer_wrong_foot_contact_plot and AnalyticsPolicy).
+
+    FIX 2026-08-07 (user request: "implement it in the wrong foot ball
+    contact" -- the new left_shin/right_shin sites, t1_headless.xml/t1.xml):
+    folded in the same leading-shin proximity sub-condition added to
+    rewards.py:penalize_wrong_foot_ball_contact the same day -- this
+    function must keep mirroring that reward exactly (see the FIX above).
+    Not split into its own isolated plot/flash counter (unlike the knee)
+    since it wasn't requested -- only rolled into the combined
+    wrong_touch/"wrong_foot_ball_contact" signal.
+
+    NEW 2026-08-21 (user request, "the shin like the leg not the chin" --
+    i.e. same isolated-plot treatment shin_contact got, applied to chin):
+    added a 4th signal, "chin/head proximity" -- distance-based, against the
+    LITERAL head_collision sphere geometry (H2 body, size 0.08, local offset
+    (0.01,0,0.11)), no separate tuning margin -- mirrors this project's
+    "use the exact marker geometry, not a tuned proximity constant"
+    discipline (see cleanstop's sole-contact check). NOT wired into
+    rewards.py:penalize_wrong_foot_ball_contact -- that reward has no
+    chin/head sub-condition right now (removed 2026-08-07, see this
+    function's own FIX above); this is viewer-only telemetry, same as
+    knee_distance_contact/shin_contact were before anyone decided whether to
+    make them reward-affecting.
+
+    All four signals are viewer-only display latches with no effect on
+    training/reward.
+    """
+    raw_env = env.unwrapped if hasattr(env, "unwrapped") else env
+    from mjlab.utils.lab_api.math import quat_apply
+    from simple_goalkeeper.mdp.rewards import _get_correct_foot_idx
+
+    _KNEE_GEOM_RADIUS = 0.06
+    _SHIN_GEOM_RADIUS = 0.035  # FIX 2026-08-07: must match rewards.py's matching constant
+    _BALL_GEOM_RADIUS = 0.10
+    # FIX 2026-08-07: was 0.05, never updated through rewards.py's/
+    # goalkeeper_env_cfg.py's earlier same-day increases -- silently out of
+    # sync with the actual registered penalty for a while, likely why the
+    # plot never visibly spiked before that was caught. Went 0.05->0.10->
+    # 0.15->1.0 (DIAGNOSTIC-ONLY, confirmed the plot pipeline works) -> 0.15
+    # (the real tuned value) -> back to 0.05 (user request: this is the
+    # ORIGINAL default that was actually in effect, unversioned, for the
+    # entire model_10250.pt training run -- watching that checkpoint under
+    # its own true training-time threshold). Must match the value in
+    # goalkeeper_env_cfg.py's penalize_wrong_foot_ball_contact params, not
+    # rewards.py's function default (they can differ; params always wins).
+    _KNEE_PROXIMITY_MARGIN = 0.05
+
+    foot_idx = _get_correct_foot_idx(raw_env, "ball")  # (N,) 0=left, 1=right
+    wrong_foot_idx = 1 - foot_idx
+    env_ar = torch.arange(raw_env.num_envs, device=raw_env.device)
+
+    found = raw_env.scene["ball_contact"].data.found  # [B, 8]
+    left_sole = (found[:, :4] > 0).any(dim=-1)
+    right_sole = (found[:, 4:] > 0).any(dim=-1)
+    sole_touch = torch.stack([left_sole, right_sole], dim=-1)  # (B, 2)
+    wrong_sole_touch = sole_touch[env_ar, wrong_foot_idx]
+
+    leg_found = raw_env.scene["leg_ball_contact"].data.found  # [B, 4]
+    left_leg_touch = (leg_found[:, :2] > 0).any(dim=-1)
+    right_leg_touch = (leg_found[:, 2:] > 0).any(dim=-1)
+    leg_touch = torch.stack([left_leg_touch, right_leg_touch], dim=-1)  # (B, 2)
+    wrong_leg_touch = leg_touch[env_ar, wrong_foot_idx]
+
+    ball_pos_w = raw_env.scene["ball"].data.root_link_pos_w  # (B, 3)
+    robot = raw_env.scene["robot"]
+    shank_ids = robot.find_bodies(["Shank_Left", "Shank_Right"])[0]
+    knee_pos_w = robot.data.body_link_pos_w[:, shank_ids, :]  # (B, 2, 3)
+    dist_to_knee = (ball_pos_w.unsqueeze(1) - knee_pos_w).norm(dim=-1)  # (B, 2)
+    knee_threshold = _KNEE_GEOM_RADIUS + _BALL_GEOM_RADIUS + _KNEE_PROXIMITY_MARGIN
+    knee_near = dist_to_knee < knee_threshold  # (B, 2)
+    leading_knee_touch = knee_near[env_ar, foot_idx]
+
+    shin_site_ids = robot.find_sites(["left_shin", "right_shin"])[0]
+    shin_pos_w = robot.data.site_pos_w[:, shin_site_ids, :]  # (B, 2, 3)
+    dist_to_shin = (ball_pos_w.unsqueeze(1) - shin_pos_w).norm(dim=-1)  # (B, 2)
+    shin_threshold = _SHIN_GEOM_RADIUS + _BALL_GEOM_RADIUS + _KNEE_PROXIMITY_MARGIN
+    shin_near = dist_to_shin < shin_threshold  # (B, 2)
+    leading_shin_touch = shin_near[env_ar, foot_idx]
+
+    wrong_touch = wrong_sole_touch | wrong_leg_touch | leading_knee_touch | leading_shin_touch
+
+    _HEAD_GEOM_RADIUS = 0.08  # head_collision's own size, t1_headless.xml
+    _HEAD_LOCAL_OFFSET = torch.tensor([0.01, 0.0, 0.11], device=raw_env.device)
+    head_body_id = robot.find_bodies(["H2"])[0]
+    head_pos_w = robot.data.body_link_pos_w[:, head_body_id, :].squeeze(1)      # (B, 3)
+    head_quat_w = robot.data.body_link_quat_w[:, head_body_id, :].squeeze(1)    # (B, 4)
+    head_center_w = head_pos_w + quat_apply(head_quat_w, _HEAD_LOCAL_OFFSET.expand(raw_env.num_envs, -1))
+    dist_to_head = (ball_pos_w - head_center_w).norm(dim=-1)                    # (B,)
+    head_threshold = _HEAD_GEOM_RADIUS + _BALL_GEOM_RADIUS  # literal geometry, no tuning margin
+    chin_touch = dist_to_head < head_threshold
+
+    # NEW 2026-08-15 (user request, "put in the viewer the shins contact
+    # penalty"): isolated shin-only signal, mirroring knee_distance_contact's
+    # pattern -- leg_ball_contact's columns are [left_shin, left_knee,
+    # right_knee, right_shin] (see docstring above), so this reads JUST
+    # indices 0/3 (shin), never 1/2 (knee), unlike wrong_leg_touch above
+    # which combines both. Combines BOTH live shin mechanisms that actually
+    # feed rewards.py:penalize_wrong_foot_ball_contact -- wrong-side shin
+    # CONTACT (contact-sensor "found") and leading-side shin PROXIMITY
+    # (distance-based, leading_shin_touch, already computed above) -- unlike
+    # knee_distance_contact, which only ever tracked the leading-side
+    # proximity check (wrong-side knee has no separate isolated plot, only
+    # folded into the combined wrong_touch signal above).
+    wrong_shin_only_touch = torch.stack(
+        [leg_found[:, 0] > 0, leg_found[:, 3] > 0], dim=-1
+    )[env_ar, wrong_foot_idx]
+    shin_touch = wrong_shin_only_touch | leading_shin_touch
+
+    if not hasattr(raw_env, "_wrong_foot_flash_counter"):
+        raw_env._wrong_foot_flash_counter = torch.zeros(
+            raw_env.num_envs, dtype=torch.long, device=raw_env.device
+        )
+    # NEW 2026-08-07 (user request): isolated latch for JUST the leading-knee
+    # distance check (leading_knee_touch) -- the combined wrong_touch/counter
+    # above ORs it together with wrong-side sole/leg conditions, so it alone
+    # can't tell the user whether the SPECIFIC knee-distance mechanism
+    # (rewards.py:penalize_wrong_foot_ball_contact's distance-based leading-
+    # knee sub-check, git c55786c 2026-07-30) is the one firing. Same git
+    # history the user asked to re-confirm: chin was tried and reverted in
+    # that same commit; only the knee-distance check remains live in the
+    # actual reward.
+    if not hasattr(raw_env, "_knee_distance_flash_counter"):
+        raw_env._knee_distance_flash_counter = torch.zeros(
+            raw_env.num_envs, dtype=torch.long, device=raw_env.device
+        )
+    just_reset = raw_env.episode_length_buf <= 1
+
+    counter = raw_env._wrong_foot_flash_counter
+    counter[just_reset] = 0
+    counter[wrong_touch] = _WRONG_FOOT_FLASH_STEPS
+    counter[~wrong_touch & ~just_reset] = torch.clamp(counter[~wrong_touch & ~just_reset] - 1, min=0)
+
+    knee_counter = raw_env._knee_distance_flash_counter
+    knee_counter[just_reset] = 0
+    knee_counter[leading_knee_touch] = _WRONG_FOOT_FLASH_STEPS
+    knee_counter[~leading_knee_touch & ~just_reset] = torch.clamp(
+        knee_counter[~leading_knee_touch & ~just_reset] - 1, min=0
+    )
+
+    if not hasattr(raw_env, "_shin_flash_counter"):
+        raw_env._shin_flash_counter = torch.zeros(
+            raw_env.num_envs, dtype=torch.long, device=raw_env.device
+        )
+    shin_counter = raw_env._shin_flash_counter
+    shin_counter[just_reset] = 0
+    shin_counter[shin_touch] = _WRONG_FOOT_FLASH_STEPS
+    shin_counter[~shin_touch & ~just_reset] = torch.clamp(
+        shin_counter[~shin_touch & ~just_reset] - 1, min=0
+    )
+
+    if not hasattr(raw_env, "_chin_flash_counter"):
+        raw_env._chin_flash_counter = torch.zeros(
+            raw_env.num_envs, dtype=torch.long, device=raw_env.device
+        )
+    chin_counter = raw_env._chin_flash_counter
+    chin_counter[just_reset] = 0
+    chin_counter[chin_touch] = _WRONG_FOOT_FLASH_STEPS
+    chin_counter[~chin_touch & ~just_reset] = torch.clamp(
+        chin_counter[~chin_touch & ~just_reset] - 1, min=0
+    )
+
+    return (
+        float(counter[env_idx].item() > 0),
+        float(knee_counter[env_idx].item() > 0),
+        float(shin_counter[env_idx].item() > 0),
+        float(chin_counter[env_idx].item() > 0),
+    )
+
+
+def _patch_viewer_wrong_foot_contact_plot(native_viewer: "NativeMujocoViewer", env) -> None:
+    """Add two P-panel plots ("wrong_foot_ball_contact"/"knee_distance_contact")
+    showing the latched raw bad-contact signals (see
+    _compute_wrong_foot_contact_flash), alongside the existing per-reward-term
+    plots. Mirrors the removed feet-slip patch's structure exactly (see
+    _patch_viewer_new_reward_plots and docs/BugFixes.md for its replacement).
+
+    NEW 2026-08-07 (user request): added "knee_distance_contact", isolating
+    JUST the leading-knee proximity check (rewards.py:
+    penalize_wrong_foot_ball_contact's distance-based sub-condition, git
+    c55786c 2026-07-30 -- same commit chin/head was tried and reverted in)
+    from "wrong_foot_ball_contact"'s combined OR of wrong-side-sole/leg/
+    leading-knee -- the combined signal can't tell you WHICH condition
+    fired. See docs/BugFixes.md.
+
+    FIX 2026-08-07 (user request, same day: "remove the whole head touch
+    penalty for now"): dropped the "head_ball_contact" plot -- the reward's
+    head/chin sub-condition it tracked was removed the same way from
+    rewards.py, so this plot no longer corresponds to anything the policy is
+    penalized for.
+
+    NEW 2026-08-15 (user request, "put in the viewer the shins contact
+    penalty"): added "shin_contact", isolating JUST the shin-specific
+    sub-conditions (see _compute_wrong_foot_contact_flash's own docstring)
+    from the combined "wrong_foot_ball_contact" signal, same reasoning as
+    knee_distance_contact's own addition.
+
+    NEW 2026-08-21 (user request, "i want the shin like the leg not the
+    chin" -- i.e. give chin the same isolated-plot treatment shin_contact
+    got): added "chin_contact", mirroring shin_contact/knee_distance_contact
+    exactly. Viewer-only -- not wired into any reward (see
+    _compute_wrong_foot_contact_flash's own docstring for why).
+    """
+    orig_setup = native_viewer.setup
+    orig_update_reward_figures = native_viewer._update_reward_figures
+
+    _TERM_NAMES = ("wrong_foot_ball_contact", "knee_distance_contact", "shin_contact", "chin_contact")
+
+    def _patched_setup() -> None:
+        orig_setup()
+        from mjlab.viewer.native.viewer import make_empty_figure
+        cfg = native_viewer._plot_cfg
+        for name in _TERM_NAMES:
+            native_viewer._figures[name] = make_empty_figure(
+                name, cfg.grid_size, cfg.init_yrange, cfg.history, cfg.background_alpha,
+            )
+            native_viewer._histories[name] = deque(maxlen=cfg.history)
+            native_viewer._yrange[name] = cfg.init_yrange
+            native_viewer._scale[name] = 1.0
+        # Front of the list -- same reasoning as the other promotions above:
+        # this task's 61 active reward terms exceed max_viewports (12), so
+        # anything not moved to the front is silently never rendered.
+        rest = [n for n in native_viewer._term_names]
+        native_viewer._term_names = list(_TERM_NAMES) + rest
+
+    def _patched_update_reward_figures(viewer_handle: "mujoco.viewer.Handle") -> None:
+        if native_viewer._show_plots and native_viewer._term_names and not native_viewer._is_paused:
+            wrong_foot_flash, knee_flash, shin_flash, chin_flash = _compute_wrong_foot_contact_flash(env, native_viewer.env_idx)
+            native_viewer._append_point("wrong_foot_ball_contact", wrong_foot_flash)
+            native_viewer._write_history_to_figure("wrong_foot_ball_contact")
+            native_viewer._append_point("knee_distance_contact", knee_flash)
+            native_viewer._write_history_to_figure("knee_distance_contact")
+            native_viewer._append_point("shin_contact", shin_flash)
+            native_viewer._write_history_to_figure("shin_contact")
+            native_viewer._append_point("chin_contact", chin_flash)
+            native_viewer._write_history_to_figure("chin_contact")
+        orig_update_reward_figures(viewer_handle)
+
+    native_viewer.setup = _patched_setup
+    native_viewer._update_reward_figures = _patched_update_reward_figures
+
+
+# FIX 2026-08-30: this used to be a manually-duplicated literal here
+# ("Kept as a separate literal... verify against rewards.py if that constant
+# ever changes") -- found desynced while adding a target-vs-current color
+# split to this same plot: this file's copy still read 70.0 (last touched
+# 2026-08-22, "make it 70 degrees") while rewards.py's real
+# `_FOOT_TARGET_ANGLE_DEG` had since moved to 55.0 (commit `9f6d20a`,
+# 2026-08-23) -- the plot title's "target=70" was stale and had been
+# silently wrong for a week of sessions. Now imported directly from
+# rewards.py (single source of truth, see `_patched_setup` below) instead of
+# duplicated -- can never drift again. History of the old literal's own
+# retargeting preserved here: 2026-08-01 introduced, 60->45 (2026-08-07),
+# 45->60 (2026-08-08, reverted), 60->75 (2026-08-10, "15 degrees from the y
+# axis"), 75->60 (2026-08-13), 60->50 (2026-08-15, Hip_Yaw's ~54.17deg reach
+# ceiling), 50->80 (2026-08-16, after finding Waist yaw + Ankle_Pitch gimbal
+# coupling raised the real ceiling well past 54deg), 80->70 (2026-08-22) --
+# and then, in rewards.py only (this file's copy stopped tracking it),
+# 70->55 (2026-08-23).
+
+_INNER_FOOT_TARGET_OFFSET = 0.05
+"""Must match rewards.py's _get_foot_block_offset helper (NEW 2026-08-15, user
+request). User wants to save with the INNER part of the foot rather than
+dead center, which means the foot's aim point should sit slightly further
+out (away from center) than the ball's true calculated crossing point --
+this offset is that gap, in meters. Used only to draw the green sphere at
+the actual foot-aim point while the rod stays pinned to the true, unmodified
+ball crossing_y -- see the green-sphere block below. Verify against
+rewards.py if that constant ever changes."""
+
+_FOOT_TARGET_TOLERANCE_DEG = 5.0
+"""inner_face_orientation_save's tolerance_deg -- the one-shot bonus fires when
+the foot's signed angle is within this many degrees of _FOOT_TARGET_ANGLE_DEG
+(a plain +/- window, e.g. [65,75] at the current 70deg target).
+
+History: this used to be a cosine-threshold cone (alignment_threshold, a dot-
+product/cos() check), NOT a clean degree window -- 0.7->0.85 (2026-08-07,
+tightened alongside a target-angle change); left at 0.85 through the
+2026-08-08 target revert per explicit user request (a known, requested
+divergence from "matching" calibration); reverted 0.85->0.7 (2026-08-13,
+alongside the 75->60 target revert -- back to the value that trained
+model_17250.pt); 0.7->0.8 (2026-08-22, alongside the 80->70 target retarget).
+FIX 2026-08-22 (LATER same day, user request, "only 5 above or below" --
+the cosine cone's ~36.87deg-per-side tolerance at 0.8 was much wider than
+the user expected from watching training): replaced the cosine-threshold
+mechanism entirely with a plain `abs(signed_progress-target) < tolerance_deg`
+check in rewards.py -- this constant is now a literal degree value, not
+degrees(acos(threshold)). Not itself read by any reward function."""
+
+
+def _compute_assigned_foot_angle_deg(env, env_idx: int) -> float:
+    """Assigned/leading foot's long-axis angle off robot-forward, in degrees,
+    for the single env at env_idx.
+
+    NEW 2026-08-01 (user request): visual verification for the
+    inner_face_orientation_save/foot_inner_face_continuous retarget (was 90
+    deg/parallel-to-Y, now _FOOT_TARGET_ANGLE_DEG deg off forward) -- lets a
+    human watching sgk_play confirm the foot is actually settling near the
+    new target instead of trusting the reward-curve shape alone. Reuses the
+    exact foot_inner_face_continuous geometry (rewards.py) so the plotted
+    number matches what the reward itself sees, not a fresh reimplementation.
+    Unsigned (0-180 deg): the assigned foot is always evaluated against its
+    own side's target, so magnitude alone is meaningful here.
+
+    FIX 2026-08-16 (kept in sync with foot_inner_face_continuous's own
+    2026-08-16 fix, rewards.py, SECOND revision): the lateral (local Y)
+    body-axis version (first revision, same day) still entangled
+    Ankle_Pitch -- user directly observed this plot rising from pure
+    Ankle_Pitch tilt with no yaw change, live. Switched to reading the
+    Hip_Yaw JOINT VALUE directly (T1's ankle has no yaw DOF) -- zero
+    Ankle_Pitch/Ankle_Roll contamination by construction.
+
+    FIX 2026-08-16 (SAME DAY, THIRD revision): Hip_Yaw alone still
+    undercounted -- user visually saw ~90deg on a left_near save while this
+    plot showed ~40deg. First tried summing Waist + Hip_Yaw
+    (t1_headless.xml: legs are children of a "Waist" body with its own yaw
+    joint, range +/-90deg, between Trunk and the legs -- completely missed
+    by Hip_Yaw alone), which got closer (~65-67deg live-checked) but still
+    undercounted.
+
+    FIX 2026-08-16 (FOURTH revision, same day, user confirmed frame choice
+    via AskUserQuestion at the time): root-caused the remaining gap -- the
+    foot's true toe-axis WORLD azimuth read ~89deg on the same live save
+    moments, matching the user's visual read almost exactly. The ~22deg the
+    joint-sum missed is Ankle_Pitch GIMBAL COUPLING (confirmed NOT roll --
+    Ankle_Roll sits at its own range limit on these saves yet contributes
+    ~0 to the toe's true direction, exactly as its roll-invariance identity
+    predicts), not summable from individual joint values. Switched to
+    ROOT-LOCAL frame at the time, matching foot_inner_face_continuous's own
+    fix, reasoning this plot's job was to mirror what the reward itself
+    sees.
+
+    FIX 2026-08-16 (FIFTH revision, same day, user re-reported the gap):
+    that reasoning was wrong for THIS plot specifically. The reward stays
+    root-local on purpose (a dive/whole-body yaw shouldn't earn free
+    credit -- correct for shaping what the policy is optimized for), but
+    THIS plot's own stated purpose (see its very first docstring
+    paragraph above) is to let a human visually cross-check against what
+    they see in the viewer -- and a human's eye compares against the
+    ROOM (world frame), not the robot's own rotated body frame. Root-local
+    made the plot read ~12-20deg (live-measured average Trunk world spin
+    on left_near saves) under what's actually visible, recreating the
+    exact "plot doesn't match what I see" confusion this plot exists to
+    prevent. Switched back to WORLD frame (dropping the
+    quat_apply_inverse-against-root_link_quat_w step) -- this plot and
+    the reward now deliberately read DIFFERENT numbers for a save with any
+    whole-body spin, which is correct: they're answering different
+    questions (reward: "how much did the LEG rotate", this plot: "what
+    angle does the foot look like it's at in the room"). See
+    docs/BugFixes.md, 2026-08-16.
+    """
+    raw_env = env.unwrapped if hasattr(env, "unwrapped") else env
+    from mjlab.utils.lab_api.math import quat_apply
+    from simple_goalkeeper.mdp.rewards import _get_correct_foot_idx
+
+    robot = raw_env.scene["robot"]
+    foot_idx = _get_correct_foot_idx(raw_env, "ball")  # (N,) 0=left, 1=right
+
+    foot_ids = robot.find_bodies(["left_foot_link", "right_foot_link"])[0]
+    foot_quat_w = robot.data.body_link_quat_w[:, foot_ids, :]  # (N, 2, 4)
+    assigned_quat_w = torch.where((foot_idx == 0)[:, None], foot_quat_w[:, 0, :], foot_quat_w[:, 1, :])  # (N, 4)
+
+    x_local = torch.zeros(raw_env.num_envs, 3, device=raw_env.device)
+    x_local[:, 0] = 1.0
+    foot_x_w = quat_apply(assigned_quat_w, x_local)                         # (N, 3), toe direction, world
+
+    angle_deg = torch.rad2deg(torch.atan2(foot_x_w[:, 1], foot_x_w[:, 0])).abs()  # (N,) unsigned, world frame
+
+    return float(angle_deg[env_idx].item())
+
+
+def _patch_viewer_foot_orientation_plot(native_viewer: "NativeMujocoViewer", env) -> None:
+    """Add an "assigned_foot_angle_deg" P-panel plot (see
+    _compute_assigned_foot_angle_deg), promoted to an always-visible front
+    slot. NEW 2026-08-01 (user request), same structural pattern as
+    _patch_viewer_wrong_foot_contact_plot (raw custom plot, not an ordinary
+    reward-term figure).
+    """
+    orig_setup = native_viewer.setup
+    orig_update_reward_figures = native_viewer._update_reward_figures
+
+    _NAME = "assigned_foot_angle_deg"
+
+    def _patched_setup() -> None:
+        orig_setup()
+        from mjlab.viewer.native.viewer import make_empty_figure
+        from simple_goalkeeper.mdp.rewards import _FOOT_TARGET_ANGLE_DEG
+        cfg = native_viewer._plot_cfg
+        native_viewer._figures[_NAME] = make_empty_figure(
+            # FIX 2026-08-16 (SAME DAY, user request, "i want 80 degrees in
+            # global frame"): foot_inner_face_continuous/
+            # inner_face_orientation_save (rewards.py) switched to WORLD
+            # frame too -- this plot (already world-frame, see FIFTH
+            # revision above) now genuinely matches what the reward
+            # measures again, not just what a human sees.
+            f"{_NAME}_world (target={_FOOT_TARGET_ANGLE_DEG:.0f}+/-{_FOOT_TARGET_TOLERANCE_DEG:.0f})",
+            cfg.grid_size, cfg.init_yrange, cfg.history, cfg.background_alpha,
+        )
+        native_viewer._histories[_NAME] = deque(maxlen=cfg.history)
+        native_viewer._yrange[_NAME] = cfg.init_yrange
+        native_viewer._scale[_NAME] = 1.0
+        rest = [n for n in native_viewer._term_names]
+        native_viewer._term_names = [_NAME] + rest
+
+    def _patched_update_reward_figures(viewer_handle: "mujoco.viewer.Handle") -> None:
+        if native_viewer._show_plots and native_viewer._term_names and not native_viewer._is_paused:
+            from simple_goalkeeper.mdp.rewards import _FOOT_TARGET_ANGLE_DEG
+            angle_deg = _compute_assigned_foot_angle_deg(env, native_viewer.env_idx)
+            native_viewer._append_point(_NAME, angle_deg)
+            native_viewer._write_history_to_figure(_NAME)
+            # FIX 2026-08-16 (user request, "have a ylim of minimum of 0
+            # because i want to have more information but i am seeing -dge
+            # in the plot"): _compute_assigned_foot_angle_deg's own return
+            # is unsigned (.abs()) and can never be negative, but mjlab's
+            # generic _write_history_to_figure autoscale pads BELOW the
+            # data's own min (`lo -= pad*span`), which can push the axis's
+            # lower bound below 0 even though no actual data point is
+            # negative -- wasted axis space, less resolution on the range
+            # that matters. Clamp the just-computed lower bound back to 0
+            # (already scaled by native_viewer._scale[_NAME], same units
+            # fig.range is stored in) right after the generic autoscale
+            # runs, rather than touching mjlab's own shared plotting code.
+            #
+            # FIX 2026-08-16 (SAME DAY, user request, "make 100 deg the
+            # maximum in the plot"): same rationale, upper side -- the
+            # autoscale's `hi += pad*span` padding can push well past
+            # values that are actually meaningful (target is now 80deg),
+            # wasting resolution on empty headroom. Clamp the upper bound
+            # to 100deg (scaled the same way as lo).
+            fig = native_viewer._figures[_NAME]
+            scale = native_viewer._scale[_NAME]
+            if fig.range[1][0] < 0.0:
+                fig.range[1][0] = 0.0
+            if fig.range[1][1] > 100.0 * scale:
+                fig.range[1][1] = 100.0 * scale
+
+            # FIX 2026-08-30 (user request, "use different colors for target
+            # and current angle"): the target was previously only visible as
+            # a static number in the title string (see _patched_setup above)
+            # -- easy to lose track of while watching the live current-angle
+            # line move, and (see the _FOOT_TARGET_ANGLE_DEG desync fixed
+            # same day above) had no way to catch itself going stale. Draws
+            # a second line (mjlab's MjvFigure supports up to 100 lines per
+            # figure via linedata/linepnt/linergb, this plot only ever used
+            # line index 0 before) holding a flat horizontal reference at
+            # the current target value, same x-range/scale as the current-
+            # angle line so both stay visually aligned. mujoco's own default
+            # figure palette already gives line index 1 a distinct color
+            # (green, vs line 0's default red/pink) -- no manual rgba needed.
+            n = int(fig.linepnt[0])
+            fig.linepnt[1] = n
+            target_scaled = float(_FOOT_TARGET_ANGLE_DEG) * scale
+            for i in range(n):
+                fig.linedata[1][2 * i] = float(-i)
+                fig.linedata[1][2 * i + 1] = target_scaled
+        orig_update_reward_figures(viewer_handle)
+
+    native_viewer.setup = _patched_setup
+    native_viewer._update_reward_figures = _patched_update_reward_figures
+
+
+def _patch_viewer_blue_free_landing_plot(native_viewer: "NativeMujocoViewer", env) -> None:
+    """Add a "blue_foot_displacement" P-panel plot -- the assigned foot's
+    distance traveled since episode reset, with a reference line at the
+    "free landing" distance threshold.
+
+    NEW 2026-09-04 (user request, "put it also in the mujoco p viewer"),
+    same structural pattern as _patch_viewer_foot_orientation_plot. Lets a
+    human watching sgk_play see directly whether a blue landing was
+    classified "free" because the foot genuinely never moved (displacement
+    stays near/under the threshold line) vs. a fast but real approach
+    (displacement clears the line quickly, landing still not "free" even
+    if it happened in a handful of ticks) -- see rewards.py's
+    _get_reach_target_y FIX 2026-09-04 for the classifier itself.
+    """
+    orig_setup = native_viewer.setup
+    orig_update_reward_figures = native_viewer._update_reward_figures
+
+    _NAME = "blue_foot_displacement"
+
+    def _patched_setup() -> None:
+        orig_setup()
+        from mjlab.viewer.native.viewer import make_empty_figure
+        from simple_goalkeeper.mdp.rewards import _BLUE_LANDING_FREE_DIST_THRESHOLD
+        cfg = native_viewer._plot_cfg
+        native_viewer._figures[_NAME] = make_empty_figure(
+            f"{_NAME}_m (free_below={_BLUE_LANDING_FREE_DIST_THRESHOLD:.2f})",
+            cfg.grid_size, cfg.init_yrange, cfg.history, cfg.background_alpha,
+        )
+        native_viewer._histories[_NAME] = deque(maxlen=cfg.history)
+        native_viewer._yrange[_NAME] = cfg.init_yrange
+        native_viewer._scale[_NAME] = 1.0
+        rest = [n for n in native_viewer._term_names]
+        native_viewer._term_names = [_NAME] + rest
+
+    def _patched_update_reward_figures(viewer_handle: "mujoco.viewer.Handle") -> None:
+        if native_viewer._show_plots and native_viewer._term_names and not native_viewer._is_paused:
+            from simple_goalkeeper.mdp.rewards import _BLUE_LANDING_FREE_DIST_THRESHOLD
+            moved_t = getattr(env, "_blue_dbg_foot_displacement", None)
+            value = float(moved_t[native_viewer.env_idx].item()) if moved_t is not None else 0.0
+            native_viewer._append_point(_NAME, value)
+            native_viewer._write_history_to_figure(_NAME)
+
+            # Reference line at the free-landing distance threshold, same
+            # pattern as _patch_viewer_foot_orientation_plot's target line.
+            fig = native_viewer._figures[_NAME]
+            scale = native_viewer._scale[_NAME]
+            threshold_scaled = float(_BLUE_LANDING_FREE_DIST_THRESHOLD) * scale
+            n = int(fig.linepnt[0])
+            fig.linepnt[1] = n
+            for i in range(n):
+                fig.linedata[1][2 * i] = float(-i)
+                fig.linedata[1][2 * i + 1] = threshold_scaled
+        orig_update_reward_figures(viewer_handle)
+
+    native_viewer.setup = _patched_setup
+    native_viewer._update_reward_figures = _patched_update_reward_figures
+
+
+_SOLE_VIS_LOCAL_POS = (0.0125, 0.0, -0.032)
+"""Must match left_sole_vis/right_sole_vis's `pos` in t1_headless.xml exactly
+(both feet use the identical local offset, per that file's own comments)."""
+
+_SOLE_VIS_HALF_SIZE = (0.065, 0.03, 0.005)
+"""Must match left_sole_vis/right_sole_vis's `size` (MuJoCo box half-extents)
+in t1_headless.xml exactly. Same "duplicated, must-match-XML constant" class
+as this file's own `_SHIN_GEOM_RADIUS`/`_KNEE_PROXIMITY_MARGIN` -- update
+here if the XML geom ever changes size/position."""
+
+
+def _compute_sole_ball_contact(env, env_idx: int) -> float:
+    """1.0 if the ball's sphere genuinely overlaps either foot's
+    `left_sole_vis`/`right_sole_vis` marker box, 0.0 otherwise, for the
+    single env at env_idx.
+
+    NEW 2026-08-15 (user request): "the robot learned to tilt its foot and
+    save the ball with the bottom of its foot" -- an exploit where the sole
+    (rather than a proper blocking face) traps the ball.
+
+    REWRITTEN 2026-08-15 (same day, user request): the first version reused
+    the existing `ball_contact` ContactSensorCfg (the real `foot[1-4]
+    _collision` capsules) directly -- user reported this fired even when the
+    ball visually showed 0 overlap with the (deliberately smaller, per an
+    explicit request) red marker box. Root cause: NOT a sensor bug -- the
+    real capsules' footprint (X: -0.10 to 0.125, Y: ~-0.05 to 0.05 accounting
+    for their own radius) is genuinely bigger than the marker box the user
+    asked to keep small (X: -0.0525 to 0.0775, Y: -0.03 to 0.03), so contact
+    near the toe/heel/outer edge could fire the sensor while visibly missing
+    the box. User clarified the intent directly: "the red marker is not
+    cosmetic i wanted to use that geom quite literally" -- i.e. the graph
+    should track exactly this box's geometry, not the older, larger capsule
+    sensor. Rewritten as a direct sphere(ball)-vs-box(marker) distance check
+    using the box's own exact `pos`/`size` (`_SOLE_VIS_LOCAL_POS`/
+    `_SOLE_VIS_HALF_SIZE` above) -- deliberately NOT a new MuJoCo
+    ContactSensorCfg / not making the box an actual colliding geom (contype/
+    conaffinity stay 0), since that would touch real physics/training
+    behavior; this stays a pure viewer-side geometric computation, matching
+    the box "quite literally" without any physics-engine involvement.
+
+    Algorithm: transform the ball's world-frame center into each foot link's
+    local frame (quat_apply_inverse(foot_quat_w, ball_pos_w - foot_pos_w)),
+    clamp to the box's local AABB (center +/- half-size) to get the closest
+    point on the box, then check if that point is within `_BALL_GEOM_RADIUS`
+    of the ball's (local-frame) center -- standard sphere-vs-AABB distance
+    test, exact for a box that's axis-aligned in this local frame (which it
+    is, per the XML: `left_sole_vis`/`right_sole_vis` have no rotation).
+    """
+    # Local, not module-level -- mirrors _compute_wrong_foot_contact_flash's
+    # own identically-named local constant (same value, kept separate/
+    # duplicated rather than promoted to module scope, since that function
+    # already documents this "must match rewards.py" duplication pattern).
+    _BALL_GEOM_RADIUS = 0.10
+
+    from mjlab.utils.lab_api.math import quat_apply_inverse
+
+    raw_env = env.unwrapped if hasattr(env, "unwrapped") else env
+    robot = raw_env.scene["robot"]
+    ball = raw_env.scene["ball"]
+    foot_ids = robot.find_bodies(["left_foot_link", "right_foot_link"])[0]
+    foot_pos_w = robot.data.body_link_pos_w[env_idx, foot_ids, :]      # (2, 3)
+    foot_quat_w = robot.data.body_link_quat_w[env_idx, foot_ids, :]    # (2, 4)
+    ball_pos_w = ball.data.root_link_pos_w[env_idx]                   # (3,)
+
+    device = foot_pos_w.device
+    box_center = torch.tensor(_SOLE_VIS_LOCAL_POS, device=device, dtype=torch.float32)
+    box_half = torch.tensor(_SOLE_VIS_HALF_SIZE, device=device, dtype=torch.float32)
+
+    for i in range(2):
+        rel_w = (ball_pos_w - foot_pos_w[i]).unsqueeze(0)
+        local = quat_apply_inverse(foot_quat_w[i].unsqueeze(0), rel_w)[0]
+        offset = local - box_center
+        closest_offset = torch.clamp(offset, -box_half, box_half)
+        dist = (offset - closest_offset).norm()
+        if float(dist.item()) <= _BALL_GEOM_RADIUS:
+            return 1.0
+    return 0.0
+
+
+def _patch_viewer_sole_contact_and_stop_plots(native_viewer: "NativeMujocoViewer", env) -> None:
+    """Add a "sole_ball_contact" raw P-panel plot (0/1, see
+    _compute_sole_ball_contact) and promote `cleanstop`/`softstop` into the
+    always-visible front slots.
+
+    NEW 2026-08-15 (user request): user watched training and found the
+    policy learned to deflect the ball with the SOLE of the foot (a tilted-
+    foot exploit) rather than a genuine block -- wants this visible live,
+    plus the two save-quality bonuses (`cleanstop`/`softstop`) that should
+    correlate with it (a sole-trap save is exactly the kind of "technically
+    stopped the ball" event those two are meant to reward/penalize the
+    quality of). Same raw-custom-plot pattern as
+    `_patch_viewer_foot_orientation_plot` (sole_ball_contact) combined with
+    the ordinary-reward-term promotion pattern (`cleanstop`/`softstop` already
+    have their own auto-created figures, just need moving to the front).
+
+    Registered LAST in run_play (after every other panel patch, including
+    `_patch_viewer_all_footorientation_plots`) so its reorder is the final
+    word -- same "last registered wins" mechanism that function's own
+    docstring documents. Brings the guaranteed-visible front slots to
+    exactly 12 (8 from `_ALL_FOOTORIENTATION_TERMS` + these 4), AT the
+    `max_viewports` cap -- no more room without dropping something.
+
+    FIX 2026-08-15 (same day, user request, "put in the viewer the shins
+    contact penalty"): added "shin_contact" to `_PROMOTED` -- without this,
+    it (and `wrong_foot_ball_contact`/`knee_distance_contact`, all three
+    only promoted by the EARLIER `_patch_viewer_wrong_foot_contact_plot`)
+    would land at positions 11-13 after this later patch's own reorder and
+    get silently pushed past the 12-slot cutoff -- the exact failure mode
+    this file's own comments have flagged happening before. Only
+    `shin_contact` is guaranteed here since it's the one actually requested
+    this time; `wrong_foot_ball_contact`/`knee_distance_contact` may now
+    fall out of the visible set.
+
+    FIX 2026-08-21 (user request, "add the penalize wrong foot ball contact
+    in the mujoco p viewer"): swapped `softstop` out for
+    `wrong_foot_ball_contact` -- confirmed via this exact mechanism
+    (`_patch_viewer_wrong_foot_contact_plot` registers/computes it every
+    step, but this later patch's own reorder was silently pushing it past
+    the 12-slot cutoff, precisely as the 2026-08-15 entry above warned).
+    `softstop` demoted as the least relevant of the 4 promoted terms to
+    the wrong-foot-contact signal `penalize_wrong_foot_ball_contact`
+    mirrors -- `cleanstop`/`sole_ball_contact`/`shin_contact` all stay.
+    `knee_distance_contact` still falls outside the visible set.
+    """
+    orig_setup = native_viewer.setup
+    orig_update_reward_figures = native_viewer._update_reward_figures
+
+    _RAW_NAME = "sole_ball_contact"
+    _PROMOTED = (_RAW_NAME, "cleanstop", "wrong_foot_ball_contact", "shin_contact")
+
+    def _patched_setup() -> None:
+        orig_setup()
+        from mjlab.viewer.native.viewer import make_empty_figure
+        cfg = native_viewer._plot_cfg
+        native_viewer._figures[_RAW_NAME] = make_empty_figure(
+            f"{_RAW_NAME} (0/1, either foot's sole touching ball)",
+            cfg.grid_size, cfg.init_yrange, cfg.history, cfg.background_alpha,
+        )
+        native_viewer._histories[_RAW_NAME] = deque(maxlen=cfg.history)
+        native_viewer._yrange[_RAW_NAME] = cfg.init_yrange
+        native_viewer._scale[_RAW_NAME] = 1.0
+        rest = [n for n in native_viewer._term_names if n not in _PROMOTED]
+        promoted = [n for n in _PROMOTED if n in native_viewer._term_names or n == _RAW_NAME]
+        native_viewer._term_names = promoted + rest
+
+    def _patched_update_reward_figures(viewer_handle: "mujoco.viewer.Handle") -> None:
+        if native_viewer._show_plots and native_viewer._term_names and not native_viewer._is_paused:
+            contact = _compute_sole_ball_contact(env, native_viewer.env_idx)
+            native_viewer._append_point(_RAW_NAME, contact)
+            native_viewer._write_history_to_figure(_RAW_NAME)
+        orig_update_reward_figures(viewer_handle)
+
+    native_viewer.setup = _patched_setup
+    native_viewer._update_reward_figures = _patched_update_reward_figures
+
+
+def _compute_foot_restitution_dampratio(env, env_idx: int) -> float:
+    """Current foot-collision solref dampratio for env_idx's LEFT foot1
+    geom (all 8 foot geoms always share one value per env -- see
+    `randomize_foot_ball_restitution`'s own docstring, `mdp/events.py`).
+
+    Reads directly from `env.sim.model.geom_solref` rather than the cached
+    `env._foot_restitution_dampratio` attribute so this plot is correct
+    regardless of whether the randomization event fires this specific
+    reset. FIX 2026-08-23 (user request): the event is now registered in
+    BOTH train and play (`goalkeeper_env_cfg.py`) per this project's own
+    Training/Play Parity Rule -- was popped in play until today, see that
+    file's own changelog comment for the reasoning.
+    """
+    raw_env = env.unwrapped if hasattr(env, "unwrapped") else env
+    if not hasattr(_compute_foot_restitution_dampratio, "_geom_id"):
+        robot = raw_env.scene["robot"]
+        ids, _ = robot.find_geoms(r"^left_foot1_collision$")
+        _compute_foot_restitution_dampratio._geom_id = ids[0]
+    geom_id = _compute_foot_restitution_dampratio._geom_id
+    return float(raw_env.sim.model.geom_solref[env_idx, geom_id, 1].item())
+
+
+def _patch_viewer_foot_restitution_plot(native_viewer: "NativeMujocoViewer", env) -> None:
+    """Add a "foot_restitution_dampratio" raw P-panel plot (see
+    `_compute_foot_restitution_dampratio`) and promote it, plus the
+    ordinary `contact_yield_velocity` reward term, into the always-visible
+    front slots. Also fixes the display-scale bug on `contact_yield_velocity`
+    and `cleanstop`'s own figures (see the FIX 2026-08-23 comment inside
+    `_patched_update_reward_figures` below for the full mechanism).
+
+    FIX 2026-08-23 (user request, "put the contact yield velocity in the p
+    mujoco viewer"): `contact_yield_velocity` is a normal registered
+    reward term (`rewards.py`/`goalkeeper_env_cfg.py`) so it already has
+    an auto-created figure -- no new raw plot needed, just promoted into
+    `_term_names` alongside `foot_restitution_dampratio`. Demoted
+    `wrong_foot_ball_contact` (in addition to the existing
+    `trailing_foot_forward_continuous` demotion below) to stay within the
+    12-slot cap.
+
+    FIX 2026-08-23 (user report, "i dont see it"): the viewer has a HARD
+    `max_viewports=12` render cap (`mjlab/viewer/native/viewer.py`) with NO
+    pagination/toggle of any kind -- anything past index 11 of
+    `_term_names` is never drawn, period. The original version of this
+    patch appended past that cap (already fully saturated by
+    `_patch_viewer_sole_contact_and_stop_plots`'s own 12) and claimed a
+    "toggle the full list" escape hatch that doesn't exist -- corrected.
+    Demotes `trailing_foot_forward_continuous` (least relevant of the 8
+    footorientation terms to a ball-contact-physics investigation) to make
+    room, registered LAST so this reorder is the final word (same
+    last-registered-wins mechanism `_patch_viewer_sole_contact_and_stop_plots`
+    itself documents). Say if you want a different term swapped instead.
+
+    NEW 2026-08-23 (user request), same raw-custom-plot pattern as
+    `_compute_sole_ball_contact`/`_patch_viewer_sole_contact_and_stop_plots`.
+    Plots dampratio itself (0.35=bounciest calibrated end, 1.0=current
+    production/least bouncy), not restitution -- restitution isn't a single
+    MuJoCo model field to read back live; see
+    `randomize_foot_ball_restitution`'s docstring for the measured
+    dampratio->restitution mapping.
+
+    FIX 2026-08-23 (user request, "make it the same randomised in play...
+    training and play needs to be very similar"): was a genuinely constant
+    flat line at 1.0 in play mode -- `randomize_foot_ball_restitution` used
+    to be popped from `cfg.events` in play (mirroring `push_robot`'s own
+    precedent, treating it as training-robustness DR rather than a core
+    task parameter). Reversed per this project's own Training/Play Parity
+    Rule -- the event is now registered in both train and play
+    (`goalkeeper_env_cfg.py`), so this plot correctly varies per reset in
+    play mode too now, not just during training.
+
+    FIX 2026-08-23 (user report, "it shows a constant line nothing else...
+    max 1.5 and -0.5"): the native viewer's own autoscale
+    (`_write_history_to_figure`) computes lo/hi from a percentile window of
+    the last `history` points -- for a genuinely constant value this
+    collapses to a near-zero-width window (`min_span` floor), which reads
+    as "a flat line pinned somewhere, uninformative" regardless of the
+    actual value. Also confirmed live: `native_viewer._yrange[name]` this
+    patch set is NEVER read by `_write_history_to_figure` at all (dead
+    code in the original version of this patch) -- that function always
+    recomputes its own lo/hi from the data. Fixed by writing this term's
+    figure directly with a FIXED range (-0.5, 1.5), bypassing the shared
+    autoscale entirely, instead of trying to fight it via `_yrange`.
+    """
+    orig_setup = native_viewer.setup
+    orig_update_reward_figures = native_viewer._update_reward_figures
+
+    _RAW_NAME = "foot_restitution_dampratio"
+    # FIX 2026-08-30: contact_yield_velocity split into X/Y components
+    # (rewards.py) -- promote both, same auto-created-figure mechanism.
+    _ALSO_PROMOTED = ("contact_yield_velocity_x", "contact_yield_velocity_y")
+    _DEMOTED = ("trailing_foot_forward_continuous", "wrong_foot_ball_contact")
+    _FIXED_LO, _FIXED_HI = -0.5, 1.5
+
+    def _patched_setup() -> None:
+        orig_setup()
+        from mjlab.viewer.native.viewer import make_empty_figure
+        cfg = native_viewer._plot_cfg
+        native_viewer._figures[_RAW_NAME] = make_empty_figure(
+            f"{_RAW_NAME} (0.35=bounciest, 1.0=least bouncy; resamples every reset)",
+            cfg.grid_size, (_FIXED_LO, _FIXED_HI), cfg.history, cfg.background_alpha,
+        )
+        native_viewer._histories[_RAW_NAME] = deque(maxlen=cfg.history)
+        native_viewer._scale[_RAW_NAME] = 1.0
+        rest = [n for n in native_viewer._term_names if n not in (_RAW_NAME, *_ALSO_PROMOTED, *_DEMOTED)]
+        front = [_RAW_NAME] + [n for n in _ALSO_PROMOTED if n in native_viewer._term_names]
+        native_viewer._term_names = front + rest
+
+    def _write_fixed_range(name: str, lo: float, hi: float) -> None:
+        fig = native_viewer._figures[name]
+        hist = native_viewer._histories[name]
+        n = min(len(hist), native_viewer._plot_cfg.history)
+        fig.linepnt[0] = n
+        for i in range(n):
+            fig.linedata[0][2 * i] = float(-i)
+            fig.linedata[0][2 * i + 1] = float(hist[-1 - i])
+        fig.range[1][0] = lo
+        fig.range[1][1] = hi
+        fig.title = name  # drop any "(1eN)" suffix from the native autoscale write below
+
+    def _patched_update_reward_figures(viewer_handle: "mujoco.viewer.Handle") -> None:
+        if native_viewer._show_plots and native_viewer._term_names and not native_viewer._is_paused:
+            value = _compute_foot_restitution_dampratio(env, native_viewer.env_idx)
+            native_viewer._append_point(_RAW_NAME, value)
+            _write_fixed_range(_RAW_NAME, _FIXED_LO, _FIXED_HI)
+        orig_update_reward_figures(viewer_handle)
+        # FIX 2026-08-23 (user report, "why is contact yield velocity peaks
+        # at 5e7 and cleanstop only 1e7"): the native autoscale
+        # (_write_history_to_figure) picks its display-scale multiplier
+        # from a percentile window of recent history -- for a one-shot,
+        # mostly-zero term (fires once per episode, rest of the buffer is
+        # 0), that window collapses to the 1e-6 min_span floor, and the
+        # multiplier explodes to 1e6-1e8 to compensate. Not a real reward
+        # blowup -- the actual plotted units are raw_reward*weight (see
+        # reward_manager.py's _step_reward = value/dt). `orig_update_
+        # reward_figures` above already ran the native (buggy-scaled)
+        # write for every ordinary term including these two -- overwrite
+        # each with a fixed, correct-units range afterward, same bypass
+        # already used for foot_restitution_dampratio.
+        if native_viewer._show_plots and not native_viewer._is_paused:
+            # FIX 2026-08-30: this range was already stale even before
+            # today's X/Y split -- comment claimed "weight=5.0" but the
+            # actual registered weight had moved to 25.0 (2026-08-25) then
+            # 50.0 (2026-08-29) without this plot ever being updated to
+            # match. Now two separate terms with their own weights, true
+            # range for each is weight * [-1,1].
+            # FIX 2026-08-30 (later same day, user request, "decrease the y
+            # velocity drastically and put it towards the x"): weights
+            # 30/20 -> 45/5 (goalkeeper_env_cfg.py) -- ranges updated to match.
+            if "contact_yield_velocity_x" in native_viewer._histories:
+                _write_fixed_range("contact_yield_velocity_x", -45.0, 45.0)
+            if "contact_yield_velocity_y" in native_viewer._histories:
+                _write_fixed_range("contact_yield_velocity_y", -5.0, 5.0)
+            if "cleanstop" in native_viewer._histories:
+                # FIX 2026-08-23 (user request, "fix cleanstop aswell"):
+                # max = 1.0 (raw scale) * 34.72 (cleanstop_curriculum's own
+                # peak weight, goalkeeper_env_cfg.py) = 34.72.
+                _write_fixed_range("cleanstop", -2.0, 38.0)
+
+    native_viewer.setup = _patched_setup
+    native_viewer._update_reward_figures = _patched_update_reward_figures
+
+
+def _patch_viewer_postupperdofpos_plot(native_viewer: "NativeMujocoViewer", env) -> None:
+    """Promote `postupperdofpos` (arm post-save recovery reward) into the
+    always-visible front P-panel slots.
+
+    FIX 2026-07-30 (user request): replaces this function's prior content
+    (`left_foot_yaw_deg`/`right_foot_yaw_deg` custom plots + `postlegdofpos`
+    promotion) -- removed outright, not just deprioritized, per user request.
+    `postupperdofpos` is an ordinary reward term with its own auto-created
+    figure, so this only needs the promotion mechanism (no custom raw plot),
+    same pattern as `_patch_viewer_new_reward_plots`.
+
+    FIX 2026-07-30 (2nd follow-up, user request): also promoted
+    `penalize_arm_above_shoulder` (the new shoulder-height penalty, same
+    date, see rewards.py) and `trailing_foot_forward_continuous` (existing
+    term, previously never promoted so silently unrendered past the top-12
+    viewport cap) alongside it -- all three are arm/posture-adjacent terms
+    useful to watch together while diagnosing the "arms flying" behavior.
+    """
+    orig_setup = native_viewer.setup
+
+    _PROMOTED_REWARD_TERMS = (
+        "postupperdofpos", "penalize_arm_above_shoulder", "trailing_foot_forward_continuous",
+    )
+
+    def _patched_setup() -> None:
+        orig_setup()
+        rest = [n for n in native_viewer._term_names if n not in _PROMOTED_REWARD_TERMS]
+        promoted = [n for n in _PROMOTED_REWARD_TERMS if n in native_viewer._term_names]
+        native_viewer._term_names = promoted + rest
+
+    native_viewer.setup = _patched_setup
+
+
+def _patch_viewer_postsave_airtime_plot(native_viewer: "NativeMujocoViewer", env) -> None:
+    """Swap the `stopball` P-panel plot for `postsave_foot_airtime` (2026-08-01
+    airborne-hangtime bonus, rewards.py).
+
+    NEW 2026-08-03 (user request): user wants to watch postsave_foot_airtime
+    live while replaying a checkpoint in the native viewer instead of
+    stopball -- stopball reliably fires already and doesn't need dedicated
+    screen space. Same promotion mechanism as
+    _patch_viewer_postupperdofpos_plot, but also explicitly demotes
+    `stopball` to the back of `_term_names` (this task registers far more
+    reward terms than `max_viewports` (12), so anything not in the front 12
+    is silently unrendered) -- without this, promoting postsave_foot_airtime
+    alone wouldn't guarantee stopball drops off, only that something at the
+    tail of the list does.
+    """
+    orig_setup = native_viewer.setup
+
+    _PROMOTED = ("postsave_foot_airtime",)
+    _DEMOTED = ("stopball",)
+
+    def _patched_setup() -> None:
+        orig_setup()
+        rest = [
+            n for n in native_viewer._term_names
+            if n not in _PROMOTED and n not in _DEMOTED
+        ]
+        promoted = [n for n in _PROMOTED if n in native_viewer._term_names]
+        demoted = [n for n in _DEMOTED if n in native_viewer._term_names]
+        native_viewer._term_names = promoted + rest + demoted
+
+    native_viewer.setup = _patched_setup
+
+
+def _patch_viewer_post_recovery_plots(native_viewer: "NativeMujocoViewer", env) -> None:
+    """Make the P-panel (KEY_P already toggles its visibility natively --
+    `_safe_key_callback`'s `TOGGLE_PLOTS` action, mjlab's own binding, not a
+    new one added here) show the full post-recovery reward family in the
+    front 12 visible slots, superseding whatever the earlier promotion
+    patches in this file left there.
+
+    NEW 2026-08-03 (user request): "put all the rewards that are on at post
+    recovery" when pressing P. Built directly from this file's own
+    `_ball_is_behind`-gated reward functions (grepped `rewards.py` for every
+    function containing a `_ball_is_behind(env` call, excluding the
+    APPROACH-phase terms that instead gate OFF once behind --
+    `footreach`/`foot_proximity`/`foot_inner_face_continuous`/
+    `foot_clearance`/`blue_trunk_drive` -- those are the opposite family):
+    `postangvel`, `postlinvel`, `postupperdofpos`, `postwaistdofpos`,
+    `postlegdofpos`, `postleadfootorientation`, `postsave_foot_airtime`,
+    `postheadingorientation`, `penalize_arm_above_shoulder` (steady-post-save
+    gated). Plus three always-active terms from the same "recovery" family
+    by naming/purpose, included since they're exactly what's under
+    investigation for the post-save arm-drift bug: `postorientation`
+    (upright recovery, always active per its own docstring -- AMP has no
+    root-orientation signal to supply this itself), `angular_momentum_penalty`
+    (2026-08-03, whole-body momentum). Exactly 12 terms -- fits `max_viewports`
+    (12) with no overflow, so all twelve are guaranteed visible with no need
+    to also demote anything else.
+
+    FIX 2026-08-06 (user request): swapped `arm_dof_vel` (12th slot) for
+    `inner_face_orientation_save` -- the one-time save-moment leading-foot
+    "block posture" reward, retargeted 2026-08-01 (commit 036222f) from 90deg
+    off forward (parallel to world Y) to 60deg off forward (30deg off Y).
+    It's an APPROACH-phase term by this function's own earlier classification
+    (fires at the softstop moment, not gated by `_ball_is_behind` like the
+    other 11), included here anyway so the new save-angle target can be
+    watched directly in the panel.
+    """
+    orig_setup = native_viewer.setup
+
+    # FIX 2026-08-06 (user request): swapped `arm_dof_vel` out for
+    # `inner_face_orientation_save` -- the save-moment leading-foot "block
+    # posture" reward retargeted 2026-08-01 (commit 036222f) to 60deg off
+    # forward / 30deg off world Y (`_FOOT_TARGET_ANGLE_DEG`, rewards.py).
+    # It's an APPROACH-phase term (fires at the softstop moment, not
+    # `~behind`-gated like the other 11), included here anyway so the foot's
+    # save-angle can be watched directly; `arm_dof_vel` was judged the least
+    # foot-orientation-relevant of the original 12.
+    #
+    # FIX 2026-08-06 (user request): dropped `postwaistdofpos` and
+    # `angular_momentum_penalty` to make room for the 4 terms touched by
+    # today's foot/leg orientation rework (airborne-latch fix affecting
+    # `postlegdofpos`/`postleadfootorientation`, the simplified
+    # `foot_inner_face_continuous`, and the save-time-captured
+    # `postheadingorientation`) -- added `foot_inner_face_continuous`
+    # (the only one of the 4 not already in this list). 11 terms now, not
+    # backfilled to 12 -- the display cap, not a requirement to hit exactly.
+    #
+    # FIX 2026-08-06 (later same day, user request): swapped
+    # `penalize_arm_above_shoulder` out for `penalize_sharpcontact` --
+    # user just retuned that term's force threshold (1700->1800N) and
+    # wants to watch it directly in the panel.
+    #
+    # FIX 2026-08-07 (user request): swapped `postlinvel` out for
+    # `penalize_arm_above_shoulder` -- brought back into the panel (was
+    # bumped out same-day 2026-08-06 for `penalize_sharpcontact`, which
+    # stays). `postlinvel` was judged the least relevant of the 11 to the
+    # current investigation (foot-yaw/post-save-pose instability).
+    #
+    # FIX 2026-08-07 (later same day, user request): added `postshoulderdofpos`
+    # -- the shoulder-scoped sibling of `postupperdofpos` (added 2026-08-06,
+    # never previously promoted to this panel). 12 terms now, exactly at the
+    # display cap -- nothing else needed removing since the list was at 11.
+    #
+    # FIX 2026-08-07 (later same day, user request): swapped
+    # `foot_inner_face_continuous` out for `head_ball_contact` -- this panel
+    # is registered LAST in run_play (after _patch_viewer_wrong_foot_contact_
+    # plot), so its own term_names reordering runs last and wins; since
+    # "head_ball_contact" isn't in _POST_RECOVERY_REWARD_TERMS it was
+    # silently pushed past the 12-slot max_viewports cutoff by this exact
+    # panel, despite _patch_viewer_wrong_foot_contact_plot having genuinely
+    # registered and computed it -- the plot existed and updated every step,
+    # it just was never actually visible. This surfaces the raw latched
+    # chin/head-contact signal (see _compute_wrong_foot_contact_flash) after
+    # user review of model_10250.pt found the policy converged on chin/head
+    # contact as a save method. `foot_inner_face_continuous`'s own target
+    # angle is still separately visible via the "assigned_foot_angle_deg"
+    # custom plot (_patch_viewer_foot_orientation_plot), and its one-shot
+    # sibling `inner_face_orientation_save` stays in this panel -- judged
+    # the least-redundant term to demote. Viewer-only change, no effect on
+    # training/rewards.
+    # FIX 2026-08-07 (user request): same visibility bug as the head_ball_contact
+    # fix above -- "wrong_foot_ball_contact" and "knee_distance_contact" were
+    # ALSO being silently pushed past the 12-slot cutoff by this same panel,
+    # the whole time head_ball_contact was (they were never in this list
+    # either, until now). Demoted `penalize_sharpcontact` (unrelated to the
+    # current wrong-foot/knee/chin-contact investigation) and
+    # `postsave_foot_airtime` (peripheral to it) to make room for both.
+    #
+    # FIX 2026-08-07 (later same day, user request: "ignore the whole head
+    # thing, even remove the whole head touch penalty for now"): dropped
+    # "head_ball_contact" -- the reward's head/chin sub-condition it tracked
+    # was removed the same day from rewards.py:penalize_wrong_foot_ball_
+    # contact. 11 terms now, not backfilled to 12 -- the display cap, not a
+    # requirement to hit exactly (same reasoning as the 2026-08-06 entry
+    # above).
+    # FIX 2026-08-08 (user request): "turn on rewards i need to watch out for"
+    # for the (re-opened, still-unresolved per a fresh model_17250.pt replay
+    # this session) leading-foot yaw-spin investigation. Swapped out
+    # "wrong_foot_ball_contact"/"knee_distance_contact" (a separate, orthogonal
+    # investigation from an earlier session) for the three reward terms that
+    # directly measure/damp the spin itself and were never in this panel
+    # despite being exactly what the current investigation needs to watch:
+    # "foot_ang_vel_xy"/"foot_ang_vel_z" (the two rate-damping penalties added
+    # 2026-08-07 specifically for this issue) and "ang_vel_z" (whole-body yaw
+    # rate). "postleadfootorientation"/"postheadingorientation"/
+    # "inner_face_orientation_save" were already present and stay. See
+    # docs/BugFixes.md for the fresh replay evidence this responds to.
+    # FIX 2026-08-10 (user request, "enable all the leading foot orientation
+    # rewards"): swapped "ang_vel_z" (whole-body yaw rate, least foot-specific
+    # of the 12, and redundant with foot_ang_vel_z which already covers foot-
+    # level yaw) for "foot_inner_face_continuous" -- the pre-save continuous
+    # sibling of inner_face_orientation_save/postleadfootorientation, bumped
+    # out of this panel on 2026-08-07 and never restored. This completes the
+    # full leading-foot-orientation reward family in one panel:
+    # foot_inner_face_continuous (pre-save), inner_face_orientation_save
+    # (save-moment one-shot), postleadfootorientation (post-save), plus the
+    # two rotation-rate penalties foot_ang_vel_xy/foot_ang_vel_z. Still 12
+    # terms, still fits max_viewports with no overflow.
+    _POST_RECOVERY_REWARD_TERMS = (
+        "postorientation", "postangvel", "penalize_arm_above_shoulder",
+        "postupperdofpos", "postshoulderdofpos", "postlegdofpos",
+        "postleadfootorientation", "postheadingorientation",
+        "inner_face_orientation_save", "foot_inner_face_continuous",
+        "foot_ang_vel_xy",
+    )
+
+    def _patched_setup() -> None:
+        orig_setup()
+        rest = [n for n in native_viewer._term_names if n not in _POST_RECOVERY_REWARD_TERMS]
+        promoted = [n for n in _POST_RECOVERY_REWARD_TERMS if n in native_viewer._term_names]
+        native_viewer._term_names = promoted + rest
+
+    native_viewer.setup = _patched_setup
+
+
+def _patch_viewer_all_footorientation_plots(native_viewer: "NativeMujocoViewer", env) -> None:
+    """Make the P-panel show every foot-orientation reward term at once, in
+    the front 12 slots.
+
+    NEW 2026-08-13 (user request): "still it doesn't learn to rotate the
+    foot correctly to the correct point" -- `_patch_viewer_post_recovery_
+    plots` (2026-08-03) already promoted 12 terms including `foot_ang_vel_xy`/
+    `foot_ang_vel_z` in its last two slots, but 3 more single-item promotion
+    patches (`_patch_viewer_blue_overshoot_plot`,
+    `_patch_viewer_blue_overshoot_margin_plot`,
+    `_patch_viewer_blue_landed_flags_plot`, all added 2026-08-12 for an
+    unrelated blue-waypoint investigation) registered after it, each
+    prepending its own term(s) without removing anything else -- silently
+    pushing whatever was in the last slot(s) past `max_viewports` (12), the
+    same "silently pushed past the 12-slot cutoff" failure this file's own
+    comments already document happening to `head_ball_contact`,
+    `wrong_foot_ball_contact`, and `knee_distance_contact` on 2026-08-07.
+    By the time all 3 had registered, `foot_ang_vel_xy`/`foot_ang_vel_z`
+    were almost certainly among the terms pushed out.
+
+    FIX (same date, user request, "remove blue shot margin in the viewer and
+    all of those"): removed all 3 of those single-item promotion patches
+    (and their now-unused helper `_compute_blue_overshoot_margin`) outright
+    -- that investigation is over and they were actively fighting this
+    panel for slots. Verified via a live re-check (temporary debug print of
+    `native_viewer._term_names[:15]` during a real native-viewer run, then
+    removed) that with them gone, all 8 terms below land at indices 0-7,
+    and confirmed against a real trained checkpoint
+    (`model_17750.pt`) that `postleadfootorientation` genuinely computes and
+    plots non-zero values (observed up to 1.94, weight cap 2.0) right after
+    a save -- it reads 0.00 the rest of the time by design (gated on
+    `env._softstop_flag`), which is what made it look "missing" in a short
+    zero-action smoke test. See docs/BugFixes.md, 2026-08-13.
+
+    Every function containing "foot" + "orientation"/"ang_vel"/"face" in its
+    name or purpose, grepped directly from `rewards.py` (see FIX 2026-08-13
+    row -- `foot`-scoped rotation reward audit): `feetorientation` (static
+    roll/pitch flatness, always active), `foot_inner_face_continuous`
+    (pre-save, continuous, rotates the assigned foot's inner face toward the
+    ball), `inner_face_orientation_save` (save-moment one-shot bonus at the
+    same target angle), `postleadfootorientation` (post-save, continuous,
+    rotates the assigned foot back toward forward),
+    `trailing_foot_forward_continuous` (the non-assigned foot's own forward-
+    alignment, always active), `foot_ang_vel_xy` / `foot_ang_vel_z`
+    (roll+pitch / yaw rotation-RATE penalties -- orthogonal to the five
+    target-angle terms above, they damp how fast the foot spins rather than
+    where it ends up). Root/whole-body orientation terms (`postorientation`,
+    `postheadingorientation`, `ang_vel_z`) are deliberately excluded --
+    those are trunk-level, not foot-level, and were already the subject of
+    the separate whole-body-yaw-spin investigation
+    (`_patch_viewer_post_recovery_plots`'s 2026-08-08 entry).
+
+    Also explicitly includes `assigned_foot_angle_deg`
+    (`_patch_viewer_foot_orientation_plot`'s custom raw plot, the live
+    save-target angle readout in degrees) alongside the 7 ordinary reward-
+    term figures -- 8 terms total, well under the 12-slot cap, so nothing
+    needs demoting to fit.
+
+    Registered LAST in run_play (after every other panel patch) so its
+    reorder is the final word -- same "last registered wins" mechanism
+    `_patch_viewer_post_recovery_plots`'s own 2026-08-07 fix-comment
+    documents.
+    """
+    orig_setup = native_viewer.setup
+
+    _ALL_FOOTORIENTATION_TERMS = (
+        "assigned_foot_angle_deg",
+        "feetorientation",
+        "foot_inner_face_continuous",
+        "inner_face_orientation_save",
+        "postleadfootorientation",
+        "trailing_foot_forward_continuous",
+        # REMOVED 2026-08-15 (user request, "drop foot_ang_vel_xy"):
+        # foot_ang_vel_xy deleted entirely (goalkeeper_env_cfg.py/rewards.py/
+        # mdp/__init__.py) -- superseded by ankle_pitch_vel/ankle_roll_vel
+        # below, see docs/BugFixes.md.
+        # SWAPPED 2026-08-30 (user request): ankle_pitch_vel -> softstop.
+        # ankle_pitch_vel's own slot history: added 2026-08-15 -- probe
+        # evidence (docs/BugFixes.md, 2026-08-15) found Ankle_Pitch's own
+        # joint velocity, not the whole-body world-frame sum foot_ang_vel_xy
+        # used to measure, actually leads the leading foot's pre-save pitch
+        # spike. Removed from this panel (not from the reward table --
+        # still registered/trained in goalkeeper_env_cfg.py, just no longer
+        # promoted to an always-visible front slot) to make room for
+        # `softstop` -- the single biggest weight in the whole reward table
+        # (up to 262.5) and the save-quality investigation's own trigger
+        # event, worth watching directly alongside cleanstop/contact_yield_
+        # velocity_x/_y rather than only inferring it from _softstop_flag.
+        "softstop",
+        # REMOVED 2026-08-15 (user request, "drop the _pos"): ankle_pitch_pos/
+        # ankle_roll_pos deleted from the reward manager entirely (see
+        # goalkeeper_env_cfg.py) -- removed from this panel too. ankle_roll_vel
+        # kept (velocity term, unaffected by the same-default-angle problem).
+        "ankle_roll_vel",
+    )
+
+    def _patched_setup() -> None:
+        orig_setup()
+        rest = [n for n in native_viewer._term_names if n not in _ALL_FOOTORIENTATION_TERMS]
+        promoted = [n for n in _ALL_FOOTORIENTATION_TERMS if n in native_viewer._term_names]
+        native_viewer._term_names = promoted + rest
+
+    native_viewer.setup = _patched_setup
 
 
 def run_play(task_id: str, cfg: PlayConfig) -> None:
@@ -387,7 +2209,22 @@ def run_play(task_id: str, cfg: PlayConfig) -> None:
         motion_path = Path(cfg.motion_file)
         if not motion_path.exists():
             raise FileNotFoundError(f"Motion file not found: {motion_path}")
-        print(f"[INFO]: Using motion file: {motion_path.name}")
+
+        if cfg.amp_eye_view:
+            from simple_goalkeeper.scripts.amp_eye_view import make_amp_eye_view
+            import tempfile
+            eye_path = Path(tempfile.gettempdir()) / f"amp_eye_view_{motion_path.stem}.npz"
+            make_amp_eye_view(motion_path, eye_path)
+            print(
+                f"[AMP-EYE-VIEW]: {motion_path.name} re-anchored to the currently-planted "
+                f"foot each frame (root transform cancelled out) -> {eye_path.name}. This is "
+                f"what the AMP discriminator actually observes (joint_pos/joint_vel only, no "
+                f"root term) -- NOT a training-data file, diagnostic rendering only. Expect a "
+                f"visible jump each time stance switches feet."
+            )
+            motion_path = eye_path
+        else:
+            print(f"[INFO]: Using motion file: {motion_path.name}")
         env_cfg.commands["motion_ghost"] = GhostMotionCommandCfg(
             motion_file=str(motion_path),
             anchor_body_name="Trunk",
@@ -435,12 +2272,241 @@ def run_play(task_id: str, cfg: PlayConfig) -> None:
     else:
         env = AMPEnvWrapper(env, clip_actions=agent_cfg.clip_actions, motion_dataset=agent_cfg.amp_data)
 
-    DUMMY_MODE = cfg.agent in {"zero", "random"}
+    DUMMY_MODE = cfg.agent in {"zero", "random", "scripted_yaw", "scripted_lean"}
     if DUMMY_MODE:
         action_shape: tuple[int, ...] = env.unwrapped.action_space.shape
         if cfg.agent == "zero":
             def policy(obs: torch.Tensor) -> torch.Tensor:
                 return torch.zeros(action_shape, device=device)
+        elif cfg.agent == "scripted_yaw":
+            # Motion-sample probe (2026-08-15, user request): "make a motion
+            # sample that only rotates the foot in the z axis" to watch the
+            # P-panel reward graphs respond. All other joints stay at 0
+            # action (= default_joint_pos, per JointPositionAction's
+            # use_default_offset=True) -- only the resolved Hip_Yaw action
+            # index is driven, so the hip genuinely does move (as the user
+            # anticipated -- "probably it has to also move then the hip
+            # etc"), but nothing else is scripted; any other joint motion
+            # visible is the physics' own reaction (e.g. balance response),
+            # not commanded. No reward-affecting code touched -- viewer/CLI
+            # addition only, see CLAUDE.md's Change Approval Workflow.
+            import math as _yaw_math
+
+            raw_env_for_yaw = env.unwrapped
+            joint_pos_term = raw_env_for_yaw.action_manager.get_term("joint_pos")
+            if cfg.scripted_yaw_joint not in joint_pos_term.target_names:
+                raise ValueError(
+                    f"--scripted-yaw-joint {cfg.scripted_yaw_joint!r} not found in "
+                    f"action term's target_names: {joint_pos_term.target_names}"
+                )
+            yaw_idx = joint_pos_term.target_names.index(cfg.scripted_yaw_joint)
+            yaw_scale = joint_pos_term.scale
+            yaw_scale_val = (
+                float(yaw_scale[0, yaw_idx].item())
+                if torch.is_tensor(yaw_scale)
+                else float(yaw_scale)
+            )
+            yaw_amplitude_rad = _yaw_math.radians(cfg.scripted_yaw_deg)
+            yaw_amplitude_action = yaw_amplitude_rad / yaw_scale_val
+            print(
+                f"[INFO] scripted_yaw: joint={cfg.scripted_yaw_joint!r} "
+                f"action_idx={yaw_idx} action_scale={yaw_scale_val:.4f} rad/unit -- "
+                f"+/-{cfg.scripted_yaw_deg:.1f}deg -> action amplitude "
+                f"{yaw_amplitude_action:.3f}, period={cfg.scripted_yaw_period_steps} steps",
+                file=sys.stderr,
+            )
+
+            def policy(obs: torch.Tensor) -> torch.Tensor:
+                action = torch.zeros(action_shape, device=device)
+                step = raw_env_for_yaw.episode_length_buf.to(torch.float32)
+                phase = 2.0 * torch.pi * (step / cfg.scripted_yaw_period_steps)
+                action[:, yaw_idx] = yaw_amplitude_action * torch.sin(phase)
+                return action
+
+            # Root-pin + ball-park (both live-verified 2026-08-15 necessary,
+            # see docs/BugFixes.md): the standing pose alone is stable, but a
+            # planted foot's Hip_Yaw sweep alone reliably tips the robot over
+            # within ~1.5 cycles from ground-friction reaction torque -- ruled
+            # out the ball as the cause first (parked it, still fell at the
+            # same timing), then confirmed pinning the root fixes it (foot
+            # keeps rotating, height/tilt stay exactly constant). Both are
+            # applied via a monkey-patched env.step/env.reset rather than
+            # inside `policy` itself, since policy only returns an action --
+            # it has no hook to run code AFTER physics has advanced.
+            n_yaw = raw_env_for_yaw.num_envs
+            _pin_pose = {"pose": None}
+
+            def _capture_pin_pose() -> None:
+                robot_entity = raw_env_for_yaw.scene["robot"]
+                pos = robot_entity.data.root_link_pos_w.clone()
+                pos[:, 2] += cfg.scripted_yaw_lift_height
+                _pin_pose["pose"] = torch.cat([pos, robot_entity.data.root_link_quat_w.clone()], dim=-1)
+
+            # Live-verified 2026-08-15 (see docs/BugFixes.md): NativeMujocoViewer
+            # steps the sim for a while BEFORE its first real env.reset() (some
+            # kind of pre-render/priming window -- ~120 steps observed). Lazily
+            # capturing the pin pose only inside the reset hook left that whole
+            # window unprotected (`_pin_pose["pose"] is None`, pinning a no-op),
+            # so the scripted action ran completely unpinned and the robot fell
+            # for real during it -- confirmed via a `pin_target_h=nan` trace the
+            # entire time it was falling, snapping to stable the instant the
+            # first real reset finally fired. Capturing eagerly here, using
+            # whatever state exists right now (construction-time state is
+            # already a valid standing pose -- confirmed by this same trace:
+            # height read exactly 0.663m, right, from step 1), closes that gap.
+            # The reset hook below still re-captures on every subsequent real
+            # reset, so a manual reset (key-press, episode boundary) still gets
+            # a fresh pin pose rather than reusing this first one forever.
+            _capture_pin_pose()
+
+            def _park_ball_state() -> None:
+                if not cfg.scripted_yaw_park_ball:
+                    return
+                ball_entity = raw_env_for_yaw.scene["ball"]
+                park_pos = (
+                    torch.tensor([[10.0, 10.0, 5.0]], device=device).expand(n_yaw, -1)
+                    + raw_env_for_yaw.scene.env_origins
+                )
+                park_quat = torch.tensor([[1.0, 0.0, 0.0, 0.0]], device=device).expand(n_yaw, -1)
+                ball_entity.write_root_link_pose_to_sim(torch.cat([park_pos, park_quat], dim=-1))
+                ball_entity.write_root_link_velocity_to_sim(torch.zeros(n_yaw, 6, device=device))
+
+            def _pin_root_state() -> None:
+                if not cfg.scripted_yaw_pin_root or _pin_pose["pose"] is None:
+                    return
+                robot_entity = raw_env_for_yaw.scene["robot"]
+                robot_entity.write_root_link_pose_to_sim(_pin_pose["pose"])
+                robot_entity.write_root_link_velocity_to_sim(torch.zeros(n_yaw, 6, device=device))
+
+            _orig_yaw_reset = env.reset
+            _orig_yaw_step = env.step
+
+            def _patched_yaw_reset(*args, **kwargs):
+                result = _orig_yaw_reset(*args, **kwargs)
+                _capture_pin_pose()
+                _park_ball_state()
+                _pin_root_state()
+                return result
+
+            _yaw_diag_counter = {"n": 0}
+
+            def _patched_yaw_step(actions: torch.Tensor):
+                result = _orig_yaw_step(actions)
+                _park_ball_state()
+                _pin_root_state()
+                _yaw_diag_counter["n"] += 1
+                if _yaw_diag_counter["n"] % 100 == 0:
+                    robot_entity = raw_env_for_yaw.scene["robot"]
+                    h = float(robot_entity.data.root_link_pos_w[0, 2] - raw_env_for_yaw.scene.env_origins[0, 2])
+                    tilt = float(robot_entity.data.projected_gravity_b[0, :2].norm())
+                    print(
+                        f"[INFO] scripted_yaw diag: step={_yaw_diag_counter['n']} height={h:.3f} tilt={tilt:.3f} "
+                        f"(pinned -> should stay ~constant; drift here means pin/park broke again)",
+                        file=sys.stderr,
+                    )
+                return result
+
+            env.reset = _patched_yaw_reset
+            env.step = _patched_yaw_step
+            print(
+                f"[INFO] scripted_yaw: pin_root={cfg.scripted_yaw_pin_root} "
+                f"park_ball={cfg.scripted_yaw_park_ball}",
+                file=sys.stderr,
+            )
+        elif cfg.agent == "scripted_lean":
+            # Static-pose probe (2026-08-17, user request): visualize
+            # postorientation's own forward-lean target (rewards.py's
+            # _HOME_LEAN_TARGET=sin(15deg)) live in the real viewer, since
+            # that target's docstring flagged it as "derived analytically,
+            # not yet render-verified" -- render-verified offline first
+            # (standalone MuJoCo render, see docs/BugFixes.md 2026-08-17:
+            # the torso tips toward the SAME direction the toes point, a
+            # genuine forward lean), this gives the same thing live.
+            #
+            # No joint sweep, no action needed -- zero action already holds
+            # default_joint_pos (HOME_KEYFRAME) via JointPositionAction's
+            # use_default_offset=True, same mechanism scripted_yaw relies on
+            # for every joint it doesn't drive. Only the root orientation is
+            # scripted, re-written every step (same pin pattern scripted_yaw
+            # uses) so the pose stays crisp regardless of what reset/RSI
+            # would otherwise produce.
+            import math as _lean_math
+            from simple_goalkeeper.mdp.rewards import _POST_SAVE_STANCE_MAP
+
+            raw_env_for_lean = env.unwrapped
+            n_lean = raw_env_for_lean.num_envs
+            half = _lean_math.radians(cfg.scripted_lean_deg) / 2.0
+            _lean_quat = torch.tensor(
+                [_lean_math.cos(half), 0.0, _lean_math.sin(half), 0.0], device=device
+            ).expand(n_lean, -1)
+
+            _lean_robot = raw_env_for_lean.scene["robot"]
+            if cfg.scripted_lean_pose == "post_save":
+                # Same resolution pattern postlegdofpos/postupperdofpos/
+                # postshoulderdofpos/postwaistdofpos use (rewards.py,
+                # env._post_save_stance_target) -- straight legs, not
+                # HOME_KEYFRAME's crouched reset pose.
+                all_names = _lean_robot.joint_names
+                _lean_stance = torch.zeros(len(all_names), device=device)
+                for i, name in enumerate(all_names):
+                    if name in _POST_SAVE_STANCE_MAP:
+                        _lean_stance[i] = _POST_SAVE_STANCE_MAP[name]
+                _lean_stance = _lean_stance.expand(n_lean, -1)
+            else:
+                _lean_stance = _lean_robot.data.default_joint_pos
+            print(
+                f"[INFO] scripted_lean: joint stance = {cfg.scripted_lean_pose!r} "
+                f"({'straight legs, _POST_SAVE_STANCE_MAP' if cfg.scripted_lean_pose == 'post_save' else 'crouched legs, HOME_KEYFRAME reset pose'})",
+                file=sys.stderr,
+            )
+
+            def policy(obs: torch.Tensor) -> torch.Tensor:
+                return torch.zeros(action_shape, device=device)
+
+            def _park_ball_state_lean() -> None:
+                if not cfg.scripted_lean_park_ball:
+                    return
+                ball_entity = raw_env_for_lean.scene["ball"]
+                park_pos = (
+                    torch.tensor([[10.0, 10.0, 5.0]], device=device).expand(n_lean, -1)
+                    + raw_env_for_lean.scene.env_origins
+                )
+                park_quat = torch.tensor([[1.0, 0.0, 0.0, 0.0]], device=device).expand(n_lean, -1)
+                ball_entity.write_root_link_pose_to_sim(torch.cat([park_pos, park_quat], dim=-1))
+                ball_entity.write_root_link_velocity_to_sim(torch.zeros(n_lean, 6, device=device))
+
+            def _apply_lean_pose() -> None:
+                robot_entity = raw_env_for_lean.scene["robot"]
+                root_pos = raw_env_for_lean.scene.env_origins.clone()
+                root_pos[:, 2] += cfg.scripted_lean_root_height
+                robot_entity.write_root_link_pose_to_sim(torch.cat([root_pos, _lean_quat], dim=-1))
+                robot_entity.write_root_link_velocity_to_sim(torch.zeros(n_lean, 6, device=device))
+                robot_entity.write_joint_state_to_sim(
+                    _lean_stance, torch.zeros_like(_lean_stance)
+                )
+
+            _orig_lean_reset = env.reset
+            _orig_lean_step = env.step
+
+            def _patched_lean_reset(*args, **kwargs):
+                result = _orig_lean_reset(*args, **kwargs)
+                _park_ball_state_lean()
+                _apply_lean_pose()
+                return result
+
+            def _patched_lean_step(actions: torch.Tensor):
+                result = _orig_lean_step(actions)
+                _park_ball_state_lean()
+                _apply_lean_pose()
+                return result
+
+            env.reset = _patched_lean_reset
+            env.step = _patched_lean_step
+            print(
+                f"[INFO] scripted_lean: holding {cfg.scripted_lean_deg:.1f}deg forward "
+                f"lean at HOME_KEYFRAME joints, root height={cfg.scripted_lean_root_height:.3f}m",
+                file=sys.stderr,
+            )
         else:
             def policy(obs: torch.Tensor) -> torch.Tensor:
                 return 2 * torch.rand(action_shape, device=device) - 1
@@ -498,6 +2564,17 @@ def run_play(task_id: str, cfg: PlayConfig) -> None:
                 analytics.toggle()
         native_viewer = NativeMujocoViewer(env, final_policy, key_callback=_key_cb)
         _patch_viewer_intercept_vis(native_viewer, env)
+        _patch_viewer_new_reward_plots(native_viewer, env)
+        _patch_viewer_postupperdofpos_plot(native_viewer, env)
+        _patch_viewer_wrong_foot_contact_plot(native_viewer, env)
+        _patch_viewer_foot_orientation_plot(native_viewer, env)
+        _patch_viewer_blue_free_landing_plot(native_viewer, env)
+        _patch_viewer_postsave_airtime_plot(native_viewer, env)
+        _patch_viewer_post_recovery_plots(native_viewer, env)
+        _patch_viewer_all_footorientation_plots(native_viewer, env)
+        _patch_viewer_sole_contact_and_stop_plots(native_viewer, env)
+        _patch_viewer_foot_restitution_plot(native_viewer, env)
+        _patch_viewer_contact_yield_vis(native_viewer, env)
         native_viewer.run()
     elif resolved_viewer == "viser":
         ViserPlayViewer(env, final_policy).run()

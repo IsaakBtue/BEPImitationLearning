@@ -46,6 +46,7 @@ SSH key passphrase for this machine: `Isaak`
 6. **Document every fix immediately** — after every bug fix, reward change, or config change, append a dated entry to the correct bug fix log in the same commit. Include: what changed, why it was wrong, what the correct value is, and what evidence (training data, error messages) confirmed the fix was needed.
    - **Single-motion mjlab project** (`my_mjlab_project_booster_t1/`): log to `my_mjlab_project_booster_t1/docs/BugFixes.md`
    - **AMP mjlab project** (`AMPBoosterGoalKeeper/`): log to `AMPBoosterGoalKeeper/Docs/BugFixes.md`
+7. **Offer to turn repeated debugging into a skill** — if a single session goes back and forth roughly 3+ times on the same bug/misunderstanding (user says "still not working" / "still not what I want" repeatedly before landing on the real cause), ask the user whether to capture the diagnostic technique as a project-scoped Claude skill (under `<project>/.claude/skills/<name>/SKILL.md`, unignored in `.gitignore` so it pushes to GitHub — see `interceptV2DualDis/.claude/skills/` for the pattern). Reference the resulting skill from that project's own `CLAUDE.md`.
 
 ## Installation
 

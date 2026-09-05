@@ -1,1 +1,2 @@
-uv run sgk_train Mjlab-BeyondAMP-Goalkeeper-T1-MultiDisc --num-envs 6144 --agent.run-name green_numenvs6144_2026-07-20
+cd /home/isaak/BEPImitationlearning/interceptV2DualDis
+uv run sgk_play Mjlab-BeyondAMP-Goalkeeper-T1-MultiDisc --checkpoint-file logs/rsl_rl/intercept_simple_goalkeeper_multidisc/2026-09-03_20-30-05_6144_watchdogresume_2026-09-03_20-30/model_20750.pt

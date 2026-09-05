@@ -68,11 +68,39 @@ def _compute_ball_visibility(env: "ManagerBasedRlEnv", ball_name: str) -> torch.
         approaching
     )
 
-    # random_vanish: ball disappears after a random number of consecutive flying steps.
+    # random_vanish: ball disappears after a random number of consecutive
+    # flying steps.
+    #
+    # FIX 2026-09-04 (user request/bug fix): `_vanish_step` was only ever
+    # randomized ONCE per env, on the very first call (`if not hasattr`
+    # guard) -- never re-rolled on episode reset, unlike G1
+    # (`self.vanish_step[ball_ids] = randint(...)` inside G1's own reset,
+    # legged_robot.py:725). This froze each env slot at whatever vanish_step
+    # it happened to draw at startup for the ENTIRE run -- roughly 1-in-30
+    # envs permanently hid the ball after a single tick every episode,
+    # forever, while others never hid it at all. Now re-rolled every reset
+    # via `just_reset`, matching G1's per-reset resampling.
+    #
+    # Also skewed toward higher (more-visible) values early in training,
+    # tied to the existing `env._ball_difficulty` curriculum (0->1, already
+    # used elsewhere, e.g. events.py's y_end_range coupling): the random
+    # range's floor starts at 20 (mostly visible, ball can only hide in the
+    # last ~10 flying ticks) at difficulty=0, and linearly drops to 0 (full
+    # G1 randomness) at difficulty=1 -- gives an easier on-ramp without ever
+    # fully excluding low-visibility episodes, and reaches exact G1 parity
+    # once fully trained.
+    ball_difficulty = float(getattr(env, "_ball_difficulty", 1.0))
+    vanish_floor = int(round(20.0 * (1.0 - ball_difficulty)))
+
     if not hasattr(env, "_vanish_step"):
-        env._vanish_step = torch.randint(0, 30, (env.num_envs,), device=env.device)
+        env._vanish_step = torch.randint(vanish_floor, 30, (env.num_envs,), device=env.device)
     if not hasattr(env, "_ball_visible_step"):
         env._ball_visible_step = torch.zeros(env.num_envs, dtype=torch.long, device=env.device)
+
+    just_reset = env.episode_length_buf <= 1
+    if just_reset.any():
+        n_reset = int(just_reset.sum().item())
+        env._vanish_step[just_reset] = torch.randint(vanish_floor, 30, (n_reset,), device=env.device)
 
     env._ball_visible_step = torch.where(
         flying,
@@ -91,6 +119,29 @@ def _compute_ball_visibility(env: "ManagerBasedRlEnv", ball_name: str) -> torch.
 # G1 flying-mask front edge: ball visible only while x_body > 0.05 m
 # (Humanoid-Goalkeeper legged_robot.py:401, end_target_local[:,0] > 0.05).
 _BEHIND_TORSO_X = 0.05
+
+
+def _compute_initial_vanish(env: "ManagerBasedRlEnv") -> torch.Tensor:
+    """G1's privileged-obs gate: the brief post-throw warmup blackout only.
+
+    G1's end_target_local is multiplied by `initial_vanish` alone before it
+    is written into BOTH obs_buf and privileged_obs_buf (legged_robot.py:397-
+    398, 442-443) -- `flying`/`random_vanish` are applied afterward, and only
+    to the actor's obs_buf slice (line 426). So the critic (privileged_obs_buf
+    = current_obs, unmasked past this point) sees the ball through the whole
+    flight except this initial few-step warmup -- unlike the actor, which is
+    also gated by the FOV-ish `flying` check and the random mid-flight
+    dropout. Ball velocity in G1's current_obs isn't gated at all, at any
+    level (only end_target_local gets the `* initial_vanish` multiply) --
+    see ball_vel_b's always_visible=True, which is correct as-is, not a gap.
+    """
+    catchstep = getattr(env, "_catchstep", None)
+    startstep = getattr(env, "_startstep", None)
+    if catchstep is None:
+        return torch.ones(env.num_envs, dtype=torch.bool, device=env.device)
+    if startstep is None:
+        return catchstep < 43
+    return catchstep < startstep
 
 
 def ball_pos_xy_b(
@@ -147,12 +198,19 @@ def ball_pos_b(
     env: "ManagerBasedRlEnv",
     ball_name: str = "ball",
     always_visible: bool = False,
+    warmup_only: bool = False,
 ) -> torch.Tensor:
     """Ball position in robot body frame, optionally gated by visibility. Shape (N, 3).
 
     Set always_visible=True during Phase 1 training so the policy always has the ball
     position as input. The visibility system (warmup + random vanish) is enabled for
     play/evaluation to simulate partial observability.
+
+    warmup_only: use only the initial_vanish warmup gate, not the full
+    flying/random_vanish mask -- matches G1's own privileged-obs gate, which
+    is strictly weaker than the actor's (see _compute_initial_vanish's
+    docstring). Intended for the critic term specifically; ignored if
+    always_visible=True.
     """
     robot: Entity = env.scene["robot"]
     ball: Entity = env.scene[ball_name]
@@ -162,7 +220,7 @@ def ball_pos_b(
     )
     if always_visible:
         return ball_pos_b_val
-    visible = _compute_ball_visibility(env, ball_name)
+    visible = _compute_initial_vanish(env) if warmup_only else _compute_ball_visibility(env, ball_name)
     return ball_pos_b_val * visible.float().unsqueeze(-1)
 
 
@@ -277,7 +335,7 @@ _ARM_JOINT_NAMES: tuple[str, ...] = (
 
 def joint_pos_abs_arms_masked_by_region(
     env: "ManagerBasedRlEnv",
-    far_region_ids: tuple[int, ...] = (1, 3),
+    far_region_ids: tuple[int, ...] = (),
 ) -> torch.Tensor:
     """Like joint_pos_abs (full 21-DOF, softstop-gated), but additionally
     freezes arm joints to their default pose for envs whose env._region_id
@@ -295,6 +353,27 @@ def joint_pos_abs_arms_masked_by_region(
     incentive to move sensibly). This targets only the far/double-step
     regions the original "weird arm swinging" complaints were about,
     leaving near regions unaffected.
+
+    FIX 2026-08-04 (user request): `far_region_ids` default changed
+    `(1, 3) -> ()` -- far regions now keep real, live arm motion in their
+    AMP input too, matching near. Different from the reverted 2026-07-15
+    attempt (which masked EVERYONE, found worse than the status quo at the
+    time) -- this instead UNMASKS everyone, a combination not previously
+    tested. Motivated by live-checkpoint replay this session finding near
+    region's post-save arm recovery is measurably better than far's; user's
+    hypothesis is that far's live arm supervision (removed 2026-07-16 for a
+    different, pre-save "weird arm swinging" complaint) may help post-save
+    recovery quality the same way it apparently does for near. Note: this
+    only affects the PRE-save/approach phase -- the separate softstop-gated
+    freeze above (`joint_pos[softstop_fired] = default_joint_pos[...]`)
+    still blanks ALL joints, both regions, the instant a save is confirmed,
+    unchanged by this fix (confirmed via live checkpoint replay this same
+    session: AMP's arm columns read frozen, not live, in both regions from
+    ~k=15 post-save onward regardless of this parameter). Expert/reference-
+    clip side updated to match in the same commit
+    (`goalkeeper_multidisc_amp_cfg.py`'s `freeze_joint_names`) -- both sides
+    must agree per the original 2026-07-16 fix's own stated invariant. Not
+    yet validated against a live training run. See docs/BugFixes.md.
     """
     robot: Entity = env.scene["robot"]
     joint_pos = robot.data.joint_pos.clone()
@@ -322,7 +401,7 @@ def joint_pos_abs_arms_masked_by_region(
 
 def joint_vel_abs_arms_masked_by_region(
     env: "ManagerBasedRlEnv",
-    far_region_ids: tuple[int, ...] = (1, 3),
+    far_region_ids: tuple[int, ...] = (),
 ) -> torch.Tensor:
     """Like joint_vel_abs (full 21-DOF, softstop-gated), but additionally
     zeroes arm joint velocity columns for envs whose env._region_id is in
@@ -338,6 +417,12 @@ def joint_vel_abs_arms_masked_by_region(
     supported this generically (MotionDatasetCfg.freeze_joint_names zeroes
     whichever amp_obs_terms are configured, including joint_vel) with no
     code changes needed there -- only this policy-side term was missing.
+
+    FIX 2026-08-04 (user request): `far_region_ids` default changed
+    `(1, 3) -> ()`, same as `joint_pos_abs_arms_masked_by_region` -- see
+    that function's docstring for the full rationale. Both functions must
+    stay in sync (same `far_region_ids` default) since they mask the same
+    joint set for the same regions.
     """
     robot: Entity = env.scene["robot"]
     joint_vel = robot.data.joint_vel.clone()

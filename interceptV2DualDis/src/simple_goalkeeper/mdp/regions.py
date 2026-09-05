@@ -25,7 +25,11 @@ REGION_NAMES: tuple[str, ...] = ("left_near", "left_far", "right_near", "right_f
 # Per-region ball-spawn y_start_range / y_end_range. Side sign matches the
 # existing convention: positive Y crossing = left, negative Y crossing =
 # right (see rewards.py:_get_correct_foot_idx). |cross_y| < 0.5 = near,
-# >= 0.5 = far, matching the design spec's threshold.
+# >= 0.5 = far.
+# FIX 2026-08-01: near/far boundary narrowed 0.65 -> 0.5 (user request,
+# reverting the 2026-07-23 widening) -- keep in sync with rewards.py's
+# wide_threshold and far_travel_curriculum's `lo` default (events.py),
+# both of which encode this same boundary.
 _REGION_Y_START_RANGE: dict[int, tuple[float, float]] = {
     0: (0.0, 0.3),     # left_near
     1: (0.0, 0.3),     # left_far
@@ -33,14 +37,27 @@ _REGION_Y_START_RANGE: dict[int, tuple[float, float]] = {
     3: (-0.3, 0.0),    # right_far
 }
 _REGION_Y_END_RANGE: dict[int, tuple[float, float]] = {
-    0: (0.15, 0.5),    # left_near: crosses on the left, under 0.5 m
-    1: (0.5, 1.3),     # left_far: crosses on the left, at/above 0.5 m
-    2: (-0.5, -0.15),  # right_near
-    3: (-1.3, -0.5),   # right_far
+    # FIX 2026-08-15 (user request): near-region inner floor 0.15 -> 1e-4
+    # (effectively 0, "i want it a little rare to be in the center because
+    # there is nothing much to learn from those" -- floor lowered, rarity
+    # handled by events.py's skewed sampling, not by this bound). NOT a
+    # literal 0.0 -- events.py's reset_ball_rolling uses
+    # `y_end_range[0] * y_end_range[1] > 0` to detect a one-sided
+    # (region-conditioned) range vs. the plain two-sided dead-zone
+    # mechanism; an exact 0.0 endpoint makes that product 0, failing the
+    # `>0` check and silently routing left_near/right_near into the WRONG
+    # branch (the two-sided mechanism's random 50/50 side flip, which would
+    # break region-conditioning). 1e-4 (0.1mm) is physically negligible but
+    # keeps the sign-product check working with a large margin.
+    0: (1e-4, 0.5),    # left_near: crosses on the left, under 0.5 m
+    1: (0.5, 1.0),     # left_far: crosses on the left, at/above 0.5 m
+    2: (-0.5, -1e-4),  # right_near
+    3: (-1.0, -0.5),   # right_far
 }
-# RE-WIDENED 2026-07-15: back to 1.3 (matching the single-disc track, see
-# the 2026-07-15 BugFixes.md entry) now that the vel_sigma-alone test is
-# done and the overshoot/arms/contact-sensor fixes are in place.
+# FIX 2026-08-01: far outer bound narrowed 1.3 -> 1.1 (user request), kept
+# in sync with far_travel_curriculum's `hi` default (events.py) and
+# goalkeeper_env_cfg.py's single-disc reset_ball/play y_end_range.
+# FIX 2026-08-06: far outer bound narrowed again, 1.1 -> 1.0 (user request).
 
 
 def assign_static_regions(env: "ManagerBasedRlEnv", env_ids: torch.Tensor | None) -> None:

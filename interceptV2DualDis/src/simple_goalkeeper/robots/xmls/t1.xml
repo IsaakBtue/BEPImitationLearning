@@ -158,6 +158,24 @@
                 <geom class="visual" mesh="Shank_Left"/>
                 <geom name="left_shin_collision" class="collision" size="0.05 0.075" pos="0 0 -0.12"/>
                 <geom name="left_knee_collision" class="collision" size="0.06" type="sphere"/>
+                <!-- shin marker: inert (no collision, same contype/conaffinity=0
+                     pattern as left/right_inner_vis on the feet) -- a single
+                     clean, queryable reference for the shin, since Shank_Left
+                     has no equivalent (its origin is at the KNEE joint, z=0
+                     local; left_shin_collision is a whole capsule, not a
+                     point). Cylinder, not a sphere. FIX 2026-08-07: radius
+                     0.05->0.035, half-length 0.13->0.10->0.08 (user: "make
+                     the geom a bit shorter", then "smaller and a little
+                     more tight (circumfrance)"), centred at z=-0.14, between
+                     the knee (z=0) and the ankle (Ankle_Cross_Left, z=-0.28
+                     local). Read directly by rewards.py:penalize_wrong_
+                     foot_ball_contact via robot.find_sites(["left_shin",
+                     "right_shin"]) + robot.data.site_pos_w -- the actual
+                     compiled site position, not a hardcoded duplicate
+                     offset. -->
+                <geom name="left_shin_vis" type="cylinder" size="0.035 0.08" pos="0 0 -0.14"
+                  rgba="0.1 0.85 0.3 0.85" contype="0" conaffinity="0" group="2"/>
+                <site name="left_shin" pos="0 0 -0.14"/>
                 <body name="Ankle_Cross_Left" pos="0 0 -0.28">
                   <inertial pos="-0.003722 0 -0.007981" quat="0.443136 0.551027 0.551027 0.443136" mass="0.073"
                     diaginertia="2.9e-05 2.56589e-05 1.13411e-05"/>
@@ -206,6 +224,11 @@
                 <geom class="visual" mesh="Shank_Right"/>
                 <geom name="right_knee_collision" class="collision" size="0.06" type="sphere"/>
                 <geom name="right_shin_collision" class="collision" size="0.05 0.075" pos="0 0 -0.12"/>
+                <!-- shin marker: see left_shin_vis's comment (Shank_Left) --
+                     same reasoning, mirrored for the right leg. -->
+                <geom name="right_shin_vis" type="cylinder" size="0.035 0.08" pos="0 0 -0.14"
+                  rgba="0.1 0.85 0.3 0.85" contype="0" conaffinity="0" group="2"/>
+                <site name="right_shin" pos="0 0 -0.14"/>
                 <body name="Ankle_Cross_Right" pos="0 0 -0.28">
                   <inertial pos="-0.003722 0 -0.007981" quat="0.443136 0.551027 0.551027 0.443136" mass="0.073"
                     diaginertia="2.9e-05 2.56589e-05 1.13411e-05"/>

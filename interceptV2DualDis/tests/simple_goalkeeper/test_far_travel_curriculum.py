@@ -60,13 +60,13 @@ def test_far_travel_curriculum_starts_at_g1_step_proportions():
     env._ball_difficulty = 1.0  # ball_difficulty already saturated, independent
     cfg = _FakeCfg({})
     far_travel_curriculum(cfg, env)
-    lo, hi = 0.5, 1.3
+    lo, hi = 0.5, 1.0  # FIX 2026-08-06: class default hi 1.1 -> 1.0
     span = hi - lo
     assert abs(env._far_inner - (lo + _G1_STEP_INNER_FRAC * span)) < 1e-9
     assert abs(env._far_outer - (lo + _G1_STEP_OUTER_FRAC * span)) < 1e-9
     # inner starts closer to lo, outer starts closer to hi -- real separation
     # from both the eventual floor/ceiling AND from the near region's own max
-    # (which sits at lo, 0.5) from iteration 0, not a degenerate point.
+    # (which sits at lo, 0.65) from iteration 0, not a degenerate point.
     assert lo < env._far_inner < env._far_outer < hi
 
 
@@ -126,8 +126,8 @@ def test_far_travel_curriculum_clips_at_lo_and_hi():
     for i in range(1, 400):
         env.common_step_counter = i
         term(env, env_ids=torch.arange(8))
-    assert env._far_inner == 0.5
-    assert env._far_outer == 1.3
+    assert env._far_inner == 0.5  # FIX 2026-08-01: class default reverted from 0.65/1.3
+    assert env._far_outer == 1.0  # FIX 2026-08-06: class default hi 1.1 -> 1.0
 
 
 def test_reset_ball_rolling_far_travel_flag_uses_far_inner_outer_not_ball_difficulty():

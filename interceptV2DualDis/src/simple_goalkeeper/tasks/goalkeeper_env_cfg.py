@@ -45,7 +45,33 @@ _RECOVERY_ARM_CFG = SceneEntityCfg(
         "Right_Shoulder_Pitch", "Right_Shoulder_Roll", "Right_Elbow_Pitch", "Right_Elbow_Yaw",
     ),
 )
+# NEW 2026-07-30 (user request): AL2/AR2 (not AL1/AR1) chosen as "the
+# shoulder" because they carry left/right_shoulder_collision, the same body
+# already used as the shoulder reference elsewhere in this task. NOTE:
+# resolved SceneEntityCfg.body_ids order does NOT match this declared
+# body_names order (verified live -- see penalize_arm_above_shoulder's
+# docstring, rewards.py) -- the reward function resolves each name
+# explicitly via robot.find_bodies(...)'s returned names list rather than
+# assuming a fixed position, so this declaration order is documentation
+# only, not load-bearing.
+_ARM_HEIGHT_CFG = SceneEntityCfg(
+    "robot",
+    body_names=("AL2", "AR2", "left_hand_link", "right_hand_link"),
+)
 _RECOVERY_WAIST_CFG = SceneEntityCfg("robot", joint_names=("Waist",))
+# NEW 2026-08-15 (user request): scopes joint_vel_l2 to just the 2
+# Ankle_Pitch joints -- see docs/BugFixes.md for the probe evidence
+# (Ankle_Pitch's own joint velocity, not Hip_Pitch/Knee_Pitch, leads the
+# leading foot's pre-save world-pitch spike, -1.76 rad/s at the exact
+# spike peak vs. Knee_Pitch +1.46/Hip_Pitch +0.63, and the largest relative
+# jump from its own baseline at 2.56x). Ankle_Roll deliberately excluded --
+# the same probe found roll's world-frame spike is actually more
+# Hip_Roll-driven on average and only ~1/3 of pitch's magnitude, so an
+# ankle-specific roll penalty wouldn't target the right joint.
+_ANKLE_PITCH_CFG = SceneEntityCfg("robot", joint_names=("Left_Ankle_Pitch", "Right_Ankle_Pitch"))
+# NEW 2026-08-15 (user request): sibling of _ANKLE_PITCH_CFG above, for
+# ankle_roll_vel/ankle_roll_pos -- see those RewardTermCfg entries below.
+_ANKLE_ROLL_CFG = SceneEntityCfg("robot", joint_names=("Left_Ankle_Roll", "Right_Ankle_Roll"))
 # FIX 2026-07-22: see postlegdofpos's docstring (rewards.py) -- G1 has no
 # leg-recovery reward to port because its legs aren't the catching limb;
 # SGK's legs are, so this fills the gap that left them with no post-save
@@ -129,6 +155,57 @@ def goalkeeper_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
             reduce="netforce",
             history_length=0,
         ),
+        # DEBUG 2026-07-28: "ball_contact" above only matches foot geoms, so a
+        # ball touch against the head/chin (head_collision, t1_headless.xml --
+        # a static sphere on H2, fixed since head joints were removed) is
+        # invisible to both feet_contact and ball_contact and therefore to
+        # penalize_wrong_foot_ball_contact and its viewer plot too. User
+        # observed the wrong-foot plot never reacting and asked whether the
+        # ball might actually be hitting the chin instead -- this sensor lets
+        # play.py's viewer confirm/deny that independently. Was purely
+        # additive/display-only at introduction; FIX 2026-07-30 wired a
+        # chin/head penalty into penalize_wrong_foot_ball_contact
+        # (rewards.py), then reverted same day (chin judged unavoidable).
+        # 2026-08-07: re-added, reverted (process violation, no user
+        # approval first), then re-added again after explicit confirmation --
+        # penalize_wrong_foot_ball_contact now reads this sensor's geometry
+        # (via a distance-based proximity check, not the raw "found" field
+        # directly) again. See docs/BugFixes.md for the full history.
+        ContactSensorCfg(
+            name="head_ball_contact",
+            primary=ContactMatch(mode="geom", pattern="head_collision", entity="robot"),
+            secondary=ContactMatch(mode="geom", pattern="ball_geom", entity=BALL_NAME),
+            fields=("found", "force"),
+            reduce="netforce",
+            history_length=0,
+        ),
+        # DEBUG 2026-07-28: same gap class as head_ball_contact above, found
+        # via the user directly observing MuJoCo's native contact-point
+        # overlay (orange dot) between the trailing leg and the ball while
+        # penalize_wrong_foot_ball_contact stayed 0. Confirmed via a scripted
+        # replay of the real trained checkpoint: the shin (left_shin_collision/
+        # right_shin_collision) and knee geoms are NOT foot[1-4]_collision, so
+        # they were invisible to ball_contact/feet_contact -- the policy makes
+        # genuine foot-ball saves via the shin routinely, and confirmed at
+        # least one case of the WRONG side's shin/knee touching the ball
+        # while penalize_wrong_foot_ball_contact read 0. Primary resolves in
+        # geom-index order [left_shin, left_knee, right_knee, right_shin] --
+        # verified directly (env.scene["leg_ball_contact"].primary_names) --
+        # so found[:, :2]=left, found[:, 2:]=right, matching the existing
+        # feet_contact/ball_contact left/right split convention. See
+        # penalize_wrong_foot_ball_contact (rewards.py) and docs/BugFixes.md.
+        ContactSensorCfg(
+            name="leg_ball_contact",
+            primary=ContactMatch(
+                mode="geom",
+                pattern=r"^(left|right)_(shin|knee)_collision$",
+                entity="robot",
+            ),
+            secondary=ContactMatch(mode="geom", pattern="ball_geom", entity=BALL_NAME),
+            fields=("found", "force"),
+            reduce="netforce",
+            history_length=0,
+        ),
         ContactSensorCfg(
             name="self_collision",
             primary=ContactMatch(mode="subtree", pattern="Trunk", entity="robot"),
@@ -154,9 +231,45 @@ def goalkeeper_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
     cfg.commands.clear()
 
     # ------------------------------------------------------------------
-    # Curriculum: ramp ball difficulty 0→1 over training
-    # Stages match upstream: stage1 at 600 iters, stage2 at 1200 iters
-    # (num_steps_per_env=24 by default → same thresholds as Imitationlearningbooster).
+    # Curriculum
+    #
+    # FIX 2026-08-30 (user request, "organise this... give same curriculum
+    # to a group of rewards... make logical groups"): reorganized into 3
+    # tiers by importance -- previously one long list in whatever order
+    # each reward happened to be introduced, across ~2 months of dated
+    # fixes. Tiers only affect WHERE an entry is grouped/registered in this
+    # file, not which curriculum mechanism it uses -- reward_curriculum_ep_len
+    # (smooth ramp, weight=base*(1+0.5*cu)) vs correct_foot_save_curriculum
+    # (step-double at cu>=activate_at_cu) stays per-term, unchanged.
+    #
+    # A literal single CurriculumTermCfg cannot drive several rewards'
+    # weights at once (each reward needs its own base_weight), so "grouping"
+    # here means physical placement + tier-header comments, not a shared
+    # object -- see docs/BugFixes.md for the full reasoning (a
+    # dict-driven grouped_reward_curriculum class was considered and
+    # deferred as a separate, optional follow-up).
+    #
+    # Two curricula exist OUTSIDE the tiers below -- not reward weights:
+    #   - ball_difficulty (right below): spawn difficulty, not a reward.
+    #   - far_travel_curriculum (mdp/events.py): far-region spawn Y-range --
+    #     a genuine outlier, not registered via cfg.curriculum[...] at all,
+    #     instantiated directly inside reset_ball_rolling/region-spawn
+    #     events. Flagged here so the next "what curricula exist" survey
+    #     doesn't miss it (it did, until this same reorg).
+    #
+    # FIX 2026-08-30 (user report, confirmed): correct_foot_save_curriculum's
+    # activate_at_cu=3 was UNREACHABLE in practice. cu=int(smoothed_ep_len/50);
+    # episode_length_s=3.0 @ dt=0.02s = 150 steps max, so cu=3 requires the
+    # training batch's SMOOTHED MEAN episode length to hit that absolute
+    # ceiling -- effectively zero early terminations
+    # (bad_orientation/base_height/sharpforce/ball_exit) averaged across the
+    # whole batch. Any nonzero rate on those channels (there is always one)
+    # caps the mean below 150, so cu never reaches 3 -- all 7 step-doubling
+    # entries below ran at flat base_weight the ENTIRE run, never their
+    # documented doubled value. Lowered activate_at_cu 3 -> 2 for all 7
+    # (surgical: only this group's own threshold, doesn't touch the shared
+    # env._curriculumupdate computation the reward_curriculum_ep_len entries
+    # also depend on).
     # ------------------------------------------------------------------
     _num_steps = 24
     cfg.curriculum.clear()
@@ -174,41 +287,31 @@ def goalkeeper_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
                 "step_size":       0.01,  # difficulty units per curriculumupdate per check
             },
         )
+
+        # ================================================================
+        # TIER 1 -- core save mechanics (essential to the final product):
+        # the actual save event, its quality bonuses, the core approach
+        # signal, and the primary (X) contact-yield direction.
+        # ================================================================
         # Episode-length-driven weight curriculum — mirrors G1 compute_reward() lines 359-364:
         #   weight = base * (1 + 0.5 * curriculumupdate)  where cu = int(mean_ep_len / 50)
-        # All three terms share env._curriculumupdate (set by whichever runs first each window).
+        # All entries below share env._curriculumupdate (set by whichever runs first each window).
         # G1 max (cu=3, ep_len=150): softstop 105→262.5, footreach 10→25.
-        #
-        # FIX 2026-07-20 (reward audit item 8, peak-magnitude cap): the six
-        # terms that can all fire around a single save event -- stopball,
-        # softstop, single_foot_save, cleanstop, inner_face_orientation_save,
-        # foot_inner_face_continuous -- summed to a combined max-curriculum
-        # peak of 18.75+131.25+100+50+50+10 = 360 even after the same-day
-        # halving pass above, still 1.44x G1's own ceiling for the equivalent
-        # single "did you stop it" event (_reward_stopball, curriculum-scaled
-        # 100->250, no per-foot/orientation/cleanliness sub-bonuses). Scaled
-        # this whole group down by a further 25/36 (0.69444) so the combined
-        # peak lands at exactly 250, preserving each term's relative share of
-        # the group (SGK's feet-specific quality bonuses stay individually
-        # reasoned, just resized to fit under G1's ceiling as a group):
-        #   stopball                    7.5   -> 5.21   (max 18.75 -> 13.02)
-        #   softstop                   52.5   -> 36.46  (max 131.25 -> 91.15)
-        #   single_foot_save           50.0   -> 34.72  (max 100 -> 69.44)
-        #   cleanstop                  25.0   -> 17.36  (max 50 -> 34.72)
-        #   inner_face_orientation_save 25.0  -> 17.36  (max 50 -> 34.72)
-        #   foot_inner_face_continuous  5.0   -> 3.47   (max 10 -> 6.94)
-        # New combined peak: 13.02+91.15+69.44+34.72+34.72+6.94 = 250.0 (exact,
-        # 25/36 chosen precisely so the sum lands on G1's ceiling). See
-        # docs/BugFixes.md for the full derivation. Static `weight=` values in
-        # cfg.rewards below (stopball/softstop) are also updated to match
-        # these new base weights -- they were previously stale pre-halving
-        # values only used in play mode (no curriculum there); this also
-        # fixes that pre-existing static/curriculum mismatch as a side effect.
         cfg.curriculum["softstop_curriculum"] = CurriculumTermCfg(
             func=gk_mdp.reward_curriculum_ep_len,
             params={
                 "reward_name": "softstop",
-                "base_weight": 36.46,   # 52.5 * 25/36 -- see item-8 cap comment above
+                # FIX 2026-09-04 (user request): 36.46 -> 18.23 (halved, peak
+                # 91.15 -> 45.58). softstop's own one-shot bonus was
+                # effectively double-counting the same event `success`'s
+                # tiering already rewards (softstop_flag doubles success's
+                # ongoing per-step multiplier for the rest of the episode --
+                # raw per-step accumulation from that alone can exceed
+                # softstop's own one-shot dt-scaled contribution). Safe,
+                # low-blast-radius change: _softstop_flag itself (read by
+                # _ball_is_behind/success/single_foot_save) is unaffected by
+                # this reward's weight, only by whether softstop() fires.
+                "base_weight": 18.23,
                 "update_interval": 500,
                 "ep_len_divisor":  50,
             },
@@ -232,40 +335,323 @@ def goalkeeper_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
             func=gk_mdp.reward_curriculum_ep_len,
             params={
                 "reward_name": "stopball",
-                "base_weight": 5.21,    # 7.5 * 25/36 -- see item-8 cap comment above
+                "base_weight": 5.21,    # 7.5 * 25/36 -- see item-8 cap comment below
                 "update_interval": 500,
                 "ep_len_divisor":  50,
             },
         )
-        # Correct-foot-save quality bonuses: weights double at cu >= 3 (ep_len ≈ 144 steps).
-        # Only makes sense once the robot already saves reliably (cu=3 = footreach fully ramped).
-        # One entry per reward, same pattern as reward_curriculum_ep_len.
-        # Base weights scaled by 25/36 (item-8 peak-magnitude cap, see comment above).
-        for _name, _base in (
-            ("single_foot_save",             34.72),
-            ("cleanstop",                    17.36),
-            ("inner_face_orientation_save",  17.36),
-            ("foot_inner_face_continuous",    3.47),
-        ):
-            cfg.curriculum[f"{_name}_curriculum"] = CurriculumTermCfg(
-                func=gk_mdp.correct_foot_save_curriculum,
-                params={"reward_name": _name, "base_weight": _base, "activate_at_cu": 3},
-            )
         # G1's own `success` reward (legged_robot.py:1402-1403): continuing,
         # doubled-after-save, close-to-target signal -- NOT part of the item-8
-        # group above (G1 itself keeps it outside _reward_stopball's own
+        # group below (G1 itself keeps it outside _reward_stopball's own
         # weight ceiling). base=5.0 -> max 12.5 at cu=3, matching G1's
         # success_init=5.0 (g1_29_config.py:300) exactly under the same
         # weight=base*(1+0.5*cu) formula. See rewards.py:success docstring.
+        # FIX 2026-08-25 (user request, delegated to Claude's judgment):
+        # base_weight 5.0 -> 3.5 (30% trim, max 12.5 -> 8.75 at cu=3) --
+        # deliberate divergence from the G1-matched value above. A live
+        # 16224-iteration run (6144_footangle55deg_2026-08-23) showed
+        # success logging ~10-11 per episode, the single largest reward in
+        # the table -- roughly 300x the entire possible range of the new
+        # contact_yield_velocity term (max ~0.033 at weight=5.0, one-shot,
+        # normalized to [-1,1]), which never learned to yield and drifted
+        # slightly negative instead. This trim is a rebalancing move to give
+        # contact_yield_velocity's now-larger weight genuine room to matter,
+        # not a claim that G1's value was wrong for G1's own task. Not yet
+        # validated against a live training run.
         cfg.curriculum["success_curriculum"] = CurriculumTermCfg(
             func=gk_mdp.reward_curriculum_ep_len,
             params={
                 "reward_name": "success",
+                "base_weight": 3.5,
+                "update_interval": 500,
+                "ep_len_divisor":  50,
+            },
+        )
+        # Correct-foot-save quality bonuses (one-shot, at the genuine
+        # contact instant): step-double at cu >= 2 (was 3 -- see the
+        # activate_at_cu fix note at the top of this section). Only makes
+        # sense once the robot already saves reliably.
+        #
+        # FIX 2026-07-20 (reward audit item 8, peak-magnitude cap): the six
+        # terms that can all fire around a single save event -- stopball,
+        # softstop, single_foot_save, cleanstop, inner_face_orientation_save,
+        # foot_inner_face_continuous (the last now lives in Tier 3 below,
+        # base weight unchanged, still part of this same derivation) --
+        # summed to a combined max-curriculum peak of
+        # 18.75+131.25+100+50+50+10 = 360, 1.44x G1's own ceiling for the
+        # equivalent single "did you stop it" event (_reward_stopball,
+        # curriculum-scaled 100->250, no per-foot/orientation/cleanliness
+        # sub-bonuses). Scaled this whole group down by 25/36 (0.69444) so
+        # the combined peak lands at exactly 250, preserving each term's
+        # relative share of the group:
+        #   stopball                    7.5   -> 5.21   (max 18.75 -> 13.02)
+        #   softstop                   52.5   -> 36.46  (max 131.25 -> 91.15)
+        #   single_foot_save           50.0   -> 34.72  (max 100 -> 69.44)
+        #   cleanstop                  25.0   -> 17.36  (max 50 -> 34.72)
+        #   inner_face_orientation_save 25.0  -> 17.36  (max 50 -> 34.72)
+        #   foot_inner_face_continuous  5.0   -> 3.47   (max 10 -> 6.94)
+        # New combined peak: 13.02+91.15+69.44+34.72+34.72+6.94 = 250.0
+        # (exact, 25/36 chosen precisely so the sum lands on G1's ceiling).
+        # See docs/BugFixes.md for the full derivation.
+        #
+        # FIX 2026-08-30 (user request, "add [contact_yield_velocity] also
+        # with trailing foot clearance because those are important"): added
+        # contact_yield_velocity_x here -- same event class as the item-8
+        # group above (one-shot bonus at the genuine contact instant), same
+        # "only makes sense once the robot already saves reliably" reasoning.
+        # Base weight matches its current static weight (2026-08-30
+        # rebalance: X=45.0 dominant over Y) -- doubles to 90.0 at cu=2.
+        # contact_yield_velocity_y and trailing_foot_lift deliberately NOT
+        # here -- see Tier 2/3 below.
+        for _name, _base in (
+            ("single_foot_save",             34.72),
+            ("cleanstop",                    17.36),
+            # RE-ADDED 2026-09-04 (user request): inner_face_orientation_save
+            # re-enabled, retargeted to 0 deg off forward (was 55 deg,
+            # sideways block posture) -- see rewards.py's
+            # _FOOT_TARGET_ANGLE_DEG docstring. Same base weight as before
+            # removal.
+            ("inner_face_orientation_save",  17.36),
+            ("contact_yield_velocity_x",     45.0),
+        ):
+            cfg.curriculum[f"{_name}_curriculum"] = CurriculumTermCfg(
+                func=gk_mdp.correct_foot_save_curriculum,
+                params={"reward_name": _name, "base_weight": _base, "activate_at_cu": 2},
+            )
+
+        # ================================================================
+        # TIER 2 -- everything not in Tier 1: the wide-crossing blue/
+        # orange/red waypoint mechanism and near-region analog,
+        # trailing_foot_lift/foot_clearance (user-confirmed just as
+        # important as the rest of this tier), and foot_inner_face_
+        # continuous/contact_yield_velocity_y (originally a separate Tier
+        # 3 "secondary" group -- merged in per user request, "no reason to
+        # seperate", 2026-08-30: grouping only, no training effect).
+        # ================================================================
+        # FIX 2026-07-26 (near-region oscillation): near-region analog of
+        # blue_stick_landing_curriculum below -- same base_weight (8.0),
+        # ported for the same reason (dense "close AND slow" anti-
+        # oscillation signal near-region footreach has no equivalent of).
+        # Narrow-region-only by construction (rewards.py:near_stick_reach's
+        # own env._blue_wide gate) -- this curriculum entry only ever scales
+        # a reward value that is already zero for wide/far envs, so it
+        # cannot influence far-region training despite living in this same
+        # shared config file.
+        # FIX 2026-08-25 (user request, "faster blue/green approach" --
+        # balancing half of the "raise speed rewards" set): base_weight
+        # 8.0 -> 4.0 (peak 16.0 -> 8.0). near_stick_reach directly rewards
+        # "close AND slow" -- the opposite force to the speed incentives
+        # raised alongside this change (footreach's widened vel_sigma
+        # window, blue_trunk_drive, trailing_foot_reach). Halved rather
+        # than removed since it still guards the near-region oscillation
+        # exploit it was added for (2026-07-26). See docs/BugFixes.md.
+        cfg.curriculum["near_stick_reach_curriculum"] = CurriculumTermCfg(
+            func=gk_mdp.reward_curriculum_ep_len,
+            params={
+                "reward_name": "near_stick_reach",
+                "base_weight": 4.0,
+                "update_interval": 500,
+                "ep_len_divisor":  50,
+            },
+        )
+        # v2 reimplementation (2026-07-23) of the blue-ball-waypoint branch's
+        # curriculum for its own 3 reward terms -- same reward_curriculum_ep_len
+        # mechanism already used above, base weights taken from the branch's own
+        # tuning (unretuned for this reimplementation). Without these, the "must
+        # land at blue first" incentive would stay fixed while footreach/stopball/
+        # softstop all grow via curriculum -- an asymmetry the branch's own
+        # 2026-07-09 fix found caused genuine landing rate to collapse as the
+        # cheap, immediate overshoot penalty and growing downstream save payoff
+        # both outpaced it.
+        cfg.curriculum["blue_ball_landed_curriculum"] = CurriculumTermCfg(
+            func=gk_mdp.reward_curriculum_ep_len,
+            params={
+                "reward_name": "blue_ball_landed",
+                "base_weight": 10.0,
+                "update_interval": 500,
+                "ep_len_divisor":  50,
+            },
+        )
+        cfg.curriculum["blue_overshoot_penalty_curriculum"] = CurriculumTermCfg(
+            func=gk_mdp.reward_curriculum_ep_len,
+            params={
+                "reward_name": "blue_overshoot_penalty",
+                "base_weight": -60.0,  # FIX 2026-07-23: was -30.0, too lenient
+                "update_interval": 500,
+                "ep_len_divisor":  50,
+            },
+        )
+        # FIX 2026-08-25 (user request, "faster blue/green approach" --
+        # balancing half of the "raise speed rewards" set): base_weight
+        # 8.0 -> 4.0 (peak 20.0 -> 10.0), same "close AND slow" vs. speed
+        # tension as near_stick_reach above. blue_overshoot_penalty
+        # (-60.0->-150.0 curriculum) is untouched and stays the backstop
+        # against carrying speed past blue unlanded. See docs/BugFixes.md.
+        cfg.curriculum["blue_stick_landing_curriculum"] = CurriculumTermCfg(
+            func=gk_mdp.reward_curriculum_ep_len,
+            params={
+                "reward_name": "blue_stick_landing",
+                "base_weight": 4.0,
+                "update_interval": 500,
+                "ep_len_divisor":  50,
+            },
+        )
+        # NEW 2026-07-24: same curriculum shape as the other blue_* terms --
+        # without this, the trunk-drive incentive would stay fixed while
+        # footreach/stopball/softstop/blue_ball_landed all grow via
+        # curriculum (see the blue_ball_landed_curriculum comment above for
+        # why an asymmetric curriculum among these terms caused problems
+        # before). base_weight=5.0 is an initial, unvalidated guess --
+        # matches this term's static play-mode weight (cu=0 baseline).
+        # FIX 2026-08-12 (user request, far-region post-landing speed
+        # investigation): base_weight 5.0 -> 10.0 (peak 12.5 -> 25.0, now
+        # matching footreach's own peak weight exactly). Root cause: live
+        # P-panel diagnostics showed the assigned foot's world-Y position
+        # freezing after a genuine blue landing on wide crossings --
+        # footreach's own velocity-amplified reach_rew*vel_sigma branch is
+        # gated on `ball_x_local <= 1.5` (rewards.py's `phase1_mask`),
+        # UNCONDITIONAL on env._blue_landed_genuine, so between "landed at
+        # blue" and "ball within 1.5m" blue_trunk_drive was the ONLY active
+        # speed incentive (confirmed via an independent subagent review,
+        # cross-checked against G1 upstream: no G1 precedent for either this
+        # term or a landing-conditioned phase1_mask relaxation). Doubling the
+        # weight was chosen over relaxing phase1_mask itself (the other
+        # candidate fix) because loosening phase1_mask would extend
+        # footreach's already-unguarded (no "close AND slow" counter-term)
+        # vel_sigma amplification into a much longer window -- this project
+        # has twice already had to fix a live oscillation-farming exploit of
+        # exactly that unguarded mechanism (near_stick_reach/blue_stick_landing,
+        # see their docstrings) -- so the weight bump is the lower-risk lever
+        # to test first. Not yet validated against a live training run.
+        # FIX 2026-08-25 (user request, "faster blue/green approach"):
+        # base_weight 10.0 -> 20.0 (peak 25.0 -> 50.0), doubling this
+        # term's whole-body trunk-velocity-toward-target incentive. Chosen
+        # (alongside trailing_foot_reach and footreach's widened
+        # phase2_threshold below) because it rewards speed independent of
+        # HOW the feet get there -- foot_clearance/trailing_foot_lift/
+        # feet_slippage still separately enforce genuine stepping instead
+        # of the sliding gait a much earlier checkpoint (model_2000,
+        # 6144_yieldweightrescale_2026-08-25 run) exhibited. See
+        # docs/BugFixes.md.
+        cfg.curriculum["blue_trunk_drive_curriculum"] = CurriculumTermCfg(
+            func=gk_mdp.reward_curriculum_ep_len,
+            params={
+                "reward_name": "blue_trunk_drive",
+                "base_weight": 20.0,
+                "update_interval": 500,
+                "ep_len_divisor":  50,
+            },
+        )
+        # NEW 2026-08-08: same curriculum shape as the blue_* terms above,
+        # base_weight halved (conservative first pass) -- see
+        # docs/superpowers/specs/2026-08-08-orange-ball-trailing-foot-design.md.
+        cfg.curriculum["orange_ball_landed_curriculum"] = CurriculumTermCfg(
+            func=gk_mdp.reward_curriculum_ep_len,
+            params={
+                "reward_name": "orange_ball_landed",
                 "base_weight": 5.0,
                 "update_interval": 500,
                 "ep_len_divisor":  50,
             },
         )
+        cfg.curriculum["orange_overshoot_penalty_curriculum"] = CurriculumTermCfg(
+            func=gk_mdp.reward_curriculum_ep_len,
+            params={
+                "reward_name": "orange_overshoot_penalty",
+                "base_weight": -30.0,
+                "update_interval": 500,
+                "ep_len_divisor":  50,
+            },
+        )
+        # FIX 2026-08-25 (user request, "faster blue/green approach" --
+        # balancing half of the "raise speed rewards" set): base_weight
+        # 4.0 -> 2.0 (peak 10.0 -> 5.0), same reasoning as
+        # blue_stick_landing above. orange_overshoot_penalty (-30.0
+        # curriculum) untouched, stays the backstop. See docs/BugFixes.md.
+        cfg.curriculum["orange_stick_landing_curriculum"] = CurriculumTermCfg(
+            func=gk_mdp.reward_curriculum_ep_len,
+            params={
+                "reward_name": "orange_stick_landing",
+                "base_weight": 2.0,
+                "update_interval": 500,
+                "ep_len_divisor":  50,
+            },
+        )
+        # NEW 2026-08-15: "red" second-stage trailing-foot waypoint, active
+        # only once both blue and orange are genuinely landed (see
+        # _get_red_reach_target_y). Weights equal to orange's own (user
+        # confirmed via AskUserQuestion -- red's extra landing-gate already
+        # limits false credit relative to orange's ungated single stage, so
+        # a further quarter-of-blue halving wasn't applied).
+        cfg.curriculum["red_ball_landed_curriculum"] = CurriculumTermCfg(
+            func=gk_mdp.reward_curriculum_ep_len,
+            params={
+                "reward_name": "red_ball_landed",
+                "base_weight": 5.0,
+                "update_interval": 500,
+                "ep_len_divisor":  50,
+            },
+        )
+        cfg.curriculum["red_overshoot_penalty_curriculum"] = CurriculumTermCfg(
+            func=gk_mdp.reward_curriculum_ep_len,
+            params={
+                "reward_name": "red_overshoot_penalty",
+                "base_weight": -30.0,
+                "update_interval": 500,
+                "ep_len_divisor":  50,
+            },
+        )
+        # FIX 2026-08-25 (user request, "faster blue/green approach" --
+        # balancing half of the "raise speed rewards" set): base_weight
+        # 4.0 -> 2.0 (peak 10.0 -> 5.0), same reasoning as
+        # blue_stick_landing/orange_stick_landing above. red_overshoot_penalty
+        # (-30.0 curriculum) untouched, stays the backstop. See docs/BugFixes.md.
+        cfg.curriculum["red_stick_landing_curriculum"] = CurriculumTermCfg(
+            func=gk_mdp.reward_curriculum_ep_len,
+            params={
+                "reward_name": "red_stick_landing",
+                "base_weight": 2.0,
+                "update_interval": 500,
+                "ep_len_divisor":  50,
+            },
+        )
+        # FIX 2026-08-30 (user request, "trailing foot lift is quite
+        # important... just as important as the stuff from tier 2"):
+        # step-doubles at cu>=2 same as Tier 1's correct-foot-save group --
+        # base weight matches current static weight, doubles 2.0 -> 4.0.
+        # FIX 2026-08-30 (later same day, user request, weight-audit
+        # follow-up): added foot_clearance alongside it -- the two share
+        # the EXACT SAME kernel (`_clearance_reward`, unified earlier
+        # today) and target_height (0.10), scoped to max(both feet) vs the
+        # trailing foot only, but foot_clearance had been left flat while
+        # trailing_foot_lift got curriculum-scaled -- an inconsistency
+        # between two sibling terms using identical math, found during the
+        # weight-distribution audit. Same base weight/doubling as
+        # trailing_foot_lift.
+        # FIX 2026-08-30 (later still, user request, "put tier 3 in tier 2
+        # no reason to seperate"): merged the former Tier 3 (secondary/
+        # reconsider) group in here too -- foot_inner_face_continuous (the
+        # 6th member of Tier 1's item-8 peak-magnitude-cap derivation above,
+        # base weight/derivation unchanged, only its grouping moved) and
+        # contact_yield_velocity_y (deliberately de-emphasized vs. X, base
+        # weight unchanged). Purely a grouping/label change -- doesn't
+        # affect training, each entry keeps its own base_weight/mechanism/
+        # activate_at_cu regardless of which tier comment it sits under.
+        for _name, _base in (
+            ("trailing_foot_lift",         2.0),
+            ("foot_clearance",             2.0),
+            # RE-ADDED 2026-09-04 (user request): foot_inner_face_continuous
+            # re-enabled, retargeted to 0 deg off forward -- see
+            # inner_face_orientation_save's matching re-add above and
+            # rewards.py's _FOOT_TARGET_ANGLE_DEG docstring. Same base
+            # weight as before removal.
+            ("foot_inner_face_continuous", 3.47),
+            ("contact_yield_velocity_y",   5.0),
+        ):
+            cfg.curriculum[f"{_name}_curriculum"] = CurriculumTermCfg(
+                func=gk_mdp.correct_foot_save_curriculum,
+                params={"reward_name": _name, "base_weight": _base, "activate_at_cu": 2},
+            )
 
     # ------------------------------------------------------------------
     # Observations
@@ -327,11 +713,16 @@ def goalkeeper_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
         # gated zeros into a phantom ball. G1 noises first, then masks
         # (legged_robot.py:425-426) — noise_scale reproduces that ordering.
         # Unscaled — see item-21 note above (G1's ball_pos scale is dead code).
+        # RE-ENABLED 2026-09-02 (user request): full G1 pre-save visibility
+        # gate (warmup + FOV-ish flying + random mid-flight vanish) restored
+        # -- always_visible True->False. hide_behind_torso/hide_after_steps
+        # (the v2 post-save release gate) are untouched, a separate concept
+        # layered on top -- see ball_pos_xy_b's own docstring.
         "ball_pos_b": ObservationTermCfg(
             func=gk_mdp.ball_pos_xy_b,
             params={
                 "ball_name": BALL_NAME,
-                "always_visible": True,
+                "always_visible": False,
                 "hide_behind_torso": True,
                 "hide_after_steps": 75,
                 "noise_scale": 0.05,
@@ -350,15 +741,26 @@ def goalkeeper_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
         k: ObservationTermCfg(func=v.func, params=v.params, scale=v.scale)
         for k, v in actor_terms.items()
     }
+    # RE-ENABLED 2026-09-02 (user request): warmup-only gate, matching G1's
+    # real privileged-obs behavior -- critic loses the ball only during the
+    # brief initial_vanish blackout, NOT the actor's flying/random_vanish
+    # gates (G1 never applies those past end_target_local's own mask --
+    # see ball_pos_b's warmup_only param docstring). NOT the same as the
+    # actor's full gate above -- do not set always_visible=True nor
+    # warmup_only=False here without re-checking G1's split first.
     critic_terms["ball_pos_b"] = ObservationTermCfg(
         func=gk_mdp.ball_pos_b,
-        params={"ball_name": BALL_NAME, "always_visible": True},
+        params={"ball_name": BALL_NAME, "always_visible": False, "warmup_only": True},
     )
     critic_terms.update({
         "base_lin_vel": ObservationTermCfg(
             func=gk_mdp.base_lin_vel,
             scale=2.0,  # matches G1 obs_scales.lin_vel
         ),
+        # Left always_visible=True (2026-09-02 visibility re-enable pass) --
+        # this already matches G1: current_obs's ball velocity term is never
+        # gated at any level, not even by initial_vanish (only end_target_
+        # local gets that multiply, legged_robot.py:398/443). Not a gap.
         "ball_vel_b": ObservationTermCfg(
             func=gk_mdp.ball_vel_b,
             params={"ball_name": BALL_NAME, "always_visible": True},
@@ -424,22 +826,33 @@ def goalkeeper_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
         # this fix, stopball/softstop's static values were stale pre-halving
         # leftovers (15.0/105.0) that no longer matched their own curriculum's
         # base_weight (7.5/52.5 pre-cap) at all.
+        # FIX 2026-07-23: added asset_cfg=_FEET_CFG to both stopball's and
+        # softstop's params. Without it, their internal _get_reach_target_y
+        # call fell back to that function's own default SceneEntityCfg --
+        # a *different* object than _FEET_CFG that never appears in any
+        # term's params dict, so mjlab's manager setup (which only resolves
+        # SceneEntityCfg.body_ids for objects it finds inside a term's own
+        # params -- manager_base.py:_resolve_common_term_cfg) never resolved
+        # it. body_ids silently stayed the un-resolved default slice(None)
+        # (all bodies) for the whole run. Since stopball is registered
+        # first each tick -- the one call allowed to update the blue-landing
+        # settle counter -- this made dist_to_blue permanently garbage on
+        # exactly the call that mattered, blocking blue_ball_landed from
+        # ever firing off a genuine plant even though every other
+        # properly-resolved term (footreach etc.) saw the correct distance
+        # the same tick. See rewards.py's stopball/softstop docstrings.
         "stopball": RewardTermCfg(
             func=gk_mdp.stopball,
             weight=5.21,
-            params={"ball_name": BALL_NAME, "delta_vel_threshold": 0.6},
+            params={"ball_name": BALL_NAME, "delta_vel_threshold": 0.6, "asset_cfg": _FEET_CFG},
         ),
         # --- partial deflection signal (fires before stopball; gates _ball_is_behind) ---
         "softstop": RewardTermCfg(
             func=gk_mdp.softstop,
-            weight=36.46,
-            params={"ball_name": BALL_NAME, "velocity_threshold": 0.05},
-        ),
-        # --- continuing close-to-target signal, doubled after first save (ports G1 _reward_success) ---
-        "success": RewardTermCfg(
-            func=gk_mdp.success,
-            weight=5.0,
-            params={"ball_name": BALL_NAME, "asset_cfg": _FEET_CFG, "strict_th": 0.15},
+            # FIX 2026-09-04 (user request): 36.46 -> 18.23 (halved), matching
+            # softstop_curriculum's new base_weight above.
+            weight=18.23,
+            params={"ball_name": BALL_NAME, "velocity_threshold": 0.05, "asset_cfg": _FEET_CFG},
         ),
         # --- single-foot save bonus: same foot first contacted AND caused the reversal ---
         "single_foot_save": RewardTermCfg(
@@ -447,39 +860,378 @@ def goalkeeper_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
             weight=34.72,
             params={"ball_name": BALL_NAME},
         ),
-        # --- clean-trap bonus: ball nearly dead after deflection ---
+        # --- clean-trap bonus: continuous payout by how dead the ball is after deflection ---
+        # FIX 2026-07-28 (user request): speed_threshold widened 0.10->1.0 (fire
+        # condition, unchanged one-time latch) now that the payout itself is a
+        # continuous scale (best_speed/decay_rate, see cleanstop()'s docstring)
+        # instead of a binary bonus -- see rewards.py:cleanstop.
         "cleanstop": RewardTermCfg(
             func=gk_mdp.cleanstop,
             weight=17.36,
-            params={"ball_name": BALL_NAME, "speed_threshold": 0.10},
+            # FIX 2026-09-04 (user request): negative_scale=0.4 added
+            # explicitly (was an implicit function default) -- caps the
+            # negative branch at -0.4 instead of -1.0 (positive branch
+            # unchanged, still +1.0) to avoid the policy learning that not
+            # engaging the ball beats a low-confidence attempt. See
+            # rewards.py:cleanstop docstring.
+            params={"ball_name": BALL_NAME, "speed_threshold": 1.0, "steepness": 2.0, "negative_scale": 0.4},
+        ),
+        # --- one-shot, fires at the genuine contact instant (env._sb_deflection_now):
+        # rewards the leading foot's velocity yielding backward along its own
+        # orientation target direction (conservation of momentum -> lower
+        # post-contact ball speed, directly targeting cleanstop's own goal).
+        # See rewards.py:contact_yield_velocity.
+        # FIX 2026-08-25 (user request, delegated to Claude's judgment):
+        # weight 5.0 -> 25.0 (5x), moving it into the same tier as this
+        # table's other one-shot save-quality bonuses at the same contact
+        # event (inner_face_orientation_save=17.36, cleanstop=17.36,
+        # single_foot_save~34-69 curriculum-scaled). At weight=5.0 this
+        # one-shot, [-1,1]-normalized term's entire possible range topped
+        # out at a logged Episode_Reward of ~0.033 even at perfect
+        # behavior every episode -- ~300x smaller than success's own
+        # logged ~10-11 in the same 16224-iteration run
+        # (6144_footangle55deg_2026-08-23), mathematically too small to
+        # move the policy at all (it drifted slightly negative instead of
+        # learning to yield).
+        # FIX 2026-08-29 (user request): weight 25.0 -> 50.0. Live-checkpoint
+        # replay of model_39750 (from a run trained entirely at weight=25)
+        # confirmed the term's DIRECTION is correct (corr(foot_vx_at_contact,
+        # reward) = -0.72 left / -0.44 right -- it does reward yielding -X
+        # and penalize +X) but it's still LOSING: mean foot vx at the
+        # contact instant was net positive (+0.37 left / +0.17 right m/s),
+        # i.e. moving further INTO the ball, not yielding away from it --
+        # the "robot learns to kick the ball" symptom this term exists to
+        # counter. One-shot single-tick weight=25 apparently isn't enough to
+        # outweigh the accumulated per-step momentum from footreach/
+        # blue_trunk_drive/trailing_foot_reach, all of which explicitly
+        # carry full, undecayed speed into the real ball by design. Not yet
+        # validated against a live training run -- if 50 still loses, the
+        # next lever is attacking the momentum at its source (an
+        # early-window foot-speed penalty as the foot closes the last
+        # ~0.2-0.3m to the ball), not just raising this weight further.
+        # FIX 2026-08-30 (user request): split into X/Y components (see
+        # rewards.py:contact_yield_velocity_x/_y for the full rationale --
+        # the combined dot-product let a big lateral swing mask a bad,
+        # forward X velocity) AND retimed off the true first ball-contact
+        # instant instead of stopball's own sometimes-delayed
+        # `_sb_deflection_now` (user report + confirmed live: ~11% of save
+        # events had a 0.1s+ lag during which the foot had already reversed
+        # from a genuinely forward contact-instant velocity, crediting a
+        # later recovery motion as if it were yielding-at-impact). Weight
+        # split 30/20 (was a single 50), matching the original combined
+        # vector's own X:Y magnitude ratio (sin(55)=0.82 : cos(55)=0.57).
+        # FIX 2026-08-30 (later same day, user request, "i dont want that
+        # the most important velocity is the [equal-ish split]... i want
+        # you to decrease the y velocity drastically and put it towards the
+        # x"): 30/20 -> 45/5. X is now the dominant, primary signal (9x Y,
+        # was 1.5x); Y kept small but nonzero so the corrected toward-center
+        # direction (see contact_yield_velocity_y's 2026-08-30 sign-flip
+        # fix) still has some gradient. Total unchanged at 50.
+        "contact_yield_velocity_x": RewardTermCfg(
+            func=gk_mdp.contact_yield_velocity_x,
+            weight=45.0,
+            params={"ball_name": BALL_NAME, "asset_cfg": _FEET_CFG, "max_credit_speed": 0.5},
+        ),
+        # FIX 2026-08-30 (later same day, user request, "set the target y
+        # velocity for contact yield to something small like 0.3 max"):
+        # max_credit_speed 0.5 -> 0.3 -- the raw lateral speed needed to
+        # reach full credit shrinks accordingly (was ~0.87 m/s given the
+        # cos(55) scaling in the formula, now ~0.52 m/s).
+        "contact_yield_velocity_y": RewardTermCfg(
+            func=gk_mdp.contact_yield_velocity_y,
+            weight=5.0,
+            params={"ball_name": BALL_NAME, "asset_cfg": _FEET_CFG, "max_credit_speed": 0.3},
+        ),
+        # --- continuing close-to-target signal, tiered 1.0x/2.0x/3.0x by softstop/cleanstop
+        # (ports G1 _reward_success; FIX 2026-07-27 retiered off stopball -- see rewards.py).
+        # MUST stay registered after "cleanstop" above: success() reads env._cleanstop_flag,
+        # which cleanstop() only sets when IT runs -- registering success first would read a
+        # one-tick-stale value on the exact step cleanstop first fires. ---
+        # FIX 2026-08-25: initial weight 5.0 -> 3.5, matching success_curriculum's
+        # new base_weight above (this is the pre-curriculum starting value).
+        "success": RewardTermCfg(
+            func=gk_mdp.success,
+            weight=3.5,
+            params={"ball_name": BALL_NAME, "asset_cfg": _FEET_CFG, "strict_th": 0.15},
         ),
         # --- save quality bonuses (fire on top of softstop, not as a gate) ---
+        # inner_face_orientation_save / foot_inner_face_continuous were
+        # TEMPORARILY REMOVED 2026-09-02 (user request) because their 55 deg
+        # off-forward (sideways block posture) target was causing unwanted
+        # foot rotation. RE-ADDED 2026-09-04 (user request): same mechanism,
+        # retargeted to 0 deg off forward (straight forward, was 55 deg
+        # sideways) via rewards.py's `_FOOT_TARGET_ANGLE_DEG` -- these two
+        # terms now reward the leading foot staying pointed forward rather
+        # than turning sideways. `contact_yield_velocity_x`/`_y` (which also
+        # read a target-angle constant) were split onto their own
+        # `_YIELD_TARGET_ANGLE_DEG` (still 55 deg, unchanged) in the same
+        # fix so they aren't silently retargeted too -- see rewards.py.
+        # feetorientation (flatness, roll/pitch) is untouched -- orthogonal
+        # reward, not this one.
         "inner_face_orientation_save": RewardTermCfg(
             func=gk_mdp.inner_face_orientation_save,
             weight=17.36,
-            params={"ball_name": BALL_NAME, "alignment_threshold": 0.7, "asset_cfg": _FEET_CFG},
+            params={"ball_name": BALL_NAME, "tolerance_deg": 5.0, "asset_cfg": _FEET_CFG},
         ),
         "foot_inner_face_continuous": RewardTermCfg(
             func=gk_mdp.foot_inner_face_continuous,
             weight=3.47,
             params={"ball_name": BALL_NAME, "asset_cfg": _FEET_CFG},
         ),
+        # --- NEW 2026-07-27 (user request): trailing foot has no orientation
+        # shaping anywhere else in this table (the two terms above only ever
+        # touch the leading/assigned foot) -- always active, no ~behind gate.
+        "trailing_foot_forward_continuous": RewardTermCfg(
+            func=gk_mdp.trailing_foot_forward_continuous,
+            weight=3.0,
+            params={"ball_name": BALL_NAME, "asset_cfg": _FEET_CFG},
+        ),
+        # --- NEW 2026-07-27 (user request): leading foot rotates back toward
+        # forward once the save has happened (behind-gated) -- complementary
+        # to foot_inner_face_continuous's (~behind)-gated sideways target, so
+        # the two can never be active on the same step.
+        # FIX 2026-08-22 (user request): weight 2.0->6.0 (3x), window_steps
+        # 20->30 (~0.4s->~0.6s, explicit override of the shared
+        # _postsave_airtime_window default) -- see docs/BugFixes.md.
+        "postleadfootorientation": RewardTermCfg(
+            func=gk_mdp.postleadfootorientation,
+            weight=6.0,
+            params={"ball_name": BALL_NAME, "asset_cfg": _FEET_CFG, "window_steps": 30},
+        ),
+        # NEW 2026-08-01 (user request): flat, time-boxed bonus (~0.2s) for
+        # the assigned foot staying airborne right after the save, so
+        # postleadfootorientation actually has hangtime to work with instead
+        # of relying on whatever the dive physics happens to leave it. See
+        # rewards.py:postsave_foot_airtime docstring.
+        # FIX 2026-08-22 (user request): weight 1.0->2.0 (2x), window_steps
+        # 20->30 (~0.4s->~0.6s, matching postleadfootorientation's window so
+        # the two stay in sync) -- see docs/BugFixes.md.
+        "postsave_foot_airtime": RewardTermCfg(
+            func=gk_mdp.postsave_foot_airtime,
+            weight=2.0,
+            params={"ball_name": BALL_NAME, "asset_cfg": _FEET_CFG, "window_steps": 30},
+        ),
+        # NEW 2026-08-07 (user request): one-shot bonus for the leading foot
+        # touching down near a controlled 0.1 m/s, instead of slamming into
+        # the ground -- user watched training and saw hard landings. See
+        # rewards.py:postleadfootplantspeed docstring for the Gaussian shape
+        # (reuses foot_clearance's sigma=300 convention) and firing mechanism.
+        "postleadfootplantspeed": RewardTermCfg(
+            func=gk_mdp.postleadfootplantspeed,
+            weight=3.0,
+            params={"ball_name": BALL_NAME, "asset_cfg": _FEET_CFG},
+        ),
+        # NEW 2026-07-28 (user request): whole-body yaw heading recovery --
+        # user observed the robot's hips/whole body drifting into a
+        # left/right yaw post-save, not just a foot. postorientation (below)
+        # is roll/pitch-only and yaw-invariant; ang_vel_z only penalizes yaw
+        # rate, not final heading. No G1 equivalent (static catch task never
+        # needs to reface). See rewards.py:postheadingorientation.
+        "postheadingorientation": RewardTermCfg(
+            func=gk_mdp.postheadingorientation,
+            weight=2.5,
+            params={"ball_name": BALL_NAME},
+        ),
         # --- ball interception (feet-only) ---
+        # FIX 2026-08-25 (user request, "faster blue/green approach"):
+        # phase2_threshold 1.5->2.5 -- widens the vel_sigma speed-urgency
+        # window (footreach's own docstring) so the leading foot gets the
+        # up-to-10x speed multiplier sooner instead of only in the final
+        # 1.5m. See docs/BugFixes.md, 2026-08-25.
         "footreach": RewardTermCfg(
             func=gk_mdp.footreach,
             weight=10.0,
-            params={"ball_name": BALL_NAME, "reach_th": 0.3, "sigma": 5.0, "asset_cfg": _FEET_CFG},
+            params={"ball_name": BALL_NAME, "reach_th": 0.3, "sigma": 5.0, "asset_cfg": _FEET_CFG, "phase2_threshold": 2.5},
         ),
         "foot_proximity": RewardTermCfg(
             func=gk_mdp.foot_proximity,
             weight=5.0,
             params={"ball_name": BALL_NAME, "sigma": 5.0, "asset_cfg": _FEET_CFG},
         ),
+        # FIX 2026-07-26 (near-region oscillation): dense "close AND slow"
+        # reward, ported from blue_stick_landing -- see rewards.py's
+        # near_stick_reach docstring and docs/BugFixes.md. Zero for
+        # wide/far-region envs by construction (near_stick_reach's own
+        # env._blue_wide gate), so this entry cannot influence far-region
+        # behavior despite sharing this config file with the blue_* terms.
+        # FIX 2026-08-25 (user request, "faster blue/green approach"):
+        # weight 8.0 -> 4.0, matches curriculum's base_weight halving above.
+        "near_stick_reach": RewardTermCfg(
+            func=gk_mdp.near_stick_reach,
+            weight=4.0,
+            params={"ball_name": BALL_NAME, "asset_cfg": _FEET_CFG},
+        ),
+        # --- two-stage blue->green waypoint bonus, v2 reimplementation
+        # (2026-07-23) of the blue-ball-waypoint branch mechanism, removed
+        # from this project's lineage 2026-07-10. See rewards.py's
+        # _get_reach_target_y/blue_ball_landed/blue_overshoot_penalty/
+        # blue_stick_landing docstrings and docs/BugFixes.md. ---
+        "blue_ball_landed": RewardTermCfg(
+            func=gk_mdp.blue_ball_landed,
+            weight=10.0,
+            params={"ball_name": BALL_NAME, "asset_cfg": _FEET_CFG},
+        ),
+        # Without this, ignoring the blue waypoint entirely on a wide crossing
+        # earns the same reward (zero, from the landing-gated terms above) as
+        # attempting and failing -- no gradient discourages skipping it.
+        # FIX 2026-07-23: -30.0 -> -60.0 (user request: "too lenient for the
+        # blue ball"). Doubled to match base_weight below (curriculum-scaled
+        # in step with blue_ball_landed/blue_stick_landing's own 2x growth).
+        "blue_overshoot_penalty": RewardTermCfg(
+            func=gk_mdp.blue_overshoot_penalty,
+            weight=-60.0,
+            params={"ball_name": BALL_NAME, "asset_cfg": _FEET_CFG},
+        ),
+        # Dense reward for "close AND slow" near blue -- the exact joint
+        # condition the settle-window landing check requires.
+        # FIX 2026-08-25 (user request, "faster blue/green approach"):
+        # weight 8.0 -> 4.0, matches curriculum's base_weight halving above.
+        "blue_stick_landing": RewardTermCfg(
+            func=gk_mdp.blue_stick_landing,
+            weight=4.0,
+            params={"ball_name": BALL_NAME, "asset_cfg": _FEET_CFG},
+        ),
+        # NEW 2026-07-24 (user request): trunk (whole-body), not foot-specific,
+        # velocity incentive toward the current two-stage target -- fills the
+        # gap where footreach's own vel_sigma (foot velocity) only reactivates
+        # once ball_x_local <= 1.5m, leaving no locomotion incentive for the
+        # (often much longer) window between a genuine blue landing and the
+        # ball finally closing in. See rewards.py:blue_trunk_drive docstring.
+        # FIX 2026-08-12: weight 5.0 -> 10.0, matching the curriculum's
+        # base_weight bump above (blue_trunk_drive_curriculum) -- keeps the
+        # cu=0 static weight and the curriculum's cu=0 baseline in sync, per
+        # this file's own stated invariant ("matches this term's static
+        # play-mode weight").
+        # FIX 2026-08-25 (user request, "faster blue/green approach"):
+        # weight 10.0 -> 20.0, matching curriculum base_weight bump above.
+        "blue_trunk_drive": RewardTermCfg(
+            func=gk_mdp.blue_trunk_drive,
+            weight=20.0,
+            params={"ball_name": BALL_NAME, "asset_cfg": _FEET_CFG},
+        ),
+        # --- trailing-foot ("orange") mirror of the blue waypoint above,
+        # landing-focused subset (2026-08-08). See rewards.py's
+        # _get_orange_reach_target_y/orange_ball_landed/orange_overshoot_penalty/
+        # orange_stick_landing docstrings and
+        # docs/superpowers/specs/2026-08-08-orange-ball-trailing-foot-design.md.
+        # Weights are half of blue's own (conservative first pass, unvalidated). ---
+        "orange_foot_proximity": RewardTermCfg(
+            func=gk_mdp.orange_foot_proximity,
+            weight=2.5,
+            params={"ball_name": BALL_NAME, "sigma": 5.0, "asset_cfg": _FEET_CFG},
+        ),
+        "orange_ball_landed": RewardTermCfg(
+            func=gk_mdp.orange_ball_landed,
+            weight=5.0,
+            params={"ball_name": BALL_NAME, "asset_cfg": _FEET_CFG},
+        ),
+        "orange_overshoot_penalty": RewardTermCfg(
+            func=gk_mdp.orange_overshoot_penalty,
+            weight=-30.0,
+            params={"ball_name": BALL_NAME, "asset_cfg": _FEET_CFG},
+        ),
+        # FIX 2026-08-25 (user request, "faster blue/green approach"):
+        # weight 4.0 -> 2.0, matches curriculum's base_weight halving above.
+        "orange_stick_landing": RewardTermCfg(
+            func=gk_mdp.orange_stick_landing,
+            weight=2.0,
+            params={"ball_name": BALL_NAME, "asset_cfg": _FEET_CFG},
+        ),
+        # --- trailing-foot second waypoint ("red"), active only once both
+        # blue and orange are genuinely landed. See rewards.py's
+        # _get_red_reach_target_y/red_ball_landed/red_overshoot_penalty/
+        # red_stick_landing docstrings. Weights equal to orange's own
+        # (user-confirmed 2026-08-15, not a further halving -- red's own
+        # landing gate already limits false credit). ---
+        "red_foot_proximity": RewardTermCfg(
+            func=gk_mdp.red_foot_proximity,
+            weight=2.5,
+            params={"ball_name": BALL_NAME, "sigma": 5.0, "asset_cfg": _FEET_CFG},
+        ),
+        "red_ball_landed": RewardTermCfg(
+            func=gk_mdp.red_ball_landed,
+            weight=5.0,
+            params={"ball_name": BALL_NAME, "asset_cfg": _FEET_CFG},
+        ),
+        "red_overshoot_penalty": RewardTermCfg(
+            func=gk_mdp.red_overshoot_penalty,
+            weight=-30.0,
+            params={"ball_name": BALL_NAME, "asset_cfg": _FEET_CFG},
+        ),
+        # FIX 2026-08-25 (user request, "faster blue/green approach"):
+        # weight 4.0 -> 2.0, matches curriculum's base_weight halving above.
+        "red_stick_landing": RewardTermCfg(
+            func=gk_mdp.red_stick_landing,
+            weight=2.0,
+            params={"ball_name": BALL_NAME, "asset_cfg": _FEET_CFG},
+        ),
+        # NEW 2026-08-15 (user request): trailing-foot analog of footreach's
+        # urgency mechanism (sigmoid reach x up-to-10x velocity multiplier),
+        # auto-switching orange->red, WITHOUT footreach's ball-position
+        # gating/live-ball-tracking (see rewards.py:trailing_foot_reach
+        # docstring for the full reasoning). Weight 10.0 matches footreach's
+        # own weight -- this is the direct trailing-foot analog of that
+        # term, not of the smaller flat foot_proximity/orange_foot_proximity
+        # terms.
+        # FIX 2026-08-25 (user request, "faster blue/green approach"):
+        # weight 10.0 -> 20.0 (flat, no curriculum on this term).
+        "trailing_foot_reach": RewardTermCfg(
+            func=gk_mdp.trailing_foot_reach,
+            weight=20.0,
+            params={"ball_name": BALL_NAME, "reach_th": 0.3, "sigma": 5.0, "asset_cfg": _FEET_CFG},
+        ),
+        # NEW 2026-08-15 (user request): one-shot bonus for completing the
+        # WHOLE blue->orange->red->save relay with margin to spare, paid out
+        # only at the save itself (not per-stage, deliberately -- see
+        # rewards.py:sequence_promptness docstring for why). Registered
+        # AFTER stopball/blue/orange/red's own terms above so
+        # env._sb_flag/_blue_landed_genuine/_orange_landed_genuine/
+        # _red_landed_genuine are all fresh this tick. Weight 3.0
+        # (user-confirmed via AskUserQuestion) -- a nudge on top of the
+        # existing landing/save bonuses, not a dominant signal.
+        "sequence_promptness": RewardTermCfg(
+            func=gk_mdp.sequence_promptness,
+            weight=3.0,
+            params={"ball_name": BALL_NAME, "promptness_ref": 1.5, "asset_cfg": _FEET_CFG},
+        ),
         # --- active stepping: reward lifting feet during approach ---
+        # FIX 2026-08-23 (user request): target_height 0.10 -> 0.05 (10cm ->
+        # 5cm), same change mirrored below in trailing_foot_lift.
+        # FIX 2026-08-29 (user request): reverted 0.05 -> 0.10 -- deployment
+        # showed the 5cm target clipping the floor; wants more clearance.
+        # clearance_at_save (below) intentionally NOT reverted -- user
+        # explicitly asked to keep that one at 5cm.
         "foot_clearance": RewardTermCfg(
             func=gk_mdp.foot_clearance,
             weight=2.0,
             params={"ball_name": BALL_NAME, "target_height": 0.10, "asset_cfg": _FEET_CFG},
+        ),
+        # NEW 2026-08-17 (user request): "an incentive that raises the foot"
+        # for the TRAILING foot specifically during its start->orange and
+        # orange->red journey -- foot_clearance above takes max(both feet),
+        # fully satisfiable by the leading foot alone, leaving the trailing
+        # foot's own lift unrewarded during this journey. Same target
+        # height/weight as foot_clearance (0.10m / 2.0), scoped to one foot
+        # instead of max(both) -- see rewards.py:trailing_foot_lift.
+        # FIX 2026-08-23 (user request): target_height 0.10 -> 0.05, same
+        # change as foot_clearance above.
+        # FIX 2026-08-29 (user request): reverted 0.05 -> 0.10, same reason
+        # as foot_clearance above.
+        "trailing_foot_lift": RewardTermCfg(
+            func=gk_mdp.trailing_foot_lift,
+            weight=2.0,
+            params={"ball_name": BALL_NAME, "target_height": 0.10, "asset_cfg": _FEET_CFG},
+        ),
+        # NEW 2026-08-23 (user request): successor to the removed (2026-06-29)
+        # airborne_at_save -- continuous (not one-shot binary), leading foot
+        # only, active blue-landed -> real-save window instead of the single
+        # save tick. Weight 15.0 carried over from airborne_at_save's own
+        # tier as a first guess, not re-derived -- see rewards.py:
+        # clearance_at_save for the full design rationale.
+        "clearance_at_save": RewardTermCfg(
+            func=gk_mdp.clearance_at_save,
+            weight=15.0,
+            params={"ball_name": BALL_NAME, "target_height": 0.05, "asset_cfg": _FEET_CFG},
         ),
         # --- goalkeeper stance ---
         "stayonline": RewardTermCfg(
@@ -492,19 +1244,69 @@ def goalkeeper_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
         ),
         "feetorientation": RewardTermCfg(
             func=gk_mdp.feetorientation,
-            weight=3.0,
-            params={"asset_cfg": _FEET_CFG},
+            # FIX 2026-08-15 (same session, user request): 3.0 -> 6.0 (2x,
+            # chosen via AskUserQuestion from 6.0/10.0/custom) -- follow-up
+            # to dropping ankle_pitch_pos/ankle_roll_pos (see below): those
+            # pulled the ankle toward its OWN default joint angle, which
+            # user correctly identified as the wrong target for "I want the
+            # foot flat on the ground every time" -- the ankle legitimately
+            # needs to differ from its default to keep the foot flat when
+            # hip/knee are off-default mid-dive, so the position penalties
+            # could actively fight genuine flattening. feetorientation
+            # measures the real world-frame outcome (flat relative to
+            # gravity) regardless of joint configuration, so it's the
+            # correct lever for this goal -- raising its weight (on top of
+            # the earlier sigma steepening 5->80) gives it more say in the
+            # combined objective now that the ankle terms aren't diluting/
+            # fighting it. See docs/BugFixes.md, 2026-08-15.
+            # FIX 2026-08-15 (user request): sigma was the function's own
+            # default (5.0), never explicitly set here -- user noticed a
+            # visually "pretty bad" ~11deg one-foot tilt still scored ~83%
+            # of max reward (exp(-5*sin^2(11deg))=0.83) and asked whether
+            # steepening this bounded reward's drop-off would also help.
+            # Raised 5.0 -> 40.0 (same ~11deg tilt now scores ~23%, was ~83%
+            # -- chosen via AskUserQuestion from 20/40/leave-as-is/custom).
+            # Passed explicitly rather than left as the function default,
+            # matching this codebase's convention for auditable per-term
+            # overrides. FIX 2026-08-15 (same day, user request, "make
+            # sigma even bigger"): 40.0 -> 80.0 (same ~11deg tilt now
+            # scores ~5%, chosen via AskUserQuestion from 80/150/custom).
+            # FIX 2026-08-16 (user request, "increase the footorientation
+            # reward 10x" -- landed at 6.0 -> 30.0 (5x, "do 30 to start of
+            # with") after AskUserQuestion, plus sigma 80.0 -> 100.0 (user
+            # request, same message): one-foot-tilt reward at max (0deg)
+            # rises 6.0 -> 30.0; a ~11deg tilt drops further, from ~5% of
+            # max (before) to ~4.2% of max (after) -- steeper sigma still
+            # dominates the higher weight past ~10deg. See docs/BugFixes.md,
+            # 2026-08-16.
+            # FIX 2026-08-17 (user request): 30.0 -> 15.0. sigma (100.0)
+            # left unchanged.
+            weight=15.0,
+            params={"asset_cfg": _FEET_CFG, "sigma": 100.0},
         ),
-        "foot_ang_vel_xy": RewardTermCfg(
-            func=gk_mdp.foot_ang_vel_xy,
-            # FIX 2026-07-20 (reward-weight audit): was -0.5. No G1
-            # equivalent; live-measured real per-step magnitude (-1.80) was
-            # meaningfully inflating raw task-reward scale and diluting
-            # AMP's real proportional influence on the blended objective.
-            # Halved rather than removed -- likely still doing real work.
-            weight=-0.25,
-            params={"asset_cfg": _FEET_CFG},
-        ),
+        # REMOVED 2026-08-15 (user request): foot_ang_vel_xy deleted outright
+        # (function + this registration + mdp/__init__.py export), not just
+        # reweighted -- superseded by ankle_pitch_vel/ankle_roll_vel, which
+        # read each ankle joint's own local velocity directly instead of the
+        # whole-body world-frame foot angular velocity this term measured.
+        # The world-frame read conflated genuine ankle rotation with
+        # hip/knee-driven leg-swing propagation (confirmed live via the
+        # scripted_yaw motion-sample tooling: this term reacted even to a
+        # "pure" Hip_Yaw sweep) -- the exact reason its own -3.0 (6x)
+        # attempt on 2026-08-10 had to be reverted (killed legitimate
+        # reach/dive motion too). Its only unique remaining contribution
+        # (penalizing hip/knee-driven foot rotation) was that same failure
+        # mode, not a benefit. See rewards.py (function deleted) and
+        # docs/BugFixes.md.
+        # REMOVED 2026-08-13 (user request): foot_ang_vel_z (foot YAW
+        # angular-velocity penalty, added 2026-08-07) deleted outright, not
+        # just reweighted -- it had no equivalent in model_17250.pt's
+        # (airbornelatchfix) training code at all. Removed together with
+        # foot_ang_vel_xy's revert above (superseded outright 2026-08-15,
+        # see above) and postleadfootorientation's gate revert (rewards.py)
+        # to isolate whether these three reward-config differences, not
+        # training maturity, explain the leading-foot rotation gap vs
+        # baseline. See rewards.py (function deleted) and docs/BugFixes.md.
         # --- post-save recovery (active only when ball is behind) ---
         "postorientation": RewardTermCfg(
             func=gk_mdp.postorientation,
@@ -525,14 +1327,103 @@ def goalkeeper_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
         # See postupperdofpos's docstring (rewards.py) -- stuck near its
         # floor on both master's last run and the v2 branch, unlike
         # postlegdofpos/postwaistdofpos at the same weight tier.
+        # FIX 2026-08-06: this registration was explicitly overriding
+        # postupperdofpos's asset_cfg with the OLD 8-joint _RECOVERY_ARM_CFG
+        # (shoulder+elbow), silently undoing the 2026-08-03 fix that dropped
+        # shoulder from the function's own default (_ARM_JOINT_CFG, elbow
+        # only, matching G1's real scope) -- params always wins over a
+        # function default (mjlab reward_manager.py:125 calls
+        # func(env, **params)), so postupperdofpos had been evaluating all 8
+        # joints this whole time despite the 08-03 fix's docstring/BugFixes.md
+        # entry claiming otherwise.
+        #
+        # FIX 2026-08-06 (same day, follow-up -- a SECOND, separate wiring
+        # bug found while wiring up postshoulderdofpos below): removing the
+        # params override entirely (this entry's original fix, `params=
+        # {"ball_name": BALL_NAME}` only) does NOT actually let the
+        # function's 4-joint _ARM_JOINT_CFG default apply as intended.
+        # mjlab's RewardManager only calls SceneEntityCfg.resolve() on
+        # objects found in `term_cfg.params.values()`
+        # (manager_base.py:_resolve_common_term_cfg) -- a function's own
+        # default argument is invisible to this mechanism, since it's never
+        # placed into `params`. Confirmed live: `_ARM_JOINT_CFG.joint_ids`
+        # stayed `slice(None, None, None)` even after real env.step() calls
+        # through the registered term -- i.e. postupperdofpos was silently
+        # indexing ALL 21 joints (slice(None) selects everything), not the
+        # intended 4, for every run since this SAME date's earlier fix
+        # landed (including the model_12500 checkpoint analyzed this
+        # session). Every OTHER asset-scoped reward in this table
+        # (postwaistdofpos/postlegdofpos/penalize_arm_above_shoulder/
+        # arm_dof_vel/etc.) already follows the correct pattern -- explicit
+        # `asset_cfg` in `params`, sourced from a SceneEntityCfg object --
+        # which is the only way `.resolve()` ever actually runs. Fixed by
+        # explicitly passing `gk_mdp.rewards._ARM_JOINT_CFG` (the SAME
+        # object the function uses as its own default, imported directly
+        # rather than duplicated, to keep one source of truth) via params.
+        # See docs/BugFixes.md.
         "postupperdofpos": RewardTermCfg(
             func=gk_mdp.postupperdofpos,
             weight=5.0,
-            params={"ball_name": BALL_NAME, "asset_cfg": _RECOVERY_ARM_CFG},
+            params={"ball_name": BALL_NAME, "asset_cfg": gk_mdp.rewards._ARM_JOINT_CFG},
         ),
+        # NEW 2026-08-06 (user request): separate reward/kernel for the shoulder
+        # joints postupperdofpos no longer targets (2026-08-03/08-06 fixes,
+        # elbow-only scope). Kept as its own RewardTermCfg (not merged into
+        # postupperdofpos's asset_cfg) specifically to avoid re-mixing
+        # shoulder's much larger error magnitude into the same kernel as
+        # elbow's -- the exact saturation bug the 2026-08-03 fix removed
+        # shoulder to fix in the first place. See postshoulderdofpos's
+        # docstring (rewards.py) and docs/BugFixes.md. `asset_cfg` passed
+        # explicitly (see postupperdofpos's comment just above for why this
+        # is required, not optional, for the resolve() mechanism to run).
+        "postshoulderdofpos": RewardTermCfg(
+            func=gk_mdp.postshoulderdofpos,
+            weight=5.0,
+            params={"ball_name": BALL_NAME, "asset_cfg": gk_mdp.rewards._SHOULDER_JOINT_CFG},
+        ),
+        # NEW 2026-07-30 (user request): supplementary to postupperdofpos --
+        # specifically targets "hand above its own shoulder" rather than the
+        # aggregate 8-joint pose error. Gated to the STEADY post-save window
+        # only (see penalize_arm_above_shoulder's docstring, rewards.py) so
+        # it can't fight legitimate dive/balance-recovery arm motion, the
+        # exact failure mode that got arm_torque_limits/arm_action_rate_l2/
+        # arm_action_acc_l2 reverted 2026-07-29. Weight modest/supplementary,
+        # not the -100 "bad technique" tier. See docs/BugFixes.md.
+        "penalize_arm_above_shoulder": RewardTermCfg(
+            func=gk_mdp.penalize_arm_above_shoulder,
+            weight=-2.0,
+            params={"ball_name": BALL_NAME, "asset_cfg": _ARM_HEIGHT_CFG},
+        ),
+        # NEW 2026-08-03 (user request): ported near-verbatim from sibling
+        # project BoosterT1mjlab (tasks/velocity/mdp/rewards.py, weight -0.02
+        # there), which uses this exact mechanism to "encourage natural arm
+        # swing" for its own T1 locomotion policy. Reads the native MuJoCo
+        # subtreeangmom sensor (root_angmom, already present in this
+        # project's t1.xml/t1_headless.xml but never read by any code here
+        # before this fix) -- whole-body angular momentum about the Trunk.
+        # Physically-adaptive complement to postupperdofpos: doesn't fight
+        # a genuine counterbalance swing (which legitimately produces high
+        # momentum), only penalizes momentum that's still nonzero once the
+        # body should already be stable. Small/gentle by design, matching
+        # BoosterT1mjlab's own weight -- not meant to replace postupperdofpos.
+        # See rewards.py:angular_momentum_penalty and docs/BugFixes.md.
+        "angular_momentum_penalty": RewardTermCfg(
+            func=gk_mdp.angular_momentum_penalty,
+            weight=-0.02,
+            params={},
+        ),
+        # FIX 2026-07-27: 1.0 -> 3.0. User reported the waist visibly
+        # rotating post-save; training logs confirmed this reward stuck
+        # near its floor (~0.31 mean episode reward), the same "stuck
+        # near its floor relative to siblings" symptom -- and now
+        # magnitude -- that motivated postupperdofpos's 2026-07-23 bump
+        # (that fix's own comment above named postwaistdofpos as one of
+        # the terms postupperdofpos was compared against; that comparison
+        # is now stale). See postwaistdofpos's docstring (rewards.py) and
+        # docs/BugFixes.md.
         "postwaistdofpos": RewardTermCfg(
             func=gk_mdp.postwaistdofpos,
-            weight=1.0,
+            weight=3.0,
             params={"ball_name": BALL_NAME, "asset_cfg": _RECOVERY_WAIST_CFG},
         ),
         # FIX 2026-07-22: new leg-recovery term, no G1 equivalent to copy a
@@ -565,10 +1456,17 @@ def goalkeeper_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
             weight=-100.0,
             params={"min_height": 0.59},
         ),
+        # FIX 2026-08-06 (user request, "just a tiny bit"): 1700 -> 1800 N.
+        # Continues this term's own established history (1000->1200->1350->
+        # 1450->1700, docs/BugFixes.md) of raising the threshold in small
+        # steps whenever it's found too sensitive to legitimate aggressive
+        # stepping/diving -- same direction, same ~100N step size as every
+        # prior adjustment. No live evidence gathered this time (user request
+        # alone); revert if it turns out to tolerate genuine ground-slamming.
         "penalize_sharpcontact": RewardTermCfg(
             func=gk_mdp.penalize_sharpcontact,
             weight=-100.0,
-            params={"force_threshold": 1700.0},
+            params={"force_threshold": 1800.0},
         ),
         "penalize_self_collision": RewardTermCfg(
             func=gk_mdp.penalize_self_collision,
@@ -588,8 +1486,72 @@ def goalkeeper_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
         # outweighing the save-quality benefit. See rewards.py docstring.
         "penalize_wrong_foot_ball_contact": RewardTermCfg(
             func=gk_mdp.penalize_wrong_foot_ball_contact,
+            # FIX 2026-08-21 (user request): -100.0 -> -500.0 (5x). Root cause:
+            # this penalty's per-episode magnitude (~-456 on left_near, the
+            # worst-affected region) was tiny next to the rest of the reward
+            # stack (success ~+6900, feetorientation ~+7300, near_stick_reach
+            # ~+2650, postupperdofpos ~+1250 per episode) -- too small to
+            # actually steer behavior. right_near fires this at exactly 0.000
+            # (confirmed via live probe), proving it IS avoidable with correct
+            # technique, not an unavoidable side-effect -- so raising the
+            # weight is expected to help, not just add noise.
+            #
+            # REVERT 2026-08-21 (same day, user request): -500.0 -> -100.0.
+            # The 5x run (6144_autotrain_2026-08-21_13-40, model_9250.pt)
+            # converged the leading foot's block orientation to almost
+            # exactly target+180 (mirror-opposite) on BOTH sides, confirmed
+            # via probe_left_right_yaw.py (tight std 5-7deg, not noise).
+            # probe_region_reward_asymmetry.py on that same checkpoint showed
+            # this term's own per-episode magnitude collapsed to ~0.000/-1.34
+            # (from the ~-456 that justified the 5x in the first place) --
+            # i.e. the policy learned to almost entirely avoid triggering
+            # this penalty, consistent with it now dominating the much
+            # smaller orientation-reward budget (one-shot bonus maxes
+            # +34.72, dense term +6.94/step) and steering the leading leg
+            # away from the ball entirely to dodge it. Same failure class as
+            # arm_torque_limits/arm_action_rate_l2/arm_action_acc_l2
+            # (reverted 2026-07-29): a penalty raised enough to out-suppress
+            # the behavior it was meant to only discourage. Reverting to
+            # isolate this one variable -- shin site position (t1_headless.xml,
+            # z -0.14->-0.10) kept as-is. Not yet validated against a live
+            # training run; this is a controlled test, not a confirmed fix.
             weight=-100.0,
-            params={"ball_name": BALL_NAME},
+            # FIX 2026-08-07 (user request): knee_proximity_margin 0.05->0.10m,
+            # explicit now (was relying on the function's own default) --
+            # see rewards.py:penalize_wrong_foot_ball_contact docstring.
+            # FIX 2026-08-07 (2nd same-day increase, user request): 0.10->0.15m.
+            # FIX 2026-08-07 (3rd same-day increase, DIAGNOSTIC-ONLY, user
+            # request, REVERTED same day): 0.15->1.0m -- oversized on purpose
+            # so the P-panel plots visibly spiked for verification (confirmed
+            # working, then reverted -- see rewards.py docstring).
+            # FIX 2026-08-07 (4th same-day change, REVERT): back to 0.15.
+            # FIX 2026-08-07 (5th same-day change, user request): 0.15->0.05 --
+            # the ORIGINAL, pre-session default (this key had no explicit
+            # override at all before today), so model_10250.pt and every
+            # other checkpoint from this run can be watched under the exact
+            # threshold they were actually trained/checkpointed under.
+            # FIX 2026-08-07 (6th same-day change, user request, re-adds
+            # chin/head after explicit confirmation via AskUserQuestion):
+            # head_proximity_margin=0.20 -- distance-based (not raw contact
+            # "found", which under-fires -- same fix already proven for the
+            # knee), independent of knee_proximity_margin per explicit user
+            # request to keep the knee's own threshold unchanged.
+            # FIX 2026-08-07 (7th same-day change, user request): 0.20->0.65 --
+            # 0.38m total radius was smaller than the CLOSEST real approach
+            # (0.736m) measured in this session's own checkpoint-replay probe,
+            # so it could never fire in practice. See rewards.py docstring.
+            # FIX 2026-08-07 (8th same-day change, user request): 0.65->1.0.
+            # FIX 2026-08-07 (9th same-day change, user request: "i only want
+            # the treshold of the chin so revert back again, and ignore the
+            # whole head thing, even remove the whole head touch penalty for
+            # now"): head_proximity_margin param removed entirely --
+            # penalize_wrong_foot_ball_contact no longer has a head/chin
+            # sub-condition at all (see rewards.py docstring). Back to just
+            # the two params below, unchanged from the pre-session baseline.
+            params={
+                "ball_name": BALL_NAME,
+                "knee_proximity_margin": 0.05,
+            },
         ),
         "feet_slippage": RewardTermCfg(
             func=gk_mdp.feet_slippage,
@@ -630,6 +1592,18 @@ def goalkeeper_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
             weight=-3.0,
             params={"asset_cfg": _ALL_JOINTS_CFG},
         ),
+        # REVERTED 2026-07-29 (user request): arm_torque_limits penalized
+        # actual torque/effort regardless of resulting pose -- diagnosed
+        # (alongside arm_action_rate_l2/arm_action_acc_l2 below) as fighting
+        # legitimate counterbalance motion during a dive, dragging down
+        # footreach/ball_exit/episode-length (confirmed via matched-iteration
+        # comparison against the pre-2026-07-28 run, docs/BugFixes.md). User
+        # wants arm posture controlled by postupperdofpos (a pose-matching
+        # term, not a movement/effort penalty) instead -- see that term's
+        # during_scale bump below. arm_dof_vel (further down) is kept: same
+        # movement-penalty family, but a real G1-matched mechanism (dof_vel)
+        # at a small, mostly-inert weight, not one of these three speculative
+        # SGK-only additions.
         # --- stability ---
         "ang_vel_xy": RewardTermCfg(
             func=gk_mdp.ang_vel_xy_l2,
@@ -693,6 +1667,14 @@ def goalkeeper_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
             # rationale.
             weight=-0.1,
         ),
+        # REVERTED 2026-07-29 (user request): arm_action_rate_l2/
+        # arm_action_acc_l2 penalized how fast the commanded arm target
+        # changed, again independent of resulting pose -- same "wrong
+        # problem class" diagnosis as arm_torque_limits above. Reverted
+        # alongside it; see that entry's comment and docs/BugFixes.md for
+        # the full regression evidence. The underlying custom functions
+        # (_resolve_arm_action_indices helper included) were removed from
+        # rewards.py since nothing else calls them.
         "dof_vel": RewardTermCfg(
             func=mjlab_mdp.joint_vel_l2,
             weight=-5e-4,
@@ -702,6 +1684,73 @@ def goalkeeper_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
             func=mjlab_mdp.joint_acc_l2,
             weight=-2.5e-7,
             params={"asset_cfg": _ALL_JOINTS_CFG},
+        ),
+        # NEW 2026-07-28 (user request): dof_vel above is diluted across all
+        # ~21 joints, giving any single arm joint's swing only a tiny share
+        # of the gradient. User reported the arms swinging noticeably for
+        # counterbalance -- this scopes the same joint_vel_l2 penalty to
+        # just the 8 arm joints (_RECOVERY_ARM_CFG, already defined above)
+        # for a concentrated, undiluted signal. No G1 equivalent to match --
+        # G1's smoothness/action-rate terms are flat, non-curriculum, and
+        # whole-body the entire run (checked g1_29_config.py -- no
+        # arm-specific or curriculum-scaled smoothness mechanism exists;
+        # g1_29_config.py's unrelated `curriculum_joints` list touches the
+        # same joint group but for actuator-noise-injection curriculum, not
+        # a reward). Weight is a first empirical guess (10x dof_vel's
+        # diluted per-joint share, since scoped to 8 joints instead of ~21),
+        # not a G1-matched value -- not yet validated against a live run.
+        "arm_dof_vel": RewardTermCfg(
+            func=mjlab_mdp.joint_vel_l2,
+            weight=-5e-3,
+            params={"asset_cfg": _RECOVERY_ARM_CFG},
+        ),
+        # NEW 2026-08-15 (user request, "I never want this type of tilt
+        # behavior" -- no gating, always active): same joint_vel_l2
+        # mechanism as arm_dof_vel above, scoped to just the 2 Ankle_Pitch
+        # joints (_ANKLE_PITCH_CFG). Additive alongside foot_ang_vel_xy
+        # (unchanged, -0.25) rather than a replacement -- foot_ang_vel_xy
+        # measures world-frame body angular velocity (conflates ankle-local
+        # rotation with hip/knee-driven leg-swing propagation, the exact
+        # reason the earlier -3.0 attempt killed legitimate rotation too);
+        # this term reads the LOCAL ankle joint's own velocity directly, so
+        # it can't touch Hip_Pitch/Knee_Pitch's genuine reach/swing motion.
+        # Weight -0.1 is a first empirical guess (same "unvalidated, watch
+        # next run" status as arm_dof_vel's own docstring) -- not derived
+        # from a principled calibration against the probe's rad/s values.
+        # See docs/BugFixes.md, 2026-08-15.
+        # FIX 2026-08-15 (user request, "drastically increase"): -0.1 -> -1.0
+        # (10x). model_11750.pt (6144_seqpromptness run) still showed the
+        # heel-down/toes-up tilt despite this term -- weight was a first
+        # guess and this was its first-ever live checkpoint. Chosen via
+        # AskUserQuestion (10x/20x/5x/custom offered, 10x picked). Kept
+        # local-joint-scoped (Ankle_Pitch only, not foot_ang_vel_xy's
+        # whole-body world-frame read) specifically so a large weight here
+        # is less likely to bleed into legitimate Hip_Pitch/Knee_Pitch reach
+        # motion the way foot_ang_vel_xy's -3.0 attempt did. Not yet
+        # validated against a live training run. See docs/BugFixes.md.
+        "ankle_pitch_vel": RewardTermCfg(
+            func=mjlab_mdp.joint_vel_l2,
+            weight=-1.0,
+            params={"asset_cfg": _ANKLE_PITCH_CFG},
+        ),
+        # REMOVED 2026-08-15 (same session, user request, "drop the _pos
+        # because they are bullshit"): ankle_pitch_pos/ankle_roll_pos
+        # deleted outright -- user correctly identified they pulled the
+        # ankle toward its OWN default joint angle, which is the wrong
+        # target for "I want the foot flat on the ground every time": the
+        # ankle legitimately needs to differ from its default to keep the
+        # foot flat when hip/knee are off-default mid-dive, so these could
+        # actively fight genuine landing flatness rather than help it.
+        # feetorientation (weight raised 3.0->6.0 in the same fix, above)
+        # measures the real world-frame outcome instead and is the correct
+        # lever for that goal. ankle_pitch_vel/ankle_roll_vel (velocity,
+        # not position) are unaffected -- "don't actively rotate the ankle
+        # fast" doesn't have the same default-angle mismatch problem. See
+        # docs/BugFixes.md, 2026-08-15.
+        "ankle_roll_vel": RewardTermCfg(
+            func=mjlab_mdp.joint_vel_l2,
+            weight=-1.0,
+            params={"asset_cfg": _ANKLE_ROLL_CFG},
         ),
     }
 
@@ -764,8 +1813,14 @@ def goalkeeper_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
             "ball_name":      BALL_NAME,
             "dist_range":     (1.5, 3.5),
             "y_start_range":  (-0.3, 0.3),
-            "y_end_range":    (-1.3, 1.3),
-            "t_flight_range": (0.7, 1.1),
+            "y_end_range":    (-1.0, 1.0),  # FIX 2026-08-06: 1.1 -> 1.0 (user request)
+            # FIX 2026-09-04 (user request): 0.7-1.1 -> 0.4-1.0, matching
+            # G1's own t_flight range exactly. Fixes the catchstep/visibility
+            # mismatch from the other direction (shrinking flight time to
+            # fit catchstep's 50-tick/1.0s ceiling, instead of raising
+            # catchstep) -- also closer to a real reaction-time distribution
+            # per user judgment.
+            "t_flight_range": (0.4, 1.0),
             "spawn_z":        0.12,
         },
     )
@@ -774,6 +1829,25 @@ def goalkeeper_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
         func=gk_mdp.reset_from_motion_data,
         mode="reset",
         params={},
+    )
+
+    # Save-contact bounciness DR, matching G1's own randomize_restitution
+    # (restitution_range=[0.0,1.0], resampled every reset). Randomizes the
+    # FOOT geoms (not the ball) -- FULL_COLLISION's priority=1 makes the foot
+    # always win foot-ball contact, so only the foot's own solref actually
+    # affects save bounciness. See randomize_foot_ball_restitution's own
+    # docstring for the live-calibrated dampratio->restitution mapping.
+    cfg.events["randomize_foot_ball_restitution"] = EventTermCfg(
+        func=gk_mdp.randomize_foot_ball_restitution,
+        mode="reset",
+        params={
+            "dampratio_range": (0.35, 1.0),
+            # Explicit -- a function's own default SceneEntityCfg is NEVER
+            # resolved unless it's also present here (mjlab only resolves
+            # SceneEntityCfg objects found in a term's own params dict).
+            # See .claude/skills/reward-shaping-scene-entity-cfg.
+            "asset_cfg": gk_mdp.events._FOOT_COLLISION_CFG,
+        },
     )
 
     # Per-step catchstep decrement for ball visibility warmup.
@@ -809,9 +1883,16 @@ def goalkeeper_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
             params={"ball_name": BALL_NAME, "behind_threshold": -0.5},
             time_out=False,
         ),
+        # FIX 2026-08-06 (user request, "just a tiny bit"): 2500 -> 2600 N,
+        # same direction/reasoning as penalize_sharpcontact's threshold raise
+        # just above -- a small, single step, not a live-evidence-driven
+        # retune. CLAUDE.md's terminations line previously (incorrectly)
+        # documented this as 1500N -- that was sharpforce_termination's own
+        # unused function default (rewards.py); this params override has
+        # always been the real active value. Doc corrected alongside.
         "sharpforce": TerminationTermCfg(
             func=gk_mdp.sharpforce_termination,
-            params={"max_contact_force": 2500.0},
+            params={"max_contact_force": 2600.0},
             time_out=False,
         ),
         # shank_height REMOVED 2026-07-22 -- see base_height's FIX comment
@@ -839,6 +1920,13 @@ def goalkeeper_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
         cfg.terminations.pop("out_of_terrain_bounds", None)
         # No disturbance pushes during play/eval — mirrors kick task play mode.
         cfg.events.pop("push_robot", None)
+        # FIX 2026-08-23 (user request): restitution DR now stays ACTIVE in
+        # play mode too — reverses the push_robot-style pop this had until
+        # today. Per this project's own Training/Play Parity Rule, a policy
+        # evaluated on a different distribution than it trained on gives
+        # misleading results; user judged that principle applies here, not
+        # just to ball spawn range. Foot geoms now resample dampratio
+        # U(0.35,1.0) every play-mode reset too, same as training.
         # RSI disabled in play mode by default — mirrors BoosterT1mjlab kicking task
         # which never registers reset_from_motion_data in play. Always starting from
         # standing makes play behaviour deterministic and consistent across episodes.
@@ -853,8 +1941,8 @@ def goalkeeper_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
                 "ball_name":     BALL_NAME,
                 "dist_range":    (1.5, 3.5),
                 "y_start_range": (-0.3, 0.3),
-                "y_end_range":   (-1.3, 1.3),
-                "t_flight_range": (0.7, 1.1),
+                "y_end_range":   (-1.0, 1.0),  # FIX 2026-08-06: 1.1 -> 1.0 (user request)
+                "t_flight_range": (0.4, 1.0),  # FIX 2026-09-04: matches train block, see that comment
                 "spawn_z":       0.12,
             },
         )

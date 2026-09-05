@@ -85,12 +85,39 @@ HOME_KEYFRAME = EntityCfg.InitialStateCfg(
         r"(Left_Hip_Pitch|Right_Hip_Pitch)": -0.3,
         r"(Left_Knee_Pitch|Right_Knee_Pitch)": 0.6,
         r"(Left_Ankle_Pitch|Right_Ankle_Pitch)": -0.3,
-        r"Left_Shoulder_Pitch": -0.21,
-        r"Left_Shoulder_Roll": -0.41,
-        r"Right_Shoulder_Pitch": -0.11,
-        r"Right_Shoulder_Roll": 1.07,
-        r"Right_Elbow_Pitch": -0.13,
-        r"Right_Elbow_Yaw": 0.21,
+        # FIX 2026-07-24: mirror-symmetric standing pose (was a one-sided
+        # "right arm counterbalance" stance, Right_Shoulder_Roll=1.07 vs
+        # Left=-0.41 -- a leftover from G1's hand-catching reach pose, not
+        # a fit for this feet-only track). Shoulder_Pitch/Elbow_Pitch share
+        # the same axis sign convention L/R (t1_headless.xml: both
+        # axis="0 1 0", same range) so equal values are already symmetric;
+        # Shoulder_Roll/Elbow_Yaw have mirrored axis conventions (axis
+        # "1 0 0"/"0 0 1" but opposite-signed joint ranges L/R) so a
+        # symmetric pose needs equal magnitude, opposite sign. See
+        # docs/BugFixes.md.
+        # FIX 2026-07-27 (CORRECTED, then fine-tuned, THEN matched to
+        # Booster's own official T1 walk-policy default pose, user
+        # request): earlier same-day edits chased Shoulder_Roll toward 0.0
+        # believing that was "hanging down" -- confirmed via render it was
+        # actually this joint's T-POSE reference; corrected toward its
+        # range limit instead, then hand-tuned to 20deg of flare (1.2217
+        # rad). User then asked to check Booster Robotics' own official T1
+        # walking controller's default pose (booster_deploy repo,
+        # tasks/locomotion/locomotion.py:205-214, T1WalkControllerCfg) for
+        # comparison -- it uses Shoulder_Pitch=0.2, Shoulder_Roll=∓1.3,
+        # Elbow_Pitch=0.0, Elbow_Yaw=∓0.5 (same Left-negative/Right-positive
+        # sign convention already used here, confirmed no remapping
+        # needed). All four arm values below now match that official pose
+        # exactly, replacing the hand-tuned ones. _POST_SAVE_STANCE_MAP
+        # (rewards.py) mirrors this exact value -- keep them in sync if
+        # either changes again. See docs/BugFixes.md for the misdiagnosis
+        # writeup, reference images, and this comparison.
+        r"(Left_Shoulder_Pitch|Right_Shoulder_Pitch)": 0.2,
+        r"Left_Shoulder_Roll": -1.3,
+        r"Right_Shoulder_Roll": 1.3,
+        r"(Left_Elbow_Pitch|Right_Elbow_Pitch)": 0.0,
+        r"Left_Elbow_Yaw": -0.5,
+        r"Right_Elbow_Yaw": 0.5,
     },
     joint_vel={".*": 0.0},
 )
