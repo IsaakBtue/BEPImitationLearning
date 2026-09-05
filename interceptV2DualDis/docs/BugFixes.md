@@ -3995,3 +3995,25 @@ Fixes the catchstep/visibility mismatch from the other side (flight time now fit
 **Fix (user request):** reverted `stopball`/`softstop`'s `landing_ok` back to `env._blue_landed_genuine` (matching `success`, and matching the pre-session state) -- treating this as the first candidate to rule out via controlled comparison, rather than leaving an unisolated change in place on a guess. If a future bisect shows this wasn't the actual cause, it can go back to raw `_blue_landed` (the underlying motivation -- more gradient for dives when blue is already satisfied at reset -- still stands and would need addressing some other way).
 
 **Evidence:** `ast.parse` clean. All three `landing_ok` sites (`stopball`, `softstop`, `success`) now consistently read `_blue_landed_genuine`. Not yet validated against a live training run.
+
+---
+
+## 2026-09-04 (session-wide revert + selective re-apply): master synced, branch reset to pre-`87a936c`, only 3 of 6 changes re-applied
+
+**Context (user request):** the whole `87a936c` batch (cleanstop's trigger, softstop's weight halving, `landing_ok`, `t_flight_range`, the `_vanish_step` bug fix, and the orientation reward re-add -- all landed in one commit at the start of this session) was never isolated from the one-shotting regression observed on `model_6750`. Rather than keep guessing which of 6 simultaneous changes caused it, reverted the whole batch and re-applied only the pieces confirmed as genuinely wanted independent of that investigation.
+
+**Steps taken:**
+1. Merged `v2-blue-ball-waypoint` into `master` (real merge, conflicts resolved in the feature branch's favor -- its 216 commits of history supersede master's one stale July commit touching the same lines) and pushed, so the full pre-revert state is preserved on master regardless of what happens to the feature branch next.
+2. Non-destructive revert (new commit `84804a5`, not a history rewrite / force-push) of `rewards.py`, `goalkeeper_env_cfg.py`, `observations.py`, `play.py` back to their exact `a485311` (pre-`87a936c`) content.
+3. Re-applied, cleanly isolated in commit `a098652`:
+   - `_vanish_step` re-roll bug fix (+ difficulty-skewed floor)
+   - `t_flight_range` 0.7-1.1 -> 0.4-1.0
+   - `inner_face_orientation_save`/`foot_inner_face_continuous` re-add, retargeted 55->0 deg, with `_YIELD_TARGET_ANGLE_DEG` split for `contact_yield_velocity_x`/`_y` and the matching `play.py` viewer-arrow fix
+
+**Left reverted (not re-applied), still stock/original as of pre-session:**
+- `cleanstop`'s trigger (back to gating on `softstop`/`landing_ok`, the pre-session behavior -- the `.claude/skills/debugging-mujoco-contact-sensors`-based investigation that motivated decoupling it is still valid evidence if this gets revisited)
+- `softstop`'s weight (back to 36.46, not halved)
+- `stopball`/`softstop`/`success`'s `landing_ok` (all three back to `_blue_landed_genuine`, matching pre-session)
+- The displacement-based `_blue_landed_was_free` classifier (back to step-count-only, `<10` ticks)
+
+**Evidence:** `ast.parse` clean on all 4 files. Live smoke test: env constructs and steps 50 ticks with zero action, no exceptions; both `inner_face_orientation_save`/`foot_inner_face_continuous` confirmed registered in the reward manager's active terms. Not yet validated against a live training run.
