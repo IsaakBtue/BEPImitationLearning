@@ -3985,3 +3985,13 @@ Fixes the catchstep/visibility mismatch from the other side (flight time now fit
 **Final decision (user request):** reverted `stopball`/`softstop`'s `landing_ok` back to raw `env._blue_landed` (bypassing the classifier entirely for these two, regardless of which version of it exists) -- user's actual original goal, stated explicitly, was more training gradient for dive quality when blue is already effectively satisfied at reset, not a perfect RSI-cheese classifier. The displacement-based classifier fix to `_blue_landed_was_free`/`_get_reach_target_y` itself was LEFT IN PLACE (not reverted) since it still benefits every other consumer of `_blue_landed_genuine` (`phase1_active`, `footreach`, `blue_overshoot_penalty`, `blue_stick_landing`, orange/red activation) -- those were never part of this complaint. `success` (a third `landing_ok` site) still uses `_blue_landed_genuine`, unchanged throughout.
 
 **Evidence:** `ast.parse` clean on `rewards.py`/`play.py`. Not yet validated against a live training run. `cleanstop`'s window-shrink (round 1's finding) is still a separate, not-yet-applied pending item.
+
+---
+
+## 2026-09-04 (round 5, further reverted): stopball/softstop's landing_ok back to `_blue_landed_genuine`
+
+**Context:** confirmed via `git show 87a936c` that the `_blue_landed_genuine` -> raw `_blue_landed` change for `stopball`/`softstop` was part of the same large batch commit (`87a936c`) that also changed `cleanstop`'s trigger, halved `softstop`'s weight, shrunk `t_flight_range`, and fixed the ball-visibility `_vanish_step` bug -- all in one commit. The checkpoint that showed the one-shotting regression (`model_6750`) was trained entirely under that batch, so the actual cause was never isolated among these 5+ simultaneous changes.
+
+**Fix (user request):** reverted `stopball`/`softstop`'s `landing_ok` back to `env._blue_landed_genuine` (matching `success`, and matching the pre-session state) -- treating this as the first candidate to rule out via controlled comparison, rather than leaving an unisolated change in place on a guess. If a future bisect shows this wasn't the actual cause, it can go back to raw `_blue_landed` (the underlying motivation -- more gradient for dives when blue is already satisfied at reset -- still stands and would need addressing some other way).
+
+**Evidence:** `ast.parse` clean. All three `landing_ok` sites (`stopball`, `softstop`, `success`) now consistently read `_blue_landed_genuine`. Not yet validated against a live training run.

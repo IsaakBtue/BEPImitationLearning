@@ -2479,21 +2479,19 @@ def stopball(
     foot_in_contact = torch.stack([left_in_contact, right_in_contact], dim=-1)  # (B, 2)
     correct_foot_contact = foot_in_contact[torch.arange(env.num_envs, device=env.device), foot_idx]
 
-    # FIX 2026-09-04 (final, user request): reads raw env._blue_landed, not
-    # env._blue_landed_genuine. Went back and forth same day (briefly used
-    # raw _blue_landed -> reverted to _blue_landed_genuine once a "free"
-    # classifier bug seemed to explain a one-shotting regression -> found
-    # the classifier fix didn't actually change the underlying picture,
-    # RSI's random-donor-env mechanism means most blue landings look
-    # "already there" regardless of which classifier is used). User's
-    # actual original goal (stated explicitly): more gradient for dives
-    # when blue is already effectively satisfied at reset, not a perfect
-    # RSI-cheese classifier -- raw env._blue_landed does exactly that,
-    # directly. `_blue_landed_genuine`/`_blue_landed_was_free` (now
-    # displacement-based, see _get_reach_target_y) are UNCHANGED and still
-    # used by every other consumer (phase1_active/footreach/
-    # blue_overshoot_penalty/etc.) -- only stopball/softstop bypass it.
-    landing_ok = ~env._blue_wide | env._blue_landed
+    # FIX 2026-09-04 (reverted again, user request): back to
+    # env._blue_landed_genuine. Full history: was genuine originally ->
+    # changed to raw _blue_landed in the 87a936c batch (user request: more
+    # gradient for dives when blue is already satisfied at reset) -> a
+    # one-shotting regression was observed on the checkpoint trained under
+    # that batch -> since that batch changed 5+ things at once (this,
+    # cleanstop's trigger, softstop's weight, t_flight_range, ball
+    # visibility), the actual cause was never isolated -> reverting this
+    # specific piece back to genuine as the first candidate to rule out via
+    # a controlled comparison, rather than leaving 87a936c's un-isolated
+    # raw-_blue_landed change in place on a guess. If a bisect later shows
+    # this wasn't the cause, it can go back to raw _blue_landed.
+    landing_ok = ~env._blue_wide | env._blue_landed_genuine
 
     # Raw condition (not gated by the one-shot ~env._sb_flag latch) -- this
     # is "is a deflection happening right now", read by softstop below.
@@ -2625,10 +2623,11 @@ def softstop(
     same_step_as_stopball = getattr(
         env, "_sb_deflection_now", torch.zeros(env.num_envs, dtype=torch.bool, device=env.device)
     )
-    # FIX 2026-09-04 (final, user request): see stopball's matching comment
-    # (above, same file) for the full back-and-forth -- raw env._blue_landed,
-    # not env._blue_landed_genuine.
-    landing_ok = ~env._blue_wide | env._blue_landed
+    # FIX 2026-09-04 (reverted again, user request): see stopball's matching
+    # comment (above, same file) for the full history -- back to
+    # env._blue_landed_genuine, isolating this as one candidate for the
+    # one-shotting regression rather than leaving it changed on a guess.
+    landing_ok = ~env._blue_wide | env._blue_landed_genuine
 
     fired = (
         (ball_x_vel > velocity_threshold) & in_front & correct_foot_contact
