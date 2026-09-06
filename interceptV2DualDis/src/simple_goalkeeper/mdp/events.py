@@ -512,7 +512,15 @@ def _init_visibility_state(env: "ManagerBasedRlEnv", env_ids: torch.Tensor) -> N
 
     if not hasattr(env, "_startstep"):
         env._startstep = torch.zeros(n, dtype=torch.long, device=env.device)
-    env._startstep[env_ids] = 50 - torch.randint(3, 11, (len(env_ids),), device=env.device)
+    # FIX 2026-09-07 (user request, "decrease the warmup time"): randint(3,11)
+    # -> randint(1,4) -- warmup blackout right after each throw shrinks from
+    # 3-10 steps (0.06-0.2s @ 0.02s/tick) to 1-3 steps (0.02-0.06s). The old
+    # range was eating up to 20-50% of the shortest (0.4s) flights' total
+    # window right at the start, before the robot had ever seen the ball --
+    # a real contributor to "the robot just doesn't dive" reports. Some
+    # blackout kept (not removed to 0) to preserve the token camera-detection-
+    # latency this was modeling in the first place.
+    env._startstep[env_ids] = 50 - torch.randint(1, 4, (len(env_ids),), device=env.device)
 
     if not hasattr(env, "_vanish_step"):
         env._vanish_step = torch.zeros(n, dtype=torch.long, device=env.device)
@@ -815,6 +823,69 @@ class ball_difficulty_curriculum:
         # structural behavior, not a bolted-on guard.
         env._ball_difficulty = min(1.0, env._ball_difficulty + self._step_size * curriculumupdate)
         return {"ball_difficulty": torch.tensor(env._ball_difficulty)}
+
+
+class domain_rand_curriculum:
+    """Slower-paced sibling of ball_difficulty_curriculum, for domain-
+    randomization-style mechanics that shouldn't ramp on ball_difficulty's
+    own (performance-dependent, can-be-fast) pace.
+
+    NEW 2026-09-07 (user request): "vanish step[ping should] use a 0.25 as
+    fast as ball_difficulty metric, because it is too fast of a metric".
+    ball_difficulty's pace is tied to smoothed episode length -- it can climb
+    quickly once the policy is already saving reliably, which is exactly the
+    wrong signal for the ball-visibility vanish_step skew (see
+    observations.py's _compute_ball_visibility): that skew exists to give an
+    easier, more-visible on-ramp, and tying it to ball_difficulty meant it
+    could disappear before the policy had actually had much practice at low
+    visibility. Same accumulator mechanism as ball_difficulty_curriculum
+    (shares the same EMA-smoothed episode-length signal via
+    _update_smoothed_ep_len, so the two never fight over noisy windows), just
+    a separate value (env._domain_rand_curriculum) with its own, slower
+    step_size -- default 0.0025 (0.01 * 0.25), i.e. exactly 1/4 of
+    ball_difficulty's default step_size. In practice (user's own estimate,
+    not yet validated against a live run) this should reach full strength
+    (1.0) around iteration ~10000 rather than ball_difficulty's faster climb.
+
+    First consumer: observations.py's vanish_floor skew. Registered as its
+    own curriculum term (not reusing ball_difficulty_curriculum directly)
+    since that class hardcodes the env._ball_difficulty attribute name --
+    kept as a separate, parallel class rather than parameterizing that one,
+    matching this file's existing pattern of near-duplicate curriculum
+    classes (reward_curriculum_ep_len / correct_foot_save_curriculum /
+    ball_difficulty_curriculum are all separate already) rather than a
+    shared-but-more-abstract base.
+    """
+
+    def __init__(self, cfg: "CurriculumTermCfg", env: "ManagerBasedRlEnv") -> None:
+        p = cfg.params
+        self._step_size       = p.get("step_size",       0.0025)
+        self._update_interval = p.get("update_interval",  500)
+        self._ep_len_divisor  = p.get("ep_len_divisor",    50)
+        self._last_update     = 0
+        if not hasattr(env, "_domain_rand_curriculum"):
+            env._domain_rand_curriculum = 0.0
+
+    def __call__(
+        self,
+        env: "ManagerBasedRlEnv",
+        env_ids: torch.Tensor,
+        **kwargs,
+    ) -> dict:
+        if env.common_step_counter - self._last_update < self._update_interval:
+            return {"domain_rand_curriculum": torch.tensor(env._domain_rand_curriculum)}
+
+        self._last_update = env.common_step_counter
+
+        if len(env_ids) > 0:
+            mean_ep_len = env.episode_length_buf[env_ids].float().mean().item()
+        else:
+            mean_ep_len = 0.0
+        smoothed_ep_len = _update_smoothed_ep_len(env, mean_ep_len)
+        curriculumupdate = int(smoothed_ep_len / self._ep_len_divisor)
+
+        env._domain_rand_curriculum = min(1.0, env._domain_rand_curriculum + self._step_size * curriculumupdate)
+        return {"domain_rand_curriculum": torch.tensor(env._domain_rand_curriculum)}
 
 
 class far_travel_curriculum:

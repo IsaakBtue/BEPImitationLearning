@@ -82,16 +82,18 @@ def _compute_ball_visibility(env: "ManagerBasedRlEnv", ball_name: str) -> torch.
     # re-rolled every reset via `just_reset`, matching G1's per-reset
     # resampling.
     #
-    # Also skewed toward higher (more-visible) values early in training,
-    # tied to the existing `env._ball_difficulty` curriculum (0->1, already
-    # used elsewhere, e.g. events.py's y_end_range coupling): the random
-    # range's floor starts at 20 (mostly visible, ball can only hide in the
-    # last ~10 flying ticks) at difficulty=0, and linearly drops to 0 (full
-    # G1 randomness) at difficulty=1 -- gives an easier on-ramp without ever
-    # fully excluding low-visibility episodes, and reaches exact G1 parity
-    # once fully trained.
-    ball_difficulty = float(getattr(env, "_ball_difficulty", 1.0))
-    vanish_floor = int(round(20.0 * (1.0 - ball_difficulty)))
+    # Also skewed toward higher (more-visible) values early in training: the
+    # random range's floor starts at 20 (mostly visible, ball can only hide
+    # in the last ~10 flying ticks) at curriculum=0, and linearly drops to 0
+    # (full G1 randomness) at curriculum=1 -- gives an easier on-ramp without
+    # ever fully excluding low-visibility episodes, and reaches exact G1
+    # parity once fully ramped.
+    # FIX 2026-09-07 (user request): was env._ball_difficulty, keyed to a
+    # performance-dependent pace the user found "too fast" for this skew's
+    # purpose. Now reads the dedicated, slower domain_rand_curriculum
+    # (mdp/events.py, 0.25x ball_difficulty's step_size) instead.
+    domain_rand = float(getattr(env, "_domain_rand_curriculum", 1.0))
+    vanish_floor = int(round(20.0 * (1.0 - domain_rand)))
 
     if not hasattr(env, "_vanish_step"):
         env._vanish_step = torch.randint(vanish_floor, 30, (env.num_envs,), device=env.device)

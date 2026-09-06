@@ -287,6 +287,21 @@ def goalkeeper_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
                 "step_size":       0.01,  # difficulty units per curriculumupdate per check
             },
         )
+        # NEW 2026-09-07 (user request): separate, slower-paced curriculum for
+        # domain-randomization-style mechanics (currently: ball_pos_xy_b's
+        # vanish_step skew in observations.py) that shouldn't ramp on
+        # ball_difficulty's own pace -- user found that pace "too fast" for
+        # this purpose. Same mechanism/shared EMA signal as ball_difficulty,
+        # just step_size=0.0025 (0.25x of ball_difficulty's 0.01). See
+        # domain_rand_curriculum's own docstring (mdp/events.py).
+        cfg.curriculum["domain_rand"] = CurriculumTermCfg(
+            func=gk_mdp.domain_rand_curriculum,
+            params={
+                "update_interval": 500,
+                "ep_len_divisor":  50,
+                "step_size":       0.0025,
+            },
+        )
 
         # ================================================================
         # TIER 1 -- core save mechanics (essential to the final product):
@@ -1796,7 +1811,14 @@ def goalkeeper_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
         mode="reset",
         params={
             "ball_name":      BALL_NAME,
-            "dist_range":     (1.5, 3.5),
+            # FIX 2026-09-07 (user request, "further away targets"): 1.5-3.5
+            # -> 2.0-5.0 -- also lands close to G1's own hardcoded spawn
+            # distance (2.0*rand()+3.0 = uniform(3.0,5.0), legged_robot.py:779)
+            # rather than SGK's original narrower range. Speed = dist/t_flight,
+            # so this also widens the fast tail (worst case 5.0/0.4=12.5 m/s,
+            # vs 3.5/0.4=8.75 m/s before) -- still within G1's own envelope
+            # (G1 hits the same 12.5 m/s worst case with its wider dist range).
+            "dist_range":     (2.0, 5.0),
             "y_start_range":  (-0.3, 0.3),
             "y_end_range":    (-1.0, 1.0),  # FIX 2026-08-06: 1.1 -> 1.0 (user request)
             # FIX 2026-09-04 (re-applied after a session-wide revert): 0.7-1.1
@@ -1925,7 +1947,7 @@ def goalkeeper_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
             mode="reset",
             params={
                 "ball_name":     BALL_NAME,
-                "dist_range":    (1.5, 3.5),
+                "dist_range":    (2.0, 5.0),  # FIX 2026-09-07: matches train block, see that comment
                 "y_start_range": (-0.3, 0.3),
                 "y_end_range":   (-1.0, 1.0),  # FIX 2026-08-06: 1.1 -> 1.0 (user request)
                 "t_flight_range": (0.4, 1.0),  # FIX 2026-09-04: matches train block, see that comment
