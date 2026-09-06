@@ -1483,20 +1483,17 @@ def footreach(
     upright = 1.0 - torch.clamp(torch.sum(projected_grav[:, :2] ** 2, dim=1), 0.0, 1.0)
     behind = _ball_is_behind(env, ball_name)
 
-    # FIX 2026-09-07 (user request, "not learning to actually stop first at
-    # blue"): was `* (~env._footreach_overshot_flag).float()` -- zeroed
-    # footreach outright once overshot, indistinguishable from "never
-    # approached at all" from the policy's perspective, same zero-reward-vs-
-    # penalty gap already fixed this same way elsewhere in this file (see
-    # foot_inner_face_continuous's and contact_yield_velocity's own FIX
-    # entries: "a mild, informative penalty gives clearer gradient... than
-    # merely withholding reward"). Now mirrors taskrew NEGATIVE instead of
-    # zeroing it -- sticky for the rest of the episode (same flag, unchanged
-    # trigger), so continuing to sit/dive near the crossing point after
-    # overshooting blue without landing now actively costs what it would
-    # have earned, rather than costing nothing.
-    gated = torch.where(env._footreach_overshot_flag, -taskrew, taskrew)
-    return gated * upright * (~behind).float()
+    # REVERTED 2026-09-07 (user request): the 2026-09-07 negative-mirror
+    # attempt (`where(overshot_flag, -taskrew, taskrew)`) turned out backwards
+    # -- taskrew is proximity-based (large when CLOSE to the crossing point),
+    # so the penalty was largest right at the overshoot boundary and faded
+    # toward zero the further the foot actually overshot, the opposite of
+    # "punish overshooting more the worse it gets". blue_overshoot_penalty
+    # already exists as the correctly-shaped mechanism for this (grows with
+    # signed_progress past env._blue_landing_radius_current, capped at
+    # max_overshoot, not sticky) -- back to plain zeroing here rather than
+    # duplicating/fighting that term with a second, wrongly-shaped penalty.
+    return taskrew * upright * (~behind).float() * (~env._footreach_overshot_flag).float()
 
 
 def near_stick_reach(
