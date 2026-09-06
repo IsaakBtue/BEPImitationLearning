@@ -703,16 +703,20 @@ def goalkeeper_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
         # gated zeros into a phantom ball. G1 noises first, then masks
         # (legged_robot.py:425-426) — noise_scale reproduces that ordering.
         # Unscaled — see item-21 note above (G1's ball_pos scale is dead code).
-        # RE-ENABLED 2026-09-02 (user request): full G1 pre-save visibility
-        # gate (warmup + FOV-ish flying + random mid-flight vanish) restored
-        # -- always_visible True->False. hide_behind_torso/hide_after_steps
-        # (the v2 post-save release gate) are untouched, a separate concept
-        # layered on top -- see ball_pos_xy_b's own docstring.
+        # REVERTED 2026-09-06 (user request, automated one-shot check): the
+        # 2026-09-02 G1 visibility re-enable is suspected of stalling
+        # blue_ball_landed (< 0.025 by iteration 6000) -- reverted back to
+        # always_visible=True (pre-2026-09-02 behavior). contact_yield_
+        # velocity_x/y split, foot orientation rewards, cleanstop/softstop/
+        # landing_ok, blue-landing classifier, and spectral norm are all
+        # UNCHANGED by this revert -- visibility gating was hypothesized to
+        # be the only real behavioral difference from the last known-good
+        # version, per live blue_ball_landed diffing.
         "ball_pos_b": ObservationTermCfg(
             func=gk_mdp.ball_pos_xy_b,
             params={
                 "ball_name": BALL_NAME,
-                "always_visible": False,
+                "always_visible": True,
                 "hide_behind_torso": True,
                 "hide_after_steps": 75,
                 "noise_scale": 0.05,
@@ -731,16 +735,11 @@ def goalkeeper_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
         k: ObservationTermCfg(func=v.func, params=v.params, scale=v.scale)
         for k, v in actor_terms.items()
     }
-    # RE-ENABLED 2026-09-02 (user request): warmup-only gate, matching G1's
-    # real privileged-obs behavior -- critic loses the ball only during the
-    # brief initial_vanish blackout, NOT the actor's flying/random_vanish
-    # gates (G1 never applies those past end_target_local's own mask --
-    # see ball_pos_b's warmup_only param docstring). NOT the same as the
-    # actor's full gate above -- do not set always_visible=True nor
-    # warmup_only=False here without re-checking G1's split first.
+    # REVERTED 2026-09-06 (user request, automated one-shot check) -- see
+    # the actor ball_pos_b term above for the full rationale.
     critic_terms["ball_pos_b"] = ObservationTermCfg(
         func=gk_mdp.ball_pos_b,
-        params={"ball_name": BALL_NAME, "always_visible": False, "warmup_only": True},
+        params={"ball_name": BALL_NAME, "always_visible": True},
     )
     critic_terms.update({
         "base_lin_vel": ObservationTermCfg(
