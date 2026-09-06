@@ -112,16 +112,15 @@ _DEFAULT_ROBOT_CFG = SceneEntityCfg("robot")
 # past it. Not yet validated against a live training run under this target.
 # FIX 2026-08-22 (user request): retargeted 80->70 -- see docs/BugFixes.md.
 # FIX 2026-08-23 (user request): retargeted 70->55.
-# FIX 2026-09-04 (re-applied after a session-wide revert): retargeted 55->0
-# (0 deg off forward = 90 deg off Y = straight forward) -- these two rewards
-# now reward the leading foot for NOT rotating off-forward, the opposite of
-# their original "turn sideways to block" intent, since the sideways turn
-# was the root cause of a reported unwanted foot rotation. Split off
-# `_YIELD_TARGET_ANGLE_DEG` (below) to keep contact_yield_velocity_x/y's
-# own target (which shares this constant) at the old 55 deg value -- these
-# two concepts are independent (block-face orientation vs. contact-yield
-# direction), decoupled per user request.
-_FOOT_TARGET_ANGLE_DEG = 0.0
+# REVERTED 2026-09-06 (user request): 0->55, back to the sideways block-
+# posture target. This was flipped to 0 (straight forward) on 2026-09-04,
+# bundled together with the unrelated ball-visibility-gate work -- reverted
+# here specifically to isolate the visibility gate as the only variable in
+# a blue_ball_landed debugging run. `_YIELD_TARGET_ANGLE_DEG` (below) still
+# independently carries 55 deg for contact_yield_velocity_x/y, so this
+# revert is a no-op for that split (both constants now agree again, as
+# they did before the split).
+_FOOT_TARGET_ANGLE_DEG = 55.0
 _FOOT_TARGET_COS = math.cos(math.radians(_FOOT_TARGET_ANGLE_DEG))
 _FOOT_TARGET_SIN = math.sin(math.radians(_FOOT_TARGET_ANGLE_DEG))
 
