@@ -1482,7 +1482,21 @@ def footreach(
     projected_grav = robot.data.projected_gravity_b
     upright = 1.0 - torch.clamp(torch.sum(projected_grav[:, :2] ** 2, dim=1), 0.0, 1.0)
     behind = _ball_is_behind(env, ball_name)
-    return taskrew * upright * (~behind).float() * (~env._footreach_overshot_flag).float()
+
+    # FIX 2026-09-07 (user request, "not learning to actually stop first at
+    # blue"): was `* (~env._footreach_overshot_flag).float()` -- zeroed
+    # footreach outright once overshot, indistinguishable from "never
+    # approached at all" from the policy's perspective, same zero-reward-vs-
+    # penalty gap already fixed this same way elsewhere in this file (see
+    # foot_inner_face_continuous's and contact_yield_velocity's own FIX
+    # entries: "a mild, informative penalty gives clearer gradient... than
+    # merely withholding reward"). Now mirrors taskrew NEGATIVE instead of
+    # zeroing it -- sticky for the rest of the episode (same flag, unchanged
+    # trigger), so continuing to sit/dive near the crossing point after
+    # overshooting blue without landing now actively costs what it would
+    # have earned, rather than costing nothing.
+    gated = torch.where(env._footreach_overshot_flag, -taskrew, taskrew)
+    return gated * upright * (~behind).float()
 
 
 def near_stick_reach(
