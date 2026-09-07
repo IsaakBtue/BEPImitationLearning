@@ -896,16 +896,24 @@ class domain_rand_curriculum:
     same "stuck at a mediocre rate shouldn't creep to full strength" bug,
     same fix (running max instead of step_size * rate).
 
-    The tricky part: a permanent 0.25x SCALE on a running max would cap
-    domain_rand at 0.25 forever (rate maxes at 1.0, 0.25*1.0=0.25) -- not
-    "slower", just permanently stuck short of full strength. Instead, this
-    class reads the SAME raw per-window success rate as ball_difficulty but
-    smooths it on its OWN, separately slower EMA track
+    The tricky part: a permanent scale on a running max would cap domain_rand
+    short forever (e.g. a 0.25x scale caps it at 0.25, since rate maxes at
+    1.0) -- not "slower", just permanently stuck short of full strength.
+    Instead, this class reads the SAME raw per-window success rate as
+    ball_difficulty but smooths it on its OWN, separately slower EMA track
     (_smoothed_softstop_success_slow, alpha = _CURRICULUM_EMA_ALPHA *
-    alpha_scale, default alpha_scale=0.25 i.e. ~4x more sluggish to respond
-    to a change) before taking ITS OWN running max. This still eventually
+    alpha_scale) before taking ITS OWN running max. This still eventually
     reaches the same ceiling (1.0) if success rate sustains -- it just takes
     longer to catch up to a rise, rather than being capped short of it.
+
+    FIX 2026-09-07 (later same day, user request, "make it 2x longer" --
+    the original 4x-slower pace wasn't visually distinguishable enough on
+    a check plot): alpha_scale 0.25 -> 0.5. Convergence time to a step
+    change scales roughly with 1/alpha, not linearly with alpha_scale
+    itself -- alpha_scale=0.25 (alpha=0.075) took ~4.6x as many windows to
+    reach 90% of a step change as ball_difficulty's alpha=0.3; alpha_scale=
+    0.5 (alpha=0.15) takes ~2.2x as many, verified by direct simulation of
+    this exact formula, not just the naive "0.5 = half as fast" assumption.
 
     First consumer: observations.py's vanish_floor skew -- that skew exists
     to give an easier, more-visible on-ramp; tying it to ball_difficulty's
@@ -919,7 +927,7 @@ class domain_rand_curriculum:
 
     def __init__(self, cfg: "CurriculumTermCfg", env: "ManagerBasedRlEnv") -> None:
         p = cfg.params
-        self._alpha           = _CURRICULUM_EMA_ALPHA * p.get("alpha_scale", 0.25)
+        self._alpha           = _CURRICULUM_EMA_ALPHA * p.get("alpha_scale", 0.5)
         self._update_interval = p.get("update_interval",  500)
         self._last_update     = 0
         if not hasattr(env, "_domain_rand_curriculum"):

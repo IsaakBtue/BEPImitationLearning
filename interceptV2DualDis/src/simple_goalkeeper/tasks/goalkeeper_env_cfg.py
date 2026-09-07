@@ -293,14 +293,14 @@ def goalkeeper_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
         # ball_difficulty's own pace -- user found that pace "too fast" for
         # this purpose. Same running-max-of-success-rate mechanism as
         # ball_difficulty, but smoothed on its OWN slower EMA track
-        # (alpha_scale=0.25 -> ~4x more sluggish to respond) rather than a
+        # (alpha_scale=0.5 -> ~2x more sluggish to respond) rather than a
         # permanent scale-down, so it still eventually reaches full strength,
         # just slower. See domain_rand_curriculum's own docstring (mdp/events.py).
         cfg.curriculum["domain_rand"] = CurriculumTermCfg(
             func=gk_mdp.domain_rand_curriculum,
             params={
                 "update_interval": 500,
-                "alpha_scale":     0.25,
+                "alpha_scale":     0.5,
             },
         )
 
