@@ -307,9 +307,7 @@ def goalkeeper_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
         # far_travel_curriculum (mdp/events.py) -- docs/superpowers/specs/
         # 2026-07-18-doublestep-research-and-plan.md's recommendation B, an
         # explicit curriculum over required lateral TRAVEL DISTANCE for far
-        # regions, decoupled from ball_difficulty (far needs a genuine
-        # multi-step gait, a different/slower thing to ramp than general
-        # task competence). The class itself and its consumer wiring
+        # regions. The class itself and its consumer wiring
         # (use_far_travel_curriculum=True, regions.py) were never removed --
         # only this registration was, at some point, silently: with no
         # entry here, env._far_inner/_far_outer never get created, so
@@ -318,18 +316,17 @@ def goalkeeper_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
         # requirement from iteration 0 -- confirmed live in docs/BugFixes.md
         # that this curriculum correctly reached full width by iteration
         # 10000 in a past run, so this isn't unproven, just re-activating a
-        # previously-working mechanism. Defaults (lo=0.5, hi=1.0, seeded to
-        # G1 STEP's own init-fraction-of-span) match _REGION_Y_END_RANGE's
-        # current (0.5,1.0) far bound exactly -- see that class's own
-        # docstring for the full worked-example numbers.
+        # previously-working mechanism.
+        # FIX 2026-09-07 (same day, user request, "use ball_difficulty for
+        # the far region to scale"): now a pure function of
+        # env._ball_difficulty (see the class's own docstring) -- no more
+        # step_size/ep_len_divisor/update_interval, those were for the old
+        # independent accumulator this class no longer has.
         cfg.curriculum["far_travel"] = CurriculumTermCfg(
             func=gk_mdp.far_travel_curriculum,
             params={
-                "update_interval": 500,
-                "ep_len_divisor":  50,
-                "step_size":       0.0013,
-                "lo":              0.5,
-                "hi":              1.0,
+                "lo": 0.5,
+                "hi": 1.0,
             },
         )
 
@@ -507,15 +504,24 @@ def goalkeeper_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
                 "ep_len_divisor":  50,
             },
         )
-        cfg.curriculum["blue_overshoot_penalty_curriculum"] = CurriculumTermCfg(
-            func=gk_mdp.reward_curriculum_ep_len,
-            params={
-                "reward_name": "blue_overshoot_penalty",
-                "base_weight": -60.0,  # FIX 2026-07-23: was -30.0, too lenient
-                "update_interval": 500,
-                "ep_len_divisor":  50,
-            },
-        )
+        # REMOVED 2026-09-07 (user request, "combine footreach and overshoot
+        # penalty... don't have them split"): blue_overshoot_penalty's
+        # curriculum entry -- must be removed alongside the reward term
+        # itself (below), not left behind: reward_curriculum_ep_len.__init__
+        # does env.reward_manager.get_term_cfg("blue_overshoot_penalty"),
+        # which crashes at env construction if the reward is gone but this
+        # curriculum entry stays. Its job (grow the overshoot penalty over
+        # training) is now handled by footreach's OWN weight curriculum
+        # below, since the penalty is computed inside footreach directly.
+        # cfg.curriculum["blue_overshoot_penalty_curriculum"] = CurriculumTermCfg(
+        #     func=gk_mdp.reward_curriculum_ep_len,
+        #     params={
+        #         "reward_name": "blue_overshoot_penalty",
+        #         "base_weight": -60.0,
+        #         "update_interval": 500,
+        #         "ep_len_divisor":  50,
+        #     },
+        # )
         # FIX 2026-08-25 (user request, "faster blue/green approach" --
         # balancing half of the "raise speed rewards" set): base_weight
         # 8.0 -> 4.0 (peak 20.0 -> 10.0), same "close AND slow" vs. speed
@@ -1101,17 +1107,21 @@ def goalkeeper_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
             weight=10.0,
             params={"ball_name": BALL_NAME, "asset_cfg": _FEET_CFG},
         ),
-        # Without this, ignoring the blue waypoint entirely on a wide crossing
-        # earns the same reward (zero, from the landing-gated terms above) as
-        # attempting and failing -- no gradient discourages skipping it.
-        # FIX 2026-07-23: -30.0 -> -60.0 (user request: "too lenient for the
-        # blue ball"). Doubled to match base_weight below (curriculum-scaled
-        # in step with blue_ball_landed/blue_stick_landing's own 2x growth).
-        "blue_overshoot_penalty": RewardTermCfg(
-            func=gk_mdp.blue_overshoot_penalty,
-            weight=-60.0,
-            params={"ball_name": BALL_NAME, "asset_cfg": _FEET_CFG},
-        ),
+        # REMOVED 2026-09-07 (user request, "combine footreach and overshoot
+        # penalty... don't have them split, make it drop off again once it
+        # overshoots"): folded directly into footreach as a smooth, live
+        # penalty subtracted from taskrew (rewards.py, see footreach's
+        # return statement) -- replaces both this term and footreach's own
+        # old sticky hard-zero. Without this, ignoring the blue waypoint
+        # entirely on a wide crossing used to earn the same reward (zero,
+        # from the landing-gated terms above) as attempting and failing --
+        # footreach's new smooth penalty still provides that same gradient,
+        # just computed in one place instead of two.
+        # "blue_overshoot_penalty": RewardTermCfg(
+        #     func=gk_mdp.blue_overshoot_penalty,
+        #     weight=-60.0,
+        #     params={"ball_name": BALL_NAME, "asset_cfg": _FEET_CFG},
+        # ),
         # Dense reward for "close AND slow" near blue -- the exact joint
         # condition the settle-window landing check requires.
         # FIX 2026-08-25 (user request, "faster blue/green approach"):

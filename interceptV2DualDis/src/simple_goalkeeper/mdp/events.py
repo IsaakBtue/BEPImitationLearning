@@ -1041,24 +1041,39 @@ class far_travel_curriculum:
     reset_ball_rolling_by_region), replacing the generic lo/hi/d-based lerp
     for that branch entirely. footreach's far_scale escalation (rewards.py),
     also ported from jump's jump_scale, is a separate fix -- see BugFixes.md.
+
+    FIX 2026-09-07 (user request, "use ball_difficulty for the far region to
+    scale"): dropped the independent episode-length-based accumulator
+    (step_size/ep_len_divisor/its own EMA state) entirely -- now a pure,
+    stateless function of env._ball_difficulty each check:
+        far_inner(d) = lerp(seed_inner, lo, d)
+        far_outer(d) = lerp(seed_outer, hi, d)
+    where seed_inner/seed_outer are the same G1-STEP-derived seeds as
+    before (~0.567/~0.900 at d=0), and d=1 lands exactly on lo/hi (full
+    range), same endpoints the old accumulator eventually reached. This
+    reuses ball_difficulty's NEW running-max-of-success-rate signal
+    (2026-09-07, same day) directly -- no separate signal to keep in sync,
+    and since ball_difficulty is itself monotonic (running max, never
+    decreases), this lerp is too, so no oscillation risk despite dropping
+    the old accumulator's own step-limiting. This intentionally goes back
+    to reading ball_difficulty after this class's original 2026-07-18
+    rationale for decoupling from it (ball_difficulty saturated too fast
+    back then, using the OLD episode-length-based ball_difficulty) --
+    that concern doesn't apply the same way to the NEW success-rate-bounded
+    ball_difficulty, which can't outrun demonstrated competence either.
     """
 
     def __init__(self, cfg: "CurriculumTermCfg", env: "ManagerBasedRlEnv") -> None:
         p = cfg.params
-        self._step_size       = p.get("step_size",       0.0013)
-        self._update_interval = p.get("update_interval", 500)
-        self._ep_len_divisor  = p.get("ep_len_divisor",   50)
-        self._lo              = p.get("lo", 0.5)  # FIX 2026-08-01: reverted to 0.5 (was 0.65 since 2026-07-23)
-        self._hi              = p.get("hi", 1.0)  # FIX 2026-08-06: 1.1 -> 1.0 (was 1.3 pre-2026-08-01)
-        # FIX 2026-07-20: was -(update_interval) -- see reward_curriculum_ep_len's
-        # __init__ comment for the full explanation. 0 matches G1's
-        # last_step_counter=0 init, requiring a full window before first fire.
-        self._last_update     = 0
+        self._lo = p.get("lo", 0.5)  # FIX 2026-08-01: reverted to 0.5 (was 0.65 since 2026-07-23)
+        self._hi = p.get("hi", 1.0)  # FIX 2026-08-06: 1.1 -> 1.0 (was 1.3 pre-2026-08-01)
         span = self._hi - self._lo
+        self._seed_inner = self._lo + _G1_STEP_INNER_FRAC * span
+        self._seed_outer = self._lo + _G1_STEP_OUTER_FRAC * span
         if not hasattr(env, "_far_inner"):
-            env._far_inner = self._lo + _G1_STEP_INNER_FRAC * span
+            env._far_inner = self._seed_inner
         if not hasattr(env, "_far_outer"):
-            env._far_outer = self._lo + _G1_STEP_OUTER_FRAC * span
+            env._far_outer = self._seed_outer
 
     def __call__(
         self,
@@ -1066,27 +1081,9 @@ class far_travel_curriculum:
         env_ids: torch.Tensor,
         **kwargs,
     ) -> dict:
-        if env.common_step_counter - self._last_update < self._update_interval:
-            return {"far_inner": torch.tensor(env._far_inner), "far_outer": torch.tensor(env._far_outer)}
-
-        self._last_update = env.common_step_counter
-
-        if len(env_ids) > 0:
-            mean_ep_len = env.episode_length_buf[env_ids].float().mean().item()
-        else:
-            mean_ep_len = 0.0
-        # Reuses the SAME shared EMA state as ball_difficulty_curriculum /
-        # reward_curriculum_ep_len (_update_smoothed_ep_len is idempotent per
-        # call within a window and all three curricula read the same smoothed
-        # signal) so this doesn't introduce a second, independently-noisy
-        # episode-length estimate.
-        smoothed_ep_len = _update_smoothed_ep_len(env, mean_ep_len)
-        curriculumupdate = int(smoothed_ep_len / self._ep_len_divisor)
-
-        span = self._hi - self._lo
-        step = self._step_size * span * curriculumupdate
-        env._far_inner = max(self._lo, env._far_inner - step)
-        env._far_outer = min(self._hi, env._far_outer + step)
+        d = float(getattr(env, "_ball_difficulty", 0.0))
+        env._far_inner = self._seed_inner + (self._lo - self._seed_inner) * d
+        env._far_outer = self._seed_outer + (self._hi - self._seed_outer) * d
         return {"far_inner": torch.tensor(env._far_inner), "far_outer": torch.tensor(env._far_outer)}
 
 

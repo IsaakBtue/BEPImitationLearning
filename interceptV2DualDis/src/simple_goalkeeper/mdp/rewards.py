@@ -1311,44 +1311,31 @@ def footreach(
     # schedule on wide crossings. See _get_reach_target_y.
     reach_target_y = _get_reach_target_y(env, ball_name, asset_cfg=asset_cfg)  # (N,)
 
-    # FIX 2026-07-24: overshoot-kill flag. footreach's vel_sigma (below) picks
-    # up the foot's raw post-physics velocity, which includes the impulse
-    # from a ball collision, not just deliberate policy motion -- confirmed
-    # live via play.py traces: footreach spiked 5->13->21->28 across 3 ticks
-    # while dist_to_blue stayed flat (~0.37-0.38, not converging), then
-    # crashed back to ~8 the same tick foot_ang_vel_xy hit -10.58 and
-    # feet_slippage crashed to 0.13 -- both independent signatures of a hard
-    # impact -- confirming the peak was the contact impulse, not genuine
-    # approach. No G1 equivalent exists for this gate (checked every reward
-    # function in legged_robot.py -- G1's eereach never zeros on distance,
-    # its `behind` mask only sets a fixed vel_sigma=2.0; see docs/BugFixes.md).
-    # Uses the SAME direction-aware signed_progress blue_overshoot_penalty
-    # already computes, so "overshot" means the same thing in both places.
-    # Sticky per episode (not per-tick) so a single clear miss stops footreach
-    # from paying out on repeat dives at the same spot; foot_proximity/
-    # blue_stick_landing/blue_ball_landed are untouched, so a genuine
-    # recovery-and-land afterward still earns real reward through those.
+    # Overshoot geometry -- the SAME direction-aware signed_progress
+    # blue_overshoot_penalty used to compute independently, so "overshot"
+    # means the same thing everywhere. Originally paired with a sticky
+    # hard-zero kill flag (removed 2026-09-07 -- see the smooth penalty at
+    # this function's return statement, which replaced both that flag and
+    # the separate blue_overshoot_penalty term with one live, non-sticky
+    # mechanism). No G1 equivalent exists for this gate (checked every
+    # reward function in legged_robot.py -- G1's eereach never zeros on
+    # distance, its `behind` mask only sets a fixed vel_sigma=2.0; see
+    # docs/BugFixes.md).
     full_y_ov = _get_ball_crossing_y(env, ball_name)                       # (N,)
     start_y_ov = env.scene.env_origins[:, 1]                               # (N,)
     half_y_ov = start_y_ov + (full_y_ov - start_y_ov) / 2.0
     direction_ov = torch.sign(full_y_ov - start_y_ov)
     signed_progress = direction_ov * (assigned_foot_y - half_y_ov)
-    if not hasattr(env, "_footreach_overshot_flag"):
-        env._footreach_overshot_flag = torch.zeros(env.num_envs, dtype=torch.bool, device=env.device)
-    env._footreach_overshot_flag[env.episode_length_buf <= 1] = False
     # FIX 2026-07-25: was a fixed 0.20 (matching the LOOSEST/easy-curriculum
-    # end of the landing radius, per the 2026-07-24 comment above). But
-    # env._blue_landing_radius_current (set fresh by _get_reach_target_y,
-    # called above) tightens with curriculum down to 0.15 -- at high
-    # difficulty a foot could overshoot up to 0.20m, MORE than the actual
-    # landing tolerance (0.15m), before this kill-switch ever fired. User
-    # reported footreach still spiking after the 2026-07-24 fix; tracking
-    # the same curriculum-eased distance used everywhere else for "at blue"
-    # (_get_reach_target_y/blue_ball_landed/blue_stick_landing) instead of a
-    # stale fixed constant closes that gap. See docs/BugFixes.md.
+    # end of the landing radius). But env._blue_landing_radius_current (set
+    # fresh by _get_reach_target_y, called above) tightens with curriculum
+    # down to 0.15 -- at high difficulty a foot could overshoot up to
+    # 0.20m, MORE than the actual landing tolerance (0.15m), before this
+    # kill-switch ever fired. Tracking the same curriculum-eased distance
+    # used everywhere else for "at blue" (_get_reach_target_y/
+    # blue_ball_landed/blue_stick_landing) instead of a stale fixed
+    # constant closes that gap. See docs/BugFixes.md.
     _FOOTREACH_OVERSHOOT_KILL = float(getattr(env, "_blue_landing_radius_current", 0.20))
-    overshot_now = env._blue_wide & ~env._blue_landed_genuine & (signed_progress > _FOOTREACH_OVERSHOOT_KILL)
-    env._footreach_overshot_flag |= overshot_now
 
     # Phase 1: pre-position laterally when ball is far (> 1.5 m in front).
     # Uses the ASSIGNED FOOT's Y, not root -- see docstring above.
@@ -1483,17 +1470,37 @@ def footreach(
     upright = 1.0 - torch.clamp(torch.sum(projected_grav[:, :2] ** 2, dim=1), 0.0, 1.0)
     behind = _ball_is_behind(env, ball_name)
 
-    # REVERTED 2026-09-07 (user request): the 2026-09-07 negative-mirror
-    # attempt (`where(overshot_flag, -taskrew, taskrew)`) turned out backwards
-    # -- taskrew is proximity-based (large when CLOSE to the crossing point),
-    # so the penalty was largest right at the overshoot boundary and faded
-    # toward zero the further the foot actually overshot, the opposite of
-    # "punish overshooting more the worse it gets". blue_overshoot_penalty
-    # already exists as the correctly-shaped mechanism for this (grows with
-    # signed_progress past env._blue_landing_radius_current, capped at
-    # max_overshoot, not sticky) -- back to plain zeroing here rather than
-    # duplicating/fighting that term with a second, wrongly-shaped penalty.
-    return taskrew * upright * (~behind).float() * (~env._footreach_overshot_flag).float()
+    # FIX 2026-09-07 (user request, "combine footreach and overshoot
+    # penalty... make it drop off again once it overshoots"): replaces both
+    # the sticky hard-zero above (env._footreach_overshot_flag, now unused --
+    # see the dead-code note where it's still computed above) and the
+    # separate blue_overshoot_penalty reward term with ONE smooth, always-
+    # live (not sticky) penalty subtracted directly from taskrew. Approved
+    # shape (see the published "reach-and-stop" artifact, 2026-09-07): a
+    # sigmoid ramp from 0 up to a capped floor as signed_progress crosses
+    # past the landing tolerance -- taskrew's own existing, already-tuned
+    # proximity/speed rise is left untouched; only the post-overshoot
+    # handling changes. Non-sticky, matching blue_overshoot_penalty's own
+    # always-live recompute -- also fixes a separate quirk the sticky flag
+    # had (footreach used to stay dead for the rest of the episode even
+    # after a genuine recovery-and-land past an early overshoot; this
+    # penalty now correctly relaxes once signed_progress drops back down).
+    #
+    # Magnitude calibrated to roughly match blue_overshoot_penalty's own
+    # strength so merging doesn't quietly weaken the anti-overshoot
+    # pressure: that term capped at raw 0.5 * weight(-60) = -30 max
+    # contribution. footreach's own weight is 10.0, so a raw cap of 3.0
+    # here reproduces the same -30 max contribution (10.0 * -3.0).
+    _OVERSHOOT_PENALTY_K = 18.0        # sigmoid steepness (1/m)
+    _OVERSHOOT_PENALTY_CENTER = 0.10   # meters past the kill threshold where the ramp is half-way to its cap
+    _MAX_OVERSHOOT_PENALTY = 3.0       # raw cap; see calibration note above
+    overshoot_x = signed_progress - _FOOTREACH_OVERSHOOT_KILL
+    overshoot_penalty = _MAX_OVERSHOOT_PENALTY / (
+        1.0 + torch.exp(-_OVERSHOOT_PENALTY_K * (overshoot_x - _OVERSHOOT_PENALTY_CENTER))
+    )
+    overshoot_active = env._blue_wide & ~env._blue_landed_genuine  # same gate blue_overshoot_penalty used
+    combined = taskrew - overshoot_penalty * overshoot_active.float()
+    return combined * upright * (~behind).float()
 
 
 def near_stick_reach(
