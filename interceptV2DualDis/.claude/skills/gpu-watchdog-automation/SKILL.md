@@ -1,6 +1,6 @@
 ---
 name: gpu-watchdog-automation
-description: Use when working with, debugging, or extending the unattended GPU-sharing/auto-training automation for this project (/home/robocup/IsaakB/intercept_gpu_watchdog.sh, cron */30 * * * *). Covers the full priority state machine, the state files it reads/writes, the additive-resume iteration quirk it has to account for, and known edge cases -- including several confirmed live (contention chains with zero idle gaps, the mislabeled-final-checkpoint bug interacting with its target check).
+description: Use when working with, debugging, or extending the unattended GPU-sharing/auto-training automation for this project (/home/robocup/IsaakB/intercept_gpu_watchdog.sh, cron */15 * * * *). Covers the full priority state machine, the state files it reads/writes, the additive-resume iteration quirk it has to account for, and known edge cases -- including several confirmed live (contention chains with zero idle gaps, the mislabeled-final-checkpoint bug interacting with its target check).
 ---
 
 # Intercept GPU Watchdog Automation
@@ -8,10 +8,12 @@ description: Use when working with, debugging, or extending the unattended GPU-s
 ## What it is
 
 A single unattended bash script, `/home/robocup/IsaakB/intercept_gpu_watchdog.sh`,
-scheduled via cron (`*/30 * * * *`) on this machine (robocup). It is **pure
-shell** -- no Claude/LLM involvement at runtime. Claude only writes/edits the
-script and reads its logs when asked; cron invokes it directly and it runs
-to completion on its own every 30 minutes, forever, with zero AI cost.
+scheduled via cron (`*/15 * * * *`, tightened from `*/30` on 2026-09-07 -- a
+tick itself is just `nvidia-smi`/`ps` checks and an occasional `git fetch`,
+no GPU/compute cost) on this machine (robocup). It is **pure shell** -- no
+Claude/LLM involvement at runtime. Claude only writes/edits the script and
+reads its logs when asked; cron invokes it directly and it runs to completion
+on its own every 15 minutes, forever, with zero AI cost.
 
 It is the sole automation for this project. It supersedes two earlier,
 narrower scripts that are **no longer scheduled** (kept on disk only for
