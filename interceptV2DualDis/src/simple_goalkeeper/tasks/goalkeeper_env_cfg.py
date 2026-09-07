@@ -277,28 +277,30 @@ def goalkeeper_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
         cfg.curriculum["ball_difficulty"] = CurriculumTermCfg(
             func=gk_mdp.ball_difficulty_curriculum,
             params={
-                # FIX 2026-09-07 (user request): success-based, not episode-
-                # length-based -- difficulty += step_size × smoothed fraction
-                # of resetting episodes with a genuine save (env._softstop_
-                # flag). See ball_difficulty_curriculum's own docstring
-                # (mdp/events.py) for the full ADR-vs-episode-length reasoning.
+                # FIX 2026-09-07 (user request, "stuck at 50% but difficulty
+                # keeps climbing to 100%, isn't that wrong"): running max of
+                # the smoothed fraction of resetting episodes with a genuine
+                # save (env._softstop_flag) -- difficulty = max(difficulty,
+                # smoothed_success_rate), never exceeds demonstrated
+                # competence, never decreases. No step_size needed anymore.
+                # See ball_difficulty_curriculum's own docstring (mdp/events.py).
                 "update_interval": 500,   # per-env steps between updates
-                "step_size":       0.01,  # difficulty units per smoothed-success-rate unit per check
             },
         )
         # NEW 2026-09-07 (user request): separate, slower-paced curriculum for
         # domain-randomization-style mechanics (currently: ball_pos_xy_b's
         # vanish_step skew in observations.py) that shouldn't ramp on
         # ball_difficulty's own pace -- user found that pace "too fast" for
-        # this purpose. Same success-rate mechanism/shared EMA signal as
-        # ball_difficulty (see that entry's comment above), just
-        # step_size=0.0025 (0.25x of ball_difficulty's 0.01). See
-        # domain_rand_curriculum's own docstring (mdp/events.py).
+        # this purpose. Same running-max-of-success-rate mechanism as
+        # ball_difficulty, but smoothed on its OWN slower EMA track
+        # (alpha_scale=0.25 -> ~4x more sluggish to respond) rather than a
+        # permanent scale-down, so it still eventually reaches full strength,
+        # just slower. See domain_rand_curriculum's own docstring (mdp/events.py).
         cfg.curriculum["domain_rand"] = CurriculumTermCfg(
             func=gk_mdp.domain_rand_curriculum,
             params={
                 "update_interval": 500,
-                "step_size":       0.0025,
+                "alpha_scale":     0.25,
             },
         )
 
