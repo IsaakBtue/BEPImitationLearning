@@ -277,28 +277,27 @@ def goalkeeper_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
         cfg.curriculum["ball_difficulty"] = CurriculumTermCfg(
             func=gk_mdp.ball_difficulty_curriculum,
             params={
-                # Adaptive curriculum: mirrors Humanoid-Goalkeeper G1 (legged_robot.py:325-336).
-                # difficulty += step_size × int(mean_ep_len / ep_len_divisor)
-                # every update_interval per-env steps. Longer episodes → faster advance.
-                "update_interval": 500,   # per-env steps between updates (same as G1)
-                "ep_len_divisor":  50,    # same as G1 (matches reward curricula divisor exactly
-                                          # so ball difficulty and reward weights advance at the
-                                          # same episode-length boundary)
-                "step_size":       0.01,  # difficulty units per curriculumupdate per check
+                # FIX 2026-09-07 (user request): success-based, not episode-
+                # length-based -- difficulty += step_size × smoothed fraction
+                # of resetting episodes with a genuine save (env._softstop_
+                # flag). See ball_difficulty_curriculum's own docstring
+                # (mdp/events.py) for the full ADR-vs-episode-length reasoning.
+                "update_interval": 500,   # per-env steps between updates
+                "step_size":       0.01,  # difficulty units per smoothed-success-rate unit per check
             },
         )
         # NEW 2026-09-07 (user request): separate, slower-paced curriculum for
         # domain-randomization-style mechanics (currently: ball_pos_xy_b's
         # vanish_step skew in observations.py) that shouldn't ramp on
         # ball_difficulty's own pace -- user found that pace "too fast" for
-        # this purpose. Same mechanism/shared EMA signal as ball_difficulty,
-        # just step_size=0.0025 (0.25x of ball_difficulty's 0.01). See
+        # this purpose. Same success-rate mechanism/shared EMA signal as
+        # ball_difficulty (see that entry's comment above), just
+        # step_size=0.0025 (0.25x of ball_difficulty's 0.01). See
         # domain_rand_curriculum's own docstring (mdp/events.py).
         cfg.curriculum["domain_rand"] = CurriculumTermCfg(
             func=gk_mdp.domain_rand_curriculum,
             params={
                 "update_interval": 500,
-                "ep_len_divisor":  50,
                 "step_size":       0.0025,
             },
         )

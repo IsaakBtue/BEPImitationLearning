@@ -618,6 +618,40 @@ def _update_smoothed_ep_len(env: "ManagerBasedRlEnv", mean_ep_len: float) -> flo
     return env._smoothed_ep_len
 
 
+def _update_smoothed_softstop_success(env: "ManagerBasedRlEnv", raw_success_rate: float) -> float:
+    """EMA-smooth the raw per-window softstop success rate before any
+    curriculum term reads it. Same double-call guard as
+    _update_smoothed_ep_len (separate env attrs, ball_difficulty_curriculum
+    and domain_rand_curriculum both call in during the same compute()).
+
+    NEW 2026-09-07 (user request): ball_difficulty_curriculum and
+    domain_rand_curriculum both switched from episode-length to genuine
+    task success (env._softstop_flag -- a real save happened, not a reward
+    magnitude) as their progress signal, matching OpenAI's ADR (arXiv
+    1910.07113), which explicitly uses success rate rather than reward for
+    exactly this kind of threshold. Deliberately NOT reading
+    Episode_Reward/softstop (the weighted reward value) -- that number is
+    entangled with softstop's OWN curriculum-ramped weight
+    (softstop_curriculum), so the same underlying success rate would read
+    differently depending on where that unrelated curriculum happens to be.
+    _softstop_flag itself is weight-independent: reset False at episode
+    start, OR-accumulated to True the moment a genuine save fires, so
+    reading it for the envs resetting this window gives a clean per-episode
+    success fraction in [0,1].
+    """
+    current_step = env.common_step_counter
+    if not hasattr(env, "_smoothed_softstop_success"):
+        env._smoothed_softstop_success = raw_success_rate
+        env._last_success_ema_update_step = current_step
+    elif getattr(env, "_last_success_ema_update_step", None) != current_step:
+        env._smoothed_softstop_success = (
+            _CURRICULUM_EMA_ALPHA * raw_success_rate
+            + (1.0 - _CURRICULUM_EMA_ALPHA) * env._smoothed_softstop_success
+        )
+        env._last_success_ema_update_step = current_step
+    return env._smoothed_softstop_success
+
+
 class reward_curriculum_ep_len:
     """G1-style episode-length-driven reward weight curriculum.
 
@@ -736,20 +770,39 @@ class correct_foot_save_curriculum:
 
 
 class ball_difficulty_curriculum:
-    """Adaptive difficulty curriculum — direct port of Humanoid-Goalkeeper (G1) approach.
+    """Adaptive difficulty curriculum — originally a direct port of
+    Humanoid-Goalkeeper (G1)'s episode-length-driven approach; switched
+    2026-09-07 (user request) to genuine task success instead.
 
-    G1 legged_robot.py:325-336: every `update_interval` per-env steps compute
-        curriculumupdate = int(mean_episode_length / ep_len_divisor)
-    and expand command ranges by `step_size × curriculumupdate`:
-        command_ranges[i] = clip(command_ranges[i] ± 0.3*curriculumupdate, bound_lo, bound_hi)
-    This is an ACCUMULATOR, not a fresh recompute -- each update nudges the
-    range outward by a small bounded step. Since curriculumupdate = int(...)
-    is never negative, this can only grow or hold flat; a bad window just
-    means zero growth that cycle, not retreat. Contrast with G1's REWARD
-    weights (eereach/success/stopball, compute_reward() lines 359-364),
-    which ARE freshly, directly recomputed every step from curriculumupdate
-    and genuinely go up and down -- G1 uses two different patterns for two
-    different things.
+    FIX 2026-09-07 (user request, "isn't [success-based] better, research
+    it"): was episode-length-driven (G1 legged_robot.py:325-336 style,
+    curriculumupdate = int(mean_episode_length / ep_len_divisor)). Episode
+    length is only an indirect proxy for "is the policy actually good at
+    this task" -- a policy that survives the full episode without ever
+    genuinely saving anything would still ratchet difficulty up. Switched to
+    env._softstop_flag (a real save happened this episode, reset False at
+    episode start, sticky-true once fired -- see softstop's own docstring)
+    as the progress signal, matching OpenAI's Automatic Domain Randomization
+    (arXiv 1910.07113), which explicitly uses success rate rather than
+    episode length or reward for exactly this kind of curriculum trigger.
+    Deliberately kept the EXISTING smooth monotonic-accumulator mechanism
+    (this class's own 2026-07-10 fix, below) rather than switching to ADR's
+    hard 80%/50% widen/narrow hysteresis -- that hysteresis exists in ADR
+    specifically to prevent oscillation in a loop where harder settings
+    immediately drop success rate, but this project already solved that
+    exact oscillation problem a different way (EMA-damping the input signal
+    into a monotonic accumulator, see the 2026-07-10 entry below) -- a
+    continuous alternative to ADR's discrete hysteresis, not an inferior
+    stand-in for it.
+
+    curriculumupdate's old `int(x / divisor)` discretization (needed to turn
+    an unbounded-ish episode-length reading into small integer "credits") is
+    gone too -- softstop success rate is already a clean, bounded [0,1]
+    signal, so the update is now a direct
+        difficulty += step_size * smoothed_success_rate
+    every `update_interval` per-env steps, still clipped to 1.0, still an
+    accumulator that can only grow or hold flat (never negative, so still
+    structurally immune to the 2026-07-10 oscillation failure mode below).
 
     FIX 2026-07-10: the 2026-07-09 fix ("remove the monotonic ratchet")
     correctly matched G1's reward-weight pattern for reward_curriculum_ep_len,
@@ -758,26 +811,24 @@ class ball_difficulty_curriculum:
     this is G1's reward-weight pattern, not its difficulty pattern. A live
     run (rsi_practice_curriculum_2026-07-10) showed ball_difficulty
     oscillating 0.667<->0.333 repeatedly the entire run, never settling --
-    exactly the failure mode G1's accumulator can't have by construction
+    exactly the failure mode an accumulator can't have by construction
     (it structurally cannot move backward). Reverted to a step-size-based
-    accumulator matching G1's actual command_ranges mechanism: difficulty
-    only ever increases (or holds flat), clipped to 1.0, never resets to a
-    fresh absolute value. See docs/BugFixes.md.
+    accumulator: difficulty only ever increases (or holds flat), clipped to
+    1.0, never resets to a fresh absolute value. See docs/BugFixes.md.
 
-    Default params mirror G1 exactly:
-        ep_len_divisor = 50   (same as G1)
-        update_interval = 500 (same as G1, in per-env steps)
-        step_size = 0.01      (difficulty units per curriculumupdate per check;
-                               at cu=2 sustained, reaches 1.0 in ~25 checks;
-                               original project value, unused since the
-                               2026-07-09 fix, now restored to actual use)
+    Default params:
+        update_interval = 500  (same cadence as before/G1)
+        step_size = 0.01       (difficulty units per smoothed-success-rate
+                                 unit per check; at success_rate=1.0
+                                 sustained, reaches 1.0 in ~100 checks --
+                                 not yet validated against a live run under
+                                 the new signal)
     """
 
     def __init__(self, cfg: "CurriculumTermCfg", env: "ManagerBasedRlEnv") -> None:
         p = cfg.params
         self._step_size      = p.get("step_size",      0.01)
         self._update_interval = p.get("update_interval", 500)
-        self._ep_len_divisor  = p.get("ep_len_divisor",   50)
         # FIX 2026-07-20: was -(update_interval) -- see reward_curriculum_ep_len's
         # __init__ comment for the full explanation. 0 matches G1's
         # last_step_counter=0 init, requiring a full window before first fire.
@@ -797,71 +848,64 @@ class ball_difficulty_curriculum:
 
         self._last_update = env.common_step_counter
 
-        # G1: curriculumupdate = int(mean_episode_length / 50)
-        # Uses lengths of just-completed episodes (env_ids are resetting envs).
-        # FIX 2026-07-10: EMA-smoothed via the same shared _update_smoothed_ep_len
-        # as reward_curriculum_ep_len, so both curricula stay synchronized and
-        # neither oscillates independently on single-window noise. See that
-        # function's docstring.
-        if len(env_ids) > 0:
-            mean_ep_len = env.episode_length_buf[env_ids].float().mean().item()
+        # Fraction of just-completed (resetting) episodes that had a genuine
+        # save (env._softstop_flag), EMA-smoothed via the shared
+        # _update_smoothed_softstop_success so this and domain_rand_
+        # curriculum stay synchronized on the same signal, same as the old
+        # episode-length version did via _update_smoothed_ep_len.
+        softstop_flag = getattr(env, "_softstop_flag", None)
+        if len(env_ids) > 0 and softstop_flag is not None:
+            raw_success_rate = softstop_flag[env_ids].float().mean().item()
         else:
-            mean_ep_len = 0.0
-        smoothed_ep_len = _update_smoothed_ep_len(env, mean_ep_len)
-        curriculumupdate = int(smoothed_ep_len / self._ep_len_divisor)
+            raw_success_rate = 0.0
+        smoothed_success_rate = _update_smoothed_softstop_success(env, raw_success_rate)
 
-        # FIX 2026-07-10: accumulator, matching G1's ACTUAL command_ranges
-        # mechanism (legged_robot.py:329-335: range = clip(range ± 0.3*cu,
-        # bound_lo, bound_hi) -- an incremental nudge each update, never a
-        # fresh absolute recompute). curriculumupdate is never negative, so
+        # FIX 2026-07-10: accumulator -- an incremental nudge each update,
+        # never a fresh absolute recompute. The input is never negative, so
         # this can only grow or hold flat -- structurally cannot oscillate,
         # unlike the 2026-07-09 version's `difficulty = min(1.0, cu/3.0)`
         # direct recompute (that formula matches G1's REWARD weights, not
-        # its difficulty mechanism -- see class docstring). No ratchet
-        # needed here: G1's own mechanism has no floor/ceiling logic beyond
-        # the clip, because monotonic-non-decreasing is its natural,
-        # structural behavior, not a bolted-on guard.
-        env._ball_difficulty = min(1.0, env._ball_difficulty + self._step_size * curriculumupdate)
+        # its difficulty mechanism -- see class docstring).
+        env._ball_difficulty = min(1.0, env._ball_difficulty + self._step_size * smoothed_success_rate)
         return {"ball_difficulty": torch.tensor(env._ball_difficulty)}
 
 
 class domain_rand_curriculum:
     """Slower-paced sibling of ball_difficulty_curriculum, for domain-
     randomization-style mechanics that shouldn't ramp on ball_difficulty's
-    own (performance-dependent, can-be-fast) pace.
+    own pace.
 
     NEW 2026-09-07 (user request): "vanish step[ping should] use a 0.25 as
     fast as ball_difficulty metric, because it is too fast of a metric".
-    ball_difficulty's pace is tied to smoothed episode length -- it can climb
-    quickly once the policy is already saving reliably, which is exactly the
-    wrong signal for the ball-visibility vanish_step skew (see
-    observations.py's _compute_ball_visibility): that skew exists to give an
-    easier, more-visible on-ramp, and tying it to ball_difficulty meant it
-    could disappear before the policy had actually had much practice at low
-    visibility. Same accumulator mechanism as ball_difficulty_curriculum
-    (shares the same EMA-smoothed episode-length signal via
-    _update_smoothed_ep_len, so the two never fight over noisy windows), just
-    a separate value (env._domain_rand_curriculum) with its own, slower
-    step_size -- default 0.0025 (0.01 * 0.25), i.e. exactly 1/4 of
-    ball_difficulty's default step_size. In practice (user's own estimate,
-    not yet validated against a live run) this should reach full strength
-    (1.0) around iteration ~10000 rather than ball_difficulty's faster climb.
 
-    First consumer: observations.py's vanish_floor skew. Registered as its
-    own curriculum term (not reusing ball_difficulty_curriculum directly)
-    since that class hardcodes the env._ball_difficulty attribute name --
-    kept as a separate, parallel class rather than parameterizing that one,
-    matching this file's existing pattern of near-duplicate curriculum
-    classes (reward_curriculum_ep_len / correct_foot_save_curriculum /
-    ball_difficulty_curriculum are all separate already) rather than a
-    shared-but-more-abstract base.
+    FIX 2026-09-07 (same day, user request): switched to the same genuine-
+    success signal as ball_difficulty_curriculum (env._softstop_flag via the
+    shared _update_smoothed_softstop_success), not episode length -- see
+    ball_difficulty_curriculum's own docstring for the full reasoning
+    (matches OpenAI's ADR, arXiv 1910.07113, using success rate rather than
+    a proxy metric). Both curricula now read the exact same smoothed success
+    rate each window (via the shared helper's double-call guard, so neither
+    re-applies the EMA step twice), and only differ in step_size -- this
+    class's default 0.0025 is exactly 1/4 of ball_difficulty's 0.01, so this
+    climbs at a quarter of ball_difficulty's rate on the same underlying
+    signal, per the user's original request.
+
+    First consumer: observations.py's vanish_floor skew -- that skew exists
+    to give an easier, more-visible on-ramp; tying it to ball_difficulty's
+    own (faster) pace meant it could fade before the policy had much
+    practice at low visibility. Registered as its own curriculum term (not
+    reusing ball_difficulty_curriculum directly) since that class hardcodes
+    the env._ball_difficulty attribute name -- kept as a separate, parallel
+    class rather than parameterizing that one, matching this file's existing
+    pattern of near-duplicate curriculum classes (reward_curriculum_ep_len /
+    correct_foot_save_curriculum / ball_difficulty_curriculum are all
+    separate already) rather than a shared-but-more-abstract base.
     """
 
     def __init__(self, cfg: "CurriculumTermCfg", env: "ManagerBasedRlEnv") -> None:
         p = cfg.params
         self._step_size       = p.get("step_size",       0.0025)
         self._update_interval = p.get("update_interval",  500)
-        self._ep_len_divisor  = p.get("ep_len_divisor",    50)
         self._last_update     = 0
         if not hasattr(env, "_domain_rand_curriculum"):
             env._domain_rand_curriculum = 0.0
@@ -877,14 +921,14 @@ class domain_rand_curriculum:
 
         self._last_update = env.common_step_counter
 
-        if len(env_ids) > 0:
-            mean_ep_len = env.episode_length_buf[env_ids].float().mean().item()
+        softstop_flag = getattr(env, "_softstop_flag", None)
+        if len(env_ids) > 0 and softstop_flag is not None:
+            raw_success_rate = softstop_flag[env_ids].float().mean().item()
         else:
-            mean_ep_len = 0.0
-        smoothed_ep_len = _update_smoothed_ep_len(env, mean_ep_len)
-        curriculumupdate = int(smoothed_ep_len / self._ep_len_divisor)
+            raw_success_rate = 0.0
+        smoothed_success_rate = _update_smoothed_softstop_success(env, raw_success_rate)
 
-        env._domain_rand_curriculum = min(1.0, env._domain_rand_curriculum + self._step_size * curriculumupdate)
+        env._domain_rand_curriculum = min(1.0, env._domain_rand_curriculum + self._step_size * smoothed_success_rate)
         return {"domain_rand_curriculum": torch.tensor(env._domain_rand_curriculum)}
 
 
