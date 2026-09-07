@@ -303,6 +303,35 @@ def goalkeeper_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
                 "alpha_scale":     0.5,
             },
         )
+        # RE-REGISTERED 2026-09-07 (user request, "make curriculum for that"):
+        # far_travel_curriculum (mdp/events.py) -- docs/superpowers/specs/
+        # 2026-07-18-doublestep-research-and-plan.md's recommendation B, an
+        # explicit curriculum over required lateral TRAVEL DISTANCE for far
+        # regions, decoupled from ball_difficulty (far needs a genuine
+        # multi-step gait, a different/slower thing to ramp than general
+        # task competence). The class itself and its consumer wiring
+        # (use_far_travel_curriculum=True, regions.py) were never removed --
+        # only this registration was, at some point, silently: with no
+        # entry here, env._far_inner/_far_outer never get created, so
+        # reset_ball_rolling's own `getattr(env, "_far_inner", lo)` fallback
+        # (events.py) always resolves to the FULL, uneased [0.5,1.0] travel
+        # requirement from iteration 0 -- confirmed live in docs/BugFixes.md
+        # that this curriculum correctly reached full width by iteration
+        # 10000 in a past run, so this isn't unproven, just re-activating a
+        # previously-working mechanism. Defaults (lo=0.5, hi=1.0, seeded to
+        # G1 STEP's own init-fraction-of-span) match _REGION_Y_END_RANGE's
+        # current (0.5,1.0) far bound exactly -- see that class's own
+        # docstring for the full worked-example numbers.
+        cfg.curriculum["far_travel"] = CurriculumTermCfg(
+            func=gk_mdp.far_travel_curriculum,
+            params={
+                "update_interval": 500,
+                "ep_len_divisor":  50,
+                "step_size":       0.0013,
+                "lo":              0.5,
+                "hi":              1.0,
+            },
+        )
 
         # ================================================================
         # TIER 1 -- core save mechanics (essential to the final product):
