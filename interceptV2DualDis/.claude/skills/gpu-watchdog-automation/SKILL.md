@@ -1,6 +1,6 @@
 ---
 name: gpu-watchdog-automation
-description: Use when working with, debugging, or extending the unattended GPU-sharing/auto-training automation for this project (/home/robocup/IsaakB/intercept_gpu_watchdog.sh, cron */15 * * * *). Covers the full priority state machine, the state files it reads/writes, the additive-resume iteration quirk it has to account for, and known edge cases -- including several confirmed live (contention chains with zero idle gaps, the mislabeled-final-checkpoint bug interacting with its target check).
+description: Use when working with, debugging, or extending the unattended GPU-sharing/auto-training automation for this project (/home/robocup/IsaakB/intercept_gpu_watchdog.sh, cron */10 * * * *). Covers the full priority state machine, the state files it reads/writes, the additive-resume iteration quirk it has to account for, and known edge cases -- including several confirmed live (contention chains with zero idle gaps, the mislabeled-final-checkpoint bug interacting with its target check).
 ---
 
 # Intercept GPU Watchdog Automation
@@ -8,12 +8,20 @@ description: Use when working with, debugging, or extending the unattended GPU-s
 ## What it is
 
 A single unattended bash script, `/home/robocup/IsaakB/intercept_gpu_watchdog.sh`,
-scheduled via cron (`*/15 * * * *`, tightened from `*/30` on 2026-09-07 -- a
-tick itself is just `nvidia-smi`/`ps` checks and an occasional `git fetch`,
-no GPU/compute cost) on this machine (robocup). It is **pure shell** -- no
-Claude/LLM involvement at runtime. Claude only writes/edits the script and
-reads its logs when asked; cron invokes it directly and it runs to completion
-on its own every 15 minutes, forever, with zero AI cost.
+scheduled via cron (`*/10 * * * *`, tightened from `*/30` -> `*/15` -> `*/10`
+on 2026-09-07 -- a tick itself is just `nvidia-smi`/`ps` checks and an
+occasional `git fetch`, no GPU/compute cost, and contention detection IS the
+tick, so a tighter cron directly means noticing another job sooner) on this
+machine (robocup). It is **pure shell** -- no Claude/LLM involvement at
+runtime. Claude only writes/edits the script and reads its logs when asked;
+cron invokes it directly and it runs to completion on its own every 10
+minutes, forever, with zero AI cost.
+
+**Temporarily disabled overnight 2026-09-07 -> 2026-09-08** for a deliberate
+GPU-sharing session with a teammate (both training on the GPU at once,
+watchdog would otherwise pause on seeing the teammate's PIDs as contention).
+A one-shot cron entry (`0 15 8 9 * intercept_watchdog_reenable.sh`) restores
+the `*/10` schedule at 15:00 on 2026-09-08 and removes itself.
 
 It is the sole automation for this project. It supersedes two earlier,
 narrower scripts that are **no longer scheduled** (kept on disk only for
