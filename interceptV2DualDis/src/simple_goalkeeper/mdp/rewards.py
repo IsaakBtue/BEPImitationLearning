@@ -571,7 +571,7 @@ def _get_reach_target_y(
     ball_name: str,
     asset_cfg: SceneEntityCfg = _DEFAULT_FEET_CFG,
     wide_threshold: float = 0.5,  # FIX 2026-08-01: was 0.65, reverted to 0.5, kept in sync with regions.py's near/far boundary
-    landing_radius: float = 0.09,  # FIX 2026-09-08: 0.20->0.18->0.15->0.13->0.09 (2026-07-24: was 0.08, too strict at full difficulty)
+    landing_radius: float = 0.14,  # FIX 2026-09-09 (user request, "revert"): back to the flat, no-curriculum real value after the 0.4 diagnostic bump. Curriculum easing removed entirely (see the flat assignment below) -- 0.14m at every difficulty. Was 0.4 (diagnostic), 0.13 hard/0.15 easy before that, 0.09 (briefly reverted), 0.4 (earlier diagnostic), 0.09->0.05 (2026-09-09 earlier same day), 0.20->0.18->0.15->0.13->0.09 before that (2026-07-24: was 0.08, too strict at full difficulty)
     landing_speed_threshold: float = 1.0,  # FIX 2026-07-24: reverted to the pre-2026-07-23 value (was 0.15); see below
 ) -> torch.Tensor:
     """Two-stage reach target for wide crossings: v2 reimplementation of the
@@ -687,7 +687,20 @@ def _get_reach_target_y(
     # "wide AND not yet landed" without recomputing the crossing geometry.
     env._blue_wide = wide
 
-    half_y = start_y + (full_y - start_y) / 2.0
+    # FIX 2026-09-09 (user request, "have it 0.3" -- minimum distance from
+    # the robot for blue's point): plain midpoint (start_y + delta/2) has
+    # no floor -- right at the wide/narrow boundary (delta just over
+    # wide_threshold=0.5) blue could sit as close as ~0.25m from the
+    # robot's own stance, a barely-there waypoint with no real
+    # pre-positioning value. Floors the midpoint's distance from start_y
+    # at _MIN_BLUE_DIST, sign-safe for both left/right crossings -- once
+    # delta/2 exceeds the floor (delta > 0.6m) this is a no-op and blue
+    # stays the true midpoint, matching the original formula exactly.
+    _MIN_BLUE_DIST = 0.3
+    delta = full_y - start_y
+    sign = torch.sign(delta)
+    sign = torch.where(sign == 0, torch.ones_like(sign), sign)  # dead-center: default outward, same convention as _get_foot_block_offset
+    half_y = start_y + sign * torch.clamp(delta.abs() / 2.0, min=_MIN_BLUE_DIST)
 
     # DEBUG 2026-07-23 (TEMPORARY, remove after landing-gate investigation):
     # expose the Y-offsets (relative to robot start) that make up this gate's
@@ -713,17 +726,16 @@ def _get_reach_target_y(
     env._blue_landed_was_free[just_reset] = False
     env._blue_landed_genuine[just_reset] = False
 
-    # Curriculum-eased landing radius (branch mechanism #1) -- eases
-    # 0.20m -> 0.15m with difficulty, giving an early policy a bigger
-    # target. FIX 2026-07-24: strict end was 0.08m; widened to 0.15m
-    # (user request -- too strict to reliably land in at full difficulty).
-    # FIX 2026-08-30 (user request, investigating far-region approach
-    # speed -- see docs/BugFixes.md): widened again, strict 0.15->0.20,
-    # easy 0.20->0.30. FIX 2026-09-08 (user request): narrowed back down,
-    # strict 0.18->0.15, easy 0.30->0.20. Same change mirrored in
-    # _get_orange_reach_target_y/_get_red_reach_target_y below.
-    d = float(min(max(getattr(env, "_ball_difficulty", 1.0), 0.0), 1.0))
-    landing_radius = 0.11 + (landing_radius - 0.11) * d
+    # REMOVED 2026-09-09 (user request, "i want no curriculum on
+    # landing_radius just to save compute and have it at 0.14m"): was a
+    # curriculum-eased lerp (0.15m easy at ball_difficulty=0 -> the
+    # caller's strict default at difficulty=1, branch mechanism #1 -- see
+    # this function's own docstring for the original per-difficulty
+    # rationale and the full 0.20->0.18->0.15->0.13 tuning history).
+    # env._blue_landing_radius_current is now just the flat caller default
+    # every call, no getattr/lerp per step. Same flat-value treatment NOT
+    # applied to landing_speed_threshold below -- only landing_radius was
+    # asked about.
     env._blue_landing_radius_current = landing_radius
 
     # FIX 2026-07-24: reverted to the pre-2026-07-23 band (2.0 m/s at d=0
@@ -739,6 +751,11 @@ def _get_reach_target_y(
     # real plants) as a deliberate trade against the widened landing_radius
     # above -- if the leak reappears, prefer a smoother curriculum shape
     # over snapping straight back to 0.15.
+    #
+    # FIX 2026-09-09: `d` used to be computed once above and shared with
+    # landing_radius's own (now-removed) lerp -- landing_speed_threshold
+    # still needs it, so it's computed fresh here, scoped to just this use.
+    d = float(min(max(getattr(env, "_ball_difficulty", 1.0), 0.0), 1.0))
     _EASY_LANDING_SPEED_THRESHOLD = 2.0
     landing_speed_threshold = _EASY_LANDING_SPEED_THRESHOLD + (landing_speed_threshold - _EASY_LANDING_SPEED_THRESHOLD) * d
     # Cached unconditionally (mirrors env._blue_landing_radius_current above)

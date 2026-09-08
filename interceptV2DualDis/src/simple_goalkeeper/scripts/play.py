@@ -668,22 +668,43 @@ def _patch_viewer_intercept_vis(native_viewer: "NativeMujocoViewer", env) -> Non
 
         if wide and not landed:
             # Phase 1: BLUE sphere at the midpoint — half the distance, half as far.
-            mid_y = start_y + (cross_y - start_y) / 2.0
+            # FIX 2026-09-09 (user request, "have it 0.3" min distance from
+            # the robot): mirrors rewards.py:_get_reach_target_y's own
+            # _MIN_BLUE_DIST floor exactly -- plain midpoint (no floor)
+            # would drift the sphere away from the actual reward target
+            # for any crossing where delta/2 < 0.3m.
+            _MIN_BLUE_DIST = 0.3
+            _delta = cross_y - start_y
+            _sign = 1.0 if _delta >= 0.0 else -1.0
+            mid_y = start_y + _sign * max(abs(_delta) / 2.0, _MIN_BLUE_DIST)
             _add_sphere(goal_x, mid_y, sphere_z, 0.08, [0.15, 0.4, 1.0, 0.75])
             _add_line(
                 np.array([goal_x, mid_y, floor_z], dtype=np.float64),
                 np.array([goal_x, mid_y, sphere_z], dtype=np.float64),
                 0.008, [0.15, 0.4, 1.0, 0.6],
             )
-            # Strict landing_radius (0.15m, ball_difficulty=1) as a ground
-            # ring around the blue target -- see _add_ground_circle above.
-            # FIX 2026-08-30 (correction): was drawn at 0.08 -- stale, that
-            # was the pre-2026-07-24 value (rewards.py:_get_reach_target_y's
-            # own FIX comment: "was 0.08, too strict, widened to 0.15").
-            # Caught from stale memory, not the current code -- verified
-            # against rewards.py's actual `landing_radius: float = 0.15`
-            # default before fixing.
-            _add_ground_circle(goal_x, mid_y, floor_z + 0.002, 0.18, 0.006, [0.15, 0.4, 1.0, 0.9])
+            # Ground ring showing the ACTUAL current landing_radius -- see
+            # _add_ground_circle above.
+            #
+            # FIX 2026-09-09 (user report, "the radius of the blue ball
+            # landed doesn't change... still not changing"): was a
+            # hardcoded 0.18, deliberately NOT reading env._blue_landing_
+            # radius_current per the original 2026-08-30 design ("a fixed
+            # reference circle... not a live readout of the current
+            # difficulty-eased radius"). That already went stale once that
+            # same session (comment claimed 0.15, drew 0.18) and then
+            # silently desynced further from every later landing_radius
+            # edit in rewards.py (0.15->0.13->0.09->0.05->0.4, this
+            # session's own diagnostic sweep included) -- the ring never
+            # moved because it was never wired to the value being tuned.
+            # Now reads the live, curriculum-eased value _get_reach_target_y
+            # sets every step (same field footreach's own overshoot-kill
+            # threshold already reads, rewards.py:_FOOTREACH_OVERSHOOT_KILL)
+            # so the visible ring always matches whatever landing_radius
+            # actually is right now, including this session's own 0.4
+            # diagnostic value.
+            _live_radius = float(getattr(raw_env, "_blue_landing_radius_current", 0.09))
+            _add_ground_circle(goal_x, mid_y, floor_z + 0.002, _live_radius, 0.006, [0.15, 0.4, 1.0, 0.9])
         else:
             # Phase 2 (or narrow crossing): GREEN sphere at the foot's aim point
             # (the true crossing point + a small outward offset, see
@@ -1624,12 +1645,38 @@ def _patch_viewer_sole_contact_and_stop_plots(native_viewer: "NativeMujocoViewer
     the wrong-foot-contact signal `penalize_wrong_foot_ball_contact`
     mirrors -- `cleanstop`/`sole_ball_contact`/`shin_contact` all stay.
     `knee_distance_contact` still falls outside the visible set.
+
+    FIX 2026-09-08 (user request, "put success reward in mujoco p viewer
+    for sole contact"): added `success` alongside `sole_ball_contact` --
+    user wants to watch whether a sole-contact ("technically stopped it"
+    exploit) save still registers as `success` (foot within strict_th of
+    the crossing target, gated by `landing_ok` -- see rewards.py:success),
+    same motivation as this panel's original sole-trap-vs-quality-bonus
+    pairing.
+
+    FIX 2026-09-09 (user request, "put for sole contact blue_ball landed
+    flag so i can track it myself"): added `blue_ball_landed` (the
+    one-shot bonus that fires exactly when env._blue_landed_genuine flips
+    True -- see rewards.py:blue_ball_landed/_get_reach_target_y) into this
+    same panel, so a live wide-crossing episode can be watched to see
+    whether the blue landing genuinely fires (and roughly when) rather
+    than only inferring it after the fact from checkpoint-replay stats.
+
+    FIX 2026-09-09 (same day, user request, "also add them in the
+    visualiser" re: orange/red landing radii): added `orange_ball_landed`/
+    `red_ball_landed` (the trailing-foot mirrors of `blue_ball_landed`,
+    see rewards.py:_get_orange_reach_target_y/_get_red_reach_target_y) --
+    same one-shot-fires-on-genuine-landing pattern, now trackable
+    alongside blue's own flag in this panel.
     """
     orig_setup = native_viewer.setup
     orig_update_reward_figures = native_viewer._update_reward_figures
 
     _RAW_NAME = "sole_ball_contact"
-    _PROMOTED = (_RAW_NAME, "cleanstop", "wrong_foot_ball_contact", "shin_contact")
+    _PROMOTED = (
+        _RAW_NAME, "blue_ball_landed", "orange_ball_landed", "red_ball_landed",
+        "success", "cleanstop", "wrong_foot_ball_contact", "shin_contact",
+    )
 
     def _patched_setup() -> None:
         orig_setup()
@@ -1819,6 +1866,24 @@ def _patch_viewer_foot_restitution_plot(native_viewer: "NativeMujocoViewer", env
                 # max = 1.0 (raw scale) * 34.72 (cleanstop_curriculum's own
                 # peak weight, goalkeeper_env_cfg.py) = 34.72.
                 _write_fixed_range("cleanstop", -2.0, 38.0)
+            # FIX 2026-09-09 (user report, "the visualisation just doesn't
+            # change size" for blue_ball_landed): same autoscale-collapse
+            # bug as cleanstop/contact_yield_velocity above -- these are
+            # also one-shot, mostly-zero terms (fire once per episode on a
+            # genuine landing), so the native autoscale's percentile window
+            # collapses and the plot looks flat/pinned regardless of
+            # whether the underlying value is actually firing. Ranges are
+            # each term's own curriculum peak weight (blue_ball_landed_
+            # curriculum/orange_ball_landed_curriculum/red_ball_landed_
+            # curriculum, goalkeeper_env_cfg.py): base_weight * 2.5 at
+            # cu=3 (reward_curriculum_ep_len's own formula) -- blue
+            # 10.0*2.5=25.0, orange/red 5.0*2.5=12.5 each.
+            if "blue_ball_landed" in native_viewer._histories:
+                _write_fixed_range("blue_ball_landed", -0.5, 26.0)
+            if "orange_ball_landed" in native_viewer._histories:
+                _write_fixed_range("orange_ball_landed", -0.5, 13.0)
+            if "red_ball_landed" in native_viewer._histories:
+                _write_fixed_range("red_ball_landed", -0.5, 13.0)
 
     native_viewer.setup = _patched_setup
     native_viewer._update_reward_figures = _patched_update_reward_figures
