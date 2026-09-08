@@ -705,35 +705,26 @@ def _patch_viewer_intercept_vis(native_viewer: "NativeMujocoViewer", env) -> Non
         # docs/superpowers/specs/2026-08-08-orange-ball-trailing-foot-design.md.
         #
         # FIX 2026-08-15 (user request, "orange ball now doesn't disappear
-        # the same way blue does, so how do i know it worked?"): the
-        # original 2026-08-08 design deliberately never changed color on
-        # landing, reasoned as "no live-ball-tracking phase to graduate
-        # into" -- true when written, but "red" (below) now IS that
-        # graduation target, so the original reasoning no longer holds and
-        # the lack of any landed-state feedback is a genuine viewer gap, not
-        # a considered design choice anymore. Now 3 visual states:
-        #   1. unlanded (env._orange_landed_genuine False): original orange,
-        #      [1.0, 0.55, 0.0].
-        #   2. landed but red not yet active (orange done, waiting on blue):
-        #      distinct gold/landed color, [1.0, 0.85, 0.0], so a genuine
-        #      landing is visible immediately even if blue hasn't landed
-        #      yet and red can't activate.
-        #   3. red active: orange sphere hidden entirely (red, below, is the
-        #      active target now) -- mirrors blue's own "one active target
-        #      sphere at a time" pattern instead of leaving a stale marker
-        #      onscreen once its job is done.
+        # the same way blue does, so how do i know it worked?"): added a
+        # gold/landed color state here at the time.
+        #
+        # REVERTED 2026-09-08 (user request, "you can also just remove the
+        # yellow gold ball, because the disappearing of orange ball means
+        # already that is done"): the gold color was made redundant by
+        # "red" (below) already existing as the graduation target -- red
+        # activating hides this sphere entirely, which is itself the
+        # landed-state feedback. Back to a single visual state: plain
+        # orange, [1.0, 0.55, 0.0], until the sphere disappears (red active).
         red_active_t = getattr(raw_env, "_red_active", None)
         red_active = bool(red_active_t[0].item()) if red_active_t is not None else False
-        orange_landed_t = getattr(raw_env, "_orange_landed_genuine", None)
-        orange_landed = bool(orange_landed_t[0].item()) if orange_landed_t is not None else False
         if wide and not red_active:
             start_y = float(origins[1])
             delta = cross_y - start_y
             sign = 1.0 if delta >= 0 else -1.0
             shrunk = sign * max(abs(delta) - 0.50, 0.0)  # FIX 2026-08-08 (user request): 0.30 -> 0.60 -> 0.50
             orange_y = start_y + shrunk / 2.0
-            orange_color = [1.0, 0.85, 0.0, 0.75] if orange_landed else [1.0, 0.55, 0.0, 0.75]
-            orange_line_color = [1.0, 0.85, 0.0, 0.6] if orange_landed else [1.0, 0.55, 0.0, 0.6]
+            orange_color = [1.0, 0.55, 0.0, 0.75]
+            orange_line_color = [1.0, 0.55, 0.0, 0.6]
             _add_sphere(goal_x, orange_y, sphere_z, 0.08, orange_color)
             _add_line(
                 np.array([goal_x, orange_y, floor_z], dtype=np.float64),
@@ -1147,6 +1138,60 @@ def _compute_wrong_foot_contact_flash(env, env_idx: int) -> tuple[float, float, 
         float(shin_counter[env_idx].item() > 0),
         float(chin_counter[env_idx].item() > 0),
     )
+
+
+def _compute_landing_ok(env, env_idx: int) -> float:
+    """landing_ok flag for the viewer's P-panel -- mirrors stopball/softstop's
+    own gate exactly (rewards.py): ~env._blue_wide | env._blue_landed_genuine.
+    True on any narrow crossing (blue never applies) or once the assigned
+    foot has genuinely landed at the blue midpoint on a wide crossing.
+    Viewer-only -- reads env attributes already populated by this tick's
+    reward computation (rewards.py's stopball/softstop read the identical
+    expression), see docs/BugFixes.md 2026-09-04 (round 5)."""
+    raw_env = env.unwrapped if hasattr(env, "unwrapped") else env
+    wide_t = getattr(raw_env, "_blue_wide", None)
+    genuine_t = getattr(raw_env, "_blue_landed_genuine", None)
+    if wide_t is None or genuine_t is None:
+        return 0.0
+    landing_ok = (~wide_t[env_idx]) | genuine_t[env_idx]
+    return float(landing_ok.item())
+
+
+def _patch_viewer_landing_ok_plot(native_viewer: "NativeMujocoViewer", env) -> None:
+    """Add a P-panel plot ("landing_ok") showing stopball/softstop's own
+    landing gate (see _compute_landing_ok). NEW (user request, "put
+    landing_ok flag in the mujoco viewer") -- same auto-created-figure +
+    front-of-list-promotion mechanism as _patch_viewer_wrong_foot_contact_plot.
+    """
+    orig_setup = native_viewer.setup
+    orig_update_reward_figures = native_viewer._update_reward_figures
+
+    _NAME = "landing_ok"
+
+    def _patched_setup() -> None:
+        orig_setup()
+        from mjlab.viewer.native.viewer import make_empty_figure
+        cfg = native_viewer._plot_cfg
+        native_viewer._figures[_NAME] = make_empty_figure(
+            _NAME, cfg.grid_size, cfg.init_yrange, cfg.history, cfg.background_alpha,
+        )
+        native_viewer._histories[_NAME] = deque(maxlen=cfg.history)
+        native_viewer._yrange[_NAME] = cfg.init_yrange
+        native_viewer._scale[_NAME] = 1.0
+        # Front of the list -- same reasoning as the other promotions: this
+        # task's 61 active reward terms exceed max_viewports (12), so
+        # anything not moved to the front is silently never rendered.
+        rest = [n for n in native_viewer._term_names]
+        native_viewer._term_names = [_NAME] + rest
+
+    def _patched_update_reward_figures(viewer_handle: "mujoco.viewer.Handle") -> None:
+        if native_viewer._show_plots and native_viewer._term_names and not native_viewer._is_paused:
+            native_viewer._append_point(_NAME, _compute_landing_ok(env, native_viewer.env_idx))
+            native_viewer._write_history_to_figure(_NAME)
+        orig_update_reward_figures(viewer_handle)
+
+    native_viewer.setup = _patched_setup
+    native_viewer._update_reward_figures = _patched_update_reward_figures
 
 
 def _patch_viewer_wrong_foot_contact_plot(native_viewer: "NativeMujocoViewer", env) -> None:
@@ -1685,7 +1730,12 @@ def _patch_viewer_foot_restitution_plot(native_viewer: "NativeMujocoViewer", env
     _RAW_NAME = "foot_restitution_dampratio"
     # FIX 2026-08-30: contact_yield_velocity split into X/Y components
     # (rewards.py) -- promote both, same auto-created-figure mechanism.
-    _ALSO_PROMOTED = ("contact_yield_velocity_x", "contact_yield_velocity_y")
+    # FIX 2026-09-07 (user request, "put footreach in the mujoco viewer"):
+    # added footreach -- same promote-into-front-slots mechanism, this
+    # patch registers last so it has final say over _term_names order.
+    # FIX 2026-09-08 (user request, "put foot clearance in the mujoco
+    # viewer"): added foot_clearance, same mechanism.
+    _ALSO_PROMOTED = ("contact_yield_velocity_x", "contact_yield_velocity_y", "footreach", "foot_clearance")
     _DEMOTED = ("trailing_foot_forward_continuous", "wrong_foot_ball_contact")
     _FIXED_LO, _FIXED_HI = -0.5, 1.5
 
@@ -2504,6 +2554,7 @@ def run_play(task_id: str, cfg: PlayConfig) -> None:
         _patch_viewer_sole_contact_and_stop_plots(native_viewer, env)
         _patch_viewer_foot_restitution_plot(native_viewer, env)
         _patch_viewer_contact_yield_vis(native_viewer, env)
+        _patch_viewer_landing_ok_plot(native_viewer, env)
         native_viewer.run()
     elif resolved_viewer == "viser":
         ViserPlayViewer(env, final_policy).run()

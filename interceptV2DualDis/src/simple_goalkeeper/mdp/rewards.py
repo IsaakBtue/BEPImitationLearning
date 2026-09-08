@@ -571,7 +571,7 @@ def _get_reach_target_y(
     ball_name: str,
     asset_cfg: SceneEntityCfg = _DEFAULT_FEET_CFG,
     wide_threshold: float = 0.5,  # FIX 2026-08-01: was 0.65, reverted to 0.5, kept in sync with regions.py's near/far boundary
-    landing_radius: float = 0.18,  # FIX 2026-08-30: 0.15->0.20->0.18 (2026-07-24: was 0.08, too strict at full difficulty)
+    landing_radius: float = 0.13,  # FIX 2026-09-08: 0.20->0.18->0.15->0.13 (2026-07-24: was 0.08, too strict at full difficulty)
     landing_speed_threshold: float = 1.0,  # FIX 2026-07-24: reverted to the pre-2026-07-23 value (was 0.15); see below
 ) -> torch.Tensor:
     """Two-stage reach target for wide crossings: v2 reimplementation of the
@@ -714,16 +714,16 @@ def _get_reach_target_y(
     env._blue_landed_genuine[just_reset] = False
 
     # Curriculum-eased landing radius (branch mechanism #1) -- eases
-    # 0.30m -> 0.18m with difficulty, giving an early policy a bigger
+    # 0.20m -> 0.15m with difficulty, giving an early policy a bigger
     # target. FIX 2026-07-24: strict end was 0.08m; widened to 0.15m
     # (user request -- too strict to reliably land in at full difficulty).
     # FIX 2026-08-30 (user request, investigating far-region approach
     # speed -- see docs/BugFixes.md): widened again, strict 0.15->0.20,
-    # easy 0.20->0.30. Same change mirrored in _get_orange_reach_target_y/
-    # _get_red_reach_target_y below (user: "also do this for orange and
-    # red").
+    # easy 0.20->0.30. FIX 2026-09-08 (user request): narrowed back down,
+    # strict 0.18->0.15, easy 0.30->0.20. Same change mirrored in
+    # _get_orange_reach_target_y/_get_red_reach_target_y below.
     d = float(min(max(getattr(env, "_ball_difficulty", 1.0), 0.0), 1.0))
-    landing_radius = 0.30 + (landing_radius - 0.30) * d
+    landing_radius = 0.15 + (landing_radius - 0.15) * d
     env._blue_landing_radius_current = landing_radius
 
     # FIX 2026-07-24: reverted to the pre-2026-07-23 band (2.0 m/s at d=0
@@ -928,7 +928,7 @@ def _get_orange_reach_target_y(
     env: "ManagerBasedRlEnv",
     ball_name: str,
     asset_cfg: SceneEntityCfg = _DEFAULT_FEET_CFG,
-    landing_radius: float = 0.18,  # FIX 2026-08-30: 0.15->0.20->0.18, mirrors _get_reach_target_y's own widening
+    landing_radius: float = 0.13,  # FIX 2026-09-08: 0.20->0.18->0.15->0.13, mirrors _get_reach_target_y's own change
     landing_speed_threshold: float = 1.0,
 ) -> torch.Tensor:
     """Trailing-foot ("orange") mirror of _get_reach_target_y -- see that
@@ -996,8 +996,9 @@ def _get_orange_reach_target_y(
 
     # FIX 2026-08-30 (user request): easy end 0.20 -> 0.30, mirrors
     # _get_reach_target_y's own widening (see that function's comment).
+    # FIX 2026-09-08 (user request): narrowed back, easy 0.30 -> 0.20.
     d = float(min(max(getattr(env, "_ball_difficulty", 1.0), 0.0), 1.0))
-    landing_radius = 0.30 + (landing_radius - 0.30) * d
+    landing_radius = 0.15 + (landing_radius - 0.15) * d
     env._orange_landing_radius_current = landing_radius
 
     _EASY_LANDING_SPEED_THRESHOLD = 2.0
@@ -1082,7 +1083,7 @@ def _get_red_reach_target_y(
     env: "ManagerBasedRlEnv",
     ball_name: str,
     asset_cfg: SceneEntityCfg = _DEFAULT_FEET_CFG,
-    landing_radius: float = 0.18,  # FIX 2026-08-30: 0.15->0.20->0.18, mirrors _get_reach_target_y's own widening
+    landing_radius: float = 0.13,  # FIX 2026-09-08: 0.20->0.18->0.15->0.13, mirrors _get_reach_target_y's own change
     landing_speed_threshold: float = 1.0,
 ) -> torch.Tensor:
     """Trailing-foot ("red") second-stage mirror of _get_orange_reach_target_y --
@@ -1171,8 +1172,9 @@ def _get_red_reach_target_y(
 
     # FIX 2026-08-30 (user request): easy end 0.20 -> 0.30, mirrors
     # _get_reach_target_y's own widening (see that function's comment).
+    # FIX 2026-09-08 (user request): narrowed back, easy 0.30 -> 0.20.
     d = float(min(max(getattr(env, "_ball_difficulty", 1.0), 0.0), 1.0))
-    landing_radius = 0.30 + (landing_radius - 0.30) * d
+    landing_radius = 0.15 + (landing_radius - 0.15) * d
     env._red_landing_radius_current = landing_radius
 
     _EASY_LANDING_SPEED_THRESHOLD = 2.0
@@ -1384,6 +1386,33 @@ def footreach(
     # step's, and jump pairs it with airborne-specific safety rewards this
     # always-grounded task has no equivalent of).
     vel_sigma = 1.0 + 3.0 * vel_toward.clamp(0.0, 3.0)
+
+    # NEW 2026-09-08 (user request): "green"-only contact decel-zone. Root
+    # cause: reach_rew is maximized exactly where the foot's position matches
+    # the (possibly live-ball) crossing_point, and vel_sigma rewards arriving
+    # there fast with NOTHING telling it to slow down right at contact -- so
+    # "hit the ball as hard as possible" is the literal reward-maximizing
+    # behavior. G1 never needed this: it catches with hands (can absorb/wrap
+    # a fast approach), we strike a free ball with a foot (a fast approach
+    # launches it). Decays vel_sigma's BOOST (the amount above neutral 1.0x)
+    # linearly to zero over the last 0.30m to the target, so the foot can
+    # still sprint to close the gap but isn't rewarded for arriving at max
+    # speed. Deliberately scoped to "green" (the real crossing point / live
+    # ball) ONLY -- targeting_green mirrors ball_close's own gate (minus the
+    # distance clause): narrow crossings are green the whole time; wide
+    # crossings are green only once genuinely landed at blue. The blue
+    # midpoint itself is a ground waypoint, not a physical ball -- no "kick"
+    # risk there, and blue's own landing quality is already handled
+    # separately (blue_stick_landing / the removed 2026-08-29 blue decel-
+    # zone), so this must not re-decay speed during the blue approach.
+    _GREEN_DECEL_ZONE = 0.30
+    targeting_green = (~env._blue_wide) | env._blue_landed_genuine
+    decel_frac = (dist_to_crossing / _GREEN_DECEL_ZONE).clamp(0.0, 1.0)
+    vel_sigma = torch.where(
+        targeting_green,
+        1.0 + (vel_sigma - 1.0) * decel_frac,
+        vel_sigma,
+    )
 
     # REMOVED 2026-08-29 (user request), was: "Blue decel-zone" -- decayed
     # the speed bonus toward neutral as the assigned foot closed on blue
@@ -5457,15 +5486,43 @@ def foot_clearance(
     unchanged Gaussian falloff past target. No G1 equivalent exists for this
     term at all (checked -- no `_reward_feet_clearance`-style function
     anywhere in legged_robot.py), so this remains a pure SGK design choice.
-    Not yet validated against a live training run.
+
+    NEW 2026-09-08 (user request, "make foot clearance drop off the moment
+    you get close to the blue ball target, and once blue ball is fired that
+    it goes back to the standard height target"): on a wide, UNLANDED
+    crossing, `target_height` decays linearly from its standard value (at
+    0.30m from blue -- reuses the same outer-zone boundary the old, removed
+    footreach blue decel-zone used) down to ~0 at the current curriculum
+    landing radius (`env._blue_landing_radius_current`), so this reward
+    stops fighting the low, slow plant blue's own landing check requires.
+    Snaps back to the standard `target_height` the instant
+    `env._blue_landed_genuine` fires (the same flip that fires
+    `blue_ball_landed`'s bonus -- confirmed via `AskUserQuestion` that
+    "fired" means genuine landing, not the later ball save). Narrow
+    crossings are unaffected (no blue exists there). Clamped to a small
+    epsilon floor (not literal 0) since `_clearance_reward` divides by
+    `target_height`. Not yet validated against a live training run.
     """
     behind = _ball_is_behind(env, ball_name)
+    _get_reach_target_y(env, ball_name, asset_cfg=asset_cfg)  # ensure env._blue_* fresh
     robot: Entity = env.scene[asset_cfg.name]
     foot_pos_w = robot.data.body_link_pos_w[:, asset_cfg.body_ids, :]        # (N, 2, 3)
     floor_z = env.scene.env_origins[:, 2]                                     # (N,)
     foot_z_above_floor = (foot_pos_w[:, :, 2] - floor_z[:, None]).clamp(0.0, None)  # (N, 2)
     max_foot_height = foot_z_above_floor.max(dim=-1).values                   # (N,)
-    reward = _clearance_reward(max_foot_height, target_height, rise_steepness, fall_sigma)
+
+    _BLUE_APPROACH_OUTER_ZONE = 0.30
+    dist_to_blue = env._blue_dbg_dist
+    radius = env._blue_landing_radius_current
+    frac = ((dist_to_blue - radius) / (_BLUE_APPROACH_OUTER_ZONE - radius)).clamp(0.0, 1.0)
+    decayed_target = (target_height * frac).clamp(min=1e-3)
+    effective_target = torch.where(
+        env._blue_wide & ~env._blue_landed_genuine,
+        decayed_target,
+        torch.full_like(decayed_target, target_height),
+    )
+
+    reward = _clearance_reward(max_foot_height, effective_target, rise_steepness, fall_sigma)
     return reward * (~behind).float()
 
 

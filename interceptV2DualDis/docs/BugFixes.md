@@ -4031,3 +4031,51 @@ Fixes the catchstep/visibility mismatch from the other side (flight time now fit
 **Fix:** ported G1's `SpectralNorm` class verbatim into `beyondAMP/source/rsl_rl_amp/rsl_rl_amp/modules/amp_discriminator.py`, wrapping every `nn.Linear` in `AMPDiscriminator` (all trunk layers + the final `amp_linear` output layer) with it, applied AFTER G1's existing weight init (so it normalizes from the actual initial values). No changes to loss formula, reward formula, gradient penalty, weight decay, or any other hyperparameter -- purely the architectural wrapper. Affects both AMP tracks (single-disc and multi-disc) since they share this discriminator module.
 
 **Evidence:** Standalone smoke test (forward pass, `compute_grad_pen` autograd through the spectral-norm wrapper, `predict_amp_reward`, 21 optimizer steps) -- all clean, no NaN/Inf, loss trending down as expected for a toy random-noise discrimination task. Real 3-iteration training smoke test (`Mjlab-BeyondAMP-Goalkeeper-T1-MultiDisc`, 64 envs) -- no exceptions, healthy AMP metrics across the 3 iterations: `AMP loss` 4.70->2.77->1.13 (decreasing), `AMP mean expert pred` 0.17->0.33->0.55 (correctly moving toward +1), `AMP mean policy pred` -0.32->-0.58->-0.83 (correctly moving toward -1), `AMP grad pen loss` stable. Not yet validated against a full live training run (the early-collapse symptom this targets only shows up over hundreds of iterations).
+
+---
+
+## 2026-09-08: blue/orange/red landing radius narrowed 0.30/0.18 -> 0.20/0.15 (easy/hard); orange sphere's gold "landed" color removed
+
+**What changed:** `rewards.py`'s `_get_reach_target_y` (blue), `_get_orange_reach_target_y`, and `_get_red_reach_target_y` all narrowed their curriculum-eased landing radius: the strict/hard-difficulty end (`landing_radius` parameter default) `0.18 -> 0.15`, and the easy/difficulty-0 end (hardcoded in each function's `landing_radius = 0.30 + (landing_radius - 0.30) * d` line) `0.30 -> 0.20`. All three markers share the same easing mechanism and were kept in sync (per the 2026-08-30 fix's own precedent). Also, `play.py`'s orange sphere reverted to a single plain-orange color for its whole unlanded lifetime -- removed the gold/landed color state added 2026-08-15.
+
+**Why:** User request, direct instruction (confirmed via `AskUserQuestion` that the narrowing applies to all three markers, not just orange). No live evidence gathered this time -- a user-requested tightening, not a diagnosed bug. Coincidentally, the new values (0.20 easy / 0.15 hard) exactly match an older, already-present docstring in `_get_reach_target_y` (lines 619-624) describing a pre-2026-08-30 state -- that docstring is accurate again after this fix.
+
+For the orange sphere: user pointed out the gold "landed" state is redundant -- when `env._red_active` flips true, the orange sphere disappears entirely (red takes over as the active target), which is itself sufficient landed-state feedback. The intermediate gold color added an extra visual state for no added information.
+
+**Correct values:** `landing_radius` now eases 0.20m (ball_difficulty=0) -> 0.15m (ball_difficulty=1) for blue, orange, and red identically. No config-level override exists in `goalkeeper_env_cfg.py` for any of the three (confirmed via grep), so the function defaults are the sole source of truth.
+
+**Evidence:** `ast.parse` clean on `rewards.py` and `play.py`. Viewer-only orange color change carries no training effect (per this project's viewer/diagnostic-only carve-out, applied directly without a pre-approval round-trip). Not yet validated against a live training run.
+
+---
+
+## 2026-09-08 (same day, follow-up): landing radius narrowed again 0.20/0.15 -> 0.15/0.13 (easy/hard)
+
+**What changed:** Same three functions (`_get_reach_target_y`, `_get_orange_reach_target_y`, `_get_red_reach_target_y`) narrowed again -- strict/hard end `0.15 -> 0.13`, easy end `0.20 -> 0.15`. Full progression today: 0.30/0.18 -> 0.20/0.15 -> 0.15/0.13.
+
+**Why:** User request, direct instruction ("have the radius on easy mode at 0.15 and the hard 0.13 that is best"). No live evidence gathered -- a further user-requested tightening on top of the same-day change above.
+
+**Evidence:** `ast.parse` clean. Not yet validated against a live training run.
+
+---
+
+## 2026-09-08 (same day, follow-up): `foot_clearance` target_height decays near a blue landing, restores once genuinely landed
+
+**What changed:** `foot_clearance` (`rewards.py`) now calls `_get_reach_target_y` up front (same memoized freshness pattern `stopball`/`softstop`/`success` already use), then computes an `effective_target` in place of the flat `target_height=0.10`: on a wide, unlanded crossing (`env._blue_wide & ~env._blue_landed_genuine`), it linearly decays from `target_height` at 0.30m from blue (reuses the old, removed footreach blue decel-zone's outer boundary) down to a small epsilon floor at the current curriculum landing radius (`env._blue_landing_radius_current`); otherwise (narrow crossings, or once genuinely landed) it stays at the standard `target_height`. Clamped to `1e-3` minimum, not literal 0, since `_clearance_reward` divides by `target_height`.
+
+**Why:** User request, direct instruction ("make that foot clearance drops off the moment you get close to the blue ball target, and once blue ball is fired that it goes back to the standard height target"). Rationale: `foot_clearance`'s standard 0.10m lift target actively fights the low, slow plant blue's own landing check requires right as the foot approaches it. Confirmed via `AskUserQuestion` that "fired" means the genuine landing itself (`env._blue_landed_genuine` flipping true, the same event that fires `blue_ball_landed`'s bonus), not the later ball save.
+
+Proposed as a graph (synthetic example episode: distance-to-blue shrinking to a landing at step 45, target_height dropping to ~0 approaching it and snapping back to 0.10 the instant landed_genuine flips) before implementation, per this project's usual "design shaped through user follow-up" pattern for genuinely new mechanisms.
+
+**Evidence:** `ast.parse` clean. Full test suite: 87/90 pass (3 pre-existing failures in `test_far_travel_curriculum.py`, unrelated to this change or today's radius change -- confirmed via `git diff --stat` that neither touched `events.py`). Live smoke test (`Mjlab-BeyondAMP-Goalkeeper-T1-MultiDisc`, 16 envs, 500 zero-action steps, calling `foot_clearance` directly each step): no exceptions, no NaN/Inf, reward stayed in the expected `[0, 1]` range, and at least one env was observed inside the decay zone (dist=0.145m vs radius=0.13m) with a correspondingly shrunk effective target. No genuine landing occurred under zero-action (expected -- the foot never actually walks to blue without real movement), so the revert-to-standard branch is unexercised live but is a simple deterministic `torch.where`, not independently risky. Not yet validated against a live training run.
+
+---
+
+## 2026-09-08 (same day, follow-up): `footreach` gets a "green"-only contact decel-zone for vel_sigma
+
+**Context:** user reported the leading foot sprints into the ball too hard in phase 2 (the sigmoid-reach × `vel_sigma` regime), kicking it too far instead of a controlled save. Root cause discussion: `reach_rew` is maximized exactly where the foot's position equals the (possibly live-ball) crossing point, and `vel_sigma` rewards arriving there fast with nothing telling it to decelerate right at contact -- "hit the ball as hard as possible" is the literal reward-maximizing behavior. Checked G1's own `_reward_eereach` (`Humanoid-Goalkeeper/legged_gym/.../legged_robot.py:1361`) -- confirmed the phase1 (position-only)/phase2 (sigmoid × vel_sigma, no decel) split is a faithful G1 port, not an SGK invention. The gap is that G1 catches with hands (can absorb/wrap a fast approach, so full speed at contact is fine); we strike a free ball with a foot (a fast approach launches it) -- a genuine feet-vs-hands divergence G1's own design never had to account for.
+
+**What changed:** `footreach` (`rewards.py`) now decays `vel_sigma`'s BOOST (the portion above neutral 1.0x) linearly to zero over the last 0.30m to the crossing target (`_GREEN_DECEL_ZONE = 0.30`), via `decel_frac = clamp(dist_to_crossing / 0.30, 0, 1)` and `vel_sigma = 1.0 + (vel_sigma - 1.0) * decel_frac`. Scoped to `targeting_green = (~env._blue_wide) | env._blue_landed_genuine` ONLY -- the same gate `ball_close` already uses (minus its distance clause): narrow crossings are "green" the whole time; wide crossings are "green" only once genuinely landed at blue. The blue midpoint itself is a ground waypoint (no kick risk), and its own landing quality is already handled separately (`blue_stick_landing`, and the removed 2026-08-29 blue decel-zone) -- this new zone must not re-decay speed during the blue approach, so it's deliberately excluded there.
+
+**Why not other options considered:** narrowing `phase2_threshold` (currently 2.5m, widened from 1.5m on 2026-08-25 specifically because the foot was arriving too late/slow) would revert that fix and risk reintroducing late arrivals -- rejected in favor of a fix scoped to the actual contact moment, leaving the mid-approach speed incentive untouched. A flat cap on `vel_sigma`'s max multiplier was also considered and rejected as a blunter, non-location-specific reduction.
+
+**Evidence:** `ast.parse` clean. Full test suite 87/90 pass (same 3 pre-existing, unrelated `test_far_travel_curriculum.py` failures). Live smoke test (`Mjlab-BeyondAMP-Goalkeeper-T1-MultiDisc`, 16 envs, 600 zero-action steps, calling `footreach` directly each step): no exceptions, no NaN/Inf, reward stayed in `[0, 1]`. Not yet validated against a live training run -- watch whether contact-moment ball speed drops on the next checkpoint.
