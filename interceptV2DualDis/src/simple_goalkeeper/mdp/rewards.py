@@ -5624,16 +5624,20 @@ def leading_foot_lift(
     shrink_frac = (torch.exp(_DECAY_STEEPNESS * x) - 1.0) / (math.exp(_DECAY_STEEPNESS) - 1.0)
     decayed_target = target_height * shrink_frac  # target_height at 0.20m -> 0.0 at the landing radius
 
-    # Overshoot override -- same signed_progress/threshold blue_overshoot_penalty
-    # uses, so "overshot" means the identical thing everywhere.
-    full_y = _get_ball_crossing_y(env, ball_name)
-    start_y = env.scene.env_origins[:, 1]
-    half_y = start_y + (full_y - start_y) / 2.0
-    direction = torch.sign(full_y - start_y)
-    assigned_foot_y = foot_pos_w[arange_n, foot_idx, 1]
-    signed_progress = direction * (assigned_foot_y - half_y)
-    overshot = signed_progress > radius
-    decayed_target = torch.where(overshot, torch.zeros_like(decayed_target), decayed_target)
+    # REMOVED 2026-09-08 (user request, "make the leading foot lift fully
+    # circular, dont zero it out once we pass the y distance"): was a hard
+    # override forcing decayed_target to exactly 0 once signed_progress
+    # (the same directional metric blue_overshoot_penalty uses) showed the
+    # foot had passed blue, staying 0 no matter how far past it went --
+    # one-sided, a cliff on the far side rather than a drop-off. dist_to_blue
+    # (above) is already a plain, undirected torch.norm(...) distance, so
+    # WITHOUT this override the exact same exponential formula is already
+    # inherently circular/radially-symmetric around the blue point on both
+    # sides -- confirmed via a comparison graph before removing this. Also
+    # confirmed side-agnostic: dist_to_blue is a norm (no sign at all), and
+    # this override's own signed_progress used the same direction=sign(...)
+    # normalization every other left/right-symmetric term in this file
+    # uses, so removing it doesn't change left/right handling at all.
 
     effective_target = torch.where(
         env._blue_wide & ~env._blue_landed_genuine,
