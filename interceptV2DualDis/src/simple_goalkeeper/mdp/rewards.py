@@ -144,9 +144,9 @@ _YIELD_TARGET_SIN = math.sin(math.radians(_YIELD_TARGET_ANGLE_DEG))
 # stayed at ~83-85deg (near the OLD target) -- the weak overshoot gradient
 # was too easily overridden by stopball/softstop's much heavier pull toward
 # a near-perpendicular block angle for near-region's more head-on ball
-# trajectories. Same steepness convention as foot_clearance's
+# trajectories. Same steepness convention as leading_foot_lift's
 # clearance_sigma=300 (exp(-clearance_sigma*(height-target)^2)): chosen so
-# error = target_magnitude (foot_clearance: 0.10m; here: the 30deg gap back
+# error = target_magnitude (leading_foot_lift: 0.10m; here: the 30deg gap back
 # to the old 90deg value) scores ~0.05, half that error scores ~0.47.
 # Applied ONLY on the overshoot side (foot rotated past the target, on the
 # correct side) -- the undershoot/wrong-side branch keeps the original
@@ -571,7 +571,7 @@ def _get_reach_target_y(
     ball_name: str,
     asset_cfg: SceneEntityCfg = _DEFAULT_FEET_CFG,
     wide_threshold: float = 0.5,  # FIX 2026-08-01: was 0.65, reverted to 0.5, kept in sync with regions.py's near/far boundary
-    landing_radius: float = 0.13,  # FIX 2026-09-08: 0.20->0.18->0.15->0.13 (2026-07-24: was 0.08, too strict at full difficulty)
+    landing_radius: float = 0.09,  # FIX 2026-09-08: 0.20->0.18->0.15->0.13->0.09 (2026-07-24: was 0.08, too strict at full difficulty)
     landing_speed_threshold: float = 1.0,  # FIX 2026-07-24: reverted to the pre-2026-07-23 value (was 0.15); see below
 ) -> torch.Tensor:
     """Two-stage reach target for wide crossings: v2 reimplementation of the
@@ -723,7 +723,7 @@ def _get_reach_target_y(
     # strict 0.18->0.15, easy 0.30->0.20. Same change mirrored in
     # _get_orange_reach_target_y/_get_red_reach_target_y below.
     d = float(min(max(getattr(env, "_ball_difficulty", 1.0), 0.0), 1.0))
-    landing_radius = 0.15 + (landing_radius - 0.15) * d
+    landing_radius = 0.11 + (landing_radius - 0.11) * d
     env._blue_landing_radius_current = landing_radius
 
     # FIX 2026-07-24: reverted to the pre-2026-07-23 band (2.0 m/s at d=0
@@ -928,7 +928,7 @@ def _get_orange_reach_target_y(
     env: "ManagerBasedRlEnv",
     ball_name: str,
     asset_cfg: SceneEntityCfg = _DEFAULT_FEET_CFG,
-    landing_radius: float = 0.13,  # FIX 2026-09-08: 0.20->0.18->0.15->0.13, mirrors _get_reach_target_y's own change
+    landing_radius: float = 0.09,  # FIX 2026-09-08: 0.20->0.18->0.15->0.13->0.09, mirrors _get_reach_target_y's own change
     landing_speed_threshold: float = 1.0,
 ) -> torch.Tensor:
     """Trailing-foot ("orange") mirror of _get_reach_target_y -- see that
@@ -998,7 +998,7 @@ def _get_orange_reach_target_y(
     # _get_reach_target_y's own widening (see that function's comment).
     # FIX 2026-09-08 (user request): narrowed back, easy 0.30 -> 0.20.
     d = float(min(max(getattr(env, "_ball_difficulty", 1.0), 0.0), 1.0))
-    landing_radius = 0.15 + (landing_radius - 0.15) * d
+    landing_radius = 0.11 + (landing_radius - 0.11) * d
     env._orange_landing_radius_current = landing_radius
 
     _EASY_LANDING_SPEED_THRESHOLD = 2.0
@@ -1083,7 +1083,7 @@ def _get_red_reach_target_y(
     env: "ManagerBasedRlEnv",
     ball_name: str,
     asset_cfg: SceneEntityCfg = _DEFAULT_FEET_CFG,
-    landing_radius: float = 0.13,  # FIX 2026-09-08: 0.20->0.18->0.15->0.13, mirrors _get_reach_target_y's own change
+    landing_radius: float = 0.09,  # FIX 2026-09-08: 0.20->0.18->0.15->0.13->0.09, mirrors _get_reach_target_y's own change
     landing_speed_threshold: float = 1.0,
 ) -> torch.Tensor:
     """Trailing-foot ("red") second-stage mirror of _get_orange_reach_target_y --
@@ -1174,7 +1174,7 @@ def _get_red_reach_target_y(
     # _get_reach_target_y's own widening (see that function's comment).
     # FIX 2026-09-08 (user request): narrowed back, easy 0.30 -> 0.20.
     d = float(min(max(getattr(env, "_ball_difficulty", 1.0), 0.0), 1.0))
-    landing_radius = 0.15 + (landing_radius - 0.15) * d
+    landing_radius = 0.11 + (landing_radius - 0.11) * d
     env._red_landing_radius_current = landing_radius
 
     _EASY_LANDING_SPEED_THRESHOLD = 2.0
@@ -3249,7 +3249,7 @@ def postupperdofpos(
     pose discrimination" -- not G1-matched (no G1 equivalent recovery-
     quality kernel exists to size against). Deliberately kept the same
     exp(-k*err) family already used throughout this reward table (postorientation/
-    postangvel/postlinvel/postlegdofpos/postwaistdofpos/foot_clearance all
+    postangvel/postlinvel/postlegdofpos/postwaistdofpos/leading_foot_lift all
     use this shape) rather than switching to a different kernel family,
     to stay consistent with the codebase's established convention. Only
     postupperdofpos was touched -- postlegdofpos/postwaistdofpos likely
@@ -4325,7 +4325,7 @@ def foot_inner_face_continuous(
     FIX 2026-08-05 (user request): the metric above (raw cos(angle-target)) is
     kept for the UNDERSHOOT/wrong-side region, but the OVERSHOOT region (foot
     rotated past the target, on the correct side -- i.e. drifting back toward
-    the old 90° value) now uses a steeper foot_clearance-style Gaussian instead
+    the old 90° value) now uses a steeper leading_foot_lift-style Gaussian instead
     of cosine's own near-flat tail there. See _FOOT_OVERSHOOT_SIGMA's docstring
     for the live-checkpoint evidence and calibration. The two pieces agree
     exactly at the target (both equal 1.0), so this is a continuous, just not
@@ -4823,7 +4823,7 @@ def postsave_foot_airtime(
     happens to leave it.
 
     Time-boxed (window_steps=20, ~0.4s at dt=0.02s) rather than unconditional
-    for the rest of the post-save window: foot_clearance's own docstring
+    for the rest of the post-save window: leading_foot_lift's own docstring
     explains why an unbounded post-save airborne reward causes "post-save
     hopping" (it's deactivated via `~behind` for exactly that reason). A
     short fixed window buys real extra rotation time without opening the
@@ -4881,7 +4881,7 @@ def postsave_foot_airtime(
     opened (not time-since-this-particular-liftoff), that second "airborne"
     reading could score a LARGER ramp value than it deserves -- effectively
     paying out for exactly the "land once, then hop again" pattern this
-    term's own time-boxing was designed to discourage (see the foot_clearance
+    term's own time-boxing was designed to discourage (see the leading_foot_lift
     "post-save hopping" reference above). Now sourced from
     `_leading_foot_airborne_latched`, which cannot reopen once landed.
     """
@@ -4911,7 +4911,7 @@ def postleadfootplantspeed(
     NEW 2026-08-07 (user request): user watched training and saw the
     assigned foot slamming down hard at landing rather than settling
     softly. Peaked Gaussian `exp(-sigma*(speed-target_speed)^2)`, same
-    shape and same sigma=300 as `foot_clearance`'s established convention
+    shape and same sigma=300 as `leading_foot_lift`'s established convention
     (that function's own docstring: "error = target_magnitude scores
     ~0.05, half that error scores ~0.47") -- here target_speed IS the
     literal error-normalizing magnitude (0.1 m/s), so the same sigma=300
@@ -5416,7 +5416,7 @@ def _clearance_reward(
     rise_steepness: float = 3.0,
     fall_sigma: float = 300.0,
 ) -> torch.Tensor:
-    """Shared asymmetric kernel for foot_clearance/trailing_foot_lift: steep,
+    """Shared asymmetric kernel for leading_foot_lift/trailing_foot_lift: steep,
     monotonic rise from height=0, Gaussian-style falloff past target_height.
 
     FIX 2026-08-30 (user request, "make the gradient better"): replaces the
@@ -5458,7 +5458,7 @@ def _clearance_reward(
     return rise * fall
 
 
-def foot_clearance(
+def leading_foot_lift(
     env: "ManagerBasedRlEnv",
     ball_name: str,
     asset_cfg: SceneEntityCfg = _DEFAULT_FEET_CFG,
@@ -5466,7 +5466,8 @@ def foot_clearance(
     rise_steepness: float = 3.0,
     fall_sigma: float = 300.0,
 ) -> torch.Tensor:
-    """Reward for lifting a foot to (not past) a target height during ball approach.
+    """Reward for lifting the LEADING (assigned) foot to (not past) a target
+    height during ball approach.
 
     Deactivates once the ball is behind to avoid rewarding post-save hopping.
 
@@ -5489,40 +5490,165 @@ def foot_clearance(
 
     NEW 2026-09-08 (user request, "make foot clearance drop off the moment
     you get close to the blue ball target, and once blue ball is fired that
-    it goes back to the standard height target"): on a wide, UNLANDED
-    crossing, `target_height` decays linearly from its standard value (at
-    0.30m from blue -- reuses the same outer-zone boundary the old, removed
-    footreach blue decel-zone used) down to ~0 at the current curriculum
-    landing radius (`env._blue_landing_radius_current`), so this reward
-    stops fighting the low, slow plant blue's own landing check requires.
-    Snaps back to the standard `target_height` the instant
-    `env._blue_landed_genuine` fires (the same flip that fires
-    `blue_ball_landed`'s bonus -- confirmed via `AskUserQuestion` that
-    "fired" means genuine landing, not the later ball save). Narrow
-    crossings are unaffected (no blue exists there). Clamped to a small
-    epsilon floor (not literal 0) since `_clearance_reward` divides by
-    `target_height`. Not yet validated against a live training run.
+    it goes back to the standard height target"), final form after many
+    same-day fix passes -- see docs/BugFixes.md for the full history of what
+    was tried and why each attempt broke:
+    1. First attempt shrank `target_height` fed straight into
+       `_clearance_reward` -- broke its rise term (`tanh(h/target)`), which
+       divides by target and blows up for ANY nonzero height once target
+       shrinks, inflating reward for a near-grounded foot instead of
+       suppressing it.
+    2. Used raw `dist_to_blue` (XY, conflates X and Y) to detect "close to
+       blue" -- missed a genuine overshoot (foot past blue in Y, still far
+       from the goal line in X), leaving the decay pinned at full strength.
+    3. Scoped the whole thing to `max(both feet)` -- silently suppressed the
+       TRAILING foot's own, unrelated orange-bound lift whenever the leading
+       foot was near/past blue at the same time (most visible in far-region
+       double/triple-step episodes). Fixed by scoping to the LEADING foot
+       only (trailing foot's own lift lives entirely in `trailing_foot_lift`,
+       per user request -- "just have leading foot clearance and trailing
+       foot clearance as a reward, dont have 3 rewards").
+    4. Abandoned the shrinking-target approach entirely in favor of fading
+       the reward OUTPUT (leaving target_height fixed at 0.10) -- this
+       avoided pass 1's blow-up, but changed the actual behavior: the term
+       went silent (no incentive either way) near blue, instead of actively
+       preferring a low/grounded foot there. User explicitly preferred the
+       original shrinking-target shape ("did you make the target height
+       just a parabola... i like the first one better") once told which of
+       the two was actually implemented.
+    5. Two further bugs surfaced against pass 4's fading-output design: the
+       outer zone (0.30m) exceeded the FIXED 0.25m gap between orange and
+       blue (`orange_y`/`half_y` are both derived from the same `delta`, so
+       their difference is always exactly 0.25m on any wide crossing --
+       confirmed live), so the fade started firing while the foot merely
+       passed orange's position en route to blue; and the foot body-link
+       origin sits ~0.03m above the true ground-contact surface even when
+       genuinely flat (matches this project's established
+       `_FOOT_CONTACT_BELOW_BODY=0.030` convention elsewhere), so a
+       genuinely flat foot still measured height~0.03m, not 0.
+
+    Final design (this pass): restores the shrinking-`target_height` shape
+    the user actually wanted, but fixes pass 1's root cause by DECOUPLING
+    the kernel's rise steepness from the (now-shrinking) target -- `rise` is
+    computed as `tanh((rise_steepness/target_height) * height)`, i.e. always
+    calibrated against the STANDARD 0.10m target regardless of how far the
+    CURRENT `effective_target` has shrunk, so it can never divide by a
+    near-zero value. Only `fall` (`exp(-fall_sigma*(height-effective_target)^2)`,
+    inherently well-behaved with no division) uses the shrinking
+    `effective_target`, so the reward's PEAK moves down toward height=0 as
+    the foot closes on blue, rather than merely fading toward 0 regardless
+    of height. A genuinely flat leading foot (height=0, after subtracting
+    the same `_FOOT_RESTING_HEIGHT` baseline pass 5 introduced) still scores
+    exactly 0 always (`tanh(0)=0`), since `rise` no longer depends on
+    `effective_target` at all -- pass 1's blow-up is structurally impossible
+    now, not just avoided by luck of the input values.
+
+    `effective_target` decays linearly from `target_height` at 0.20m from
+    blue (narrowed from 0.30m in pass 5 -- safely under the fixed 0.25m
+    orange/blue gap) down to exactly 0.0 at the current curriculum landing
+    radius (`env._blue_landing_radius_current`, no epsilon floor needed --
+    literal 0 is safe now that rise doesn't divide by it), and is forced to
+    exactly 0.0 independent of distance whenever `signed_progress` (the same
+    metric `blue_overshoot_penalty` uses) shows the foot has genuinely
+    overshot blue. This is gated to `env._blue_wide & ~env._blue_landed_genuine`
+    (restores to the standard `target_height` the instant
+    `env._blue_landed_genuine` fires -- the same flip that fires
+    `blue_ball_landed`'s bonus) and is not sticky (recomputed live every
+    tick) -- if the foot recovers back before blue, the distance-based decay
+    resumes. Narrow crossings are unaffected (`effective_target` stays at
+    `target_height` always). Not yet validated against a live training run.
     """
     behind = _ball_is_behind(env, ball_name)
     _get_reach_target_y(env, ball_name, asset_cfg=asset_cfg)  # ensure env._blue_* fresh
     robot: Entity = env.scene[asset_cfg.name]
     foot_pos_w = robot.data.body_link_pos_w[:, asset_cfg.body_ids, :]        # (N, 2, 3)
     floor_z = env.scene.env_origins[:, 2]                                     # (N,)
-    foot_z_above_floor = (foot_pos_w[:, :, 2] - floor_z[:, None]).clamp(0.0, None)  # (N, 2)
-    max_foot_height = foot_z_above_floor.max(dim=-1).values                   # (N,)
+    # FIX 2026-09-08 (user report, "standing still... leading_foot_lift is
+    # again 1.4 when standing flat"): the foot body-link origin sits ~0.03m
+    # ABOVE the true ground-contact surface even when genuinely flat/grounded
+    # -- confirmed live (env.reset -> 10 zero-action steps -> feet_contact
+    # sensor reads full contact, `foot_z_above_floor` reads 0.0298-0.0300m,
+    # not 0). Same well-established offset this project already accounts for
+    # elsewhere (events.py's `_FOOT_CONTACT_BELOW_BODY = 0.030`, the
+    # 2026-06-30 ghost-overlay +0.030m fix) -- this reward had never
+    # subtracted it. `trailing_foot_lift`/`clearance_at_save` share the
+    # identical raw measurement and likely the identical bias -- flagged,
+    # not fixed here (out of scope for this specific report).
+    _FOOT_RESTING_HEIGHT = 0.03
+    foot_z_above_floor = (foot_pos_w[:, :, 2] - floor_z[:, None] - _FOOT_RESTING_HEIGHT).clamp(0.0, None)  # (N, 2)
 
-    _BLUE_APPROACH_OUTER_ZONE = 0.30
+    foot_idx = _get_correct_foot_idx(env, ball_name)
+    arange_n = torch.arange(env.num_envs, device=env.device)
+    leading_height = foot_z_above_floor[arange_n, foot_idx]
+
+    # FIX 2026-09-08 (user report, "foot clearance falls off when it passes
+    # orange ball not blue ball"): orange_y and blue's own half_y are a FIXED
+    # 0.25m apart for EVERY wide crossing, by construction -- orange_y =
+    # start_y + sign(delta)*(|delta|-0.50)/2, half_y = start_y +
+    # sign(delta)*|delta|/2 (both from the same `delta` -- see
+    # _get_orange_reach_target_y/_get_reach_target_y), so their difference
+    # is exactly sign(delta)*0.25 for any |delta|>0.5 (i.e. every wide
+    # crossing), independent of the actual crossing distance. A 0.30m outer
+    # zone EXCEEDS this fixed 0.25m gap, so the decay (measured as distance
+    # to blue) would already be partially active by the time the leading
+    # foot's Y merely passes through orange's fixed position on its way
+    # toward blue -- nothing to do with orange itself, a pure numeric
+    # overlap of two independently-chosen constants. Narrowed to 0.20m,
+    # safely below the fixed 0.25m gap, so the decay zone can never reach
+    # back past orange.
+    # FIX 2026-09-08 (user request, after watching --agent scripted_blue_approach
+    # live: "the perfect reward towards the real blue ball needs to be
+    # exponential towards the h=0 height"): shrink_frac was a straight LINEAR
+    # ramp (0 at the landing radius -> 1 at the outer zone). Reshaped into an
+    # exponential-decay curve instead: `(exp(k*x)-1)/(exp(k)-1)` (x = the same
+    # linear 0..1 fraction as before) drops off fast right after leaving the
+    # outer zone, then flattens out asymptotically near blue -- effective_
+    # target now stays close to 0 for most of the final approach rather than
+    # declining evenly the whole way in. Shape confirmed against a comparison
+    # graph (linear vs. this exponential vs. a smoothstep ease) before
+    # implementing, same discipline as reward-shaping-scene-entity-cfg's
+    # verification-first requirement.
+    # FIX 2026-09-08 (same day, user request, "maybe make it a little bit
+    # less exponential to have a better gradient"): k=4.0 collapsed to near-
+    # zero almost immediately after leaving the outer zone, leaving very
+    # little usable gradient across most of the 0.20->0.09m approach.
+    # Lowered to 1.0 (chosen via a 4-way comparison graph: k=4/2/1/linear) --
+    # still a genuine exponential shape (front-loaded drop, not a straight
+    # line), but keeps a real, learnable gradient across most of the zone
+    # instead of flattening out immediately.
+    _BLUE_APPROACH_OUTER_ZONE = 0.20
+    _DECAY_STEEPNESS = 1.0
     dist_to_blue = env._blue_dbg_dist
     radius = env._blue_landing_radius_current
-    frac = ((dist_to_blue - radius) / (_BLUE_APPROACH_OUTER_ZONE - radius)).clamp(0.0, 1.0)
-    decayed_target = (target_height * frac).clamp(min=1e-3)
+    x = ((dist_to_blue - radius) / (_BLUE_APPROACH_OUTER_ZONE - radius)).clamp(0.0, 1.0)
+    shrink_frac = (torch.exp(_DECAY_STEEPNESS * x) - 1.0) / (math.exp(_DECAY_STEEPNESS) - 1.0)
+    decayed_target = target_height * shrink_frac  # target_height at 0.20m -> 0.0 at the landing radius
+
+    # Overshoot override -- same signed_progress/threshold blue_overshoot_penalty
+    # uses, so "overshot" means the identical thing everywhere.
+    full_y = _get_ball_crossing_y(env, ball_name)
+    start_y = env.scene.env_origins[:, 1]
+    half_y = start_y + (full_y - start_y) / 2.0
+    direction = torch.sign(full_y - start_y)
+    assigned_foot_y = foot_pos_w[arange_n, foot_idx, 1]
+    signed_progress = direction * (assigned_foot_y - half_y)
+    overshot = signed_progress > radius
+    decayed_target = torch.where(overshot, torch.zeros_like(decayed_target), decayed_target)
+
     effective_target = torch.where(
         env._blue_wide & ~env._blue_landed_genuine,
         decayed_target,
         torch.full_like(decayed_target, target_height),
     )
 
-    reward = _clearance_reward(max_foot_height, effective_target, rise_steepness, fall_sigma)
+    # Decoupled kernel (see docstring, pass 6): rise steepness is calibrated
+    # against the STANDARD target_height always, never the shrinking
+    # effective_target, so it can never divide by a near-zero value. Only
+    # the fall (peak location) tracks effective_target.
+    rise = torch.tanh((rise_steepness / target_height) * leading_height)
+    excess = (leading_height - effective_target).clamp(min=0.0)
+    fall = torch.exp(-fall_sigma * excess ** 2)
+    reward = rise * fall
     return reward * (~behind).float()
 
 
@@ -5538,17 +5664,20 @@ def trailing_foot_lift(
     blue->orange and orange->red waypoint journey.
 
     NEW 2026-08-17 (user request): "an incentive that raises the foot" while
-    the trailing foot travels start->orange and orange->red. `foot_clearance`
-    already rewards lifting SOME foot to target_height, but takes the max
-    across both feet -- fully satisfiable by the LEADING foot alone, leaving
-    the trailing foot with no lift incentive of its own during this specific
-    journey (mirrors the gap `orange_foot_proximity` closed for trailing-foot
-    *position* on 2026-08-08, this time for height).
+    the trailing foot travels start->orange and orange->red. At the time,
+    `foot_clearance` (this term's sibling, renamed to `leading_foot_lift`
+    2026-09-08) already rewarded lifting SOME foot to target_height, but
+    took the max across both feet -- fully satisfiable by the LEADING foot
+    alone, leaving the trailing foot with no lift incentive of its own
+    during this specific journey (mirrors the gap `orange_foot_proximity`
+    closed for trailing-foot *position* on 2026-08-08, this time for
+    height). As of 2026-09-08, `leading_foot_lift` ALSO only ever reads the
+    leading foot -- the two terms are fully non-overlapping by construction.
 
-    Same shared kernel as foot_clearance -- see `_clearance_reward`'s own
+    Same shared kernel as leading_foot_lift -- see `_clearance_reward`'s own
     docstring for the full shape/rationale. FIX 2026-08-30 (user request,
     "make the gradient better"): was the same symmetric Gaussian bump
-    foot_clearance used to have, replaced same day, same reasoning -- a live
+    leading_foot_lift used to have, replaced same day, same reasoning -- a live
     checkpoint replay (this exact reward's own investigation) found the
     trailing foot's real height flat at ~0m clearance the entire episode,
     consistent with the old kernel's near-zero gradient right at height=0
@@ -5561,7 +5690,7 @@ def trailing_foot_lift(
     once orange has already landed genuinely -- there is no gap between the
     two spans to leave uncovered. `env._orange_wide` (== `env._blue_wide`)
     keeps this zero on narrow crossings, where orange/red don't exist.
-    Deliberately NOT gated on `~behind` like `foot_clearance` -- the
+    Deliberately NOT gated on `~behind` like `leading_foot_lift` -- the
     orange->red leg of this journey routinely continues past the save.
 
     No G1 equivalent (same justification class as the orange/red waypoint
@@ -5604,7 +5733,7 @@ def clearance_at_save(
     `airborne_at_save` -- that term was a one-shot BINARY bonus (airborne
     y/n) fired only on the exact softstop tick. This is deliberately
     different on both axes: continuous (graded toward a real height target,
-    same Gaussian-bump kernel as foot_clearance/trailing_foot_lift) and
+    same Gaussian-bump kernel as leading_foot_lift/trailing_foot_lift) and
     windowed rather than instantaneous -- active for every step from the
     leading foot's genuine blue landing (`env._blue_landed_genuine`, already
     excludes cheap/free landings -- see `_get_reach_target_y`) through the
@@ -5614,10 +5743,11 @@ def clearance_at_save(
     blue/orange/red intermediate waypoint markers (see e.g.
     `_get_reach_target_y`'s docstring).
 
-    Unlike foot_clearance (max over both feet) or trailing_foot_lift (the
-    trailing foot), this scopes to the LEADING/assigned foot specifically --
-    the one that will make contact -- via `_get_correct_foot_idx`, mirroring
-    trailing_foot_lift's single-foot selection pattern.
+    Like leading_foot_lift and trailing_foot_lift, this scopes to the
+    LEADING/assigned foot specifically -- the one that will make contact --
+    via `_get_correct_foot_idx`, mirroring trailing_foot_lift's single-foot
+    selection pattern. (leading_foot_lift itself used to take max(both feet)
+    before its 2026-09-08 rename/scope fix -- see that term's own docstring.)
 
     `_get_reach_target_y` is called explicitly here (return value discarded)
     purely to guarantee `env._blue_landed_genuine` is fresh this tick

@@ -83,7 +83,7 @@ from simple_goalkeeper.rsl_rl_multi.him_amp_on_policy_runner import (
 
 @dataclass(frozen=True)
 class PlayConfig:
-    agent: Literal["zero", "random", "trained", "scripted_yaw", "scripted_lean"] = "trained"
+    agent: Literal["zero", "random", "trained", "scripted_yaw", "scripted_lean", "scripted_blue_approach"] = "trained"
     checkpoint_file: str | None = None
     scripted_yaw_joint: str = "Left_Hip_Yaw"
     """--agent scripted_yaw only: which joint to drive. T1's ankle has no yaw
@@ -148,6 +148,22 @@ class PlayConfig:
     episode-start stance, not the recovery target. These differ only in the
     legs; arm values are identical between the two maps. Get this wrong and
     the rendered pose isn't the one the reward stack actually targets."""
+    scripted_blue_approach_period_steps: int = 500
+    """--agent scripted_blue_approach only: total steps per demo cycle
+    (dt=0.02s, so 500 = 10s/cycle), then it loops. Live demo of
+    rewards.py:leading_foot_lift's shrinking-target-near-blue mechanism
+    (2026-09-08, see docs/BugFixes.md) -- forces a wide crossing and rigidly
+    teleports the leading foot (root translation, no IK) through 4 phases:
+    (1) approach blue, height descending as if diving in; (2) held AT blue,
+    height oscillating 0<->0.12m WHILE unlanded -- watch the P-panel
+    leading_foot_lift plot peak at the LOW end of that oscillation, not the
+    high end (the shrinking target actively prefers a low foot here, not
+    just "no penalty"); (3) a forced, clearly-announced genuine landing
+    ("blue fired"); (4) the same height oscillation again, now POST-landing
+    -- the plot should now peak at the HIGH end instead, confirming the
+    target restored to standard. Console prints announce each phase
+    transition. See scripts/probe_leading_foot_lift.py for the same
+    mechanism as a static numeric table instead of a live animated demo."""
     motion_file: str | None = None
     """Optional NPZ motion file for the WithOverlay task (overrides default)."""
     amp_eye_view: bool = False
@@ -1734,8 +1750,8 @@ def _patch_viewer_foot_restitution_plot(native_viewer: "NativeMujocoViewer", env
     # added footreach -- same promote-into-front-slots mechanism, this
     # patch registers last so it has final say over _term_names order.
     # FIX 2026-09-08 (user request, "put foot clearance in the mujoco
-    # viewer"): added foot_clearance, same mechanism.
-    _ALSO_PROMOTED = ("contact_yield_velocity_x", "contact_yield_velocity_y", "footreach", "foot_clearance")
+    # viewer"): added leading_foot_lift, same mechanism.
+    _ALSO_PROMOTED = ("contact_yield_velocity_x", "contact_yield_velocity_y", "footreach", "leading_foot_lift")
     _DEMOTED = ("trailing_foot_forward_continuous", "wrong_foot_ball_contact")
     _FIXED_LO, _FIXED_HI = -0.5, 1.5
 
@@ -1887,7 +1903,7 @@ def _patch_viewer_post_recovery_plots(native_viewer: "NativeMujocoViewer", env) 
     function containing a `_ball_is_behind(env` call, excluding the
     APPROACH-phase terms that instead gate OFF once behind --
     `footreach`/`foot_proximity`/`foot_inner_face_continuous`/
-    `foot_clearance`/`blue_trunk_drive` -- those are the opposite family):
+    `leading_foot_lift`/`blue_trunk_drive` -- those are the opposite family):
     `postangvel`, `postlinvel`, `postupperdofpos`, `postwaistdofpos`,
     `postlegdofpos`, `postleadfootorientation`, `postsave_foot_airtime`,
     `postheadingorientation`, `penalize_arm_above_shoulder` (steady-post-save
@@ -2069,11 +2085,11 @@ def _patch_viewer_all_footorientation_plots(native_viewer: "NativeMujocoViewer",
     the separate whole-body-yaw-spin investigation
     (`_patch_viewer_post_recovery_plots`'s 2026-08-08 entry).
 
-    Also explicitly includes `assigned_foot_angle_deg`
+    7 terms total, well under the 12-slot cap, so nothing needs demoting to
+    fit. REMOVED 2026-09-08 (user request): `assigned_foot_angle_deg`
     (`_patch_viewer_foot_orientation_plot`'s custom raw plot, the live
-    save-target angle readout in degrees) alongside the 7 ordinary reward-
-    term figures -- 8 terms total, well under the 12-slot cap, so nothing
-    needs demoting to fit.
+    save-target angle readout in degrees) used to be included here too (8
+    terms) -- swapped out in favor of `softstop`, now the front-most entry.
 
     Registered LAST in run_play (after every other panel patch) so its
     reorder is the final word -- same "last registered wins" mechanism
@@ -2083,7 +2099,15 @@ def _patch_viewer_all_footorientation_plots(native_viewer: "NativeMujocoViewer",
     orig_setup = native_viewer.setup
 
     _ALL_FOOTORIENTATION_TERMS = (
-        "assigned_foot_angle_deg",
+        # SWAPPED 2026-09-08 (user request, "put softstop in the p viewer
+        # instead of assigned_foot_angle_degworld"): softstop moved into
+        # this front slot in place of assigned_foot_angle_deg (the custom
+        # raw plot _patch_viewer_foot_orientation_plot creates -- its title
+        # renders as "assigned_foot_angle_deg_world (target=...)", which is
+        # what the user meant). assigned_foot_angle_deg's own figure still
+        # exists (that patch is unchanged) but is no longer in this
+        # promotion list, so it falls out of the visible front slots.
+        "softstop",
         "feetorientation",
         "foot_inner_face_continuous",
         "inner_face_orientation_save",
@@ -2093,19 +2117,6 @@ def _patch_viewer_all_footorientation_plots(native_viewer: "NativeMujocoViewer",
         # foot_ang_vel_xy deleted entirely (goalkeeper_env_cfg.py/rewards.py/
         # mdp/__init__.py) -- superseded by ankle_pitch_vel/ankle_roll_vel
         # below, see docs/BugFixes.md.
-        # SWAPPED 2026-08-30 (user request): ankle_pitch_vel -> softstop.
-        # ankle_pitch_vel's own slot history: added 2026-08-15 -- probe
-        # evidence (docs/BugFixes.md, 2026-08-15) found Ankle_Pitch's own
-        # joint velocity, not the whole-body world-frame sum foot_ang_vel_xy
-        # used to measure, actually leads the leading foot's pre-save pitch
-        # spike. Removed from this panel (not from the reward table --
-        # still registered/trained in goalkeeper_env_cfg.py, just no longer
-        # promoted to an always-visible front slot) to make room for
-        # `softstop` -- the single biggest weight in the whole reward table
-        # (up to 262.5) and the save-quality investigation's own trigger
-        # event, worth watching directly alongside cleanstop/contact_yield_
-        # velocity_x/_y rather than only inferring it from _softstop_flag.
-        "softstop",
         # REMOVED 2026-08-15 (user request, "drop the _pos"): ankle_pitch_pos/
         # ankle_roll_pos deleted from the reward manager entirely (see
         # goalkeeper_env_cfg.py) -- removed from this panel too. ankle_roll_vel
@@ -2252,7 +2263,7 @@ def run_play(task_id: str, cfg: PlayConfig) -> None:
     else:
         env = AMPEnvWrapper(env, clip_actions=agent_cfg.clip_actions, motion_dataset=agent_cfg.amp_data)
 
-    DUMMY_MODE = cfg.agent in {"zero", "random", "scripted_yaw", "scripted_lean"}
+    DUMMY_MODE = cfg.agent in {"zero", "random", "scripted_yaw", "scripted_lean", "scripted_blue_approach"}
     if DUMMY_MODE:
         action_shape: tuple[int, ...] = env.unwrapped.action_space.shape
         if cfg.agent == "zero":
@@ -2485,6 +2496,202 @@ def run_play(task_id: str, cfg: PlayConfig) -> None:
             print(
                 f"[INFO] scripted_lean: holding {cfg.scripted_lean_deg:.1f}deg forward "
                 f"lean at HOME_KEYFRAME joints, root height={cfg.scripted_lean_root_height:.3f}m",
+                file=sys.stderr,
+            )
+        elif cfg.agent == "scripted_blue_approach":
+            # Live demo (2026-09-08, user request: "show the play script that
+            # shows it working like a agent i can run in the play command")
+            # of leading_foot_lift's shrinking-target-near-blue mechanism
+            # (see rewards.py:leading_foot_lift, docs/BugFixes.md 2026-09-08)
+            # -- the same teleport technique scripts/probe_leading_foot_lift.py
+            # uses (a static numeric table), replayed live as an animated
+            # loop so the P-panel's leading_foot_lift plot visibly responds.
+            # Pass --no-terminations True (like the scripted_yaw/scripted_lean
+            # examples above) -- the scripted teleports can otherwise trip
+            # bad_orientation/base_height/sharpforce.
+            import math as _blue_math
+
+            raw_env_for_blue = env.unwrapped
+            n_blue = raw_env_for_blue.num_envs
+            _blue_period = cfg.scripted_blue_approach_period_steps
+            _FOOT_RESTING_HEIGHT_BLUE = 0.03  # must match leading_foot_lift's own constant
+            _FORCED_DELTA_BLUE = 0.8  # env-relative crossing offset, safely > wide_threshold (0.5)
+
+            def policy(obs: torch.Tensor) -> torch.Tensor:
+                return torch.zeros(action_shape, device=device)
+
+            def _force_wide_crossing() -> None:
+                start_y = raw_env_for_blue.scene.env_origins[:, 1]
+                raw_env_for_blue._ball_crossing_y = start_y + _FORCED_DELTA_BLUE
+                raw_env_for_blue._rsi_cross_y = torch.full((n_blue,), _FORCED_DELTA_BLUE, device=device)
+
+            def _park_ball_state_blue() -> None:
+                # FIX (live-verified): the ball's own physics keeps rolling
+                # for real regardless of our foot teleports -- within ~50-65
+                # real steps it crosses the goal line for real, permanently
+                # flipping _ball_is_behind() True and zeroing
+                # leading_foot_lift's `(~behind).float()` gate for the rest
+                # of the run, well before the demo cycle even finishes once.
+                # Same fix scripted_yaw/scripted_lean already use: park the
+                # ball far away, frozen, every step.
+                ball_entity = raw_env_for_blue.scene["ball"]
+                park_pos = (
+                    torch.tensor([[10.0, 10.0, 5.0]], device=device).expand(n_blue, -1)
+                    + raw_env_for_blue.scene.env_origins
+                )
+                park_quat = torch.tensor([[1.0, 0.0, 0.0, 0.0]], device=device).expand(n_blue, -1)
+                ball_entity.write_root_link_pose_to_sim(torch.cat([park_pos, park_quat], dim=-1))
+                ball_entity.write_root_link_velocity_to_sim(torch.zeros(n_blue, 6, device=device))
+
+            _blue_phase_name = {"v": ""}
+
+            def _apply_blue_schedule() -> None:
+                """Computes (dy_from_blue, effective_height, force_landed) from
+                the current step's position in the cycle, then rigidly
+                teleports the leading foot there (root translation, no IK --
+                same technique as scripts/probe_leading_foot_lift.py)."""
+                _force_wide_crossing()
+                _park_ball_state_blue()
+                from simple_goalkeeper.mdp.rewards import (
+                    _get_correct_foot_idx, _get_ball_crossing_y, _get_reach_target_y,
+                )
+                from simple_goalkeeper.tasks.goalkeeper_env_cfg import _FEET_CFG as _blue_feet_cfg
+
+                # env._blue_landed/_was_free/_settle_count/_was_airborne (below)
+                # only get created the first time _get_reach_target_y runs (the
+                # real RewardManager doesn't evaluate any reward during reset(),
+                # only during step()) -- call it once here so this can safely
+                # write to them from _patched_blue_reset too, not just mid-step.
+                _get_reach_target_y(raw_env_for_blue, "ball", asset_cfg=_blue_feet_cfg)
+
+                start_y = raw_env_for_blue.scene.env_origins[:, 1]
+                goal_x = raw_env_for_blue.scene.env_origins[:, 0]
+                floor_z = raw_env_for_blue.scene.env_origins[:, 2]
+                full_y = _get_ball_crossing_y(raw_env_for_blue, "ball")
+                half_y = start_y + (full_y - start_y) / 2.0
+                foot_idx = _get_correct_foot_idx(raw_env_for_blue, "ball")
+
+                t = int(raw_env_for_blue.episode_length_buf[0].item()) % _blue_period
+                # Phase boundaries are FRACTIONS of _blue_period, not hardcoded
+                # step counts, so shortening/lengthening --scripted-blue-
+                # approach-period-steps rescales every phase proportionally
+                # instead of the tail phases silently vanishing at a short
+                # period (or stretching absurdly long at a long one).
+                p_approach_end = 0.30 * _blue_period
+                p_hold_end = 0.55 * _blue_period
+                p_landed_end = 0.57 * _blue_period
+                p_post_landing_end = 0.85 * _blue_period
+                osc_period = max(10.0, _blue_period / 10.0)  # steps per oscillation cycle
+
+                if t < p_approach_end:
+                    # FIX 2026-09-08 (user report, after watching this agent
+                    # live: "the perfect height is gradually from 0.10 at
+                    # 0.20 before to 0 at perfectly the point of blue ball...
+                    # i dont see that in the motion"): this phase used to
+                    # decay height LINEARLY across the WHOLE 1.0m approach,
+                    # which never matched the real decay zone's timing at
+                    # all (the real zone only starts 0.20m out). Split into
+                    # two sub-phases so the visualized motion is a true
+                    # mirror of the actual mechanism: 1a covers the outer
+                    # 0.80m at a constant standard height (matches
+                    # leading_foot_lift's own undecayed region, dist >
+                    # _BLUE_APPROACH_OUTER_ZONE); 1b covers the final 0.20m
+                    # using the IDENTICAL exponential shrink_frac formula
+                    # leading_foot_lift itself uses (rewards.py,
+                    # `_DECAY_STEEPNESS`, tuned 4.0->1.0 2026-09-08 same day
+                    # for a better learning gradient), not a separately-
+                    # invented curve that could drift out of sync with the
+                    # real one.
+                    _outer = 0.20
+                    _radius = 0.09  # matches env._blue_landing_radius_current at difficulty=1.0 (play default)
+                    _k = 1.0
+                    _frac_far = 1.0 - _outer  # 0.80 -- outer zone is the last 0.20m of the 1.0m approach
+                    p_far_end = _frac_far * p_approach_end
+                    if t < p_far_end:
+                        phase = "1a/4: approaching (outside decay zone) -- standard height"
+                        frac = t / p_far_end
+                        dy = -1.0 + frac * (1.0 - _outer)
+                        height = 0.10
+                    else:
+                        phase = "1b/4: entering decay zone -- exponential shrink toward blue"
+                        frac = (t - p_far_end) / (p_approach_end - p_far_end)
+                        dy = -_outer + frac * (_outer - 0.02)
+                        dist = abs(dy)
+                        x = max(0.0, min(1.0, (dist - _radius) / (_outer - _radius)))
+                        shrink = (_blue_math.exp(_k * x) - 1.0) / (_blue_math.exp(_k) - 1.0)
+                        height = 0.10 * shrink
+                    force_landed = False
+                elif t < p_hold_end:
+                    phase = "2/4: held AT blue, unlanded -- LOW height should score HIGHEST"
+                    dy = 0.0
+                    height = 0.06 * (1.0 - _blue_math.cos(2 * _blue_math.pi * (t - p_approach_end) / osc_period))
+                    force_landed = False
+                elif t < p_landed_end:
+                    phase = "3/4: BLUE LANDED (fired!) -- target restoring to standard"
+                    dy = 0.0
+                    height = 0.0
+                    force_landed = True
+                elif t < p_post_landing_end:
+                    phase = "4/4: post-landing -- HIGH height should score HIGHEST now"
+                    dy = 0.0
+                    height = 0.06 * (1.0 - _blue_math.cos(2 * _blue_math.pi * (t - p_landed_end) / osc_period))
+                    force_landed = True
+                else:
+                    phase = "(returning far, resetting for next cycle)"
+                    frac = (t - p_post_landing_end) / (_blue_period - p_post_landing_end)
+                    dy = -0.02 - frac * (1.0 - 0.02)
+                    height = 0.15 * frac
+                    force_landed = False
+
+                if phase != _blue_phase_name["v"]:
+                    _blue_phase_name["v"] = phase
+                    print(f"[INFO] scripted_blue_approach: {phase}", file=sys.stderr)
+
+                robot_entity = raw_env_for_blue.scene["robot"]
+                fi = int(foot_idx[0].item())
+                # Same body_ids order footreach/leading_foot_lift use.
+                from simple_goalkeeper.tasks.goalkeeper_env_cfg import _FEET_CFG
+                _FEET_CFG.resolve(raw_env_for_blue.scene)
+                foot_pos_w = robot_entity.data.body_link_pos_w[:, _FEET_CFG.body_ids, :]
+                current_foot = foot_pos_w[:, fi, :]
+                target_foot = torch.stack(
+                    [goal_x, half_y + dy, floor_z + _FOOT_RESTING_HEIGHT_BLUE + height], dim=-1
+                )
+                delta = target_foot - current_foot
+                current_root_pose = robot_entity.data.root_link_pose_w.clone()
+                new_pose = current_root_pose.clone()
+                new_pose[:, :3] += delta
+                robot_entity.write_root_link_pose_to_sim(new_pose)
+                robot_entity.write_root_link_velocity_to_sim(torch.zeros(n_blue, 6, device=device))
+                raw_env_for_blue.sim.forward()
+
+                raw_env_for_blue._blue_landed[:] = force_landed
+                raw_env_for_blue._blue_landed_was_free[:] = False
+                if not force_landed:
+                    raw_env_for_blue._blue_settle_count[:] = 0
+                    raw_env_for_blue._blue_was_airborne[:] = False
+
+            _orig_blue_reset = env.reset
+            _orig_blue_step = env.step
+
+            def _patched_blue_reset(*args, **kwargs):
+                result = _orig_blue_reset(*args, **kwargs)
+                _force_wide_crossing()
+                _apply_blue_schedule()
+                return result
+
+            def _patched_blue_step(actions: torch.Tensor):
+                result = _orig_blue_step(actions)
+                _apply_blue_schedule()
+                return result
+
+            env.reset = _patched_blue_reset
+            env.step = _patched_blue_step
+            print(
+                f"[INFO] scripted_blue_approach: period={_blue_period} steps "
+                f"({_blue_period * 0.02:.1f}s/cycle), watch the leading_foot_lift "
+                f"P-panel plot -- pass --no-terminations True to avoid the "
+                f"scripted teleports tripping a termination.",
                 file=sys.stderr,
             )
         else:

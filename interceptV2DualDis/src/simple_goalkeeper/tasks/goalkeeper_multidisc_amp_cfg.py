@@ -113,7 +113,7 @@ def goalkeeper_multidisc_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
     # far_outer already fully saturated to the full (0.5, 1.3) range for
     # thousands of iterations, per that run's own logged values) double-step
     # behavior still had not reliably emerged -- consistent with
-    # foot_clearance's own docstring concern ("the robot sometimes shuffles
+    # leading_foot_lift's own docstring concern ("the robot sometimes shuffles
     # without lifting feet... producing a slide rather than a committed
     # step") and with docs/superpowers/specs/2026-07-18-doublestep-research-
     # and-plan.md's finding #1 (G1 never had to teach this, so its

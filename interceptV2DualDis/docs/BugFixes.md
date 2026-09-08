@@ -4058,6 +4058,16 @@ For the orange sphere: user pointed out the gold "landed" state is redundant -- 
 
 ---
 
+## 2026-09-08 (same day, further follow-up): landing radius narrowed again 0.15/0.13 -> 0.11/0.09 (easy/hard)
+
+**Context:** user reported "it is still very easy to get anyways and i still land in the blue ball region without moving because of the positioning" -- i.e. RSI's spawn positioning alone can place the foot within the landing radius with no genuine approach. Requested easy=0.11, hard=0.9 -- confirmed via `AskUserQuestion` that hard=0.9 was a typo for 0.09 (0.9 would have made hard LARGER/easier than easy=0.11, inverting the difficulty curve and the direction of every prior change today).
+
+**What changed:** Same three functions (`_get_reach_target_y`, `_get_orange_reach_target_y`, `_get_red_reach_target_y`) narrowed again -- strict/hard end `0.13 -> 0.09`, easy end `0.15 -> 0.11`. Full progression today: 0.30/0.18 -> 0.20/0.15 -> 0.15/0.13 -> 0.11/0.09.
+
+**Evidence:** `ast.parse` clean. Full test suite 87/90 pass (same 3 pre-existing, unrelated `test_far_travel_curriculum.py` failures). Not yet validated against a live training run.
+
+---
+
 ## 2026-09-08 (same day, follow-up): `foot_clearance` target_height decays near a blue landing, restores once genuinely landed
 
 **What changed:** `foot_clearance` (`rewards.py`) now calls `_get_reach_target_y` up front (same memoized freshness pattern `stopball`/`softstop`/`success` already use), then computes an `effective_target` in place of the flat `target_height=0.10`: on a wide, unlanded crossing (`env._blue_wide & ~env._blue_landed_genuine`), it linearly decays from `target_height` at 0.30m from blue (reuses the old, removed footreach blue decel-zone's outer boundary) down to a small epsilon floor at the current curriculum landing radius (`env._blue_landing_radius_current`); otherwise (narrow crossings, or once genuinely landed) it stays at the standard `target_height`. Clamped to `1e-3` minimum, not literal 0, since `_clearance_reward` divides by `target_height`.
@@ -4079,3 +4089,141 @@ Proposed as a graph (synthetic example episode: distance-to-blue shrinking to a 
 **Why not other options considered:** narrowing `phase2_threshold` (currently 2.5m, widened from 1.5m on 2026-08-25 specifically because the foot was arriving too late/slow) would revert that fix and risk reintroducing late arrivals -- rejected in favor of a fix scoped to the actual contact moment, leaving the mid-approach speed incentive untouched. A flat cap on `vel_sigma`'s max multiplier was also considered and rejected as a blunter, non-location-specific reduction.
 
 **Evidence:** `ast.parse` clean. Full test suite 87/90 pass (same 3 pre-existing, unrelated `test_far_travel_curriculum.py` failures). Live smoke test (`Mjlab-BeyondAMP-Goalkeeper-T1-MultiDisc`, 16 envs, 600 zero-action steps, calling `footreach` directly each step): no exceptions, no NaN/Inf, reward stayed in `[0, 1]`. Not yet validated against a live training run -- watch whether contact-moment ball speed drops on the next checkpoint.
+
+---
+
+## 2026-09-08 (same day, follow-up): `foot_clearance`'s blue decay didn't fire on overshoot (X/Y distance conflation)
+
+**Context (user report):** "it overshot at blue ball but the foot clearance didn't go down, it should go to zero if the blue_landed didn't launch and we overshot" -- i.e. the decay added earlier the same day wasn't triggering for a real overshoot case.
+
+**Root cause:** the decay reads `env._blue_dbg_dist`, the XY (combined X and Y) distance from the assigned foot to blue's fixed point `(goal_x_w, half_y)`. If the foot overshoots blue's Y position while still far from the goal line in X (X dominates the combined 2D distance), `dist_to_blue` never drops into the 0.30m decay zone at all -- so `target_height` stayed pinned at the full 0.10m for the entire unlanded, already-overshot remainder of the episode. Illustrated with a synthetic example graph (dist_to_blue staying >0.55m the whole time while `signed_progress` clearly overshoots blue's Y around step 20) before implementing, matching this project's established "graph the mechanism before coding" pattern for genuinely new logic.
+
+**Fix:** added an overshoot override, independent of `dist_to_blue`: computes the identical `signed_progress`/threshold `blue_overshoot_penalty` (`rewards.py`) already uses (`direction * (assigned_foot_y - half_y) > env._blue_landing_radius_current`), and forces `target_height` to the epsilon floor whenever true -- regardless of how far away in X the foot still is. Not sticky (recomputed live every tick, matching `blue_overshoot_penalty`'s own non-sticky recompute) -- if the foot recovers back before blue, the ordinary distance-based decay resumes.
+
+**Evidence:** `ast.parse` clean. Full test suite 87/90 pass (same 3 pre-existing, unrelated failures). Live smoke test (16 envs, 500 zero-action steps): no exceptions, no NaN/Inf, reward stayed in `[0, 1]`. Not yet validated against a live training run.
+
+---
+
+## 2026-09-08 (same day, 3rd pass): `foot_clearance` gave ~1.4 weighted reward for a near-grounded foot
+
+**Context (user report):** "why does foot_clearance give out 1.4 reward when it is flat on the ground?"
+
+**Root cause:** the prior two passes fed a SHRUNK `target_height` directly into `_clearance_reward`. That kernel's rise term is `tanh(rise_steepness * height / target_height)` -- as `target_height` shrinks toward the epsilon floor near blue, this ratio blows up for ANY nonzero height (even the few cm a foot often sits at due to collision geometry, not a literal height=0), pushing `rise` to ~1 while the Gaussian falloff (which penalizes ABSOLUTE excess, not relative) barely reacts. Verified numerically: `height=0.03, target=0.001` scores `0.777` raw (`1.554` at weight 2.0, matching the reported ~1.4) -- a near-grounded foot was scored as if it had wildly overshot a tiny target.
+
+**Fix:** `_clearance_reward` is now always called with the FULL, unmodified `target_height` (0.10m). Its output is multiplied afterward by a `fade_scale` (1.0 far from blue, decaying to 0.0 approaching/overshooting blue -- same distance/overshoot logic as before, just applied to the reward output instead of the kernel's internal target). A truly-flat foot (height=0) now always gives `_clearance_reward`=0 (`tanh(0)=0`) regardless of `fade_scale`, so this can only ever suppress reward for a foot ACTUALLY lifted near blue -- never inflate reward for a grounded one. No epsilon floor needed any more (`fade_scale` can be exactly 0, since it no longer feeds a division).
+
+**Evidence:** `height=0.03, target=0.001` (old) -> `1.554` weighted vs. `height=0.03, fade=0` (new) -> `0.0` weighted -- confirmed via direct numeric check of both formulas. `ast.parse` clean. Full test suite 87/90 pass (same 3 pre-existing, unrelated failures). Live smoke test (16 envs, 500 zero-action steps): no exceptions, no NaN/Inf, reward range `[0.0, 0.876]` (down from the prior pass's `[0.0, 0.996]`), and both a near-landing-radius example and a post-landed (`landed_genuine=True`) example were observed. Not yet validated against a live training run.
+
+---
+
+## 2026-09-08 (same day, 4th pass): `foot_clearance`'s blue fade was silently suppressing the trailing foot's orange-bound lift
+
+**Context (user report):** "the foot clearance on the far region seems to be attached to the orange ball and not to the blue ball."
+
+**Root cause:** `foot_clearance` takes `max(both feet)`'s height and, from the 2nd/3rd passes above, applied ONE shared `fade_scale` -- scoped to the LEADING/assigned foot's approach to blue -- to that combined max. On a wide crossing the TRAILING foot is simultaneously and legitimately lifting toward ORANGE (its own separate target, unrelated to blue). If the leading foot happened to be near or past blue at the same moment (`fade_scale` -> 0), the trailing foot's genuine orange-bound lift was silently zeroed out too, since both feet's height fed into one shared, blue-gated multiplier. Most visible on far-region (wide, double/triple-step) episodes, where the trailing foot's orange journey and the leading foot's blue approach genuinely overlap in time -- which read as "clearance is following orange instead of blue."
+
+**Fix:** compute each foot's clearance reward SEPARATELY -- `fade_scale` now multiplies only the LEADING foot's term (`foot_z_above_floor[arange_n, foot_idx]`); the TRAILING foot's term (`foot_z_above_floor[arange_n, 1 - foot_idx]`) always uses the full, unfaded `target_height`. Final reward is `max(leading_reward, trailing_reward)` -- same "reward either foot lifting" semantics as before, but blue's approach/overshoot state can no longer suppress the trailing foot's unrelated orange-approach lift.
+
+**Evidence:** `ast.parse` clean. Full test suite 87/90 pass (same 3 pre-existing, unrelated failures). Live smoke test (16 envs, 500 zero-action steps): no exceptions, no NaN/Inf, reward range `[0.0, 0.873]`. Not yet validated against a live training run.
+
+---
+
+## 2026-09-08 (same day, 5th pass, simplification): `foot_clearance` scoped to leading foot only, no more overlap with `trailing_foot_lift`
+
+**Context (user request):** "no just have leading foot clearance and trailing foot clearance as a reward dont have 3 rewards" -- after the 4th-pass fix above split `foot_clearance` into separate leading/trailing computations combined via `max()`, the user pointed out this created a genuine 3rd, overlapping mechanism: `foot_clearance`'s own new trailing-foot term duplicated the already-existing, separate `trailing_foot_lift` reward (added 2026-08-17, same `_clearance_reward` kernel, scoped to the trailing foot during its orange/red journey).
+
+**What changed:** `foot_clearance` now ONLY ever reads the LEADING (assigned) foot's height -- the `trailing_height`/`trailing_reward`/`torch.maximum` combination from the 4th pass is removed entirely. The trailing foot's lift incentive lives exclusively in `trailing_foot_lift`, with zero shared state or overlap between the two terms. Net effect: exactly two clean, non-overlapping clearance rewards (leading via `foot_clearance`, trailing via `trailing_foot_lift`) instead of the accidental three.
+
+**Known scope reduction:** on a NARROW crossing, the trailing (non-assigned) foot now gets no clearance-style lift incentive at all -- `trailing_foot_lift` is gated to wide crossings only (`env._orange_wide`), and `foot_clearance` no longer covers `max(both feet)`. This is a deliberate, accepted narrowing per the user's explicit "don't have 3 rewards" request, not an oversight; other terms (`trailing_foot_forward_continuous`, `feet_slippage`, AMP naturalness) still shape the trailing foot's general behavior on narrow crossings.
+
+**Evidence:** `ast.parse` clean. Full test suite 87/90 pass (same 3 pre-existing, unrelated `test_far_travel_curriculum.py` failures). Live smoke test (16 envs, 500 zero-action steps): no exceptions, no NaN/Inf, reward range `[0.0, 0.854]`. Not yet validated against a live training run.
+
+---
+
+## 2026-09-08 (same day, rename): `foot_clearance` renamed to `leading_foot_lift`
+
+**Context (user request):** "rename it to leading_foot_lift" -- follow-up to the 5th-pass simplification, matching the naming symmetry with the sibling `trailing_foot_lift` now that the two terms are scoped to exactly one foot each with no overlap.
+
+**What changed:** function renamed in `rewards.py` (`foot_clearance` -> `leading_foot_lift`), plus every reference: `mdp/__init__.py` export, `goalkeeper_env_cfg.py`'s `RewardTermCfg` dict key and `func=` reference (and the curriculum weight tuple), `play.py`'s P-panel `_ALSO_PROMOTED` tuple entry (must match the RewardManager term name exactly), and a stray comment in `goalkeeper_multidisc_amp_cfg.py`. Also fixed several now-stale prose comments/docstrings (in `trailing_foot_lift`'s and `clearance_at_save`'s own docstrings, and `goalkeeper_env_cfg.py`'s registration comments) that still described the old, pre-5th-pass "takes max(both feet)" behavior -- updated to reflect that `leading_foot_lift` now only ever reads the leading foot.
+
+**Evidence:** Global rename done via `\bfoot_clearance\b`-anchored regex (confirmed no collision with `clearance_at_save`, `_clearance_reward`, or `trailing_foot_lift`, which don't contain the literal substring `foot_clearance`). `ast.parse` clean on all 5 touched files. Full test suite 87/90 pass (same 3 pre-existing, unrelated failures). Live check (4 envs, 20 zero-action steps): env constructs and steps with no exceptions, `"leading_foot_lift" in env.reward_manager.active_terms` confirmed `True`.
+
+---
+
+## 2026-09-08 (same day, 6th/7th passes): two more `leading_foot_lift` bugs -- fixed the outer-zone/orange overlap and the foot-height baseline
+
+**Context (user reports, same message):** (1) "foot clearance falls off when it passes orange ball not blue ball, it should be around the same just the normal foot clearance towards blue ball" and (2) "when standing still the leading_foot_lift is again 1.4 when standing flat."
+
+**Bug 1 root cause (orange overlap):** `orange_y` and blue's own `half_y` are a FIXED 0.25m apart for EVERY wide crossing, by construction -- `orange_y = start_y + sign(delta)*(|delta|-0.50)/2`, `half_y = start_y + sign(delta)*|delta|/2` (both derived from the same `delta`), so their difference is exactly `sign(delta)*0.25` for any `|delta|>0.5` (i.e. every wide crossing), independent of the actual crossing distance -- confirmed live (`gap = 0.2500` exactly, every wide env checked). The `_BLUE_APPROACH_OUTER_ZONE = 0.30` from the earlier passes EXCEEDED this fixed 0.25m gap, so the decay (measured as distance to blue) was already partially active by the time the leading foot's Y merely passed through orange's fixed position on its way toward blue -- nothing to do with orange itself, a pure numeric overlap of two independently-chosen constants that were never cross-checked against each other.
+
+**Bug 1 fix:** `_BLUE_APPROACH_OUTER_ZONE` narrowed `0.30 -> 0.20`, safely below the fixed 0.25m gap, so the decay zone can never reach back past orange's position.
+
+**Bug 2 root cause (foot resting height):** the foot body-link origin sits ~0.03m ABOVE the true ground-contact surface even when genuinely flat/grounded -- confirmed live (env reset, 10 zero-action steps, `feet_contact` sensor reads full contact, `foot_z_above_floor` reads `0.0298-0.0300m`, not 0). This is the same, already-well-established offset this project accounts for elsewhere (`events.py`'s `_FOOT_CONTACT_BELOW_BODY = 0.030`, the 2026-06-30 ghost-overlay `+0.030m` fix) -- `leading_foot_lift` (and its predecessor `foot_clearance`) had never subtracted it. Without the subtraction, `_clearance_reward(0.03, target=0.10)` = `tanh(3*0.03/0.10)*1` = `0.716` (weighted `~1.43`, matching the reported "1.4") for a foot that is visually completely flat on the ground. This is a PRE-EXISTING miscalibration dating back to the 2026-08-30 kernel redesign, not a regression from today's fade logic (the raw kernel input was wrong regardless of `fade_scale`).
+
+**Bug 2 fix:** subtract `_FOOT_RESTING_HEIGHT = 0.03` before clamping, so a genuinely flat/grounded foot now measures height=0 exactly (matching the kernel's own intended "steepest exactly at height=0" calibration).
+
+**Known related, NOT fixed here (out of scope for this specific report):** `trailing_foot_lift` and `clearance_at_save` share the identical raw `(z - floor_z).clamp(0, None)` measurement and very likely the identical ~0.03m resting-height bias -- flagged for a future pass, not touched in this one.
+
+**Evidence:** Live check confirmed `blue/orange gap = 0.2500` exactly across every wide env sampled. Live smoke test (16 envs, 300 zero-action steps, calling `leading_foot_lift` directly): no exceptions, no NaN/Inf, reward range `[0.0, 0.449]`; per-step values at a standing reset show a brief RSI-settle transient (nonzero for 1-2 steps, since RSI donor poses are mid-motion by construction) then correctly settle to exactly `0.0` once genuinely grounded. `ast.parse` clean. Full test suite 87/90 pass (same 3 pre-existing, unrelated `test_far_travel_curriculum.py` failures). Not yet validated against a live training run.
+
+---
+
+## 2026-09-08 (same day, 8th pass): restored the shrinking-target design (not output-fading), fixed the division blow-up properly, added a teleport probe script
+
+**Context (user):** "did you make the target height just a parabola towards 0 towards the blue ball? or did you make the reward just towards 0, because i like the first one better" -- clarified that pass 4 (see the 2026-09-08 "3rd pass" entry above) had switched from the originally-requested shrinking-`target_height` design to a fade-the-output design instead, to dodge pass 1's division blow-up. User confirmed they wanted the original shrinking-target behavior restored, correctly this time. Also requested: "make a sample script that just teleports the booster towards certain positions to show the most optimal position to make me see it is working."
+
+**Fix (the reward):** decoupled the kernel's rise steepness from the target. `rise = tanh((rise_steepness/target_height) * height)` is now ALWAYS calibrated against the STANDARD 0.10m `target_height`, regardless of how far the current `effective_target` has shrunk -- it can never divide by a near-zero value, since it doesn't divide by `effective_target` at all. Only `fall = exp(-fall_sigma*(height-effective_target)^2)` (inherently well-behaved, no division) tracks the shrinking `effective_target`, so the reward's preference genuinely shifts toward lower heights as the foot closes on blue, rather than merely fading toward 0 regardless of height. A truly flat foot (height=0) still always scores exactly 0 (`tanh(0)=0`), since `rise` no longer depends on the target at all -- pass 1's blow-up is now structurally impossible, not just avoided by luck of the input values. `effective_target` decays from `target_height` at 0.20m out to exactly `0.0` at the landing radius (no epsilon floor needed any more -- literal 0 is safe), and is forced to `0.0` on overshoot, same triggers as before.
+
+**New diagnostic script:** `scripts/probe_leading_foot_lift.py` (`uv run python -m simple_goalkeeper.scripts.probe_leading_foot_lift`) -- teleports the leading foot to a grid of controlled (distance-from-blue, height) positions via rigid whole-body root translation (no IK) and prints the live reward at each. Building it surfaced three genuine test-harness bugs (not reward bugs), all now documented in the script's own docstring for reuse:
+1. Reusing a `root_pose` snapshot captured once at the start, instead of re-reading the robot's CURRENT root pose before every teleport -- silently broke every teleport after the first (deltas computed against a stale base).
+2. `_get_reach_target_y`'s wide/narrow classification reads `env._rsi_cross_y` (if present) in preference to `env._ball_crossing_y` -- overriding only the latter left the episode's real (narrow) spawn geometry in control, so blue's mechanism never activated regardless of the forced override.
+3. `env._blue_settle_count`'s accumulated history from one scenario row could silently flip `env._blue_landed=True` on the very next row, even after explicitly resetting it to `False` moments earlier -- fixed by also resetting `_blue_settle_count`/`_blue_was_airborne` before every "not yet landed" scenario.
+
+**Evidence (from the probe script, forced wide crossing, `delta=0.8m`):** far from blue (dist=1.0m): flat=`0.0000`, lifted to 0.10m=`0.9951` (matches the undecayed kernel exactly). Mid-decay/at-blue (`dist<=0.10m`, `effective_target=0`): flat=`0.0000`, h=0.02=`0.4763` (now the BEST-scoring height tested near blue, confirming a low foot is actively preferred, not just "not penalized"), h=0.10=`0.0495` (a still-lifted foot is clearly discouraged). Overshoot (`dy=+0.20m`, past blue): identical pattern to "at blue" (`effective_target` forced to 0 regardless of the larger raw distance) -- `0.0000`/`0.4763`/`0.0495`. Post-landing (`_blue_landed_genuine` forced True): reward snaps straight back to the undecayed pattern (`0.0000`/`0.9951`), confirming "goes back to standard once fired." `ast.parse` clean. Full test suite 87/90 pass (same 3 pre-existing, unrelated failures). Not yet validated against a live training run.
+
+---
+
+## 2026-09-08 (same day, 9th pass): new `--agent scripted_blue_approach` live demo, plus a P-panel swap (softstop for assigned_foot_angle_deg)
+
+**Context (user):** "show the play script that shows it working like a agent i can run in the play command" -- wanted the same leading_foot_lift mechanism from the probe script (a static numeric table) as something they can watch live in `sgk_play`'s actual viewer.
+
+**What changed:** New `--agent scripted_blue_approach` (`scripts/play.py`), following the exact same structural pattern as the existing `scripted_yaw`/`scripted_lean` diagnostic agents (monkeypatched `env.reset`/`env.step`, zero policy action, teleport applied every step). Forces a wide crossing (`env._ball_crossing_y`/`env._rsi_cross_y` override) and rigidly teleports the leading foot (root translation, no IK -- same technique as `scripts/probe_leading_foot_lift.py`) through a repeating 4-phase cycle, each phase length a FRACTION of the new `--scripted-blue-approach-period-steps` (default 500, so phases scale correctly if shortened/lengthened, not hardcoded absolute step counts): (1) approach blue with descending height, (2) held AT blue, height oscillating 0<->0.12m while unlanded, (3) a forced, announced genuine landing, (4) the same height oscillation again but post-landing. Console prints announce each phase transition. `leading_foot_lift` is already a promoted P-panel term, so the plot responds live with no extra wiring needed.
+
+**Two real bugs found and fixed while building/testing this (not reward bugs):**
+1. Phase boundaries were originally hardcoded absolute step numbers (150/275/285/425), silently breaking if `--scripted-blue-approach-period-steps` was set to anything other than the 500 they were tuned for (a shorter period would skip straight to the tail phases, a longer one would leave them absurdly compressed). Fixed by expressing every boundary as a fraction of the period.
+2. The ball's own physics kept rolling for real regardless of the scripted foot teleports -- within ~50-65 real steps (well before even one full 500-step demo cycle) it crossed the goal line for real, permanently flipping `_ball_is_behind()` True and zeroing `leading_foot_lift`'s `(~behind).float()` gate for the rest of the run. Confirmed via a live reward trace: correct varying rewards for the first ~50 steps, then a flatline at exactly `0.0000` from then on, repeating identically every subsequent cycle despite the foot's own position/distance/genuine-flag all still cycling correctly. Fixed the same way `scripted_yaw`/`scripted_lean` already solve this class of problem -- park the ball far away (frozen) every step.
+
+**Also:** swapped `assigned_foot_angle_deg` (the custom raw plot in `_patch_viewer_foot_orientation_plot`, titled `assigned_foot_angle_deg_world` -- what the user meant by "assigned_foot_angle_degworld") out of `_ALL_FOOTORIENTATION_TERMS`' front-most slot, replacing it with `softstop` (user request). The angle plot's own figure still exists (that patch is untouched) but is no longer in the always-visible promotion list, so it falls out of the visible front slots.
+
+**Evidence:** Live-tested headlessly (a `FakeViewer` stand-in for `NativeMujocoViewer`, all other `_patch_viewer_*` calls no-opped, real `env.reset()`/`env.step()` loop, 220 steps, `num_envs=2`, `period_steps=60` to exercise multiple full cycles quickly) -- confirmed, after the ball-park fix, the exact same reward pattern repeats identically every cycle (`0.5938 -> 0.9414 -> 0.1543 -> 0.1543 -> 0.9883 (genuine flips True) -> 0.0000 (flat, return phase)`), matching the probe script's static numbers closely (small differences from a slightly different forced offset/timing) and confirming no drift or state leakage across cycles. No exceptions over 220 steps. `ast.parse` clean on `play.py`. Full test suite 87/90 pass (same 3 pre-existing, unrelated failures -- this pass touched no reward code). Not yet watched in the real interactive viewer (only headlessly, via the FakeViewer stand-in) -- the user should confirm the P-panel plot visually matches the described phase behavior.
+
+---
+
+## 2026-09-08 (same day, 10th pass): `effective_target`'s decay shape changed from linear to exponential; demo agent's phase-1 motion fixed to actually match the real decay zone
+
+**Context (user, after watching `--agent scripted_blue_approach` live):** "the perfect reward towards the real blue ball needs to be exponential towards the h=0 height, because what happends now in the visualisation the reward goes down whilst the perfect height is gradually from 0.10 at 0.20 before to 0 at perfectly the point of blue ball, i dont see that in the motion set."
+
+Two separate issues, both real:
+1. **Reward shape:** `shrink_frac` (the 0..1 fraction feeding `decayed_target = target_height * shrink_frac`) was a straight LINEAR ramp between the landing radius and the 0.20m outer zone. User wants an exponential decay instead.
+2. **Demo accuracy:** the `scripted_blue_approach` agent's phase-1 "approach" sub-schedule decayed height LINEARLY across the ENTIRE 1.0m approach distance (from the very start of the cycle), never actually confined to the real 0.20m decay zone -- so watching the demo never showed what the real mechanism does at all, regardless of shape.
+
+**Verification-first (per the just-updated `reward-shaping-scene-entity-cfg` skill):** before touching code, generated a comparison graph of 3 candidate shapes (linear/current, exponential decay `(exp(k*x)-1)/(exp(k)-1)`, smoothstep ease) over distance-to-blue, confirmed the exponential option with the user, then implemented.
+
+**What changed:**
+- `leading_foot_lift` (`rewards.py`): `shrink_frac` reshaped from the linear ramp to `(exp(_DECAY_STEEPNESS*x)-1)/(exp(_DECAY_STEEPNESS)-1)` with `_DECAY_STEEPNESS=4.0`, `x` = the same underlying 0..1 linear fraction as before (radius->0, outer_zone->1). Effect: `effective_target` now collapses to near-zero much faster after leaving the outer zone (e.g. at the exact midpoint of the 0.09-0.20m zone, target is already down to ~0.001m, vs. ~0.05m under the old linear ramp), then stays near-zero for the remainder of the approach, instead of declining evenly the whole way in.
+- `scripts/probe_leading_foot_lift.py`: display-only `eff_target` column reshaped to match (was still computing the old linear formula for display, silently out of sync with what the actual reward now does).
+- `scripts/play.py`'s `scripted_blue_approach` agent: phase 1 split into two sub-phases -- 1a covers the outer 0.80m of the approach at a constant STANDARD height (0.10m, matching the real undecayed region), 1b covers only the final 0.20m using the IDENTICAL exponential formula `leading_foot_lift` itself uses (not a separately-invented curve that could drift out of sync). The demo's motion is now a true mirror of the mechanism, not just a generic "height goes down somehow" animation.
+
+**Evidence:** `scripts/probe_leading_foot_lift.py` re-run: mid-decay-zone (dist=0.10m, roughly the midpoint of the 0.09-0.20m zone) `eff_target` dropped from `0.05` (old, cosmetic-check via hand math) to `0.001` (new) -- confirms the fast-then-flat exponential shape live, not just algebraically. Live headless agent run (`FakeViewer`, 220 steps, `period=60`): both new phase labels (`1a/4`, `1b/4`) print correctly and repeat identically every cycle across 3+ cycles, no exceptions. `ast.parse` clean on `rewards.py`, `play.py`, `probe_leading_foot_lift.py`. Full test suite 87/90 pass (same 3 pre-existing, unrelated failures). Not yet watched in the real interactive viewer. Not yet validated against a live training run.
+
+---
+
+## 2026-09-08 (same day, 11th pass): decay steepness `k` tuned 4.0 -> 1.0 for a usable gradient
+
+**Context (user request):** "maybe make it a little bit less exponential to have a better gradient right?" -- after seeing the exponential shape live, `k=4.0` collapsed `effective_target` to near-zero almost immediately after leaving the 0.20m outer zone, leaving very little usable gradient across most of the approach into blue.
+
+**Verification-first:** generated a 4-way comparison graph (k=4/2/1/linear-limit) before changing anything; k=1.0 chosen via `AskUserQuestion` -- keeps a genuine front-loaded exponential shape while retaining meaningful gradient across most of the 0.20->0.09m zone, unlike k=4 (collapses almost immediately) or the linear limit (no longer "exponential" per the prior request).
+
+**What changed:** `_DECAY_STEEPNESS` in `leading_foot_lift` (`rewards.py`) `4.0 -> 1.0`. Mirrored in `scripts/probe_leading_foot_lift.py`'s display constant and `scripts/play.py`'s `scripted_blue_approach` agent's phase-1b sub-schedule (both were kept in sync with the reward's own constant by design, per Part 3 of the reward-shaping skill).
+
+**Evidence:** `scripts/probe_leading_foot_lift.py` re-run: mid-decay-zone (dist=0.10m) `eff_target` now `0.006` (was `0.001` at k=4) and `h=0.10` reward `0.0684` (was `0.0520`) -- confirms more residual gradient at the same test point. Live headless agent run: reward pattern repeats identically across cycles (`0.9951 -> 0.9951 -> 0.1543 -> 0.1543 -> 0.9883 (genuine) -> 0.0000`), no exceptions. `ast.parse` clean on all 3 touched files. Full test suite 87/90 pass (same 3 pre-existing, unrelated failures). Not yet validated against a live training run.

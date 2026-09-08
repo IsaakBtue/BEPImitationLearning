@@ -454,7 +454,7 @@ def goalkeeper_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
         # ================================================================
         # TIER 2 -- everything not in Tier 1: the wide-crossing blue/
         # orange/red waypoint mechanism and near-region analog,
-        # trailing_foot_lift/foot_clearance (user-confirmed just as
+        # trailing_foot_lift/leading_foot_lift (user-confirmed just as
         # important as the rest of this tier), and foot_inner_face_
         # continuous/contact_yield_velocity_y (originally a separate Tier
         # 3 "secondary" group -- merged in per user request, "no reason to
@@ -569,7 +569,7 @@ def goalkeeper_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
         # term's whole-body trunk-velocity-toward-target incentive. Chosen
         # (alongside trailing_foot_reach and footreach's widened
         # phase2_threshold below) because it rewards speed independent of
-        # HOW the feet get there -- foot_clearance/trailing_foot_lift/
+        # HOW the feet get there -- leading_foot_lift/trailing_foot_lift/
         # feet_slippage still separately enforce genuine stepping instead
         # of the sliding gait a much earlier checkpoint (model_2000,
         # 6144_yieldweightrescale_2026-08-25 run) exhibited. See
@@ -661,10 +661,10 @@ def goalkeeper_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
         # step-doubles at cu>=2 same as Tier 1's correct-foot-save group --
         # base weight matches current static weight, doubles 2.0 -> 4.0.
         # FIX 2026-08-30 (later same day, user request, weight-audit
-        # follow-up): added foot_clearance alongside it -- the two share
+        # follow-up): added leading_foot_lift alongside it -- the two share
         # the EXACT SAME kernel (`_clearance_reward`, unified earlier
         # today) and target_height (0.10), scoped to max(both feet) vs the
-        # trailing foot only, but foot_clearance had been left flat while
+        # trailing foot only, but leading_foot_lift had been left flat while
         # trailing_foot_lift got curriculum-scaled -- an inconsistency
         # between two sibling terms using identical math, found during the
         # weight-distribution audit. Same base weight/doubling as
@@ -680,7 +680,7 @@ def goalkeeper_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
         # activate_at_cu regardless of which tier comment it sits under.
         for _name, _base in (
             ("trailing_foot_lift",         2.0),
-            ("foot_clearance",             2.0),
+            ("leading_foot_lift",             2.0),
             # RE-ADDED 2026-09-04 (re-applied after a session-wide revert):
             # foot_inner_face_continuous re-enabled, retargeted to 0 deg off
             # forward -- see inner_face_orientation_save's matching re-add
@@ -1051,7 +1051,7 @@ def goalkeeper_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
         # touching down near a controlled 0.1 m/s, instead of slamming into
         # the ground -- user watched training and saw hard landings. See
         # rewards.py:postleadfootplantspeed docstring for the Gaussian shape
-        # (reuses foot_clearance's sigma=300 convention) and firing mechanism.
+        # (reuses leading_foot_lift's sigma=300 convention) and firing mechanism.
         "postleadfootplantspeed": RewardTermCfg(
             func=gk_mdp.postleadfootplantspeed,
             weight=3.0,
@@ -1241,22 +1241,26 @@ def goalkeeper_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
         # showed the 5cm target clipping the floor; wants more clearance.
         # clearance_at_save (below) intentionally NOT reverted -- user
         # explicitly asked to keep that one at 5cm.
-        "foot_clearance": RewardTermCfg(
-            func=gk_mdp.foot_clearance,
+        "leading_foot_lift": RewardTermCfg(
+            func=gk_mdp.leading_foot_lift,
             weight=2.0,
             params={"ball_name": BALL_NAME, "target_height": 0.10, "asset_cfg": _FEET_CFG},
         ),
         # NEW 2026-08-17 (user request): "an incentive that raises the foot"
         # for the TRAILING foot specifically during its start->orange and
-        # orange->red journey -- foot_clearance above takes max(both feet),
-        # fully satisfiable by the leading foot alone, leaving the trailing
-        # foot's own lift unrewarded during this journey. Same target
-        # height/weight as foot_clearance (0.10m / 2.0), scoped to one foot
-        # instead of max(both) -- see rewards.py:trailing_foot_lift.
+        # orange->red journey -- at the time, `foot_clearance` (this term's
+        # old name, renamed 2026-09-08) took max(both feet), fully
+        # satisfiable by the leading foot alone, leaving the trailing foot's
+        # own lift unrewarded during this journey. Same target height/weight
+        # as leading_foot_lift (0.10m / 2.0), scoped to one foot instead of
+        # max(both) -- see rewards.py:trailing_foot_lift. As of 2026-09-08,
+        # leading_foot_lift ALSO only ever reads the leading foot (no more
+        # max(both feet)) -- the two terms are now fully non-overlapping by
+        # construction, not just in practice.
         # FIX 2026-08-23 (user request): target_height 0.10 -> 0.05, same
-        # change as foot_clearance above.
+        # change as leading_foot_lift above.
         # FIX 2026-08-29 (user request): reverted 0.05 -> 0.10, same reason
-        # as foot_clearance above.
+        # as leading_foot_lift above.
         "trailing_foot_lift": RewardTermCfg(
             func=gk_mdp.trailing_foot_lift,
             weight=2.0,
