@@ -915,6 +915,26 @@ class domain_rand_curriculum:
     0.5 (alpha=0.15) takes ~2.2x as many, verified by direct simulation of
     this exact formula, not just the naive "0.5 = half as fast" assumption.
 
+    FIX 2026-09-08 (user request, "put domain rand curriculum slower...
+    dont want 50% softstop means 50% domain rand, still not converging
+    nicely, make it more skewed towards the higher softstop percentage"):
+    two changes.
+    (1) alpha_scale default 0.5 -> 0.2, slower again than the 2026-09-07
+        tuning (now ~5x as many windows to reach 90% of a step change as
+        ball_difficulty, vs. that pass's ~2.2x).
+    (2) NEW: a power-law skew, `skew_power` (default 3.0), applied to the
+        smoothed success rate BEFORE the running max:
+            skewed = smoothed_success_rate ** skew_power
+        A straight 1:1 pass-through (the old behavior, skew_power=1) meant
+        50% success rate produced 50% domain_rand -- linear, not "skewed
+        toward high success" the way the user wants. With skew_power=3:
+        50% success -> ~12.5% domain_rand, 80% -> ~51%, 95% -> ~86%, 100%
+        -> 100% (the curve still reaches full strength at true full
+        success, just stays low for a much wider low/mid range first).
+        Applied to the smoothed rate (not the raw per-window rate) so it
+        still benefits from the EMA's noise damping before being raised to
+        a power, which would otherwise amplify noise near the low end.
+
     First consumer: observations.py's vanish_floor skew -- that skew exists
     to give an easier, more-visible on-ramp; tying it to ball_difficulty's
     own (faster) pace meant it could fade before the policy had much
@@ -927,7 +947,8 @@ class domain_rand_curriculum:
 
     def __init__(self, cfg: "CurriculumTermCfg", env: "ManagerBasedRlEnv") -> None:
         p = cfg.params
-        self._alpha           = _CURRICULUM_EMA_ALPHA * p.get("alpha_scale", 0.5)
+        self._alpha           = _CURRICULUM_EMA_ALPHA * p.get("alpha_scale", 0.2)
+        self._skew_power       = p.get("skew_power", 3.0)
         self._update_interval = p.get("update_interval",  500)
         self._last_update     = 0
         if not hasattr(env, "_domain_rand_curriculum"):
@@ -952,8 +973,12 @@ class domain_rand_curriculum:
         smoothed_success_rate = _update_smoothed_softstop_success(
             env, raw_success_rate, alpha=self._alpha, state_attr="_smoothed_softstop_success_slow"
         )
+        # FIX 2026-09-08 (user request): power-law skew toward high success
+        # before the running max -- see class docstring for the worked
+        # example numbers (50% success -> ~12.5% domain_rand at power=3.0).
+        skewed_success_rate = smoothed_success_rate ** self._skew_power
 
-        env._domain_rand_curriculum = max(env._domain_rand_curriculum, min(1.0, smoothed_success_rate))
+        env._domain_rand_curriculum = max(env._domain_rand_curriculum, min(1.0, skewed_success_rate))
         return {"domain_rand_curriculum": torch.tensor(env._domain_rand_curriculum)}
 
 

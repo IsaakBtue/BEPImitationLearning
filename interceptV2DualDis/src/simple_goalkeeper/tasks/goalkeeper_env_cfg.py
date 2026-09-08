@@ -292,15 +292,22 @@ def goalkeeper_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
         # vanish_step skew in observations.py) that shouldn't ramp on
         # ball_difficulty's own pace -- user found that pace "too fast" for
         # this purpose. Same running-max-of-success-rate mechanism as
-        # ball_difficulty, but smoothed on its OWN slower EMA track
-        # (alpha_scale=0.5 -> ~2x more sluggish to respond) rather than a
-        # permanent scale-down, so it still eventually reaches full strength,
-        # just slower. See domain_rand_curriculum's own docstring (mdp/events.py).
+        # ball_difficulty, but smoothed on its OWN slower EMA track rather
+        # than a permanent scale-down, so it still eventually reaches full
+        # strength, just slower. See domain_rand_curriculum's own docstring
+        # (mdp/events.py).
+        # FIX 2026-09-08 (user request, "slower... still not converging
+        # nicely, skew towards higher softstop percentage"): alpha_scale
+        # 0.5 -> 0.2 (slower still), plus a new skew_power=3.0 -- raises the
+        # smoothed success rate to this power before the running max, so a
+        # mediocre 50% success rate no longer produces 50% domain_rand
+        # (now ~12.5%); only high success rates push it up meaningfully.
         cfg.curriculum["domain_rand"] = CurriculumTermCfg(
             func=gk_mdp.domain_rand_curriculum,
             params={
                 "update_interval": 500,
-                "alpha_scale":     0.5,
+                "alpha_scale":     0.2,
+                "skew_power":      3.0,
             },
         )
         # RE-REGISTERED 2026-09-07 (user request, "make curriculum for that"):
