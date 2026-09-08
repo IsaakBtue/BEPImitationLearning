@@ -5624,20 +5624,34 @@ def leading_foot_lift(
     shrink_frac = (torch.exp(_DECAY_STEEPNESS * x) - 1.0) / (math.exp(_DECAY_STEEPNESS) - 1.0)
     decayed_target = target_height * shrink_frac  # target_height at 0.20m -> 0.0 at the landing radius
 
-    # REMOVED 2026-09-08 (user request, "make the leading foot lift fully
-    # circular, dont zero it out once we pass the y distance"): was a hard
-    # override forcing decayed_target to exactly 0 once signed_progress
-    # (the same directional metric blue_overshoot_penalty uses) showed the
-    # foot had passed blue, staying 0 no matter how far past it went --
-    # one-sided, a cliff on the far side rather than a drop-off. dist_to_blue
-    # (above) is already a plain, undirected torch.norm(...) distance, so
-    # WITHOUT this override the exact same exponential formula is already
-    # inherently circular/radially-symmetric around the blue point on both
-    # sides -- confirmed via a comparison graph before removing this. Also
-    # confirmed side-agnostic: dist_to_blue is a norm (no sign at all), and
-    # this override's own signed_progress used the same direction=sign(...)
-    # normalization every other left/right-symmetric term in this file
-    # uses, so removing it doesn't change left/right handling at all.
+    # RESTORED 2026-09-08 (user request, "revert that past y distance thing
+    # ... i want it back in"): briefly removed the same day for a "fully
+    # circular" attempt (dist_to_blue is a plain torch.norm, so the bare
+    # exponential formula alone is naturally circular) -- but a 2D heatmap
+    # of the actual X-Y ground plane showed this override was never truly
+    # circular to begin with even in its original form: it cuts on Y alone
+    # (signed_progress, the same directional metric blue_overshoot_penalty
+    # uses) regardless of X, slicing a straight edge through dist_to_blue's
+    # otherwise-round falloff rather than following the circle's own curve.
+    # User confirmed this straight-line-cut version is what they actually
+    # want back (not a circular-cut variant), and confirmed the resulting
+    # behavior is correct: decayed_target -> 0 once past blue means the
+    # kernel below actively pulls the foot to a genuine 0cm/flat height
+    # (not a no-op -- rise/fall still read the foot's real height live),
+    # and this override doesn't affect the SEPARATE landed-genuine ->
+    # restore-to-standard-target_height switch just below, which still
+    # fires independently the instant env._blue_landed_genuine flips.
+    # Confirmed side-agnostic via that same heatmap (mirrors correctly for
+    # left vs. right crossings): direction=sign(full_y-start_y) already
+    # normalizes both sides onto the same convention.
+    full_y = _get_ball_crossing_y(env, ball_name)
+    start_y = env.scene.env_origins[:, 1]
+    half_y = start_y + (full_y - start_y) / 2.0
+    direction = torch.sign(full_y - start_y)
+    assigned_foot_y = foot_pos_w[arange_n, foot_idx, 1]
+    signed_progress = direction * (assigned_foot_y - half_y)
+    overshot = signed_progress > radius
+    decayed_target = torch.where(overshot, torch.zeros_like(decayed_target), decayed_target)
 
     effective_target = torch.where(
         env._blue_wide & ~env._blue_landed_genuine,
