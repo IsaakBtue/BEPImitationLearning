@@ -188,6 +188,15 @@ class PlayConfig:
     viewer: Literal["auto", "native", "viser"] = "auto"
     difficulty: float | None = None
     """Override ball difficulty (0.0 = easiest, 1.0 = hardest). Default: use curriculum value."""
+    domain_rand: float | None = None
+    """Override domain_rand curriculum strength (0.0 = off, 1.0 = full). NEW 2026-09-09
+    (user request, "what is the command to put difficulty and domain rand at 0.5 strength
+    in play"): domain_rand_curriculum (mdp/events.py) is only ever registered `if not play`
+    (goalkeeper_env_cfg.py) -- play mode never sets env._domain_rand_curriculum at all, so
+    observations.py's own read (`getattr(env, "_domain_rand_curriculum", 1.0)`) silently
+    always falls back to full strength (1.0) in play, with no prior way to override it.
+    Mirrors --difficulty's exact override pattern (set the same env attribute the curriculum
+    itself would have set)."""
     difficulty_outer_only_frac: float | None = None
     """Ignore the difficulty curriculum for the ball's lateral target offset (y_end
     magnitude) and pin it to the outer band of each region's own range instead --
@@ -2296,6 +2305,9 @@ def run_play(task_id: str, cfg: PlayConfig) -> None:
     if cfg.difficulty is not None:
         env._ball_difficulty = float(cfg.difficulty)
         print(f"[INFO]: Ball difficulty overridden to {cfg.difficulty} (0=easy, 1=hard)")
+    if cfg.domain_rand is not None:
+        env._domain_rand_curriculum = float(cfg.domain_rand)
+        print(f"[INFO]: Domain rand strength overridden to {cfg.domain_rand} (0=off, 1=full)")
 
     import math as _math
     d = float(getattr(env, "_ball_difficulty", 1.0))

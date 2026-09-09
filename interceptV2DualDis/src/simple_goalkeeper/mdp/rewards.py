@@ -1537,14 +1537,27 @@ def footreach(
     # pressure: that term capped at raw 0.5 * weight(-60) = -30 max
     # contribution. footreach's own weight is 10.0, so a raw cap of 3.0
     # here reproduces the same -30 max contribution (10.0 * -3.0).
-    _OVERSHOOT_PENALTY_K = 18.0        # sigmoid steepness (1/m)
-    _OVERSHOOT_PENALTY_CENTER = 0.10   # meters past the kill threshold where the ramp is half-way to its cap
-    _MAX_OVERSHOOT_PENALTY = 3.0       # raw cap; see calibration note above
-    overshoot_x = signed_progress - _FOOTREACH_OVERSHOOT_KILL
-    overshoot_penalty = _MAX_OVERSHOOT_PENALTY / (
-        1.0 + torch.exp(-_OVERSHOOT_PENALTY_K * (overshoot_x - _OVERSHOOT_PENALTY_CENTER))
-    )
+    # FIX 2026-09-09 (user request, "make foot reach go to zero once you go
+    # further than +delta of the centerpoint... it is still getting rewards
+    # sometimes", REVISED same message, "no wait dont do footreach hard
+    # zero make it strict towards negative when it overshoots"): first
+    # attempt hard-zeroed taskrew past the kill threshold -- reverted per
+    # explicit follow-up. Root problem is unchanged (the old sigmoid penalty
+    # below was CAPPED at a raw 3.0 ceiling, so a large overshoot cost the
+    # same as a small one past ~0.3m -- taskrew's own small residual credit
+    # near the threshold, plus a capped penalty, could still net positive).
+    # Replaced the capped sigmoid with an UNCAPPED linear penalty: exactly
+    # 0 at/before the kill threshold, then grows without bound past it, so
+    # the further overshot, the more strictly negative the total reward --
+    # taskrew itself is left untouched (no zeroing), only this subtracted
+    # term changes shape. Slope chosen to match the old cap's magnitude at
+    # the point it used to saturate (~0.3m past threshold -> raw 3.0), but
+    # keeps climbing past that instead of plateauing.
+    _OVERSHOOT_PENALTY_SLOPE = 10.0    # raw penalty per meter past the kill threshold
+    overshoot_excess = (signed_progress - _FOOTREACH_OVERSHOOT_KILL).clamp(min=0.0)
+    overshoot_penalty = _OVERSHOOT_PENALTY_SLOPE * overshoot_excess
     overshoot_active = env._blue_wide & ~env._blue_landed_genuine  # same gate blue_overshoot_penalty used
+
     combined = taskrew - overshoot_penalty * overshoot_active.float()
     return combined * upright * (~behind).float()
 
@@ -1924,7 +1937,37 @@ def blue_trunk_drive(
 
     behind = _ball_is_behind(env, ball_name)
     active = env._blue_wide & (~behind)
-    return drive * active.float()
+
+    # FIX 2026-09-09 (user request, "continue... what reward is telling the
+    # far ranges to overshoot the ball and go for the real ball when it is
+    # the far range the blue ball the target?"): this term had NO overshoot
+    # handling at all -- unlike footreach (which at least subtracts a
+    # penalty), `drive` here just floor-clamps at 0.0 for velocity not
+    # pointed at blue, never penalizing it. Since blue and the real ball
+    # sit on the SAME side (same sign(full_y-start_y)), a trunk still
+    # drifting in roughly that direction after overshooting blue keeps
+    # reading `vel_toward>0`, so this term kept paying out through an
+    # overshoot with zero pushback -- very likely a real, previously-
+    # undetected contributor to "goes over blue toward the real ball."
+    # Same UNCAPPED linear penalty shape as footreach's own 2026-09-09 fix
+    # (user explicitly asked for "strict towards negative", not a hard
+    # zero) -- 0 at/before the kill threshold (env._blue_landing_radius_
+    # current), grows without bound past it. `reach_target_y` is safe to
+    # reuse as the "blue" reference here: it equals half_y (blue) for the
+    # entire window this penalty is active (overshoot_active requires
+    # ~env._blue_landed_genuine, the same phase1_active condition that
+    # keeps reach_target_y pinned at half_y).
+    _TRUNK_OVERSHOOT_SLOPE = 10.0  # same slope as footreach's own fix, for consistency
+    overshoot_active = env._blue_wide & ~env._blue_landed_genuine
+    start_y = env.scene.env_origins[:, 1]
+    direction = torch.sign(reach_target_y - start_y)
+    direction = torch.where(direction == 0, torch.ones_like(direction), direction)
+    signed_progress = direction * (trunk_y - reach_target_y)
+    radius = env._blue_landing_radius_current
+    overshoot_excess = (signed_progress - radius).clamp(min=0.0)
+    overshoot_penalty = _TRUNK_OVERSHOOT_SLOPE * overshoot_excess * overshoot_active.float()
+
+    return drive * active.float() - overshoot_penalty * active.float()
 
 
 def orange_foot_proximity(
@@ -5635,11 +5678,21 @@ def leading_foot_lift(
     # instead of flattening out immediately.
     _BLUE_APPROACH_OUTER_ZONE = 0.20
     _DECAY_STEEPNESS = 1.0
+    # FIX 2026-09-09 (user request, "put the perfect hegiht at the
+    # centerpoint of blue_ball_landed at h=-0.02 because of the hovering
+    # problem"): floor lowered from 0.0 to -0.02 -- leading_height is
+    # clamped to [0, inf) (line ~5595), so -0.02 is physically unreachable.
+    # The `fall` kernel's peak now sits just below the true floor, so even
+    # a perfectly flat/grounded foot (height=0) scores ~0.887 of max
+    # instead of the full 1.0 -- there is no longer a small-positive-height
+    # local optimum the policy can settle into and call "close enough";
+    # the gradient keeps pointing toward height=0 all the way down.
+    _MIN_TARGET_HEIGHT = -0.02
     dist_to_blue = env._blue_dbg_dist
     radius = env._blue_landing_radius_current
     x = ((dist_to_blue - radius) / (_BLUE_APPROACH_OUTER_ZONE - radius)).clamp(0.0, 1.0)
     shrink_frac = (torch.exp(_DECAY_STEEPNESS * x) - 1.0) / (math.exp(_DECAY_STEEPNESS) - 1.0)
-    decayed_target = target_height * shrink_frac  # target_height at 0.20m -> 0.0 at the landing radius
+    decayed_target = _MIN_TARGET_HEIGHT + (target_height - _MIN_TARGET_HEIGHT) * shrink_frac  # target_height at 0.20m -> -0.02 at the landing radius
 
     # RESTORED 2026-09-08 (user request, "revert that past y distance thing
     # ... i want it back in"): briefly removed the same day for a "fully
@@ -5668,7 +5721,7 @@ def leading_foot_lift(
     assigned_foot_y = foot_pos_w[arange_n, foot_idx, 1]
     signed_progress = direction * (assigned_foot_y - half_y)
     overshot = signed_progress > radius
-    decayed_target = torch.where(overshot, torch.zeros_like(decayed_target), decayed_target)
+    decayed_target = torch.where(overshot, torch.full_like(decayed_target, _MIN_TARGET_HEIGHT), decayed_target)
 
     effective_target = torch.where(
         env._blue_wide & ~env._blue_landed_genuine,
