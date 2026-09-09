@@ -58,7 +58,9 @@ no memory between invocations except the state files below):
    iteration 20000. Throttled to ~hourly *actual* attempts via
    `last_idle_attempt_epoch.txt`, even though the cron itself fires every
    30 min (checking for contention/new-commits more often is cheap and
-   desired; repeatedly re-launching the same resume is not).
+   desired; repeatedly re-launching the same resume is not). **Skipped
+   entirely if `no_autoresume.flag` is present** (see below) -- a new
+   commit still overrides and clears the flag; this path alone does not.
 6. **No new commit, GPU idle, tracked lineage already >=20000 or none
    exists** -> nothing to do.
 
@@ -73,6 +75,7 @@ Match = ours, no match = someone else's.
 | `resume_run_dir.txt` | Absolute path to the run directory the watchdog should resume from when idle. Updated on every successful launch (fresh or resumed) once the new run is *confirmed* running. |
 | `last_trained_commit.txt` | The last commit SHA the watchdog (or a manual launch, if kept in sync -- see below) has confirmed training on. Compared against `origin/v2-blue-ball-waypoint` each tick. |
 | `last_idle_attempt_epoch.txt` | Unix timestamp of the last actual idle-resume attempt, purely to throttle state-5 to ~hourly. |
+| `no_autoresume.flag` | **NEW 2026-09-09 (user request).** Presence blocks ONLY priority-5 idle-resume. Set by Claude whenever the user says "stop training" in chat without asking for a relaunch -- the user does not want the watchdog quietly taking the GPU back later on its own. Cleared automatically by priority 3 (a new commit always overrides, per explicit user request -- "only when there is a new commit it can go automatically"), and should also be cleared by Claude any time the user explicitly asks to resume/continue a stopped run from chat. Empty/content-less -- only its existence matters. |
 | `<timestamp>_watchdog.log` | Full stdout/stderr of one tick, one file per invocation. |
 | `train_<run-name>.log` | Full training stdout for a watchdog-launched run, same as any manually launched run's log. |
 
@@ -84,6 +87,14 @@ Otherwise the watchdog either launches a redundant duplicate next tick (if
 the commit marker is stale) or loses track of the real current lineage (if
 the resume pointer is stale). See `interceptV2DualDis/CLAUDE.md`'s Training
 Run Monitoring section for the exact commands.
+
+**Manual stop from chat, no relaunch requested: also touch `no_autoresume.flag`.**
+`touch $LOG_DIR/no_autoresume.flag` right after stopping the process (and
+pushing its checkpoint, as always). This is a distinct case from a
+stop-then-immediately-relaunch (e.g. "stop and resume from X") -- in that
+case don't bother setting the flag at all, since it would just be cleared
+again a moment later. If the user comes back later and asks to resume, `rm
+-f $LOG_DIR/no_autoresume.flag` as part of that action.
 
 ## The additive-resume iteration quirk
 
@@ -146,12 +157,23 @@ absolute 20000 regardless of where the checkpoint started from.
   (`git fsck --unreachable`). The watchdog's own git operations were
   designed specifically to avoid ever repeating that mistake -- never add a
   `git reset --hard` to this script without stashing first.
-- **No overlap protection.** If a single tick takes long enough to still be
-  running when the next `*/30` fires (the confirm-wait loop alone can take
-  up to 5 minutes, plus warp/kernel compile time on a fresh launch), two
-  watchdog invocations could run concurrently. Not yet observed live, no
-  lock file exists to prevent it -- worth adding (e.g. `flock`) if it ever
-  actually happens.
+- **No overlap protection -- confirmed live twice, 2026-09-09.** Not a
+  watchdog-vs-watchdog overlap (that specific scenario still unobserved),
+  but the closely related case: a human/Claude manually launches or resumes
+  a run at almost the exact moment a `*/10` tick lands on "GPU idle, no new
+  commit" (priority 5) or "new commit, GPU idle" (priority 3) and reaches
+  the same conclusion independently -- both launch within the same second,
+  producing two live training processes racing for the GPU. Happened once
+  on a fresh launch (`6144_overshootleakfix` vs. the watchdog's own
+  `6144_watchdog`, same tick) and once on a resume (`6144_resumefrom1500`
+  vs. the watchdog's own `6144_watchdogresume`, same tick, right after a
+  manual stop left the GPU briefly idle). Both times: no OOM/crash observed
+  from the brief dual-process window, resolved by killing the
+  watchdog-launched duplicate and keeping the manually-launched one. No
+  lock file exists to prevent this -- `flock` around the whole script would
+  close it, but the user judged the actual odds of it happening "subliminal"
+  (2026-09-09) and asked not to bother. If it starts happening more often,
+  revisit with a lock.
 - **PID misclassification risk.** The "ours" check is a hardcoded string
   match (`sgk_train.*MultiDisc`). If this project's task ID or invocation
   ever changes (e.g. switching to the single-discriminator task, or a

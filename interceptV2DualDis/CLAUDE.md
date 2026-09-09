@@ -337,6 +337,20 @@ uv run sgk_play Mjlab-BeyondAMP-Goalkeeper-T1-MultiDisc --agent zero --num-envs 
 uv run sgk_play Mjlab-BeyondAMP-Goalkeeper-T1-MultiDisc --checkpoint-file logs/rsl_rl/intercept_simple_goalkeeper_multidisc/<run>/model_500.pt
 ```
 
+**FIX 2026-09-09 (user request, "still not showing up in wandb"):** this
+machine's default `wandb` login (`~/.netrc`) resolves to a teammate's
+account (`l-a-j-alewijns`), not the project owner's. Any manual `sgk_train`
+launch that doesn't override this silently syncs to the teammate's wandb
+project instead — training itself works fine (confirmed via
+`debug-internal.log`: continuous `200 OK` filestream requests), it's just
+invisible to the owner, who gets a 404/no-team-access error on the printed
+URL. The watchdog script (`intercept_gpu_watchdog.sh`) already does this
+correctly via `export WANDB_API_KEY="$(cat "$HOME/IsaakB/wandbapilink")"`
+before every launch it makes — **any manual launch/resume must do the same**
+or it silently lands on the wrong account. Verify by checking the printed
+`Currently logged in as: ...` line matches `i-p-b-bouwmeester`, not
+`l-a-j-alewijns`.
+
 ## Exporting a Checkpoint to ONNX for Deployment
 
 **Observation scaling (`base_ang_vel*0.25`, `joint_vel*0.05`, etc.) is already automatic during training** — it's baked unconditionally into `goalkeeper_env_cfg()`, the single config function both `train.py` and `play.py` call, since `e930b425da` (2026-07-22). Nothing about training needs to change for this, and no run needs to be restarted on account of it. The part that is **not** automatic is producing a deployable artifact that carries the same scaling — that's a manual step, run it every time a checkpoint is handed off for deployment:
