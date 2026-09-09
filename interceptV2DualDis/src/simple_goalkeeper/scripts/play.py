@@ -1682,10 +1682,55 @@ def _patch_viewer_sole_contact_and_stop_plots(native_viewer: "NativeMujocoViewer
     orig_update_reward_figures = native_viewer._update_reward_figures
 
     _RAW_NAME = "sole_ball_contact"
+    # FIX 2026-09-09 (user request, "put in the sole contact the contact
+    # force how much newton it was"): ADDED ONLY -- _FORCE_RAW_NAME is
+    # appended to _PROMOTED below, every pre-existing entry
+    # (blue_ball_landed/orange_ball_landed/red_ball_landed/success/
+    # cleanstop/wrong_foot_ball_contact/shin_contact) is left untouched, in
+    # the same order, so nothing existing gets pushed out of this tuple by
+    # this change (user explicitly flagged a past incident where an
+    # unrelated panel item was accidentally deleted -- being deliberately
+    # additive-only here). Note this project's viewer still has a hard
+    # 12-slot cap shared across ALL panel patches (see
+    # _patch_viewer_foot_restitution_plot's own docstring) -- adding one
+    # more item here can still push something at the very end of the FULL
+    # combined list off-screen, but nothing is deleted from any config.
+    _FORCE_RAW_NAME = "assigned_foot_contact_force_n"
+    # FIX 2026-09-09 (user request, "yes sole_ball_contact change it to
+    # that force thing"): swapped priority order -- _FORCE_RAW_NAME now
+    # takes sole_ball_contact's old front-slot position (guaranteeing it
+    # renders within the 12-slot cap), sole_ball_contact moved to the end
+    # of this panel's own list (now the one most likely to fall off-screen,
+    # same fate shin_contact already had). Both figures still exist and
+    # still get data appended every tick regardless of this ordering --
+    # only visibility priority changes, nothing is deleted.
     _PROMOTED = (
-        _RAW_NAME, "blue_ball_landed", "orange_ball_landed", "red_ball_landed",
+        _FORCE_RAW_NAME, "blue_ball_landed", "orange_ball_landed", "red_ball_landed",
         "success", "cleanstop", "wrong_foot_ball_contact", "shin_contact",
+        _RAW_NAME,
     )
+
+    def _compute_assigned_foot_force(env, env_idx: int) -> float:
+        """Real ground-reaction force (Newtons) on the assigned/leading
+        foot right now -- same feet_contact.data.force field
+        penalize_sharpcontact and _get_reach_target_y's own force-based
+        landing check both read (rewards.py), so this plot shows exactly
+        what the landing detector sees, not the separate geometric
+        sole_ball_contact check above (that one has no force concept at
+        all -- it's a pure sphere-vs-marker-box distance test, see
+        _compute_sole_ball_contact's own docstring)."""
+        raw_env = env.unwrapped if hasattr(env, "unwrapped") else env
+        from simple_goalkeeper.mdp.rewards import _get_correct_foot_idx
+        feet_contact = raw_env.scene["feet_contact"]
+        force_per_geom = feet_contact.data.force.norm(dim=-1)  # (N, 8)
+        left_force = force_per_geom[:, :4].max(dim=-1).values
+        right_force = force_per_geom[:, 4:].max(dim=-1).values
+        foot_idx = _get_correct_foot_idx(raw_env, "ball")
+        force = torch.where(foot_idx == 0, left_force, right_force)
+        return float(force[env_idx].item())
+
+    _FORCE_LO, _FORCE_HI = 0.0, 100.0  # FIX 2026-09-09 (user request, "put the newton plot max 100N"): was 500.0
+    _FORCE_THRESHOLD_N = 40.0  # matches rewards.py's _LANDING_FORCE_THRESHOLD
 
     def _patched_setup() -> None:
         orig_setup()
@@ -1698,15 +1743,61 @@ def _patch_viewer_sole_contact_and_stop_plots(native_viewer: "NativeMujocoViewer
         native_viewer._histories[_RAW_NAME] = deque(maxlen=cfg.history)
         native_viewer._yrange[_RAW_NAME] = cfg.init_yrange
         native_viewer._scale[_RAW_NAME] = 1.0
+        native_viewer._figures[_FORCE_RAW_NAME] = make_empty_figure(
+            f"{_FORCE_RAW_NAME} (Newtons, assigned foot; green=40N landing threshold)",
+            cfg.grid_size, (_FORCE_LO, _FORCE_HI), cfg.history, cfg.background_alpha,
+        )
+        native_viewer._histories[_FORCE_RAW_NAME] = deque(maxlen=cfg.history)
+        native_viewer._scale[_FORCE_RAW_NAME] = 1.0
+        # FIX 2026-09-09 (user request, "put a green line at the 40N
+        # mark"): a flat reference line at the landing-force threshold, so
+        # you can read "above/below 40N" directly off the plot instead of
+        # eyeballing the axis. Uses the SAME fixed-range write pattern
+        # _patch_viewer_foot_restitution_plot already established for
+        # cleanstop/contact_yield_velocity (bypasses the native autoscale
+        # entirely) rather than the default autoscaling
+        # _write_history_to_figure -- autoscale rescales the Y axis every
+        # frame, which would make a "constant 40N" reference line drift
+        # around the plot instead of staying put. line index 1 (linedata[1]
+        # /linergb[1]) is a genuinely separate MuJoCo figure line from the
+        # live-force trace at index 0 -- a flat 2-point segment spanning
+        # the full plot width, colored green, that never changes.
+        fig = native_viewer._figures[_FORCE_RAW_NAME]
+        fig.linepnt[1] = 2
+        fig.linedata[1][0] = -float(cfg.history)
+        fig.linedata[1][1] = _FORCE_THRESHOLD_N
+        fig.linedata[1][2] = 0.0
+        fig.linedata[1][3] = _FORCE_THRESHOLD_N
+        fig.linergb[1] = (0.0, 1.0, 0.0)
         rest = [n for n in native_viewer._term_names if n not in _PROMOTED]
-        promoted = [n for n in _PROMOTED if n in native_viewer._term_names or n == _RAW_NAME]
+        promoted = [n for n in _PROMOTED if n in native_viewer._term_names or n in (_RAW_NAME, _FORCE_RAW_NAME)]
         native_viewer._term_names = promoted + rest
+
+    def _write_force_fixed_range() -> None:
+        """Same fixed-range write _patch_viewer_foot_restitution_plot uses
+        (raw units, no autoscale multiplier) -- keeps the 40N reference
+        line (set once in _patched_setup, line index 1, never rewritten
+        here) visually stable instead of drifting with the live trace's
+        own autoscale."""
+        fig = native_viewer._figures[_FORCE_RAW_NAME]
+        hist = native_viewer._histories[_FORCE_RAW_NAME]
+        n = min(len(hist), native_viewer._plot_cfg.history)
+        fig.linepnt[0] = n
+        for i in range(n):
+            fig.linedata[0][2 * i] = float(-i)
+            fig.linedata[0][2 * i + 1] = float(hist[-1 - i])
+        fig.range[1][0] = _FORCE_LO
+        fig.range[1][1] = _FORCE_HI
+        fig.title = f"{_FORCE_RAW_NAME} (Newtons, assigned foot; green=40N landing threshold)"
 
     def _patched_update_reward_figures(viewer_handle: "mujoco.viewer.Handle") -> None:
         if native_viewer._show_plots and native_viewer._term_names and not native_viewer._is_paused:
             contact = _compute_sole_ball_contact(env, native_viewer.env_idx)
             native_viewer._append_point(_RAW_NAME, contact)
             native_viewer._write_history_to_figure(_RAW_NAME)
+            force = _compute_assigned_foot_force(env, native_viewer.env_idx)
+            native_viewer._append_point(_FORCE_RAW_NAME, force)
+            _write_force_fixed_range()
         orig_update_reward_figures(viewer_handle)
 
     native_viewer.setup = _patched_setup

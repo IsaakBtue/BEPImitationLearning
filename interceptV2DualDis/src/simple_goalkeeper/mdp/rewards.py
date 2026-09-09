@@ -778,27 +778,31 @@ def _get_reach_target_y(
         assigned_foot_pos = foot_pos_w[arange_n, foot_idx]                  # (N, 3)
         assigned_foot_vel = foot_vel_w[arange_n, foot_idx]                  # (N, 3)
 
-        found = feet_contact.data.found                                    # (N, 8)
-        left_in_contact = (found[:, :4] > 0).any(dim=-1)
-        right_in_contact = (found[:, 4:] > 0).any(dim=-1)
-        foot_in_contact = torch.where(foot_idx == 0, left_in_contact, right_in_contact)  # (N,)
+        # FIX 2026-09-09 (user request, "add that contact.force instead of
+        # contact.data thing... maybe that helps with blue_ball_landed to
+        # converge to a more forceful landing instead of just staying at
+        # the hovering part"): was the binary `found` proximity flag --
+        # replaced with a genuine force threshold, same `.data.force` field
+        # penalize_sharpcontact already reads (rewards.py:penalize_
+        # sharpcontact). Calibrated from a live probe
+        # (scripts/probe_blue_landing_force.py, model_18750.pt,
+        # difficulty=0.5/domain_rand=0.5): at least 10% of currently-
+        # classified "genuine" landings measured EXACTLY 0.00N of real
+        # contact force (p10=0.00N in both left_far and right_far), while
+        # most genuine plants land well above 60N (right_far's own
+        # p25=63.06N) -- 40N cleanly separates true non-contact/hover
+        # events from real plants without rejecting them. This also closes
+        # the long-standing "ball-touching-counts-as-landed" issue this
+        # comment block used to flag as open below (found fired on foot-
+        # ball contact too, not just ground; a light rolling ball can't
+        # produce anywhere near 40N, so it's naturally excluded now).
+        _LANDING_FORCE_THRESHOLD = 40.0  # Newtons; first pass, live-calibrated from real landing-force percentiles
+        force_per_geom = feet_contact.data.force.norm(dim=-1)               # (N, 8)
+        left_force = force_per_geom[:, :4].max(dim=-1).values
+        right_force = force_per_geom[:, 4:].max(dim=-1).values
+        assigned_force = torch.where(foot_idx == 0, left_force, right_force)
+        foot_in_contact = assigned_force > _LANDING_FORCE_THRESHOLD          # (N,)
 
-        # REVERTED 2026-07-23: tried gating foot_in_contact on foot height
-        # above floor_z (env.scene.env_origins[:, 2]) to exclude a foot
-        # suspended by ball-contact alone (see git history same day for the
-        # attempt + rationale). Live-tested: settle_count stopped
-        # accumulating AT ALL afterward, even for cases that previously
-        # accumulated fine (up to 10/3) -- i.e. the height check was false
-        # in the real sim even while the foot was visibly grounded and the
-        # contact sensor read True, for reasons not reproduced by an
-        # isolated mock with idealized (zero-offset) inputs. Reverted to the
-        # plain contact-sensor signal (matches this function's behavior
-        # before today's ball-contact investigation) to restore basic
-        # settle/landing function. The ball-touching-counts-as-landed issue
-        # (feet_contact fires on ball contact too, not just ground -- see
-        # goalkeeper_env_cfg.py's own comment on this sensor) is real and
-        # still open, but needs a cleaner fix than a height gate -- revisit
-        # separately rather than block basic landing detection on it.
         currently_airborne = ~foot_in_contact
         env._blue_was_airborne |= currently_airborne
 
@@ -1553,10 +1557,63 @@ def footreach(
     # term changes shape. Slope chosen to match the old cap's magnitude at
     # the point it used to saturate (~0.3m past threshold -> raw 3.0), but
     # keeps climbing past that instead of plateauing.
-    _OVERSHOOT_PENALTY_SLOPE = 10.0    # raw penalty per meter past the kill threshold
+    # FIX 2026-09-09 (later same day, user report, live --force-region
+    # left_far replay: "it overshoots, then goes back again for a bit and
+    # gets a second gradient reward bump for going back a little... make it
+    # so there is a definite downwards for any movement at all once you
+    # cross like landing_radius variable of distance of the blue ball line
+    # that the reward can only go strictly down or if you go down"): the
+    # LIVE overshoot_excess above is fully reversible -- a foot that
+    # oscillates in and out of the overshoot zone gets the penalty relieved
+    # every time it steps back in, even without ever genuinely returning
+    # inside the landing radius. That's a real, previously-flagged exploit
+    # class in this project (the exact reason blue_stick_landing/
+    # near_stick_reach exist for the POSITIVE side of this mechanism) --
+    # any reward/penalty that responds symmetrically to back-and-forth
+    # motion can be farmed by oscillating. Fixed with a per-episode RATCHET:
+    # track the WORST (largest) overshoot_excess reached so far this
+    # episode; the penalty is computed off that ratcheted value, not the
+    # live one, so partial recovery while still outside the radius can
+    # never reduce the penalty -- only a GENUINE return inside the radius
+    # (overshoot_excess hits exactly 0) resets the ratchet, matching "can
+    # only go strictly down, or [improve] if you [genuinely] go down [back
+    # inside]". Also raised the slope 10.0->50.0 (5x, user report: "i want
+    # the reward to be more negative for overshoot it now only goes to -5
+    # or something") -- the observed -5 implied only a few cm of overshoot
+    # were being reached at the old slope*weight product; not data-driven,
+    # a direct user-requested magnitude bump.
+    _OVERSHOOT_PENALTY_SLOPE = 50.0    # raw penalty per meter past the kill threshold (was 10.0)
     overshoot_excess = (signed_progress - _FOOTREACH_OVERSHOOT_KILL).clamp(min=0.0)
-    overshoot_penalty = _OVERSHOOT_PENALTY_SLOPE * overshoot_excess
     overshoot_active = env._blue_wide & ~env._blue_landed_genuine  # same gate blue_overshoot_penalty used
+
+    # FIX 2026-09-09 (same day, user correction: "zeroing out when it
+    # overshoots is a bad thing right because you dont give negative
+    # credits, so we go from a negative number back to 0 so a positive
+    # increase? so shouldn't we keep it a big negative number?"): the
+    # first ratchet version below reset to 0 the instant the foot merely
+    # stepped back INSIDE the radius (overshoot_excess==0), even without a
+    # genuine landing -- that recreated the exact same exploit one level
+    # up: a foot could duck just inside the radius to cash in a sudden
+    # negative->positive jump, then head back out and start a fresh
+    # (small) ratchet, repeating indefinitely. Fixed: the ratchet now ONLY
+    # clears on a genuine landing or episode reset -- while overshoot_active
+    # is True (wide, not yet landed_genuine), it can only hold or grow,
+    # full stop, regardless of how far the foot steps back in. The instant
+    # env._blue_landed_genuine actually fires, overshoot_active itself
+    # goes False, so `combined` below already ignores the penalty term
+    # entirely at that point (multiplied by 0) -- no separate reset needed,
+    # a genuinely stale positive ratchet value just becomes irrelevant.
+    n = env.num_envs
+    if not hasattr(env, "_footreach_worst_overshoot"):
+        env._footreach_worst_overshoot = torch.zeros(n, device=env.device)
+    just_reset = env.episode_length_buf <= 1
+    env._footreach_worst_overshoot[just_reset] = 0.0
+    env._footreach_worst_overshoot = torch.where(
+        overshoot_active,
+        torch.maximum(env._footreach_worst_overshoot, overshoot_excess),
+        env._footreach_worst_overshoot,
+    )
+    overshoot_penalty = _OVERSHOOT_PENALTY_SLOPE * env._footreach_worst_overshoot
 
     combined = taskrew - overshoot_penalty * overshoot_active.float()
     return combined * upright * (~behind).float()

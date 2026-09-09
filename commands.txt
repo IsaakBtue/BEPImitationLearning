@@ -1,1 +1,1 @@
-uv run sgk_play Mjlab-BeyondAMP-Goalkeeper-T1-MultiDisc --checkpoint-file interceptV2DualDis/logs/rsl_rl/intercept_simple_goalkeeper_multidisc/2026-09-09_00-36-48_6144_manualfresh_2026-09-09_00-36/model_18750.pt --difficulty 0.5 --domain-rand 0.5
+uv run sgk_play Mjlab-BeyondAMP-Goalkeeper-T1-MultiDisc --checkpoint-file logs/rsl_rl/intercept_simple_goalkeeper_multidisc/2026-09-09_00-36-48_6144_manualfresh_2026-09-09_00-36/model_18750.pt --difficulty 0.5 --domain-rand 0.5 --force-region left_far
