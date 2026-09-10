@@ -571,7 +571,7 @@ def _get_reach_target_y(
     ball_name: str,
     asset_cfg: SceneEntityCfg = _DEFAULT_FEET_CFG,
     wide_threshold: float = 0.5,  # FIX 2026-08-01: was 0.65, reverted to 0.5, kept in sync with regions.py's near/far boundary
-    landing_radius: float = 0.14,  # FIX 2026-09-09 (user request, "revert"): back to the flat, no-curriculum real value after the 0.4 diagnostic bump. Curriculum easing removed entirely (see the flat assignment below) -- 0.14m at every difficulty. Was 0.4 (diagnostic), 0.13 hard/0.15 easy before that, 0.09 (briefly reverted), 0.4 (earlier diagnostic), 0.09->0.05 (2026-09-09 earlier same day), 0.20->0.18->0.15->0.13->0.09 before that (2026-07-24: was 0.08, too strict at full difficulty)
+    landing_radius: float = 0.12,  # FIX 2026-09-11 (user request, "decrease the radius of blue ball with 0.02 it is too easy"): 0.14 -> 0.12, flat, no curriculum (still no easing -- see the flat assignment below). Was 0.14 (2026-09-09, "revert" back to the flat, no-curriculum real value after a 0.4 diagnostic bump), 0.13 hard/0.15 easy before that, 0.09 (briefly reverted), 0.4 (earlier diagnostic), 0.09->0.05 (2026-09-09 earlier same day), 0.20->0.18->0.15->0.13->0.09 before that (2026-07-24: was 0.08, too strict at full difficulty)
     landing_speed_threshold: float = 1.0,  # FIX 2026-07-24: reverted to the pre-2026-07-23 value (was 0.15); see below
 ) -> torch.Tensor:
     """Two-stage reach target for wide crossings: v2 reimplementation of the
@@ -688,19 +688,68 @@ def _get_reach_target_y(
     env._blue_wide = wide
 
     # FIX 2026-09-09 (user request, "have it 0.3" -- minimum distance from
-    # the robot for blue's point): plain midpoint (start_y + delta/2) has
+    # the robot for blue's point): plain midpoint (start_y + delta/2) had
     # no floor -- right at the wide/narrow boundary (delta just over
     # wide_threshold=0.5) blue could sit as close as ~0.25m from the
     # robot's own stance, a barely-there waypoint with no real
-    # pre-positioning value. Floors the midpoint's distance from start_y
-    # at _MIN_BLUE_DIST, sign-safe for both left/right crossings -- once
-    # delta/2 exceeds the floor (delta > 0.6m) this is a no-op and blue
-    # stays the true midpoint, matching the original formula exactly.
-    _MIN_BLUE_DIST = 0.3
+    # pre-positioning value.
+    #
+    # FIX 2026-09-11 (user request, "the nearest of the wide region is too
+    # near to [green]... maybe have it a strict distance away from it"):
+    # the floor above was anchored at START, which doesn't bound blue's
+    # distance from GREEN at all -- at delta=0.5 (the tightest wide
+    # crossing) blue sat only 0.20m from green, closer than intended.
+    # Graphed both anchorings (see docs/BugFixes.md) before changing
+    # anything: a green-anchored floor guarantees a minimum gap from the
+    # actual crossing point instead. First proposal (0.5m from green)
+    # graphed and rejected -- it collapsed blue toward the robot's own feet
+    # (0m from start) for most of the realistic 0.5-1.0m crossing range.
+    # Landed on a flat 0.3m-from-green floor (user-confirmed) -- but that
+    # version was piecewise (identical to the plain midpoint for every
+    # delta>=0.6m, flat at exactly 0.3m below that), which the user then
+    # flagged as a disliked KINK, asking for "a smooth curve having a
+    # little more distance from green... in the narrower range."
+    #
+    # FIX 2026-09-11 (same day, follow-up, user request): replaced the
+    # piecewise clamp with a smooth exponential blend -- the natural
+    # delta/2 midpoint, plus an EXTRA margin that's biggest right at
+    # wide_threshold (the "narrowest" wide crossings) and decays smoothly
+    # (no kink anywhere, C-infinity) toward 0 as delta grows, so it
+    # converges back to the same plain-midpoint asymptote for wide
+    # crossings without ever having a flat/pinned segment. Graphed 3
+    # candidate (extra, tau) pairs before implementing -- user picked
+    # extra=0.15 (0.40m from green at delta=wide_threshold, vs. the
+    # rejected piecewise version's flat 0.30m), tau=0.15 (fast decay,
+    # mostly localized near the threshold -- by delta=0.8 it's already
+    # back within 0.02m of the plain midpoint). See docs/BugFixes.md for
+    # the full candidate comparison and the exact numbers at each delta.
+    #
+    # Sign-safe for both left/right crossings. Also capped so blue can
+    # never cross past start_y to the WRONG side of the robot -- only
+    # reachable via the region-forced-wide path (env._region_id can force
+    # wide=True even for a small |delta|, see below), where this formula's
+    # raw output can exceed |delta| itself (the exponential term grows
+    # large for delta well below wide_threshold); in that degenerate case
+    # blue collapses to exactly start_y.
+    #
+    # FIX 2026-09-11 (same day, user request, "when you made the 0.5
+    # somewhere about 0.350 green blue distance and the rest about the
+    # same"): _BLUE_GREEN_EXTRA 0.15 -> 0.10 -- moves delta=wide_threshold's
+    # green-blue distance from 0.400m to exactly 0.350m; tau=0.15 unchanged,
+    # so the exponential decay shape is identical, just scaled down --
+    # every other delta barely moves (delta=0.7: 0.390->0.376, delta=0.9:
+    # 0.460->0.457, delta=1.0: 0.505->0.504), matching "the rest about the
+    # same" (confirmed by direct computation before implementing, not just
+    # by construction).
+    _BLUE_GREEN_EXTRA = 0.10   # extra distance-from-green right at wide_threshold
+    _BLUE_GREEN_TAU = 0.15     # decay length-scale (m) -- how fast the extra margin fades
     delta = full_y - start_y
     sign = torch.sign(delta)
     sign = torch.where(sign == 0, torch.ones_like(sign), sign)  # dead-center: default outward, same convention as _get_foot_block_offset
-    half_y = start_y + sign * torch.clamp(delta.abs() / 2.0, min=_MIN_BLUE_DIST)
+    extra = _BLUE_GREEN_EXTRA * torch.exp(-(delta.abs() - wide_threshold) / _BLUE_GREEN_TAU)
+    blue_dist_from_green = delta.abs() / 2.0 + extra
+    blue_dist_from_green = torch.minimum(blue_dist_from_green, delta.abs())
+    half_y = full_y - sign * blue_dist_from_green
 
     # DEBUG 2026-07-23 (TEMPORARY, remove after landing-gate investigation):
     # expose the Y-offsets (relative to robot start) that make up this gate's
@@ -945,173 +994,6 @@ def _get_reach_target_y(
     return torch.where(phase1_active, half_y, full_y + _get_foot_block_offset(env, ball_name))
 
 
-def _get_orange_reach_target_y(
-    env: "ManagerBasedRlEnv",
-    ball_name: str,
-    asset_cfg: SceneEntityCfg = _DEFAULT_FEET_CFG,
-    landing_radius: float = 0.09,  # FIX 2026-09-08: 0.20->0.18->0.15->0.13->0.09, mirrors _get_reach_target_y's own change
-    landing_speed_threshold: float = 1.0,
-) -> torch.Tensor:
-    """Trailing-foot ("orange") mirror of _get_reach_target_y -- see that
-    function's docstring for the full blue-ball-waypoint mechanism history
-    this reuses (leaky settle-count decrement, curriculum-eased landing
-    radius/speed, free-landing classification).
-
-    Target formula (confirmed with user via worked examples, 2026-08-08
-    design spec; constant raised 0.30->0.60 same day per user request --
-    "the orange ball needs to be way further than the blue ball" -- then
-    adjusted 0.60->0.50 same day -- see docs/BugFixes.md):
-        delta = full_y - start_y                          (signed)
-        shrunk = sign(delta) * max(|delta| - 0.50, 0.0)    (50cm off the top, sign-safe)
-        orange_y = start_y + shrunk / 2.0
-
-    Equivalently: blue's own midpoint, 25cm short of it in delta-magnitude
-    terms -- NOT a plain `delta - 0.50` (that would push the target further
-    OUT, not in, for right-side/negative-delta crossings).
-
-    Reuses env._blue_wide (set by _get_reach_target_y, which every existing
-    wide-gated reward already calls first in the reward-manager's term
-    order) directly as the wide/narrow gate -- "wide" is a property of the
-    ball's crossing geometry, not which foot is being tracked, so no
-    separate wide/region computation is added here. Defensive fallback to
-    all-False if _blue_wide isn't set yet (should not happen in the real
-    term order).
-
-    Keyed to the TRAILING foot (1 - _get_correct_foot_idx), not the leading
-    one. Unlike blue, this function does NOT graduate to a second/live-ball
-    target once landed -- the landing-focused subset gives the trailing foot
-    one target for the whole wide-crossing window, no live-ball-tracking
-    phase (see design spec's "Explicitly out of scope" section).
-
-    Maintains its own state namespace (env._orange_*), entirely separate
-    from env._blue_*'s -- never reads or writes any env._blue_* field except
-    the read-only env._blue_wide gate above.
-
-    See docs/superpowers/specs/2026-08-08-orange-ball-trailing-foot-design.md.
-
-    Not yet validated against a live training run.
-    """
-    full_y = _get_ball_crossing_y(env, ball_name)                 # (N,) world Y
-    start_y = env.scene.env_origins[:, 1]                         # (N,) world Y
-    delta = full_y - start_y
-    wide = getattr(env, "_blue_wide", torch.zeros_like(delta, dtype=torch.bool))
-    env._orange_wide = wide
-
-    shrunk = torch.sign(delta) * (delta.abs() - 0.50).clamp(min=0.0)
-    orange_y = start_y + shrunk / 2.0
-
-    n = env.num_envs
-    if not hasattr(env, "_orange_was_airborne"):
-        env._orange_was_airborne = torch.zeros(n, dtype=torch.bool, device=env.device)
-        env._orange_landed = torch.zeros(n, dtype=torch.bool, device=env.device)
-        env._orange_settle_count = torch.zeros(n, dtype=torch.int64, device=env.device)
-        env._orange_landed_was_free = torch.zeros(n, dtype=torch.bool, device=env.device)
-        env._orange_landed_genuine = torch.zeros(n, dtype=torch.bool, device=env.device)
-        env._orange_last_settle_step = torch.full((n,), -1, dtype=torch.int64, device=env.device)
-    just_reset = env.episode_length_buf <= 1
-    env._orange_was_airborne[just_reset] = False
-    env._orange_landed[just_reset] = False
-    env._orange_settle_count[just_reset] = 0
-    env._orange_landed_was_free[just_reset] = False
-    env._orange_landed_genuine[just_reset] = False
-
-    # FIX 2026-08-30 (user request): easy end 0.20 -> 0.30, mirrors
-    # _get_reach_target_y's own widening (see that function's comment).
-    # FIX 2026-09-08 (user request): narrowed back, easy 0.30 -> 0.20.
-    d = float(min(max(getattr(env, "_ball_difficulty", 1.0), 0.0), 1.0))
-    landing_radius = 0.11 + (landing_radius - 0.11) * d
-    env._orange_landing_radius_current = landing_radius
-
-    _EASY_LANDING_SPEED_THRESHOLD = 2.0
-    landing_speed_threshold = (
-        _EASY_LANDING_SPEED_THRESHOLD + (landing_speed_threshold - _EASY_LANDING_SPEED_THRESHOLD) * d
-    )
-    env._orange_landing_speed_threshold_current = landing_speed_threshold
-
-    try:
-        robot: Entity = env.scene[asset_cfg.name]
-        feet_contact: ContactSensor = env.scene["feet_contact"]
-    except KeyError:
-        robot = None
-        feet_contact = None
-
-    if robot is not None and feet_contact is not None:
-        foot_pos_w = robot.data.body_link_pos_w[:, asset_cfg.body_ids, :]      # (N, 2, 3)
-        foot_vel_w = robot.data.body_link_lin_vel_w[:, asset_cfg.body_ids, :]  # (N, 2, 3)
-        foot_idx = _get_correct_foot_idx(env, ball_name)                      # (N,)
-        trailing_idx = 1 - foot_idx
-        arange_n = torch.arange(n, device=env.device)
-        assigned_foot_pos = foot_pos_w[arange_n, trailing_idx]                # (N, 3)
-        assigned_foot_vel = foot_vel_w[arange_n, trailing_idx]                # (N, 3)
-
-        # FIX 2026-09-09 (user request, "fix it for orange ball... and red
-        # ball etc"): mirrors blue's own force-based landing fix
-        # (_get_reach_target_y) -- was the binary found check, which let
-        # the trailing foot register "landed" by sliding into the orange
-        # target at up to landing_speed_threshold's loose end (2.0 m/s)
-        # with zero real ground force. Live-flagged as the likely driver
-        # of a reported feet_slippage spike (model_3000.pt,
-        # 6144_forcelandingfix run) -- a foot dragging at speed while
-        # "in contact" is exactly what feet_slippage measures/penalizes.
-        # Same 40N threshold as blue, not independently recalibrated.
-        _LANDING_FORCE_THRESHOLD = 40.0  # Newtons; matches _get_reach_target_y's own value
-        force_per_geom = feet_contact.data.force.norm(dim=-1)                 # (N, 8)
-        left_force = force_per_geom[:, :4].max(dim=-1).values
-        right_force = force_per_geom[:, 4:].max(dim=-1).values
-        assigned_force = torch.where(trailing_idx == 0, left_force, right_force)
-        foot_in_contact = assigned_force > _LANDING_FORCE_THRESHOLD           # (N,)
-
-        currently_airborne = ~foot_in_contact
-        env._orange_was_airborne |= currently_airborne
-
-        goal_x_w = env.scene.env_origins[:, 0]
-        target_point_xy = torch.stack([goal_x_w, orange_y], dim=-1)          # (N, 2)
-        dist_to_orange = torch.norm(assigned_foot_pos[:, :2] - target_point_xy, dim=-1)
-        foot_speed = torch.norm(assigned_foot_vel[:, :2], dim=-1)
-
-        candidate = wide & env._orange_was_airborne & foot_in_contact & (dist_to_orange < landing_radius)
-        is_first_call_this_tick = env.episode_length_buf != env._orange_last_settle_step
-        env._orange_last_settle_step = env.episode_length_buf.clone()
-        _ORANGE_SETTLE_STEPS = 3
-        env._orange_settle_count = torch.where(
-            candidate,
-            torch.where(is_first_call_this_tick, env._orange_settle_count + 1, env._orange_settle_count),
-            torch.where(is_first_call_this_tick, (env._orange_settle_count - 1).clamp(min=0), env._orange_settle_count),
-        )
-        newly_landed = (
-            (env._orange_settle_count >= _ORANGE_SETTLE_STEPS)
-            & (foot_speed < landing_speed_threshold)
-            & ~env._orange_landed
-        )
-        env._orange_landed |= newly_landed
-
-        # NEW 2026-08-08 (user request, final-review follow-up): minimal live
-        # diagnostics -- mirrors blue's own env._blue_dbg_dist/_speed/_contact/
-        # _settle/_foot_idx (rewards.py's _get_reach_target_y), scoped to just
-        # the fields play.py's per-episode accumulator needs (not blue's full
-        # temporary per-step debug dump, which was explicitly marked
-        # TEMPORARY/for-removal cruft, not part of this function's permanent
-        # design). Lets a real training/play run explain a low orange landing
-        # rate (distance vs. speed vs. contact vs. settle-count) instead of
-        # only seeing the final _orange_landed flag.
-        env._orange_dbg_dist = dist_to_orange
-        env._orange_dbg_speed = foot_speed
-        env._orange_dbg_contact = foot_in_contact
-        env._orange_dbg_settle = env._orange_settle_count.clone()
-        env._orange_dbg_foot_idx = trailing_idx
-
-        _ORANGE_LANDING_FREE_STEP_THRESHOLD = 10
-        env._orange_landed_was_free = torch.where(
-            newly_landed,
-            env.episode_length_buf < _ORANGE_LANDING_FREE_STEP_THRESHOLD,
-            env._orange_landed_was_free,
-        )
-
-    env._orange_landed_genuine = env._orange_landed & ~env._orange_landed_was_free
-
-    return orange_y
-
-
 def _get_red_reach_target_y(
     env: "ManagerBasedRlEnv",
     ball_name: str,
@@ -1119,48 +1001,28 @@ def _get_red_reach_target_y(
     landing_radius: float = 0.09,  # FIX 2026-09-08: 0.20->0.18->0.15->0.13->0.09, mirrors _get_reach_target_y's own change
     landing_speed_threshold: float = 1.0,
 ) -> torch.Tensor:
-    """Trailing-foot ("red") second-stage mirror of _get_orange_reach_target_y --
-    see that function's docstring for the shared leaky-settle-count/curriculum/
-    free-landing mechanism this reuses verbatim.
+    """Trailing-foot ("red") waypoint -- the trailing foot's ONLY waypoint
+    as of 2026-09-11 (see below). Shares the same leaky-settle-count/
+    curriculum/free-landing/force-based-landing mechanism this always had.
 
-    NEW 2026-08-15 (user request): closes the gap orange's own docstring
-    explicitly flags ("does NOT graduate to a second/live-ball target once
-    landed") -- red is that second target for the trailing foot, active only
-    once BOTH the leading foot has genuinely landed at blue AND the trailing
-    foot has genuinely landed at orange (`env._blue_landed_genuine &
-    env._orange_landed_genuine`, cached as `env._red_active`) -- the
-    literal two-condition AND the user asked for.
+    REMOVED 2026-09-11 (user request, "i dont want yellow ball/gold ball
+    anymore"): the "orange" waypoint (a first, nearer trailing-foot target)
+    is gone entirely -- `_get_orange_reach_target_y` and its 4 reward terms
+    were deleted. Red is now the trailing foot's sole target for the whole
+    wide-crossing window, not a second stage.
 
-    Target formula -- anchored at `full_y` (green), NOT `start_y` like
-    orange: a literal copy of orange's start_y-anchored shrink formula tops
-    out AT blue as its constant shrinks to zero, so it can never place a
-    point past blue toward green. Anchoring at full_y and shrinking backward
-    instead was the first attempt, but that formula's distance from green
-    (`max(|delta|-0.50,0)/2`) scales with the total crossing distance --
-    live-checked (2026-08-15, real `model_39750.pt` rollout) it collapsed to
-    as little as 0.029m from green for crossings just barely over the 0.5m
-    wide threshold, nowhere near the intended "behind green" gap. FIX
-    (same day, user request, "just like -0.4 away from green ball full_Y"):
-    replaced with a flat offset, CLAMPED to never exceed blue's own distance
-    from green (`|delta|/2`):
-        red_offset = min(RED_OFFSET_FROM_GREEN, |delta|/2)   (0.4m cap)
-        red_y = full_y - sign(delta) * red_offset
-    Live-checked again (2026-08-15) with the plain uncapped 0.4m offset: for
-    a real crossing with |delta|=0.711m (a common "just barely wide"
-    crossing -- blue's own distance from green there is only 0.356m), the
-    uncapped version placed red BEFORE blue (closer to start), inverting the
-    intended start<orange<blue<red<green order. User confirmed via
-    AskUserQuestion to clamp rather than accept the inversion -- for
-    |delta| &gt;= 0.8m (blue's distance from green &gt;= 0.4m) this clamp never
-    engages and red gets the full 0.4m gap requested; for smaller wide
-    crossings red collapses onto blue's own position instead of passing it
-    (a degenerate "red==blue" case, same class as orange's own
-    collapse-to-start_y degenerate case above, not a new failure mode).
-    User-confirmed via AskUserQuestion (2026-08-15): weights equal to orange
-    (not a further quarter-of-blue halving -- red's extra landing-gate
-    already limits false credit relative to orange's ungated single stage),
-    and capped at red for the rest of the episode (no further graduation to
-    live green, mirroring orange's own design exactly).
+    Gate (`env._red_active`): now just `env._blue_landed_genuine` (was
+    `blue_landed_genuine & orange_landed_genuine` -- orange no longer
+    exists). "Red only appears once the leading foot has genuinely landed
+    at blue" was the user's own framing.
+
+    Target formula (user request, confirmed via AskUserQuestion -- measured
+    start->green, not blue->green): 60% of the way from the robot's own
+    start line to the final green crossing point:
+        red_y = start_y + 0.6 * (full_y - start_y)
+    Replaces the old "clamped to within 0.25m of green" formula, which
+    existed only because red used to be a second stage past an earlier
+    orange stage.
 
     Not yet validated against a live training run.
     """
@@ -1170,22 +1032,20 @@ def _get_red_reach_target_y(
     wide = getattr(env, "_blue_wide", torch.zeros_like(delta, dtype=torch.bool))
     env._red_wide = wide
 
-    # FIX 2026-08-17 (user request, "standard position of 20cm to 30cm on
-    # further ranges"): 0.4 -> 0.25. Same clamp formula/mechanism, only the
-    # far-range cap value changed -- for |delta|>=0.5m (2*0.25) red now sits
-    # a flat 25cm from green instead of 40cm; narrower wide crossings still
-    # scale down below that via the unchanged |delta|/2 term.
-    RED_OFFSET_FROM_GREEN = 0.25
-    red_offset = torch.clamp(delta.abs() / 2.0, max=RED_OFFSET_FROM_GREEN)
-    red_y = full_y - torch.sign(delta) * red_offset
+    # FIX 2026-09-11 (user request, "i dont want yellow ball/gold ball
+    # anymore, i just want red ball to be in the 60% along the green ball
+    # full length"): orange waypoint removed entirely -- red is now the
+    # trailing foot's only waypoint. Position is 60% of the way from the
+    # robot's own start line to the final green crossing point (user
+    # confirmed via AskUserQuestion: measured start->green, not blue->green).
+    # Was: clamped to sit within 0.25m of green.
+    RED_TARGET_FRACTION = 0.6
+    red_y = start_y + RED_TARGET_FRACTION * delta
 
-    # Gate: settle progress can only accrue once BOTH upstream landings are
-    # genuine. Defensive getattr fallback (all-False) mirrors orange's own
-    # defensive read of env._blue_wide -- should not trigger in the real
-    # term order (red's RewardTermCfg entries are registered after both
-    # blue's and orange's, so both flags are already fresh this tick).
+    # Gate: red only exists once the leading foot has genuinely landed at
+    # blue -- was blue AND orange, orange no longer exists.
     zeros = torch.zeros_like(delta, dtype=torch.bool)
-    red_active = getattr(env, "_blue_landed_genuine", zeros) & getattr(env, "_orange_landed_genuine", zeros)
+    red_active = getattr(env, "_blue_landed_genuine", zeros)
     env._red_active = red_active
 
     n = env.num_envs
@@ -1331,6 +1191,19 @@ def footreach(
     used this call (env._blue_landing_radius_current) -- without this nothing
     disincentivizes carrying speed through the exact zone the foot should be
     decelerating into for a genuine plant.
+
+    Green overshoot penalty (NEW 2026-09-11, user request, "the same
+    overshoot reward shaping for footreach like we did with blue ball for
+    the wide region for green ball and also for the near region for green
+    ball"): same linear, uncapped, per-episode-ratcheted penalty as the
+    blue overshoot block below, mirrored for the TRUE crossing point
+    (green) instead of the blue midpoint. Active whenever `targeting_green`
+    is true -- narrow crossings the whole time, or wide crossings once
+    genuinely landed at blue -- covering both windows the user asked for in
+    one gate. Kill threshold defaults to `reach_th` (no green-specific
+    curriculum-eased radius exists the way blue has one). Own separate
+    ratchet state (`env._footreach_worst_overshoot_green`), can't interact
+    with blue's.
     """
     robot: Entity = env.scene[asset_cfg.name]
     ball: Entity = env.scene[ball_name]
@@ -1633,7 +1506,45 @@ def footreach(
     )
     overshoot_penalty = _OVERSHOOT_PENALTY_SLOPE * env._footreach_worst_overshoot
 
-    combined = taskrew - overshoot_penalty * overshoot_active.float()
+    # NEW 2026-09-11 (user request): same overshoot-past-the-target penalty
+    # as the blue block above, but for GREEN (the true crossing point) --
+    # covers both requested windows in one gate: `targeting_green` (already
+    # computed above for the decel-zone) is (~blue_wide | blue_landed_
+    # genuine), i.e. narrow crossings the WHOLE time, or wide crossings only
+    # once genuinely landed at blue. Same signed-progress formula as blue's
+    # own block (Pitfall 5, reward-shaping skill: reuse the sibling's exact
+    # directional metric rather than inventing a new one), just measured
+    # against `full_y_ov` (the true/frozen crossing point) instead of
+    # `half_y_ov` -- matches blue's own choice of a FROZEN reference, not
+    # the live ball position, so the overshoot line doesn't move as the
+    # foot approaches. Kill threshold defaults to `reach_th` (footreach's
+    # own existing "close enough" tolerance) since green has no curriculum-
+    # eased landing-radius equivalent to blue's. Same ratchet mechanism
+    # (worst-so-far this episode, only clears on genuine `targeting_green`
+    # going False again via reset or -- for the wide case -- reverting to
+    # pre-landing, which can't happen once landed_genuine is latched) and
+    # same slope, in a SEPARATE state variable so it can never interact
+    # with blue's own ratchet.
+    signed_progress_green = direction_ov * (assigned_foot_y - full_y_ov)
+    _GREEN_OVERSHOOT_KILL = reach_th
+    overshoot_excess_green = (signed_progress_green - _GREEN_OVERSHOOT_KILL).clamp(min=0.0)
+    green_overshoot_active = targeting_green
+
+    if not hasattr(env, "_footreach_worst_overshoot_green"):
+        env._footreach_worst_overshoot_green = torch.zeros(n, device=env.device)
+    env._footreach_worst_overshoot_green[just_reset] = 0.0
+    env._footreach_worst_overshoot_green = torch.where(
+        green_overshoot_active,
+        torch.maximum(env._footreach_worst_overshoot_green, overshoot_excess_green),
+        env._footreach_worst_overshoot_green,
+    )
+    green_overshoot_penalty = _OVERSHOOT_PENALTY_SLOPE * env._footreach_worst_overshoot_green
+
+    combined = (
+        taskrew
+        - overshoot_penalty * overshoot_active.float()
+        - green_overshoot_penalty * green_overshoot_active.float()
+    )
     return combined * upright * (~behind).float()
 
 
@@ -2045,135 +1956,6 @@ def blue_trunk_drive(
     return drive * active.float() - overshoot_penalty * active.float()
 
 
-def orange_foot_proximity(
-    env: "ManagerBasedRlEnv",
-    ball_name: str,
-    asset_cfg: SceneEntityCfg = _DEFAULT_FEET_CFG,
-    sigma: float = 5.0,
-) -> torch.Tensor:
-    """Trailing-foot mirror of foot_proximity -- dense exp(-sigma*dist) pull of
-    the TRAILING (non-assigned) foot toward the orange target. Wide-crossings
-    only (env._blue_wide) -- unlike foot_proximity, which has no such gate
-    because _get_reach_target_y itself switches targets on narrow crossings;
-    _get_orange_reach_target_y never switches, so this function gates
-    explicitly instead. See
-    docs/superpowers/specs/2026-08-08-orange-ball-trailing-foot-design.md.
-
-    Not yet validated against a live training run.
-    """
-    robot: Entity = env.scene[asset_cfg.name]
-    orange_y = _get_orange_reach_target_y(env, ball_name, asset_cfg=asset_cfg)
-    goal_x_w = env.scene.env_origins[:, 0]
-    env_z = env.scene.env_origins[:, 2]
-    target_point = torch.stack([goal_x_w, orange_y, env_z + 0.10], dim=-1)   # (N, 3)
-
-    foot_pos_w = robot.data.body_link_pos_w[:, asset_cfg.body_ids, :]        # (N, 2, 3)
-    foot_idx = _get_correct_foot_idx(env, ball_name)
-    trailing_idx = 1 - foot_idx
-    foot_pos_active = foot_pos_w[torch.arange(env.num_envs, device=env.device), trailing_idx]
-    dist = torch.norm(foot_pos_active - target_point, dim=-1)
-
-    behind = _ball_is_behind(env, ball_name)
-    return torch.exp(-sigma * dist) * env._orange_wide.float() * (~behind).float()
-
-
-def orange_ball_landed(
-    env: "ManagerBasedRlEnv",
-    ball_name: str,
-    asset_cfg: SceneEntityCfg = _DEFAULT_FEET_CFG,
-) -> torch.Tensor:
-    """Trailing-foot mirror of blue_ball_landed -- one-shot bonus when the
-    trailing foot genuinely lands at the orange target. See
-    docs/superpowers/specs/2026-08-08-orange-ball-trailing-foot-design.md.
-
-    Not yet validated against a live training run.
-    """
-    _get_orange_reach_target_y(env, ball_name, asset_cfg=asset_cfg)  # ensure _orange_landed_genuine is fresh
-
-    if not hasattr(env, "_orange_landed_bonus_flag"):
-        env._orange_landed_bonus_flag = torch.zeros(env.num_envs, dtype=torch.bool, device=env.device)
-
-    just_reset = env.episode_length_buf <= 1
-    env._orange_landed_bonus_flag[just_reset] = False
-
-    fired = env._orange_landed_genuine & ~env._orange_landed_bonus_flag
-    env._orange_landed_bonus_flag |= fired
-    return fired.float()
-
-
-def orange_overshoot_penalty(
-    env: "ManagerBasedRlEnv",
-    ball_name: str,
-    asset_cfg: SceneEntityCfg = _DEFAULT_FEET_CFG,
-    max_overshoot: float = 0.5,
-) -> torch.Tensor:
-    """Trailing-foot mirror of blue_overshoot_penalty -- penalizes the
-    trailing foot for advancing past the orange target, toward the true
-    crossing point, before landing there. See
-    docs/superpowers/specs/2026-08-08-orange-ball-trailing-foot-design.md.
-
-    FIX 2026-08-30 (user request, "update it so it uses a common
-    variable"): same fix as blue_overshoot_penalty -- reads
-    `env._orange_landing_radius_current` (set fresh by
-    `_get_orange_reach_target_y`, called below) instead of its own
-    separate, previously out-of-sync `landing_radius=0.08` parameter.
-
-    Not yet validated against a live training run.
-    """
-    orange_y = _get_orange_reach_target_y(env, ball_name, asset_cfg=asset_cfg)
-
-    full_y = _get_ball_crossing_y(env, ball_name)                 # (N,) world Y
-    start_y = env.scene.env_origins[:, 1]                         # (N,) world Y
-    direction = torch.sign(full_y - start_y)
-
-    robot: Entity = env.scene[asset_cfg.name]
-    foot_pos_w = robot.data.body_link_pos_w[:, asset_cfg.body_ids, :]  # (N, 2, 3)
-    foot_idx = _get_correct_foot_idx(env, ball_name)
-    trailing_idx = 1 - foot_idx
-    arange_n = torch.arange(env.num_envs, device=env.device)
-    assigned_foot_y = foot_pos_w[arange_n, trailing_idx, 1]            # (N,)
-
-    signed_progress = direction * (assigned_foot_y - orange_y)
-    overshoot = torch.clamp(signed_progress - env._orange_landing_radius_current, min=0.0, max=max_overshoot)
-
-    phase1_active = env._orange_wide & ~env._orange_landed_genuine
-    return overshoot * phase1_active.float()
-
-
-def orange_stick_landing(
-    env: "ManagerBasedRlEnv",
-    ball_name: str,
-    asset_cfg: SceneEntityCfg = _DEFAULT_FEET_CFG,
-    dist_sigma: float = 8.0,
-    speed_sigma: float = 1.5,
-) -> torch.Tensor:
-    """Trailing-foot mirror of blue_stick_landing -- dense reward for the
-    trailing foot being simultaneously CLOSE to and SLOW near the orange
-    target on a wide, unlanded crossing. See
-    docs/superpowers/specs/2026-08-08-orange-ball-trailing-foot-design.md.
-
-    Not yet validated against a live training run.
-    """
-    orange_y = _get_orange_reach_target_y(env, ball_name, asset_cfg=asset_cfg)
-    goal_x_w = env.scene.env_origins[:, 0]
-    target_xy = torch.stack([goal_x_w, orange_y], dim=-1)              # (N, 2)
-
-    robot: Entity = env.scene[asset_cfg.name]
-    foot_pos_w = robot.data.body_link_pos_w[:, asset_cfg.body_ids, :]      # (N, 2, 3)
-    foot_vel_w = robot.data.body_link_lin_vel_w[:, asset_cfg.body_ids, :]  # (N, 2, 3)
-    foot_idx = _get_correct_foot_idx(env, ball_name)
-    trailing_idx = 1 - foot_idx
-    arange_n = torch.arange(env.num_envs, device=env.device)
-    assigned_foot_pos = foot_pos_w[arange_n, trailing_idx]              # (N, 3)
-    assigned_foot_vel = foot_vel_w[arange_n, trailing_idx]              # (N, 3)
-
-    dist = torch.norm(assigned_foot_pos[:, :2] - target_xy, dim=-1)
-    speed = torch.norm(assigned_foot_vel[:, :2], dim=-1)
-
-    phase1_active = env._orange_wide & ~env._orange_landed_genuine
-    return torch.exp(-dist_sigma * dist) * torch.exp(-speed_sigma * speed) * phase1_active.float()
-
-
 def trailing_foot_reach(
     env: "ManagerBasedRlEnv",
     ball_name: str,
@@ -2181,12 +1963,11 @@ def trailing_foot_reach(
     reach_th: float = 0.3,
     sigma: float = 5.0,
 ) -> torch.Tensor:
-    """General foot-target reach reward for the trailing foot's orange->red
-    waypoint sequence -- gives the trailing foot the same urgency mechanism
+    """General foot-target reach reward for the trailing foot's red
+    waypoint -- gives the trailing foot the same urgency mechanism
     footreach already gives the leading foot (sigmoid reach reward x a
-    velocity-toward-target multiplier, up to 10x), closing the gap that made
-    the double-step sequence slow: orange_foot_proximity/red_foot_proximity
-    are flat exp(-sigma*dist) pulls with no speed incentive at all, and
+    velocity-toward-target multiplier, up to 10x). red_foot_proximity is a
+    flat exp(-sigma*dist) pull with no speed incentive at all, and
     blue_trunk_drive only rewards whole-body trunk velocity, not the
     trailing foot specifically.
 
@@ -2197,32 +1978,37 @@ def trailing_foot_reach(
     - No phase1 (ball_x_local > 1.5m) / phase2 split. footreach's phase1
       exists to withhold the speed multiplier until the ball is close
       enough to matter -- a ball-position concept. This reward's target
-      (orange or red) is relevant for the whole wide-crossing window
-      regardless of ball position, so it's always sigmoid-reach x vel_sigma,
-      no phase gate.
+      (red) is relevant for the whole wide-crossing window regardless of
+      ball position, so it's always sigmoid-reach x vel_sigma, no phase
+      gate.
     - No live-ball tracking switch. footreach switches its target to the
       live ball once ball_x_local < 0.5m (the leading foot's actual
       interception job). The trailing foot's job is capped at its own
-      waypoint by design (orange's own docstring: "does NOT graduate to a
-      second/live-ball target"; red mirrors this) -- this reward never
-      reads live ball position at all.
-    - Auto-switches target orange_y -> red_y via env._red_active (mirrors
-      _get_reach_target_y's own blue_y -> full_y switch on
-      env._blue_landed_genuine), so ONE function covers the whole
-      double-step sequence rather than two separate ball-specific rewards.
-    - Decel-zone near whichever target is currently active (same shape as
-      footreach's own blue_decel_zone), using the orange/red landing radius
-      (numerically identical -- both curriculum-ease from the same 0.15m
-      default) as the floor, so vel_sigma decays toward neutral right at
-      the target instead of rewarding carrying speed through it.
+      waypoint by design (red's own docstring: does NOT graduate to a
+      second/live-ball target) -- this reward never reads live ball
+      position at all.
+    - Decel-zone near red (same shape as footreach's own blue_decel_zone),
+      using red's own landing radius as the floor, so vel_sigma decays
+      toward neutral right at the target instead of rewarding carrying
+      speed through it.
+
+    REMOVED 2026-09-11 (user request, "i dont want yellow ball/gold ball
+    anymore"): the orange->red auto-switch is gone -- red is now the ONLY
+    target, for the whole wide-crossing window, not just once blue lands.
+    FIX same day (user request, "trailing foot lift always stays active
+    maybe have some pull towards it not a whole lot maybe like 50%"): this
+    reward now stays active (scaled) the whole window instead of only once
+    env._red_active fires -- half strength before blue genuinely lands
+    (`pre_landing_scale=0.5`, red's spot exists as a number even before its
+    marker appears), full strength after.
 
     Deliberately NOT ported (per explicit user request -- only port fixes
     if the same failure mode is actually observed on the trailing foot,
     not preemptively): footreach's overshoot-kill flag (a fix for a
     ball-impact-impulse false-positive specific to footreach's own
     live-training history) and its near-region-oscillation vel_sigma
-    neutralization (narrow crossings have no orange/red concept at all --
-    env._orange_wide is always False there, so this reward is already zero
+    neutralization (narrow crossings have no red concept at all --
+    env._red_wide is always False there, so this reward is already zero
     for narrow crossings by construction, unlike footreach which needed an
     explicit narrow-region guard).
 
@@ -2232,10 +2018,7 @@ def trailing_foot_reach(
 
     Not yet validated against a live training run.
     """
-    orange_y = _get_orange_reach_target_y(env, ball_name, asset_cfg=asset_cfg)
-    red_y = _get_red_reach_target_y(env, ball_name, asset_cfg=asset_cfg)
-    red_active = env._red_active
-    target_y = torch.where(red_active, red_y, orange_y)
+    target_y = _get_red_reach_target_y(env, ball_name, asset_cfg=asset_cfg)
 
     robot: Entity = env.scene[asset_cfg.name]
     foot_pos_w = robot.data.body_link_pos_w[:, asset_cfg.body_ids, :]      # (N, 2, 3)
@@ -2256,16 +2039,24 @@ def trailing_foot_reach(
     vel_toward = torch.where(lateral_error > 0, assigned_foot_vel_y, -assigned_foot_vel_y)
     vel_sigma = 1.0 + 3.0 * vel_toward.clamp(0.0, 3.0)
 
-    current_landed_genuine = torch.where(red_active, env._red_landed_genuine, env._orange_landed_genuine)
-    approaching = env._orange_wide & ~current_landed_genuine
+    approaching = env._red_wide & ~env._red_landed_genuine
     _DECEL_ZONE = 0.30
-    _DECEL_FLOOR = float(getattr(env, "_orange_landing_radius_current", 0.08))
+    _DECEL_FLOOR = float(getattr(env, "_red_landing_radius_current", 0.08))
     decay_frac = ((dist_to_target - _DECEL_FLOOR) / (_DECEL_ZONE - _DECEL_FLOOR)).clamp(0.0, 1.0)
     vel_sigma = torch.where(approaching, 1.0 + (vel_sigma - 1.0) * decay_frac, vel_sigma)
 
-    done = red_active & env._red_landed_genuine
+    # FIX 2026-09-11 (user request, "not a whole lot maybe like 50%"): half
+    # pull before blue is genuinely landed, full pull after.
+    pre_landing_scale = 0.5
+    scale = torch.where(
+        env._red_active,
+        torch.ones_like(dist_to_target),
+        torch.full_like(dist_to_target, pre_landing_scale),
+    )
+
+    done = env._red_active & env._red_landed_genuine
     behind = _ball_is_behind(env, ball_name)
-    return reach_rew * vel_sigma * env._orange_wide.float() * (~behind).float() * (~done).float()
+    return reach_rew * vel_sigma * scale * env._red_wide.float() * (~behind).float() * (~done).float()
 
 
 def sequence_promptness(
@@ -2274,29 +2065,33 @@ def sequence_promptness(
     asset_cfg: SceneEntityCfg = _DEFAULT_FEET_CFG,
     promptness_ref: float = 1.5,
 ) -> torch.Tensor:
-    """One-shot bonus rewarding a WIDE crossing's full blue->orange->red->save
-    relay happening with margin to spare, not just barely in time -- direct
-    answer to the user's "make the whole blue ball etc earlier" request.
+    """One-shot bonus rewarding a WIDE crossing's full blue->red->save relay
+    happening with margin to spare, not just barely in time -- direct answer
+    to the user's "make the whole blue ball etc earlier" request.
 
     NEW 2026-08-15 (user request). Caches each stage's "spare distance"
     (ball_x_local remaining, clamped to [0,1] against `promptness_ref`) the
-    instant it genuinely completes -- blue landing, orange landing, red
-    landing, AND the save itself (env._sb_flag first firing) -- but only
-    PAYS OUT once, at the exact tick the save genuinely happens, as the
-    average of whichever stages actually occurred (0 for a stage that never
-    happened, e.g. red never activating, or orange never landing).
+    instant it genuinely completes -- blue landing, red landing, AND the
+    save itself (env._sb_flag first firing) -- but only PAYS OUT once, at
+    the exact tick the save genuinely happens, as the average of whichever
+    stages actually occurred (0 for a stage that never happened, e.g. red
+    never activating).
 
-    Deliberately deferred-payout, not 3-4 separate immediate one-shot
-    bonuses (the original proposal) -- user's own reasoning: paying out
-    promptness at each stage independently would reward a policy that
-    blitzes blue/orange/red fast but then fails to actually save; only a
-    genuinely completed save should earn credit for having been prompt
-    along the way. This also means blue/orange/red's own promptness values
-    are computed and cached long before payout, but never returned as
-    reward on their own -- only folded into this term's single payout tick.
+    REMOVED 2026-09-11 (user request, "i dont want yellow ball/gold ball
+    anymore"): orange stage dropped entirely (the orange waypoint no longer
+    exists) -- average is now over 3 stages (blue/red/save), not 4.
+
+    Deliberately deferred-payout, not separate immediate one-shot bonuses
+    (the original proposal) -- user's own reasoning: paying out promptness
+    at each stage independently would reward a policy that blitzes
+    blue/red fast but then fails to actually save; only a genuinely
+    completed save should earn credit for having been prompt along the way.
+    This also means blue/red's own promptness values are computed and
+    cached long before payout, but never returned as reward on their own --
+    only folded into this term's single payout tick.
 
     Cap: each cached component is already clamp(ball_x_local/promptness_ref,
-    0, 1), and the average of up to 4 such values is inherently bounded in
+    0, 1), and the average of up to 3 such values is inherently bounded in
     [0,1] -- no separate cap logic needed (user's own "could we cap it too"
     concern is satisfied structurally, not via an extra clamp on the sum).
 
@@ -2304,26 +2099,25 @@ def sequence_promptness(
     phase boundary rather than introducing a new magic constant.
 
     Wide crossings only (env._blue_wide) -- narrow crossings have no
-    blue/orange/red concept, unrelated to the double-step slowness problem
-    this addresses; this term is exactly 0 there.
+    blue/red concept, unrelated to the double-step slowness problem this
+    addresses; this term is exactly 0 there.
 
     landing_ok (stopball's own gate, `~env._blue_wide | env._blue_landed_
     genuine`) already guarantees blue is genuinely landed by the time a wide
     crossing's save can fire at all -- so the blue component is always
-    captured by save-time on a wide crossing; orange/red are optional,
-    scoring 0 if skipped, which is the intended "reward completing the
-    WHOLE relay" shaping.
+    captured by save-time on a wide crossing; red is optional, scoring 0 if
+    skipped, which is the intended "reward completing the WHOLE relay"
+    shaping.
 
     Not yet validated against a live training run.
     """
     # Defensive freshness calls -- registration order already guarantees
-    # these are fresh (this term is registered after stopball/blue/orange/
-    # red's own terms in goalkeeper_env_cfg.py), but every other multi-stage
+    # these are fresh (this term is registered after stopball/blue/red's
+    # own terms in goalkeeper_env_cfg.py), but every other multi-stage
     # reader in this file (e.g. blue_overshoot_penalty) makes the same
     # belt-and-suspenders call rather than relying on registration order
     # alone.
     _get_reach_target_y(env, ball_name, asset_cfg=asset_cfg)
-    _get_orange_reach_target_y(env, ball_name, asset_cfg=asset_cfg)
     _get_red_reach_target_y(env, ball_name, asset_cfg=asset_cfg)
 
     ball: Entity = env.scene[ball_name]
@@ -2333,30 +2127,22 @@ def sequence_promptness(
     n = env.num_envs
     if not hasattr(env, "_seq_blue_promptness"):
         env._seq_blue_promptness = torch.zeros(n, device=env.device)
-        env._seq_orange_promptness = torch.zeros(n, device=env.device)
         env._seq_red_promptness = torch.zeros(n, device=env.device)
         env._seq_save_promptness = torch.zeros(n, device=env.device)
         env._seq_blue_captured = torch.zeros(n, dtype=torch.bool, device=env.device)
-        env._seq_orange_captured = torch.zeros(n, dtype=torch.bool, device=env.device)
         env._seq_red_captured = torch.zeros(n, dtype=torch.bool, device=env.device)
         env._seq_paid = torch.zeros(n, dtype=torch.bool, device=env.device)
     just_reset = env.episode_length_buf <= 1
     env._seq_blue_promptness[just_reset] = 0.0
-    env._seq_orange_promptness[just_reset] = 0.0
     env._seq_red_promptness[just_reset] = 0.0
     env._seq_save_promptness[just_reset] = 0.0
     env._seq_blue_captured[just_reset] = False
-    env._seq_orange_captured[just_reset] = False
     env._seq_red_captured[just_reset] = False
     env._seq_paid[just_reset] = False
 
     newly_blue = env._blue_landed_genuine & ~env._seq_blue_captured
     env._seq_blue_promptness = torch.where(newly_blue, promptness_now, env._seq_blue_promptness)
     env._seq_blue_captured |= newly_blue
-
-    newly_orange = env._orange_landed_genuine & ~env._seq_orange_captured
-    env._seq_orange_promptness = torch.where(newly_orange, promptness_now, env._seq_orange_promptness)
-    env._seq_orange_captured |= newly_orange
 
     newly_red = env._red_landed_genuine & ~env._seq_red_captured
     env._seq_red_promptness = torch.where(newly_red, promptness_now, env._seq_red_promptness)
@@ -2367,9 +2153,8 @@ def sequence_promptness(
     env._seq_save_promptness = torch.where(newly_saved, promptness_now, env._seq_save_promptness)
 
     total = (
-        env._seq_blue_promptness + env._seq_orange_promptness
-        + env._seq_red_promptness + env._seq_save_promptness
-    ) / 4.0
+        env._seq_blue_promptness + env._seq_red_promptness + env._seq_save_promptness
+    ) / 3.0
 
     fired = newly_saved & env._blue_wide
     env._seq_paid |= fired
@@ -2382,17 +2167,16 @@ def red_foot_proximity(
     asset_cfg: SceneEntityCfg = _DEFAULT_FEET_CFG,
     sigma: float = 5.0,
 ) -> torch.Tensor:
-    """Trailing-foot mirror of orange_foot_proximity, for the "red" second
-    waypoint -- dense exp(-sigma*dist) pull toward red, active only once
-    env._red_active (both blue and orange genuinely landed). See
-    _get_red_reach_target_y's docstring for the full mechanism/formula.
+    """Dense exp(-sigma*dist) pull toward red, active only once
+    env._red_active (blue genuinely landed -- was blue AND orange, orange
+    removed 2026-09-11). See _get_red_reach_target_y's docstring for the
+    full mechanism/formula.
 
     FIX 2026-08-15 (user request): gate changed from `(~behind)` to
     `(~env._red_landed_genuine)`, matching red_overshoot_penalty/
     red_stick_landing's `phase1_active` pattern (their gate has always been
     `_red_wide & _red_active & ~_red_landed_genuine`, no `behind` involved).
-    `_red_active` itself requires blue AND orange to have already genuinely
-    landed, which structurally only happens once the ball has already
+    `_red_active` structurally only turns true once the ball has already
     deflected -- so `behind` is very likely already True by the time
     `_red_active` first turns True, making the old `(~behind)` gate
     dead-on-arrival: this term could almost never fire a nonzero reward.
@@ -5863,18 +5647,16 @@ def trailing_foot_lift(
     fall_sigma: float = 300.0,
 ) -> torch.Tensor:
     """Reward for lifting the TRAILING (non-assigned) foot during the
-    blue->orange and orange->red waypoint journey.
+    whole wide-crossing journey toward red.
 
     NEW 2026-08-17 (user request): "an incentive that raises the foot" while
-    the trailing foot travels start->orange and orange->red. At the time,
-    `foot_clearance` (this term's sibling, renamed to `leading_foot_lift`
+    the trailing foot travels toward its waypoint. At the time, `foot_
+    clearance` (this term's sibling, renamed to `leading_foot_lift`
     2026-09-08) already rewarded lifting SOME foot to target_height, but
     took the max across both feet -- fully satisfiable by the LEADING foot
-    alone, leaving the trailing foot with no lift incentive of its own
-    during this specific journey (mirrors the gap `orange_foot_proximity`
-    closed for trailing-foot *position* on 2026-08-08, this time for
-    height). As of 2026-09-08, `leading_foot_lift` ALSO only ever reads the
-    leading foot -- the two terms are fully non-overlapping by construction.
+    alone, leaving the trailing foot with no lift incentive of its own.
+    As of 2026-09-08, `leading_foot_lift` ALSO only ever reads the leading
+    foot -- the two terms are fully non-overlapping by construction.
 
     Same shared kernel as leading_foot_lift -- see `_clearance_reward`'s own
     docstring for the full shape/rationale. FIX 2026-08-30 (user request,
@@ -5885,25 +5667,23 @@ def trailing_foot_lift(
     consistent with the old kernel's near-zero gradient right at height=0
     (see `_clearance_reward` docstring for the math).
 
-    Active window: `env._orange_wide & ~env._red_landed_genuine` -- a single
-    gate spanning BOTH requested spans (start->orange, i.e. before orange
-    lands, AND orange->red, i.e. after orange lands but before red does),
-    since `env._red_active` (gating red's own terms) only ever turns true
-    once orange has already landed genuinely -- there is no gap between the
-    two spans to leave uncovered. `env._orange_wide` (== `env._blue_wide`)
-    keeps this zero on narrow crossings, where orange/red don't exist.
-    Deliberately NOT gated on `~behind` like `leading_foot_lift` -- the
-    orange->red leg of this journey routinely continues past the save.
+    REMOVED 2026-09-11 (user request, "i dont want yellow ball/gold ball
+    anymore... trailing foot lift always stays active"): the orange
+    waypoint is gone, so the gate is now directly `env._blue_wide &
+    ~env._red_landed_genuine` (was `env._orange_wide`, numerically
+    identical -- orange_wide was always just an alias for blue_wide). Stays
+    active the ENTIRE wide-crossing window, before and after blue lands,
+    per explicit user request -- unchanged behavior, just renamed off the
+    now-deleted orange alias. Deliberately NOT gated on `~behind` like
+    `leading_foot_lift` -- this journey routinely continues past the save.
 
-    No G1 equivalent (same justification class as the orange/red waypoint
-    terms -- G1 has no intermediate-waypoint concept for either foot).
-    `_get_orange_reach_target_y`/`_get_red_reach_target_y` called explicitly
-    (values discarded) purely to guarantee `env._orange_wide`/
-    `env._red_landed_genuine` are fresh this tick regardless of registration
-    order -- same freshness pattern `trailing_foot_reach` uses above. Not
-    yet validated against a live training run.
+    No G1 equivalent (same justification class as the red waypoint --
+    G1 has no intermediate-waypoint concept for either foot).
+    `_get_red_reach_target_y` called explicitly (value discarded) purely to
+    guarantee `env._red_landed_genuine` is fresh this tick regardless of
+    registration order -- same freshness pattern `trailing_foot_reach` uses
+    above. Not yet validated against a live training run.
     """
-    _get_orange_reach_target_y(env, ball_name, asset_cfg=asset_cfg)
     _get_red_reach_target_y(env, ball_name, asset_cfg=asset_cfg)
 
     robot: Entity = env.scene[asset_cfg.name]
@@ -5917,7 +5697,7 @@ def trailing_foot_lift(
 
     reward = _clearance_reward(trailing_z, target_height, rise_steepness, fall_sigma)
 
-    active = env._orange_wide & ~env._red_landed_genuine
+    active = env._blue_wide & ~env._red_landed_genuine
     return reward * active.float()
 
 
