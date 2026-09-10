@@ -4484,6 +4484,20 @@ def foot_inner_face_continuous(
     real contact, which could have cut this term off before the actual
     save event -- keying off `_softstop_flag` directly avoids that. Reward
     math/shaping itself is unchanged from the 2026-08-05 state.
+
+    NEW 2026-09-11 (user request, "the continuous foot orientation stays
+    pointing forward toward the x direction until blue ball is landed and
+    only when blue ball landed then go towards that 55 degrees thing"): the
+    target angle is now gated on `env._blue_landed_genuine`, not fixed at
+    `_FOOT_TARGET_ANGLE_DEG` (55 deg) for the whole episode -- 0 deg
+    (straight forward, world +X) before a genuine blue landing, switching to
+    the side-matched 55 deg block-posture target only after. Both the
+    undershoot/overshoot branches below now read the per-env
+    `target_angle_deg` this produces, not the raw module constant, so the
+    overshoot cutoff tracks whichever target is currently active instead of
+    always comparing against 55 (which would have falsely flagged the
+    pre-landing forward-pointing phase as "overshoot" the instant the foot
+    left dead-neutral).
     """
     robot: Entity = env.scene[asset_cfg.name]
 
@@ -4561,7 +4575,32 @@ def foot_inner_face_continuous(
     foot_x_w = quat_apply(assigned_quat_w, x_local)                        # (N, 3), toe direction, world
     yaw_deg = torch.rad2deg(torch.atan2(foot_x_w[:, 1], foot_x_w[:, 0]))   # (N,) signed, world frame
 
-    target_signed_deg = expected_sign * _FOOT_TARGET_ANGLE_DEG              # (N,)
+    # NEW 2026-09-11 (user request): gate the target angle itself on
+    # env._blue_landed_genuine, not just this reward's own softstop cutoff
+    # below. Pre-landing, target is 0 deg (straight forward, world +X --
+    # yaw_deg=0 when foot_x_w=(1,0,0), confirmed against the atan2 convention
+    # above) for BOTH feet -- expected_sign doesn't matter at 0, so no
+    # left/right mirroring is needed for this branch. Only once
+    # `_blue_landed_genuine` flips True does the target switch to the
+    # side-matched block-posture angle (_FOOT_TARGET_ANGLE_DEG=55, mirrored
+    # by expected_sign as before). `_blue_landed_genuine` is set fresh every
+    # step by `stopball` (registered first in cfg.rewards specifically so
+    # its `_get_reach_target_y` call runs before any other term -- see that
+    # dict's own top-of-block comment), which always runs before this term,
+    # so no staleness risk. Deliberately NOT world-Y here -- the prior
+    # 2026-09-04 bug in this area (docs/BugFixes.md) was `play.py`'s VIEWER
+    # arrow importing the wrong constant and rendering a stale (0,+/-1,0)
+    # direction; this reward's own math was never wrong. Re-verified here:
+    # `x_local = (1,0,0)` is the toe axis, `atan2(y,x)` of its world
+    # projection is 0 exactly when the toe points along world +X (forward),
+    # not Y -- checked by hand, not just re-read.
+    pre_landing = ~getattr(env, "_blue_landed_genuine", torch.zeros(env.num_envs, dtype=torch.bool, device=env.device))
+    target_angle_deg = torch.where(
+        pre_landing,
+        torch.zeros(env.num_envs, device=env.device),
+        torch.full((env.num_envs,), _FOOT_TARGET_ANGLE_DEG, device=env.device),
+    )                                                                        # (N,) unsigned magnitude
+    target_signed_deg = expected_sign * target_angle_deg                    # (N,)
 
     # FIX 2026-08-16 (user request, then reconsidered same day, "have below
     # 80 degrees better think unbiasedly how to improve it"): a fully
@@ -4611,8 +4650,8 @@ def foot_inner_face_continuous(
     side_sign = yaw_deg * expected_sign                  # (N,) >0 = correct side
     angle_from_forward_deg = yaw_deg.abs()                 # (N,) magnitude of yaw from neutral
 
-    overshoot_mask = (side_sign > 0.0) & (angle_from_forward_deg > _FOOT_TARGET_ANGLE_DEG)
-    overshoot_err = angle_from_forward_deg - _FOOT_TARGET_ANGLE_DEG
+    overshoot_mask = (side_sign > 0.0) & (angle_from_forward_deg > target_angle_deg)
+    overshoot_err = angle_from_forward_deg - target_angle_deg
     overshoot_reward = torch.exp(-_FOOT_OVERSHOOT_SIGMA * overshoot_err ** 2)
 
     reward = torch.where(overshoot_mask, overshoot_reward, alignment)      # (N,)
