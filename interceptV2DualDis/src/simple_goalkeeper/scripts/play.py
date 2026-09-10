@@ -1704,8 +1704,14 @@ def _patch_viewer_sole_contact_and_stop_plots(native_viewer: "NativeMujocoViewer
     # same fate shin_contact already had). Both figures still exist and
     # still get data appended every tick regardless of this ordering --
     # only visibility priority changes, nothing is deleted.
+    # FIX 2026-09-09 (user request, "disable in the p viewer and put the
+    # feet slippage there"): orange_ball_landed swapped out of the panel
+    # for feet_slippage -- user wants to watch feet_slippage live while
+    # investigating a slippage spike on model_3000.pt (6144_forcelandingfix
+    # run). Config-level orange_ball_landed itself is untouched (still a
+    # real, active reward term) -- this is a viewer-visibility swap only.
     _PROMOTED = (
-        _FORCE_RAW_NAME, "blue_ball_landed", "orange_ball_landed", "red_ball_landed",
+        _FORCE_RAW_NAME, "blue_ball_landed", "feet_slippage", "red_ball_landed",
         "success", "cleanstop", "wrong_foot_ball_contact", "shin_contact",
         _RAW_NAME,
     )

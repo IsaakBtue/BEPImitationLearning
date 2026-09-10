@@ -1044,10 +1044,22 @@ def _get_orange_reach_target_y(
         assigned_foot_pos = foot_pos_w[arange_n, trailing_idx]                # (N, 3)
         assigned_foot_vel = foot_vel_w[arange_n, trailing_idx]                # (N, 3)
 
-        found = feet_contact.data.found                                      # (N, 8)
-        left_in_contact = (found[:, :4] > 0).any(dim=-1)
-        right_in_contact = (found[:, 4:] > 0).any(dim=-1)
-        foot_in_contact = torch.where(trailing_idx == 0, left_in_contact, right_in_contact)
+        # FIX 2026-09-09 (user request, "fix it for orange ball... and red
+        # ball etc"): mirrors blue's own force-based landing fix
+        # (_get_reach_target_y) -- was the binary found check, which let
+        # the trailing foot register "landed" by sliding into the orange
+        # target at up to landing_speed_threshold's loose end (2.0 m/s)
+        # with zero real ground force. Live-flagged as the likely driver
+        # of a reported feet_slippage spike (model_3000.pt,
+        # 6144_forcelandingfix run) -- a foot dragging at speed while
+        # "in contact" is exactly what feet_slippage measures/penalizes.
+        # Same 40N threshold as blue, not independently recalibrated.
+        _LANDING_FORCE_THRESHOLD = 40.0  # Newtons; matches _get_reach_target_y's own value
+        force_per_geom = feet_contact.data.force.norm(dim=-1)                 # (N, 8)
+        left_force = force_per_geom[:, :4].max(dim=-1).values
+        right_force = force_per_geom[:, 4:].max(dim=-1).values
+        assigned_force = torch.where(trailing_idx == 0, left_force, right_force)
+        foot_in_contact = assigned_force > _LANDING_FORCE_THRESHOLD           # (N,)
 
         currently_airborne = ~foot_in_contact
         env._orange_was_airborne |= currently_airborne
@@ -1220,10 +1232,16 @@ def _get_red_reach_target_y(
         assigned_foot_pos = foot_pos_w[arange_n, trailing_idx]                # (N, 3)
         assigned_foot_vel = foot_vel_w[arange_n, trailing_idx]                # (N, 3)
 
-        found = feet_contact.data.found                                      # (N, 8)
-        left_in_contact = (found[:, :4] > 0).any(dim=-1)
-        right_in_contact = (found[:, 4:] > 0).any(dim=-1)
-        foot_in_contact = torch.where(trailing_idx == 0, left_in_contact, right_in_contact)
+        # FIX 2026-09-09 (user request, "fix it for orange ball... and red
+        # ball etc"): mirrors blue's/orange's own force-based landing fix
+        # -- was the binary found check, same pass-through-slide leak.
+        # Same 40N threshold, not independently recalibrated.
+        _LANDING_FORCE_THRESHOLD = 40.0  # Newtons; matches _get_reach_target_y's own value
+        force_per_geom = feet_contact.data.force.norm(dim=-1)                 # (N, 8)
+        left_force = force_per_geom[:, :4].max(dim=-1).values
+        right_force = force_per_geom[:, 4:].max(dim=-1).values
+        assigned_force = torch.where(trailing_idx == 0, left_force, right_force)
+        foot_in_contact = assigned_force > _LANDING_FORCE_THRESHOLD           # (N,)
 
         currently_airborne = ~foot_in_contact
         env._red_was_airborne |= currently_airborne

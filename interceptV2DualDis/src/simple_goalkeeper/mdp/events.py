@@ -506,9 +506,17 @@ def _init_visibility_state(env: "ManagerBasedRlEnv", env_ids: torch.Tensor) -> N
     """Reset per-env visibility counters at episode start."""
     n = env.num_envs
 
+    # FIX 2026-09-10 (user request, "also widen the catchstep ceiling"):
+    # 50 -> 88 ticks (1.0s -> 1.76s, dt=0.02s). Companion to the same-day
+    # t_flight_range curriculum change (reset_ball_rolling) that reopened
+    # the easy end up to 1.75s -- the 2026-09-04 fix comment on that
+    # function's own t_flight_range registration explicitly warned this
+    # exact ceiling must stay >= the max possible t_flight, or the ball
+    # goes invisible before arrival on the longest flights. 88 = ceil(1.75/0.02).
+    _CATCHSTEP_MAX = 88
     if not hasattr(env, "_catchstep"):
         env._catchstep = torch.zeros(n, dtype=torch.long, device=env.device)
-    env._catchstep[env_ids] = 50
+    env._catchstep[env_ids] = _CATCHSTEP_MAX
 
     if not hasattr(env, "_startstep"):
         env._startstep = torch.zeros(n, dtype=torch.long, device=env.device)
@@ -520,7 +528,14 @@ def _init_visibility_state(env: "ManagerBasedRlEnv", env_ids: torch.Tensor) -> N
     # a real contributor to "the robot just doesn't dive" reports. Some
     # blackout kept (not removed to 0) to preserve the token camera-detection-
     # latency this was modeling in the first place.
-    env._startstep[env_ids] = 50 - torch.randint(1, 4, (len(env_ids),), device=env.device)
+    # FIX 2026-09-10: hardcoded "50 -" -> "_CATCHSTEP_MAX -" -- this offset is
+    # relative to wherever _catchstep starts counting down FROM, not a fixed
+    # constant of its own; leaving it hardcoded at 50 while _catchstep's own
+    # start value moved to 88 would have silently reintroduced up to ~0.8s of
+    # extra ball-invisible warmup at the start of every episode (catchstep
+    # would need to count all the way down from 88 to ~47-49 before
+    # initial_vanish's `catchstep < startstep` check ever turns True).
+    env._startstep[env_ids] = _CATCHSTEP_MAX - torch.randint(1, 4, (len(env_ids),), device=env.device)
 
     if not hasattr(env, "_vanish_step"):
         env._vanish_step = torch.zeros(n, dtype=torch.long, device=env.device)
@@ -1227,7 +1242,33 @@ def reset_ball_rolling(
     # still used below for the target y_end window, which G1 DOES scale.
     x_start  = sample_uniform(*dist_range,     (n,), env.device)
     y_start  = sample_uniform(*y_start_range,  (n,), env.device)
-    t_flight = sample_uniform(*t_flight_range, (n,), env.device)
+
+    # FIX 2026-09-10 (user request, deliberate divergence beyond G1 -- NOT a
+    # parity fix, reopens the exact coupling the 2026-07-20 fix above
+    # removed): investigating a blue-landing regression (58%->19% genuine
+    # landing rate between model_3000 and model_39750 of the
+    # 6144_forcelandingfix run -- see conversation). ball_difficulty is a
+    # running-MAX, success-rate-driven curriculum (2026-09-07 change) that
+    # never eases back down even if performance later collapses; dist_range
+    # was independently widened the same day (2.0-5.0m). Combined with a
+    # FIXED t_flight_range, growing spawn distance under a constant time
+    # budget forces ball speed (=distance/t_flight) up with no compensating
+    # reaction time -- a plausible mechanism for why a skill the policy
+    # clearly has (model_3000 proves it) erodes over training. Reuses
+    # env._domain_rand_curriculum (NOT a new independent curriculum, and NOT
+    # env._ball_difficulty, which may have already mis-ratcheted off
+    # model_3000's own early, since-collapsed performance) -- user
+    # explicitly asked to reuse this exact signal. Easy end (signal~0):
+    # more reaction time (0.75-1.75s). Hard end (signal~1): the configured
+    # t_flight_range, now (0.5,1.0) (was flat 0.4-1.0 pre-fix). Falls back
+    # to hard (1.0) when the attribute doesn't exist -- domain_rand_curriculum
+    # is only ever registered `if not play` (goalkeeper_env_cfg.py), so play
+    # mode always evaluates at the hard end, same fallback convention
+    # env._ball_difficulty already uses elsewhere in this file.
+    _EASY_T_FLIGHT = (0.75, 1.75)
+    domain_rand_d = float(min(max(getattr(env, "_domain_rand_curriculum", 1.0), 0.0), 1.0))
+    t_flight_r = _lerp_range(_EASY_T_FLIGHT, t_flight_range, domain_rand_d)
+    t_flight = sample_uniform(*t_flight_r, (n,), env.device)
 
     if y_end_range[0] * y_end_range[1] > 0:
         # One-sided range (region-conditioned calls via reset_ball_rolling_by_region,

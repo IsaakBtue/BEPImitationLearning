@@ -1879,7 +1879,20 @@ def goalkeeper_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
             # 0.4-1.0s t_flight range -- SGK's ball could still be mid-flight
             # past that 1.0s ceiling for its top ~25% of flights, going
             # invisible before arrival on slow flights.
-            "t_flight_range": (0.4, 1.0),
+            # FIX 2026-09-10 (user request, deliberate divergence beyond G1 --
+            # investigating a blue-landing regression, see events.py:
+            # reset_ball_rolling's own FIX 2026-09-10 comment for the full
+            # mechanism): this value is now the HARD/converged end of a new
+            # domain_rand_curriculum-driven lerp (reset_ball_rolling), not a
+            # flat sample -- easy end is (0.75, 1.75)s, giving more reaction
+            # time while the policy is still learning, tightening toward this
+            # hard end as domain_rand_curriculum (success-rate-driven) rises.
+            # 0.4 -> 0.5 (was flat 0.4-1.0) -- the catchstep ceiling widened
+            # to 88 ticks (events.py) to cover the new 1.75s easy-end max, so
+            # this end no longer needs to double as the visibility-safe upper
+            # bound; kept close to the original for now, not independently
+            # retuned.
+            "t_flight_range": (0.5, 1.0),
             "spawn_z":        0.12,
         },
     )
@@ -2001,7 +2014,7 @@ def goalkeeper_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
                 "dist_range":    (2.0, 5.0),  # FIX 2026-09-07: matches train block, see that comment
                 "y_start_range": (-0.3, 0.3),
                 "y_end_range":   (-1.0, 1.0),  # FIX 2026-08-06: 1.1 -> 1.0 (user request)
-                "t_flight_range": (0.4, 1.0),  # FIX 2026-09-04: matches train block, see that comment
+                "t_flight_range": (0.5, 1.0),  # FIX 2026-09-10: matches train block's new curriculum hard end, see that comment
                 "spawn_z":       0.12,
             },
         )
