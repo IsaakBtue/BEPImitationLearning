@@ -33,7 +33,7 @@ from simple_goalkeeper.tasks.goalkeeper_env_cfg import BALL_NAME, _FEET_CFG
 
 _FOOT_RESTING_HEIGHT = 0.03  # must match trailing_foot_lift's own constant
 _FORCED_DELTA = 0.8  # env-relative crossing offset -- safely > wide_threshold (0.5)
-_OUTER_ZONE = 0.20  # must match trailing_foot_lift's own _APPROACH_OUTER_ZONE
+_OUTER_ZONE_MARGIN = 0.05  # must match trailing_foot_lift's own _OUTER_ZONE_MARGIN (2026-09-11: outer zone is now current_radius + this, not a fixed absolute value)
 _DECAY_STEEPNESS = 1.0
 
 
@@ -137,8 +137,6 @@ def main() -> None:
     for label, dy, h in scenarios_orange:
         teleport_trailing_foot(orange_y.item(), dy, h)
         r = trailing_foot_lift(env, BALL_NAME, asset_cfg=_FEET_CFG)
-        radius = env._orange_landing_radius_current
-        x = max(0.0, min(1.0, (abs(dy) - radius) / (_OUTER_ZONE - radius))) if dy < 0 else 0.0
         print(f"{label:<50} {dy:>8.2f} {'-':>11} {r[0].item():>9.4f}")
 
     print("\n=== Phase B: post-orange, targeting RED (blue+orange genuinely landed) ===")

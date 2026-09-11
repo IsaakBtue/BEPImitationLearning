@@ -52,6 +52,15 @@ Usage:
     uv run sgk_play Mjlab-BeyondAMP-Goalkeeper-T1-MultiDisc \\
         --agent scripted_lean --num-envs 1 --no-terminations True \\
         --scripted-lean-deg 15
+
+    # Footreach-target geometry probe: parks a ball close by and rigidly
+    # teleports the assigned foot's own body-link origin exactly onto
+    # footreach's live "green" target (dist_to_crossing=0), toggling the
+    # since-zeroed _INNER_FOOT_TARGET_OFFSET on/off every few seconds so you
+    # can see live whether the foot looks correctly placed against the ball
+    # with vs without it:
+    uv run sgk_play Mjlab-BeyondAMP-Goalkeeper-T1-MultiDisc \\
+        --agent scripted_footreach_target --num-envs 1 --no-terminations True
 """
 from __future__ import annotations
 
@@ -83,7 +92,10 @@ from simple_goalkeeper.rsl_rl_multi.him_amp_on_policy_runner import (
 
 @dataclass(frozen=True)
 class PlayConfig:
-    agent: Literal["zero", "random", "trained", "scripted_yaw", "scripted_lean", "scripted_blue_approach"] = "trained"
+    agent: Literal[
+        "zero", "random", "trained", "scripted_yaw", "scripted_lean",
+        "scripted_blue_approach", "scripted_footreach_target",
+    ] = "trained"
     checkpoint_file: str | None = None
     scripted_yaw_joint: str = "Left_Hip_Yaw"
     """--agent scripted_yaw only: which joint to drive. T1's ankle has no yaw
@@ -164,6 +176,32 @@ class PlayConfig:
     target restored to standard. Console prints announce each phase
     transition. See scripts/probe_leading_foot_lift.py for the same
     mechanism as a static numeric table instead of a live animated demo."""
+    scripted_footreach_target_period_steps: int = 150
+    """--agent scripted_footreach_target only: steps per A/B half-cycle
+    (dt=0.02s, so 150 = 3s), then the offset toggles and the cycle repeats.
+
+    NEW 2026-09-11 (user request, "make an example data agent that shows
+    the robots foot at footreach target exactly and a ball close by, i
+    want to see what the point of the foot is used to calculate footreach,
+    like maybe this offset is important that we had"). Forces a narrow
+    crossing, parks the ball at a fixed, close (0.3m in front of the goal
+    line) position so footreach's live-ball ("green") branch is always
+    active, then rigidly teleports the WHOLE ROBOT (root translation, no
+    IK -- same technique as scripts/probe_leading_foot_lift.py) every tick
+    so the assigned foot's own body-link origin -- literally
+    `robot.data.body_link_pos_w[:, asset_cfg.body_ids, :]`, the exact point
+    footreach's `dist_to_crossing` measures from, see rewards.py:footreach
+    -- lands EXACTLY on footreach's own live `crossing_point` (dist=0).
+    Watch whether the foot visually looks correctly placed against the
+    ball, or whether the foot's kinematic origin sits oddly relative to
+    the ball's surface (revealing that a same-purpose offset like the
+    since-zeroed `_INNER_FOOT_TARGET_OFFSET` may have been compensating
+    for exactly this). Toggles `_INNER_FOOT_TARGET_OFFSET` live between
+    0.0 (current) and 0.05 (the old value) every
+    `scripted_footreach_target_period_steps` steps for a direct A/B
+    comparison -- console announces each toggle. Pass --no-terminations
+    True (scripted teleports can otherwise trip bad_orientation/
+    base_height)."""
     motion_file: str | None = None
     """Optional NPZ motion file for the WithOverlay task (overrides default)."""
     amp_eye_view: bool = False
@@ -482,6 +520,25 @@ class AnalyticsPolicy:
         lf_tag = f"{'G' if lf_contact else 'A'}{lf_slip:.2f}"
         rf_tag = f"{'G' if rf_contact else 'A'}{rf_slip:.2f}"
 
+        # NEW 2026-09-11 (user request, "visualise the landing radius used
+        # by orange ball because i want to make sure its really the same
+        # as blue_ball is really not overwritten somewhere and thus
+        # 0.13?"): direct NUMERIC comparison of the two live radius
+        # attributes, every tick -- more reliable than eyeballing the two
+        # ground rings' relative sizes. _orange_landing_radius_current is
+        # set fresh every tick by _get_orange_reach_target_y (reads
+        # env._blue_landing_radius_current directly, see that function's
+        # 2026-09-11 fix) -- if anything ever overwrites it independently,
+        # this line will show MISMATCH immediately instead of requiring a
+        # source-code read to notice.
+        _blue_r_dbg = getattr(env, "_blue_landing_radius_current", None)
+        _orange_r_dbg = getattr(env, "_orange_landing_radius_current", None)
+        if _blue_r_dbg is not None and _orange_r_dbg is not None:
+            _radius_match = "MATCH" if abs(_blue_r_dbg - _orange_r_dbg) < 1e-6 else "MISMATCH!"
+            radius_cmp_dbg = f" | BLUE_R={_blue_r_dbg:.3f} ORANGE_R={_orange_r_dbg:.3f} {_radius_match}"
+        else:
+            radius_cmp_dbg = ""
+
         # DEBUG 2026-07-23 (TEMPORARY, remove after landing-gate investigation):
         # blue-ball landing-gate internals, cached onto env by rewards.py's
         # _get_reach_target_y (env._blue_dbg_*). Only meaningful once wide=True.
@@ -550,7 +607,7 @@ class AnalyticsPolicy:
             f"dvx={delta_vx:+5.2f} | "
             f"LF={lf_h:.2f}({lf_tag}) RF={rf_h:.2f}({rf_tag}) | "
             f"base={base_h:.2f} Lsh={lsh_h:.2f} Rsh={rsh_h:.2f} | "
-            f"{flags}{blue_dbg}{rew_dbg}",
+            f"{flags}{radius_cmp_dbg}{blue_dbg}{rew_dbg}",
             end="",
             flush=True,
             file=stderr,
@@ -767,8 +824,19 @@ def _patch_viewer_intercept_vis(native_viewer: "NativeMujocoViewer", env) -> Non
             start_y = float(origins[1])
             delta = cross_y - start_y
             sign = 1.0 if delta >= 0 else -1.0
-            shrunk = sign * max(abs(delta) - 0.50, 0.0)  # FIX 2026-08-08 (user request): 0.30 -> 0.60 -> 0.50
-            orange_y = start_y + shrunk / 2.0
+            # FIX 2026-09-11 (user request, "put the spawn at 0.2 minimum"):
+            # mirrors rewards.py's own smooth 0.2m floor on distance-from-
+            # start (logsumexp smooth-max) -- see that file's
+            # _get_orange_reach_target_y for the full root-cause.
+            _ORANGE_START_MIN = 0.2
+            _ORANGE_START_SMOOTH_K = 15.0
+            _raw = (abs(delta) - 0.50) / 2.0 if abs(delta) > 0.50 else 0.0
+            _a = _raw * _ORANGE_START_SMOOTH_K
+            _b = _ORANGE_START_MIN * _ORANGE_START_SMOOTH_K
+            _m = max(_a, _b)
+            orange_dist_from_start = (_m + np.log(np.exp(_a - _m) + np.exp(_b - _m))) / _ORANGE_START_SMOOTH_K
+            orange_dist_from_start = min(orange_dist_from_start, abs(delta))
+            orange_y = start_y + sign * orange_dist_from_start
             orange_color = [1.0, 0.55, 0.0, 0.75]
             orange_line_color = [1.0, 0.55, 0.0, 0.6]
             _add_sphere(goal_x, orange_y, sphere_z, 0.08, orange_color)
@@ -777,6 +845,19 @@ def _patch_viewer_intercept_vis(native_viewer: "NativeMujocoViewer", env) -> Non
                 np.array([goal_x, orange_y, sphere_z], dtype=np.float64),
                 0.008, orange_line_color,
             )
+            # NEW 2026-09-11 (user request, "visualise the landing radius
+            # used by orange ball because i want to make sure its really
+            # the same as blue_ball... not overwritten somewhere"): ground
+            # ring at the LIVE env._orange_landing_radius_current value --
+            # mirrors blue's own ring (see _live_radius above) exactly, same
+            # "read the live attribute, never a hardcoded/guessed constant"
+            # discipline, so this ring can't silently desync from whatever
+            # the real reward gate is using. If orange's radius is ever
+            # overwritten to something other than blue's, this ring's
+            # visible size (and the printed value below) will show it
+            # directly instead of requiring a source read.
+            _orange_live_radius = float(getattr(raw_env, "_orange_landing_radius_current", 0.13))
+            _add_ground_circle(goal_x, orange_y, floor_z + 0.002, _orange_live_radius, 0.006, [1.0, 0.55, 0.0, 0.9])
 
         # NEW 2026-08-15: red sphere -- trailing-foot waypoint, recomputed
         # inline (not read from a cached env attribute) so this marker can't
@@ -1854,18 +1935,32 @@ def _compute_trunk_dive(env, env_idx: int) -> float:
 
 
 def _patch_viewer_foot_restitution_plot(native_viewer: "NativeMujocoViewer", env) -> None:
-    """Add a "trunk_dive" raw P-panel plot (see `_compute_trunk_dive`) and
-    promote it, plus the ordinary `contact_yield_velocity` reward term,
-    into the always-visible front slots. Also fixes the display-scale bug
-    on `contact_yield_velocity` and `cleanstop`'s own figures (see the FIX
-    2026-08-23 comment inside `_patched_update_reward_figures` below for
-    the full mechanism).
+    """Promote `blue_trunk_drive_vel`/`blue_trunk_drive_acc` (ordinary
+    registered reward terms) plus `contact_yield_velocity_x/y`/
+    `footreach`/`leading_foot_lift` into the always-visible front slots.
+    Also fixes the display-scale bug on `contact_yield_velocity` and
+    `cleanstop`'s own figures (see the FIX 2026-08-23 comment inside
+    `_patched_update_reward_figures` below for the full mechanism).
 
-    FIX 2026-09-11 (user request, "put trunk dive in the p mujoco viewer
-    for footrestitution dampratio"): this patch's own front raw-plot slot
-    swapped from `foot_restitution_dampratio` to `trunk_dive` -- same
-    "swap X out for Y" pattern already used elsewhere in this file (e.g.
-    orange_ball_landed -> feet_slippage, 2026-09-09). `_compute_foot_
+    FIX 2026-09-11 (user request, "add blue_trunk_drive in the mujoco
+    viewer for trunk_dive"): this patch's own front-slot plot swapped from
+    the raw `trunk_dive` custom plot (a position-only "how far has the
+    trunk dropped below standing height" gauge -- no velocity or
+    acceleration involved, unlike its name might suggest) to the actual
+    `blue_trunk_drive` reward (which DOES reward trunk lateral velocity
+    toward the target) -- same "swap X out for Y" pattern already used
+    elsewhere in this file (e.g. orange_ball_landed -> feet_slippage,
+    2026-09-09). `_compute_trunk_dive` itself is untouched, just no longer
+    wired to this front slot.
+
+    UPDATE 2026-09-11 (same day, user request, "call it blue_trunk_drive_vel
+    and blue_trunk_drive_acc"): `blue_trunk_drive` split into these two
+    siblings (rewards.py) -- both promoted here now, not just the one.
+
+    FIX 2026-09-11 (earlier same day, user request, "put trunk dive in the
+    p mujoco viewer for footrestitution dampratio"): this patch's own
+    front raw-plot slot had swapped from `foot_restitution_dampratio` to
+    `trunk_dive` -- same "swap X out for Y" pattern. `_compute_foot_
     restitution_dampratio` itself is untouched, just no longer wired to
     this front slot.
 
@@ -1925,7 +2020,19 @@ def _patch_viewer_foot_restitution_plot(native_viewer: "NativeMujocoViewer", env
     orig_setup = native_viewer.setup
     orig_update_reward_figures = native_viewer._update_reward_figures
 
-    _RAW_NAME = "trunk_dive"
+    # FIX 2026-09-11 (user request, "add blue_trunk_drive in the mujoco
+    # viewer for trunk_dive"): trunk_dive's raw custom plot (was a position-
+    # only "how far has the trunk dropped below standing height" gauge, no
+    # velocity/acceleration involved -- see rewards.py:blue_trunk_drive for
+    # the actual velocity-based reward this was apparently expected to
+    # relate to) swapped out of its front slot -- same "swap X out for Y"
+    # pattern this file already uses elsewhere (e.g. orange_ball_landed ->
+    # feet_slippage, 2026-09-09). `_compute_trunk_dive` itself is untouched
+    # and still callable, just no longer wired into this patch's plot.
+    # `blue_trunk_drive` is an ordinary registered reward term (rewards.py/
+    # goalkeeper_env_cfg.py) so it already has an auto-created figure --
+    # no new raw plot needed, just promoted into `_term_names` like
+    # `contact_yield_velocity_x`/`_y`/`footreach`/`leading_foot_lift` below.
     # FIX 2026-08-30: contact_yield_velocity split into X/Y components
     # (rewards.py) -- promote both, same auto-created-figure mechanism.
     # FIX 2026-09-07 (user request, "put footreach in the mujoco viewer"):
@@ -1933,25 +2040,21 @@ def _patch_viewer_foot_restitution_plot(native_viewer: "NativeMujocoViewer", env
     # patch registers last so it has final say over _term_names order.
     # FIX 2026-09-08 (user request, "put foot clearance in the mujoco
     # viewer"): added leading_foot_lift, same mechanism.
-    _ALSO_PROMOTED = ("contact_yield_velocity_x", "contact_yield_velocity_y", "footreach", "leading_foot_lift")
+    # FIX 2026-09-11 (user request, "call it blue_trunk_drive_vel and
+    # blue_trunk_drive_acc"): "blue_trunk_drive" renamed/split into both
+    # -- promoting both siblings so the velocity and acceleration signals
+    # are both visible at once.
+    _ALSO_PROMOTED = (
+        "blue_trunk_drive_vel", "blue_trunk_drive_acc",
+        "contact_yield_velocity_x", "contact_yield_velocity_y",
+        "footreach", "leading_foot_lift",
+    )
     _DEMOTED = ("trailing_foot_forward_continuous", "wrong_foot_ball_contact")
-    # FIX 2026-09-11: range was dampratio's own [0.35,1.0]-ish scale
-    # (-0.5,1.5 padded) -- now trunk-dive depth in meters, 0=standing tall,
-    # ~0.265m at the base_height termination edge (0.665-0.4).
-    _FIXED_LO, _FIXED_HI = -0.02, 0.40
 
     def _patched_setup() -> None:
         orig_setup()
-        from mjlab.viewer.native.viewer import make_empty_figure
-        cfg = native_viewer._plot_cfg
-        native_viewer._figures[_RAW_NAME] = make_empty_figure(
-            f"{_RAW_NAME} (m below standing height 0.665m; 0=standing tall)",
-            cfg.grid_size, (_FIXED_LO, _FIXED_HI), cfg.history, cfg.background_alpha,
-        )
-        native_viewer._histories[_RAW_NAME] = deque(maxlen=cfg.history)
-        native_viewer._scale[_RAW_NAME] = 1.0
-        rest = [n for n in native_viewer._term_names if n not in (_RAW_NAME, *_ALSO_PROMOTED, *_DEMOTED)]
-        front = [_RAW_NAME] + [n for n in _ALSO_PROMOTED if n in native_viewer._term_names]
+        rest = [n for n in native_viewer._term_names if n not in (*_ALSO_PROMOTED, *_DEMOTED)]
+        front = [n for n in _ALSO_PROMOTED if n in native_viewer._term_names]
         native_viewer._term_names = front + rest
 
     def _write_fixed_range(name: str, lo: float, hi: float) -> None:
@@ -1967,10 +2070,6 @@ def _patch_viewer_foot_restitution_plot(native_viewer: "NativeMujocoViewer", env
         fig.title = name  # drop any "(1eN)" suffix from the native autoscale write below
 
     def _patched_update_reward_figures(viewer_handle: "mujoco.viewer.Handle") -> None:
-        if native_viewer._show_plots and native_viewer._term_names and not native_viewer._is_paused:
-            value = _compute_trunk_dive(env, native_viewer.env_idx)
-            native_viewer._append_point(_RAW_NAME, value)
-            _write_fixed_range(_RAW_NAME, _FIXED_LO, _FIXED_HI)
         orig_update_reward_figures(viewer_handle)
         # FIX 2026-08-23 (user report, "why is contact yield velocity peaks
         # at 5e7 and cleanstop only 1e7"): the native autoscale
@@ -2469,7 +2568,10 @@ def run_play(task_id: str, cfg: PlayConfig) -> None:
     else:
         env = AMPEnvWrapper(env, clip_actions=agent_cfg.clip_actions, motion_dataset=agent_cfg.amp_data)
 
-    DUMMY_MODE = cfg.agent in {"zero", "random", "scripted_yaw", "scripted_lean", "scripted_blue_approach"}
+    DUMMY_MODE = cfg.agent in {
+        "zero", "random", "scripted_yaw", "scripted_lean", "scripted_blue_approach",
+        "scripted_footreach_target",
+    }
     if DUMMY_MODE:
         action_shape: tuple[int, ...] = env.unwrapped.action_space.shape
         if cfg.agent == "zero":
@@ -2898,6 +3000,245 @@ def run_play(task_id: str, cfg: PlayConfig) -> None:
                 f"({_blue_period * 0.02:.1f}s/cycle), watch the leading_foot_lift "
                 f"P-panel plot -- pass --no-terminations True to avoid the "
                 f"scripted teleports tripping a termination.",
+                file=sys.stderr,
+            )
+        elif cfg.agent == "scripted_footreach_target":
+            # NEW 2026-09-11 (user request, "make an example data agent that
+            # shows the robots foot at footreach target exactly and a ball
+            # close by, i want to see what the point of the foot is used to
+            # calculate footreach, like maybe this ofset is important that
+            # we had"). See scripted_footreach_target_period_steps' own
+            # docstring above for the full rationale. Reuses the same
+            # rigid-root-translation teleport technique as
+            # scripted_blue_approach/probe_leading_foot_lift.py.
+            import math
+            import simple_goalkeeper.mdp.rewards as _gk_rewards
+            from simple_goalkeeper.mdp.rewards import (
+                _get_correct_foot_idx, _get_ball_crossing_y, _get_reach_target_y,
+                _get_foot_block_offset,
+            )
+            from simple_goalkeeper.tasks.goalkeeper_env_cfg import _FEET_CFG as _fr_feet_cfg
+
+            raw_env_fr = env.unwrapped
+            # FIX 2026-09-11 (user report, "you spawn the robot in the
+            # ground... please see the skills"): reward-shaping-scene-
+            # entity-cfg skill, Pitfall 2 -- a SceneEntityCfg's `body_ids`
+            # stay an unresolved `slice(None)` (selecting ALL 21 bodies,
+            # not just the 2 feet) until `.resolve()` is explicitly called
+            # on THIS object against THIS scene. `scripted_blue_approach`
+            # (above) already does this for its own local `_FEET_CFG`
+            # reference -- this agent never did, so `_fr_feet_cfg.body_ids`
+            # silently read `slice(None)` the whole time, and indexing
+            # `[fi]` (0 or 1) into that full 21-body array grabbed body
+            # index 0/1 in kinematic-tree order (NOT the feet) -- measured
+            # live: the resulting "foot-to-root offset" computed out to
+            # exactly [0,0,0], meaning the fixed-offset calibration was
+            # silently placing the ROOT itself (not a foot) at the target
+            # position every tick, planting the robot's pelvis directly at
+            # the ball's height -- explains "spawn the robot in the ground"
+            # exactly.
+            _fr_feet_cfg.resolve(raw_env_fr.scene)
+            n_fr = raw_env_fr.num_envs
+            _fr_period = cfg.scripted_footreach_target_period_steps
+            _FORCED_DELTA_FR = 0.2  # safely < wide_threshold (0.5) -- narrow crossing
+            _BALL_X_LOCAL_FR = 0.3  # < 0.5 -- inside footreach's ball_close window
+            _BALL_RADIUS_FR = 0.11  # matches events.py's own _BALL_RADIUS
+
+            # NEW 2026-09-11 (user request, "for the example motion set for
+            # the footreach one please rotate using the 70 deg of the foot
+            # one"): rotates the assigned foot's Hip_Yaw joint to match
+            # foot_inner_face_continuous's post-landing target angle
+            # (rewards.py:_FOOT_TARGET_ANGLE_DEG, currently 70deg) -- so the
+            # demo shows the foot both at footreach's exact target AND
+            # correctly rotated, not just planted flat-forward. Calibrated
+            # live (scratchpad calibrate_hip_yaw_70deg.py): a raw Hip_Yaw
+            # joint value of radians(70) measures 69.72deg world-frame toe
+            # axis via the SAME atan2 formula foot_inner_face_continuous
+            # itself uses -- close enough for a visual diagnostic (this is
+            # a direct `write_joint_state_to_sim` kinematic write, which
+            # bypasses actuator joint limits entirely -- Hip_Yaw's real
+            # actuated range is only +/-1.0 rad (~57deg), so this angle is
+            # only reachable this way, not by a real trained policy; fine
+            # for a static-pose viewer demo, not implying the policy could
+            # hold this exact joint value under real control).
+            _FOOT_ROTATION_HIP_YAW_RAD = math.radians(_gk_rewards._FOOT_TARGET_ANGLE_DEG)
+
+            def _get_rotated_joint_pos(fi: int) -> torch.Tensor:
+                joint_pos = robot_entity_fr.data.default_joint_pos.clone()
+                hip_yaw_name = "Left_Hip_Yaw" if fi == 0 else "Right_Hip_Yaw"
+                hip_yaw_idx = robot_entity_fr.joint_names.index(hip_yaw_name)
+                sign = 1.0 if fi == 0 else -1.0  # matches expected_sign convention (rewards.py)
+                joint_pos[:, hip_yaw_idx] = sign * _FOOT_ROTATION_HIP_YAW_RAD
+                return joint_pos
+
+            def policy(obs: torch.Tensor) -> torch.Tensor:
+                return torch.zeros(action_shape, device=device)
+
+            def _force_narrow_crossing_fr() -> None:
+                start_y = raw_env_fr.scene.env_origins[:, 1]
+                raw_env_fr._ball_crossing_y = start_y + _FORCED_DELTA_FR
+                raw_env_fr._rsi_cross_y = torch.full((n_fr,), _FORCED_DELTA_FR, device=device)
+                # Also pin region_id to a NEAR region -- _get_reach_target_y's
+                # wide check is authoritatively overridden by region_id in
+                # (1,3) (far) regardless of the small delta above.
+                raw_env_fr._region_id = torch.zeros(n_fr, dtype=torch.int64, device=device)  # left_near
+
+            def _park_ball_close_fr() -> None:
+                """Freezes the ball at a fixed, CLOSE (0.3m in front of the
+                goal line) position every tick -- guarantees footreach's
+                `ball_close` branch (the one _INNER_FOOT_TARGET_OFFSET used
+                to apply to) is always active, and gives a stable "ball
+                close by" reference to compare the teleported foot against."""
+                ball_entity = raw_env_fr.scene["ball"]
+                goal_x = raw_env_fr.scene.env_origins[:, 0]
+                start_y = raw_env_fr.scene.env_origins[:, 1]
+                floor_z = raw_env_fr.scene.env_origins[:, 2]
+                crossing_y = start_y + _FORCED_DELTA_FR
+                pos = torch.stack(
+                    [goal_x + _BALL_X_LOCAL_FR, crossing_y, floor_z + _BALL_RADIUS_FR], dim=-1
+                )
+                quat = torch.tensor([[1.0, 0.0, 0.0, 0.0]], device=device).expand(n_fr, -1)
+                ball_entity.write_root_link_pose_to_sim(torch.cat([pos, quat], dim=-1))
+                ball_entity.write_root_link_velocity_to_sim(torch.zeros(n_fr, 6, device=device))
+
+            _fr_toggle_state = {"offset_on": False}
+            # FIX 2026-09-11 (user report, "you spawn the robot in the
+            # ground... please see the skills... look at the last example
+            # you made for leading foot lift how to make data for testing
+            # rewards"): root-only + per-tick joint pinning (the previous
+            # fix) was STILL wrong -- a single isolated-tick trace
+            # (scratchpad debug script) showed the FIRST teleport computes
+            # a perfectly reasonable root height (0.665->0.744m), but the
+            # LIVE agent still collapsed to ~0.11m within 2 ticks. Root
+            # cause: unlike `leading_foot_lift`'s own static probe (which
+            # this agent was supposed to mirror per the reward-shaping
+            # skill's Part 3 -- it never steps real physics between
+            # teleports, only `sim.forward()`), THIS agent runs inside the
+            # real `env.step()` loop, so a full real physics step (gravity,
+            # contact, no active balance control under zero actions) runs
+            # BETWEEN every teleport. The old code computed each tick's
+            # root move as an INCREMENTAL delta from whatever `current_foot`
+            # happened to read AFTER that physics step -- any drift (root
+            # position OR orientation) from the intervening step got
+            # silently baked into the next teleport's baseline and
+            # compounded, collapsing within a couple ticks. `scripted_lean`
+            # (the working static-pose reference) avoids this entirely by
+            # computing an ABSOLUTE target every tick (fixed env-origin-
+            # relative height, fixed orientation) -- NEVER reading back a
+            # "current" pose that could carry physics drift. Switched to
+            # the same absolute scheme: the fixed root-to-foot offset (in
+            # world coordinates, under default_joint_pos and a FIXED
+            # reference orientation) is computed ONCE via a clean pinned
+            # pass, then every tick's root position is `target_foot_pos -
+            # offset` directly -- never built on a live/possibly-drifted
+            # reading, immune to whatever happened during the intervening
+            # physics step. Orientation is ALSO pinned to that same fixed
+            # reference every tick (previously inherited from `current_
+            # root_pose`, which silently let the robot's ACTUAL orientation
+            # drift/topple carry into the next teleport's frame -- the
+            # second half of the same root cause).
+            _fr_offset_cache: dict[str, tuple[torch.Tensor, torch.Tensor]] = {}
+
+            def _get_fixed_offset_and_quat(fi: int) -> tuple[torch.Tensor, torch.Tensor]:
+                key = str(fi)
+                if key not in _fr_offset_cache:
+                    ref_quat = robot_entity_fr.data.root_link_quat_w.clone()
+                    ref_pos = raw_env_fr.scene.env_origins.clone()
+                    robot_entity_fr.write_root_link_pose_to_sim(torch.cat([ref_pos, ref_quat], dim=-1))
+                    robot_entity_fr.write_root_link_velocity_to_sim(torch.zeros(n_fr, 6, device=device))
+                    # Uses the SAME rotated joint pose (Hip_Yaw at the
+                    # 70deg-calibrated value) the per-tick pinning below
+                    # uses -- rotating Hip_Yaw shifts the foot's position
+                    # slightly too, not just its orientation, so the offset
+                    # must be calibrated against the exact pose that will
+                    # actually be held, not the unrotated default.
+                    rotated_joint_pos = _get_rotated_joint_pos(fi)
+                    robot_entity_fr.write_joint_state_to_sim(
+                        rotated_joint_pos, torch.zeros_like(rotated_joint_pos)
+                    )
+                    raw_env_fr.sim.forward()
+                    foot_pos_w = robot_entity_fr.data.body_link_pos_w[:, _fr_feet_cfg.body_ids, :]
+                    offset = foot_pos_w[:, fi, :] - ref_pos
+                    _fr_offset_cache[key] = (offset, ref_quat)
+                return _fr_offset_cache[key]
+
+            robot_entity_fr = raw_env_fr.scene["robot"]
+
+            def _apply_footreach_target_schedule() -> None:
+                _force_narrow_crossing_fr()
+                _park_ball_close_fr()
+
+                t = int(raw_env_fr.episode_length_buf[0].item()) % (2 * _fr_period)
+                want_offset_on = t >= _fr_period
+                if want_offset_on != _fr_toggle_state["offset_on"]:
+                    _fr_toggle_state["offset_on"] = want_offset_on
+                    _gk_rewards._INNER_FOOT_TARGET_OFFSET = 0.05 if want_offset_on else 0.0
+                    print(
+                        f"[INFO] scripted_footreach_target: "
+                        f"_INNER_FOOT_TARGET_OFFSET -> {_gk_rewards._INNER_FOOT_TARGET_OFFSET:.2f} "
+                        f"({'OLD value' if want_offset_on else 'current (zeroed)'})",
+                        file=sys.stderr,
+                    )
+
+                # Mirrors footreach's own crossing_point computation exactly
+                # (rewards.py:footreach) -- narrow crossing here means
+                # phase1_active is always False and ball_x_local < 0.5
+                # always True (forced above), so this always takes the
+                # live-ball branch, the one _get_foot_block_offset applies to.
+                _get_reach_target_y(raw_env_fr, "ball", asset_cfg=_fr_feet_cfg)  # keeps env._blue_wide fresh
+                ball = raw_env_fr.scene["ball"]
+                ball_pos_w = ball.data.root_link_pos_w
+                live_y = ball_pos_w[:, 1]
+                live_z = ball_pos_w[:, 2]
+                goal_x_w = raw_env_fr.scene.env_origins[:, 0]
+                target_y = live_y + _get_foot_block_offset(raw_env_fr, "ball")
+                target_z = live_z
+                crossing_point = torch.stack([goal_x_w, target_y, target_z], dim=-1)
+
+                robot_entity = raw_env_fr.scene["robot"]
+                foot_idx = _get_correct_foot_idx(raw_env_fr, "ball")
+                fi = int(foot_idx[0].item())
+                offset, ref_quat = _get_fixed_offset_and_quat(fi)
+                new_root_pos = crossing_point - offset
+                robot_entity.write_root_link_pose_to_sim(torch.cat([new_root_pos, ref_quat], dim=-1))
+                robot_entity.write_root_link_velocity_to_sim(torch.zeros(n_fr, 6, device=device))
+                rotated_joint_pos = _get_rotated_joint_pos(fi)
+                robot_entity.write_joint_state_to_sim(
+                    rotated_joint_pos, torch.zeros_like(rotated_joint_pos)
+                )
+                raw_env_fr.sim.forward()
+
+                if int(raw_env_fr.episode_length_buf[0].item()) % 50 == 0:
+                    new_foot_pos_w = robot_entity.data.body_link_pos_w[:, _fr_feet_cfg.body_ids, :]
+                    dist = float((new_foot_pos_w[0, fi] - crossing_point[0]).norm().item())
+                    print(
+                        f"[INFO] scripted_footreach_target: offset="
+                        f"{_gk_rewards._INNER_FOOT_TARGET_OFFSET:.2f} dist_to_crossing={dist:.4f} "
+                        f"foot_y={new_foot_pos_w[0, fi, 1].item():.3f} ball_y={live_y[0].item():.3f} "
+                        f"foot_z={new_foot_pos_w[0, fi, 2].item():.3f} ball_z={live_z[0].item():.3f}",
+                        file=sys.stderr,
+                    )
+
+            _orig_fr_reset = env.reset
+            _orig_fr_step = env.step
+
+            def _patched_fr_reset(*args, **kwargs):
+                result = _orig_fr_reset(*args, **kwargs)
+                _apply_footreach_target_schedule()
+                return result
+
+            def _patched_fr_step(actions: torch.Tensor):
+                result = _orig_fr_step(actions)
+                _apply_footreach_target_schedule()
+                return result
+
+            env.reset = _patched_fr_reset
+            env.step = _patched_fr_step
+            print(
+                f"[INFO] scripted_footreach_target: period={_fr_period} steps/half-cycle "
+                f"({_fr_period * 0.02:.1f}s) -- toggles _INNER_FOOT_TARGET_OFFSET 0.0<->0.05 "
+                f"every half-cycle. Watch the foot vs the ball in the viewer -- pass "
+                f"--no-terminations True to avoid the scripted teleports tripping a termination.",
                 file=sys.stderr,
             )
         else:

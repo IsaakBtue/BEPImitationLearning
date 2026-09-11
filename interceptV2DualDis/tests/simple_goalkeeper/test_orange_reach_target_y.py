@@ -7,7 +7,19 @@ docs/superpowers/specs/2026-08-08-orange-ball-trailing-foot-design.md for the
 original 0.30m derivation; FIX 2026-08-08 (user request, "the orange ball
 needs to be way further than the blue ball") raised it to 0.60m same day,
 then adjusted to 0.50m later the same day -- see docs/BugFixes.md.
+
+UPDATE 2026-09-11 (user request, "put the spawn at 0.2 minimum to decrease
+the episodes that it happens to be free"): the raw `shrunk/2.0`
+distance-from-start is now smoothly floored at 0.2m (logsumexp smooth-max,
+_ORANGE_START_MIN/_ORANGE_START_SMOOTH_K in the real function) -- root cause
+was orange sitting exactly AT start_y for every near-wide_threshold crossing,
+which any reasonable RSI donor pose already satisfies at reset, driving a
+large share of orange's "free landing" misclassification rate. Tests below
+updated to assert against the same smooth formula (pinning the SHAPE, not
+just a point value) rather than the old exact closed form.
 """
+import math
+
 import torch
 
 from simple_goalkeeper.mdp.rewards import _get_orange_reach_target_y
@@ -40,25 +52,55 @@ def _orange_y(crossing_delta: float) -> float:
     return result[0].item()
 
 
+_ORANGE_START_MIN = 0.2
+_ORANGE_START_SMOOTH_K = 15.0
+
+
+def _expected_dist_from_start(delta: float) -> float:
+    """Reference implementation of the smooth 0.2m floor -- mirrors the
+    real function's logsumexp smooth-max exactly, so these tests pin the
+    SHAPE (smooth floor, converges to the plain formula away from it)
+    rather than a single hardcoded constant."""
+    raw = max(abs(delta) - 0.50, 0.0) / 2.0
+    a = raw * _ORANGE_START_SMOOTH_K
+    b = _ORANGE_START_MIN * _ORANGE_START_SMOOTH_K
+    m = max(a, b)
+    dist = (m + math.log(math.exp(a - m) + math.exp(b - m))) / _ORANGE_START_SMOOTH_K
+    return min(dist, abs(delta))
+
+
 def test_orange_target_shrinks_positive_delta_by_050_then_halves():
-    # delta=+1.00m -> shrunk=0.50 -> orange_y=0.25 (blue's own midpoint would be 0.50)
-    assert abs(_orange_y(1.0) - 0.25) < 1e-6
+    # delta=+1.00m -> raw shrunk/2=0.25, well above the 0.2m floor -> orange_y
+    # converges close to the plain formula (blue's own midpoint would be 0.50).
+    expected = _expected_dist_from_start(1.0)
+    assert abs(_orange_y(1.0) - expected) < 1e-4
+    assert abs(expected - 0.25) < 0.03  # smooth floor barely nudges a value this far above it
 
 
 def test_orange_target_shrinks_moderate_positive_delta():
-    # delta=+0.80m -> shrunk=0.30 -> orange_y=0.15
-    assert abs(_orange_y(0.8) - 0.15) < 1e-6
+    # delta=+0.80m -> raw shrunk/2=0.15, BELOW the 0.2m floor -> orange_y sits
+    # near the floor (0.2m from start), not the old raw 0.15m.
+    expected = _expected_dist_from_start(0.8)
+    assert abs(_orange_y(0.8) - expected) < 1e-4
+    assert expected > 0.15  # floor pulled it up from the old raw value
+    assert abs(expected - 0.2) < 0.03  # close to the floor itself
 
 
-def test_orange_target_floors_at_start_y_when_delta_below_050():
-    # delta=+0.40m -> shrunk clamped to 0.0 -> orange_y collapses to start_y (0.0)
-    assert abs(_orange_y(0.4) - 0.0) < 1e-6
+def test_orange_target_floors_at_020m_from_start_when_delta_below_050():
+    # delta=+0.40m -> raw shrunk clamped to 0.0 -- OLD behavior collapsed
+    # orange_y to start_y exactly (0.0); NEW behavior floors it at ~0.2m
+    # from start instead (the whole point of this fix).
+    expected = _expected_dist_from_start(0.4)
+    assert abs(_orange_y(0.4) - expected) < 1e-4
+    assert expected > 0.15
+    assert abs(expected - 0.2) < 0.02
 
 
 def test_orange_target_sign_safe_for_right_side_crossings():
-    # delta=-1.00m -> shrunk=-0.50 -> orange_y=-0.25 (NOT -0.90, which a naive
-    # `delta - 0.50` without sign handling would produce)
-    assert abs(_orange_y(-1.0) - (-0.25)) < 1e-6
+    # delta=-1.00m -> mirrors the positive-delta case, sign-flipped (NOT
+    # -0.90, which a naive `delta - 0.50` without sign handling would produce).
+    expected = _expected_dist_from_start(-1.0)
+    assert abs(_orange_y(-1.0) - (-expected)) < 1e-4
 
 
 def test_trailing_idx_is_complement_of_leading_foot_idx():

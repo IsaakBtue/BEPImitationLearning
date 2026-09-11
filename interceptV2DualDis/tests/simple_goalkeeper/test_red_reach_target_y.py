@@ -99,10 +99,14 @@ def test_red_active_false_immediately_after_both_landed_delay_not_elapsed():
 
 
 def test_red_active_true_once_delay_elapses_after_both_landed():
+    # UPDATE 2026-09-11 (user report "always stays at orange"): delay
+    # 25->5 steps -- real rollouts showed "both landed" typically happens
+    # very close to episode end, so 25 steps left too little time for red
+    # to ever activate. See rewards.py's _RED_ACTIVATION_DELAY_STEPS.
     env = _FakeEnv(num_envs=4, crossing_delta=1.0, blue_landed=True, orange_landed=True)
     _get_red_reach_target_y(env, "ball")  # tick 0: orange_landed_genuine_step latches to 0
     assert not bool(env._red_active[0].item())
-    env.episode_length_buf += 25  # advance exactly _RED_ACTIVATION_DELAY_STEPS
+    env.episode_length_buf += 5  # advance exactly _RED_ACTIVATION_DELAY_STEPS
     _get_red_reach_target_y(env, "ball")
     assert bool(env._red_active[0].item())
 
@@ -110,7 +114,7 @@ def test_red_active_true_once_delay_elapses_after_both_landed():
 def test_red_active_false_just_before_delay_elapses():
     env = _FakeEnv(num_envs=4, crossing_delta=1.0, blue_landed=True, orange_landed=True)
     _get_red_reach_target_y(env, "ball")
-    env.episode_length_buf += 24  # one step short of the delay
+    env.episode_length_buf += 4  # one step short of the delay
     _get_red_reach_target_y(env, "ball")
     assert not bool(env._red_active[0].item())
 

@@ -302,12 +302,31 @@ def goalkeeper_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
         # smoothed success rate to this power before the running max, so a
         # mediocre 50% success rate no longer produces 50% domain_rand
         # (now ~12.5%); only high success rates push it up meaningfully.
+        #
+        # FIX 2026-09-11 (user request, "make the domain_rand less
+        # exponential something inbetween the circularlift 2026 09 08 runs
+        # and the current one, because we rarily get any training on it"):
+        # the `6144_circularlift_2026-09-08_13-42` run launched at 13:42,
+        # BEFORE the skew/slowdown fix above landed (commit `95493f4`,
+        # 18:14 same day) -- since a running training process never
+        # hot-reloads code, that whole run trained under the PRE-fix
+        # values: `alpha_scale=0.5`, no skew_power param at all (the
+        # feature didn't exist yet, equivalent to skew_power=1.0, pure
+        # linear pass-through). Confirmed by reading that exact commit
+        # (`git show 95493f4~1`), not assumed. Split the difference
+        # between that run's values and the current ones: `alpha_scale`
+        # 0.2->0.35 (roughly the midpoint), `skew_power` 3.0->2.0 (also
+        # the midpoint) -- e.g. a 50% smoothed success rate now produces
+        # 25% domain_rand (was ~12.5% at skew_power=3, would be 50% at
+        # skew_power=1), and the EMA itself responds faster (alpha_scale
+        # 0.35 vs 0.2), so domain_rand should spend meaningfully less time
+        # pinned near 0.
         cfg.curriculum["domain_rand"] = CurriculumTermCfg(
             func=gk_mdp.domain_rand_curriculum,
             params={
                 "update_interval": 500,
-                "alpha_scale":     0.2,
-                "skew_power":      3.0,
+                "alpha_scale":     0.35,
+                "skew_power":      2.0,
             },
         )
         # RE-REGISTERED 2026-09-07 (user request, "make curriculum for that"):
@@ -581,10 +600,27 @@ def goalkeeper_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
         # of the sliding gait a much earlier checkpoint (model_2000,
         # 6144_yieldweightrescale_2026-08-25 run) exhibited. See
         # docs/BugFixes.md.
-        cfg.curriculum["blue_trunk_drive_curriculum"] = CurriculumTermCfg(
+        # RENAMED 2026-09-11 (user request, "call it blue_trunk_drive_vel
+        # and blue_trunk_drive_acc"): was "blue_trunk_drive_curriculum" /
+        # reward_name "blue_trunk_drive" -- base_weight/mechanism unchanged.
+        cfg.curriculum["blue_trunk_drive_vel_curriculum"] = CurriculumTermCfg(
             func=gk_mdp.reward_curriculum_ep_len,
             params={
-                "reward_name": "blue_trunk_drive",
+                "reward_name": "blue_trunk_drive_vel",
+                "base_weight": 20.0,
+                "update_interval": 500,
+                "ep_len_divisor":  50,
+            },
+        )
+        # NEW 2026-09-11 (user request, "don't u want a reward for
+        # acceleration for blue_trunk_drive?... add it"): same curriculum
+        # shape/base_weight as the velocity term (user-confirmed via
+        # AskUserQuestion: same weight/clamp convention) -- see
+        # rewards.py:blue_trunk_drive_acc.
+        cfg.curriculum["blue_trunk_drive_acc_curriculum"] = CurriculumTermCfg(
+            func=gk_mdp.reward_curriculum_ep_len,
+            params={
+                "reward_name": "blue_trunk_drive_acc",
                 "base_weight": 20.0,
                 "update_interval": 500,
                 "ep_len_divisor":  50,
@@ -1150,7 +1186,7 @@ def goalkeeper_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
         # gap where footreach's own vel_sigma (foot velocity) only reactivates
         # once ball_x_local <= 1.5m, leaving no locomotion incentive for the
         # (often much longer) window between a genuine blue landing and the
-        # ball finally closing in. See rewards.py:blue_trunk_drive docstring.
+        # ball finally closing in. See rewards.py:blue_trunk_drive_vel docstring.
         # FIX 2026-08-12: weight 5.0 -> 10.0, matching the curriculum's
         # base_weight bump above (blue_trunk_drive_curriculum) -- keeps the
         # cu=0 static weight and the curriculum's cu=0 baseline in sync, per
@@ -1158,8 +1194,24 @@ def goalkeeper_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
         # play-mode weight").
         # FIX 2026-08-25 (user request, "faster blue/green approach"):
         # weight 10.0 -> 20.0, matching curriculum base_weight bump above.
-        "blue_trunk_drive": RewardTermCfg(
-            func=gk_mdp.blue_trunk_drive,
+        # RENAMED 2026-09-11 (user request, "call it blue_trunk_drive_vel
+        # and blue_trunk_drive_acc"): was "blue_trunk_drive" -- weight/
+        # mechanism unchanged, only the name (to make room for the new
+        # acceleration sibling right below).
+        "blue_trunk_drive_vel": RewardTermCfg(
+            func=gk_mdp.blue_trunk_drive_vel,
+            weight=20.0,
+            params={"ball_name": BALL_NAME, "asset_cfg": _FEET_CFG},
+        ),
+        # NEW 2026-09-11 (user request, "don't u want a reward for
+        # acceleration for blue_trunk_drive? it is only velocity if so add
+        # it"): sibling of blue_trunk_drive_vel -- rewards the RATE OF
+        # CHANGE of trunk velocity toward the target, not the velocity
+        # itself. Same weight/clamp convention as the velocity term
+        # (user-confirmed via AskUserQuestion). See rewards.py:
+        # blue_trunk_drive_acc docstring.
+        "blue_trunk_drive_acc": RewardTermCfg(
+            func=gk_mdp.blue_trunk_drive_acc,
             weight=20.0,
             params={"ball_name": BALL_NAME, "asset_cfg": _FEET_CFG},
         ),

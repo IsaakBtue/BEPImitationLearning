@@ -1,6 +1,7 @@
 """Event functions and curriculum helpers for SimpleGoalKeeper."""
 from __future__ import annotations
 
+import math
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -28,6 +29,24 @@ _EASY_Y_END   = (-0.05, 0.05)  # goal target Y: dead centre on easy
 _EASY_Z_START = (0.1, 0.25)
 _EASY_Z_END   = (0.05, 0.15)
 _EASY_SPEED   = (1.0, 1.5)     # slow on easy → longer t_flight, more reaction time
+
+# Physics timestep -- fixed for this task (never read from env.cfg.sim
+# anywhere in this file), kept as one named constant so every ticks<->
+# seconds conversion in this file (_CATCHSTEP_MAX below, docstrings
+# elsewhere) refers to the same source instead of separately hardcoding
+# "0.02" or "dt=0.02s".
+_DT = 0.02
+
+# Easy-mode (domain_rand_curriculum=0) ball flight-time upper bound, used by
+# BOTH reset_ball_rolling (samples t_flight from this at the easy end of its
+# domain_rand-driven lerp) AND _init_visibility_state (_CATCHSTEP_MAX below
+# derives directly from this, not a separately-maintained literal) --
+# hoisted to module level (2026-09-11, user request, "always use variables
+# if you can... so if you change one thing everything changes with it") so
+# the two can never drift out of sync again the way _CATCHSTEP_MAX's own
+# history shows they did (see that constant's comment -- it needed 3
+# separate manual updates chasing this same range's own edits).
+_EASY_T_FLIGHT_RANGE = (0.75, 1.45)
 
 
 def _lerp_range(
@@ -512,8 +531,17 @@ def _init_visibility_state(env: "ManagerBasedRlEnv", env_ids: torch.Tensor) -> N
     # the easy end up to 1.75s -- the 2026-09-04 fix comment on that
     # function's own t_flight_range registration explicitly warned this
     # exact ceiling must stay >= the max possible t_flight, or the ball
-    # goes invisible before arrival on the longest flights. 88 = ceil(1.75/0.02).
-    _CATCHSTEP_MAX = 88
+    # goes invisible before arrival on the longest flights.
+    #
+    # FIX 2026-09-11 (user request, companion to reset_ball_rolling's
+    # `_EASY_T_FLIGHT` change, "you also need to update catchstep then" --
+    # then, same day, "always use variables if you can... so if you change
+    # one thing everything changes with it"): was a hand-maintained literal
+    # that needed 3 separate manual edits chasing `_EASY_T_FLIGHT_RANGE`'s
+    # own history (88 -> 65 -> this) -- now DERIVED directly from that
+    # shared module-level constant, so it can never drift out of sync
+    # again regardless of what that range gets tuned to next.
+    _CATCHSTEP_MAX = math.ceil(_EASY_T_FLIGHT_RANGE[1] / _DT)
     if not hasattr(env, "_catchstep"):
         env._catchstep = torch.zeros(n, dtype=torch.long, device=env.device)
     env._catchstep[env_ids] = _CATCHSTEP_MAX
@@ -1265,9 +1293,17 @@ def reset_ball_rolling(
     # is only ever registered `if not play` (goalkeeper_env_cfg.py), so play
     # mode always evaluates at the hard end, same fallback convention
     # env._ball_difficulty already uses elsewhere in this file.
-    _EASY_T_FLIGHT = (0.75, 1.75)
+    # FIX 2026-09-11 (user request, "move the flight time for easy mode
+    # from 1.5 to 1.3... 1.5 is maybe too easy", then same day "make the
+    # easy mode flight time 1.45s"): was a local (0.75, 1.75) redefined
+    # here each edit -- hoisted to the module-level `_EASY_T_FLIGHT_RANGE`
+    # (top of file) per user request ("always use variables if you can...
+    # so if you change one thing everything changes with it") --
+    # `_CATCHSTEP_MAX` (`_init_visibility_state`) now derives from that
+    # SAME constant directly instead of being separately hand-maintained,
+    # so the two can never drift out of sync again.
     domain_rand_d = float(min(max(getattr(env, "_domain_rand_curriculum", 1.0), 0.0), 1.0))
-    t_flight_r = _lerp_range(_EASY_T_FLIGHT, t_flight_range, domain_rand_d)
+    t_flight_r = _lerp_range(_EASY_T_FLIGHT_RANGE, t_flight_range, domain_rand_d)
     t_flight = sample_uniform(*t_flight_r, (n,), env.device)
 
     if y_end_range[0] * y_end_range[1] > 0:
