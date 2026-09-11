@@ -253,6 +253,15 @@ class AnalyticsPolicy:
         self._max_settle = 0
         self._ep_was_wide = False
         self._ep_landed = False
+        # RESTORED 2026-09-11 (user request, "revert the yellow ball i want
+        # it back"): same per-episode accumulator pattern for the orange
+        # (trailing-foot) mechanism -- shares blue's own _ep_was_wide
+        # (orange is only ever active when env._blue_wide is true, see
+        # rewards.py's _get_orange_reach_target_y), so only its own
+        # min-dist/max-settle/landed fields are separate.
+        self._min_orange_dist = float("inf")
+        self._max_orange_settle = 0
+        self._ep_orange_landed = False
 
     def toggle(self) -> None:
         self.enabled = not self.enabled
@@ -290,11 +299,21 @@ class AnalyticsPolicy:
                     f"max_settle={self._max_settle}/3 landed={self._ep_landed}"
                     if self._ep_was_wide else " | BLUE narrow-crossing"
                 )
+                # RESTORED 2026-09-11 (user request, "revert the yellow
+                # ball i want it back"): orange (trailing-foot) summary,
+                # same shape as blue's -- shares self._ep_was_wide since
+                # orange is only ever active on the same wide crossings
+                # blue is.
+                orange_summary = (
+                    f" | ORANGE min_dist={self._min_orange_dist:.2f} "
+                    f"max_settle={self._max_orange_settle}/3 landed={self._ep_orange_landed}"
+                    if self._ep_was_wide else " | ORANGE narrow-crossing"
+                )
                 print(
                     f"\n[EpEnd] terminated_by={','.join(fired) or 'none'} | "
                     f"min_base={self._min_base_h:.2f} "
                     f"min_Lsh={self._min_lsh_h:.2f} min_Rsh={self._min_rsh_h:.2f}"
-                    f"{blue_summary}",
+                    f"{blue_summary}{orange_summary}",
                     file=stderr,
                 )
             self._ep += 1
@@ -305,6 +324,9 @@ class AnalyticsPolicy:
             self._max_settle = 0
             self._ep_was_wide = False
             self._ep_landed = False
+            self._min_orange_dist = float("inf")
+            self._max_orange_settle = 0
+            self._ep_orange_landed = False
         self._prev_ep_buf = ep_buf.clone()
 
         # DEBUG 2026-07-28: called unconditionally (before the enabled-gate
@@ -338,18 +360,21 @@ class AnalyticsPolicy:
         cleanstop_fired = cs_flag[0].item()  if cs_flag  is not None else False
 
         # DEBUG 2026-08-21 (user request): make red's activation gate
-        # (env._red_active = _blue_landed_genuine, was also AND'd with
-        # _orange_landed_genuine before orange was removed 2026-09-11)
-        # directly visible on the console status line, alongside the red
-        # sphere play.py already draws in the native viewer once red_active
-        # (see _patch_viewer_debug_visualizers). User wants to confirm
-        # whether RD actually flips true and stays true through the
+        # (env._red_active = _blue_landed_genuine & _orange_landed_genuine,
+        # RESTORED 2026-09-11 after a same-session interval where orange
+        # was deleted and this was blue-only) directly visible on the
+        # console status line, alongside the red sphere play.py already
+        # draws in the native viewer once red_active (see
+        # _patch_viewer_debug_visualizers). User wants to confirm whether
+        # RD actually flips true and stays true through the
         # save/softstop/ball-behind sequence, not just whether the code
         # exists.
         blue_landed_genuine_t = getattr(env, "_blue_landed_genuine", None)
+        orange_landed_genuine_t = getattr(env, "_orange_landed_genuine", None)
         red_active_t = getattr(env, "_red_active", None)
         red_landed_genuine_t = getattr(env, "_red_landed_genuine", None)
         blue_landed_genuine = bool(blue_landed_genuine_t[0].item()) if blue_landed_genuine_t is not None else False
+        orange_landed_genuine = bool(orange_landed_genuine_t[0].item()) if orange_landed_genuine_t is not None else False
         red_active = bool(red_active_t[0].item()) if red_active_t is not None else False
         red_landed_genuine = bool(red_landed_genuine_t[0].item()) if red_landed_genuine_t is not None else False
 
@@ -388,9 +413,22 @@ class AnalyticsPolicy:
                 self._min_blue_dist = min(self._min_blue_dist, dist_t[0].item())
             if settle_t is not None:
                 self._max_settle = max(self._max_settle, int(settle_t[0].item()))
+            # RESTORED 2026-09-11 (user request, "revert the yellow ball i
+            # want it back"): orange (trailing-foot) accumulator, same
+            # wide-gate as blue's above (rewards.py's env._orange_dbg_* is
+            # only ever set inside the same env._blue_wide-gated branch).
+            orange_dist_t = getattr(env, "_orange_dbg_dist", None)
+            orange_settle_t = getattr(env, "_orange_dbg_settle", None)
+            if orange_dist_t is not None:
+                self._min_orange_dist = min(self._min_orange_dist, orange_dist_t[0].item())
+            if orange_settle_t is not None:
+                self._max_orange_settle = max(self._max_orange_settle, int(orange_settle_t[0].item()))
         landed_t = getattr(env, "_blue_landed", None)
         if landed_t is not None and bool(landed_t[0].item()):
             self._ep_landed = True
+        orange_landed_t = getattr(env, "_orange_landed", None)
+        if orange_landed_t is not None and bool(orange_landed_t[0].item()):
+            self._ep_orange_landed = True
 
         ball_speed = bv.norm().item()
 
@@ -437,6 +475,7 @@ class AnalyticsPolicy:
             f"{'SH✓' if self._shin_flash else 'SH·'} "
             f"{'HD✓' if self._chin_flash else 'HD·'} "
             f"{'BL✓' if blue_landed_genuine else 'BL·'} "
+            f"{'OR✓' if orange_landed_genuine else 'OR·'} "
             f"{'RD✓' if red_active else 'RD·'} "
             f"{'RDL✓' if red_landed_genuine else 'RDL·'}"
         )
@@ -643,22 +682,13 @@ def _patch_viewer_intercept_vis(native_viewer: "NativeMujocoViewer", env) -> Non
 
         if wide and not landed:
             # Phase 1: BLUE sphere at the midpoint — half the distance, half as far.
-            # FIX 2026-09-11 (user request, "a smooth curve having a little
-            # more distance from green... in the narrower range"): mirrors
-            # rewards.py:_get_reach_target_y's own smooth exponential-blend
-            # formula exactly (was a flat green-anchored floor, kinked) --
-            # extra margin near wide_threshold, decaying smoothly toward
-            # the plain midpoint as delta grows. Same constants
-            # (_BLUE_GREEN_EXTRA/_BLUE_GREEN_TAU) as the real reward.
-            _BLUE_GREEN_EXTRA = 0.10  # FIX 2026-09-11 (same day, user request): 0.15 -> 0.10
-            _BLUE_GREEN_TAU = 0.15
-            _WIDE_THRESHOLD = 0.5
+            # REVERTED 2026-09-11 (same day, user request, "lets try /2 for
+            # the blue ball location"): mirrors rewards.py's own reversion --
+            # the smooth extra-margin/start-floor machinery is gone, back to
+            # the plain midpoint.
             _delta = cross_y - start_y
             _sign = 1.0 if _delta >= 0.0 else -1.0
-            _extra = _BLUE_GREEN_EXTRA * np.exp(-(abs(_delta) - _WIDE_THRESHOLD) / _BLUE_GREEN_TAU)
-            _blue_dist_from_green = abs(_delta) / 2.0 + _extra
-            _blue_dist_from_green = min(_blue_dist_from_green, abs(_delta))
-            mid_y = cross_y - _sign * _blue_dist_from_green
+            mid_y = start_y + _sign * abs(_delta) / 2.0
             _add_sphere(goal_x, mid_y, sphere_z, 0.08, [0.15, 0.4, 1.0, 0.75])
             _add_line(
                 np.array([goal_x, mid_y, floor_z], dtype=np.float64),
@@ -715,24 +745,53 @@ def _patch_viewer_intercept_vis(native_viewer: "NativeMujocoViewer", env) -> Non
                 0.008, [0.1, 1.0, 0.2, 0.6],
             )
 
-        # REMOVED 2026-09-11 (user request, "i dont want yellow ball/gold
-        # ball anymore"): the orange sphere (trailing-foot's old first
-        # waypoint) is gone -- see docs/BugFixes.md.
+        # RESTORED 2026-09-11 (user request, "revert the yellow ball i
+        # want it back... do this by means of git"): the orange sphere,
+        # restored verbatim from git history (commit f0477c4) -- was
+        # deleted earlier this same session. Its own history: plain orange
+        # (a gold/landed color variant, added 2026-08-15, was reverted back
+        # to plain orange 2026-09-08 per an earlier user request -- this
+        # restoration reflects that already-reverted, plain-orange state,
+        # not the intervening gold one).
         #
+        # NEW 2026-08-08: orange sphere -- trailing-foot ("orange") mirror of
+        # the blue midpoint above, recomputed inline the same way blue's own
+        # mid_y is (not read from a cached env attribute) so this marker can't
+        # drift out of sync with what orange_foot_proximity/orange_ball_landed/
+        # orange_overshoot_penalty/orange_stick_landing (rewards.py) actually
+        # target. See rewards.py:_get_orange_reach_target_y and
+        # docs/superpowers/specs/2026-08-08-orange-ball-trailing-foot-design.md.
+        red_active_t = getattr(raw_env, "_red_active", None)
+        red_active = bool(red_active_t[0].item()) if red_active_t is not None else False
+        if wide and not red_active:
+            start_y = float(origins[1])
+            delta = cross_y - start_y
+            sign = 1.0 if delta >= 0 else -1.0
+            shrunk = sign * max(abs(delta) - 0.50, 0.0)  # FIX 2026-08-08 (user request): 0.30 -> 0.60 -> 0.50
+            orange_y = start_y + shrunk / 2.0
+            orange_color = [1.0, 0.55, 0.0, 0.75]
+            orange_line_color = [1.0, 0.55, 0.0, 0.6]
+            _add_sphere(goal_x, orange_y, sphere_z, 0.08, orange_color)
+            _add_line(
+                np.array([goal_x, orange_y, floor_z], dtype=np.float64),
+                np.array([goal_x, orange_y, sphere_z], dtype=np.float64),
+                0.008, orange_line_color,
+            )
+
         # NEW 2026-08-15: red sphere -- trailing-foot waypoint, recomputed
         # inline (not read from a cached env attribute) so this marker can't
         # drift out of sync with what red_foot_proximity/red_ball_landed/
         # red_overshoot_penalty/red_stick_landing (rewards.py) actually
-        # target. Only shown once env._red_active (blue genuinely landed,
-        # was blue AND orange -- orange removed).
+        # target. Only shown once env._red_active (blue AND orange both
+        # genuinely landed -- RESTORED 2026-09-11 after a same-session
+        # interval where this was blue-only).
         #
         # FIX 2026-09-11 (user request, "red ball to be in the 60% along
         # the green ball full length"): formula changed from "clamped to
         # within 0.25m of green" to 60% of the way from start to green
         # (measured start->green, confirmed via AskUserQuestion) -- mirrors
-        # rewards.py:_get_red_reach_target_y exactly.
-        red_active_t = getattr(raw_env, "_red_active", None)
-        red_active = bool(red_active_t[0].item()) if red_active_t is not None else False
+        # rewards.py:_get_red_reach_target_y exactly. Kept as-is when
+        # orange was restored -- only red's GATE (above) reverted.
         if wide and red_active:
             start_y = float(origins[1])
             delta = cross_y - start_y
@@ -1267,15 +1326,12 @@ def _patch_viewer_wrong_foot_contact_plot(native_viewer: "NativeMujocoViewer", e
 # and then, in rewards.py only (this file's copy stopped tracking it),
 # 70->55 (2026-08-23).
 
-_INNER_FOOT_TARGET_OFFSET = 0.05
-"""Must match rewards.py's _get_foot_block_offset helper (NEW 2026-08-15, user
-request). User wants to save with the INNER part of the foot rather than
-dead center, which means the foot's aim point should sit slightly further
-out (away from center) than the ball's true calculated crossing point --
-this offset is that gap, in meters. Used only to draw the green sphere at
-the actual foot-aim point while the rod stays pinned to the true, unmodified
-ball crossing_y -- see the green-sphere block below. Verify against
-rewards.py if that constant ever changes."""
+_INNER_FOOT_TARGET_OFFSET = 0.0
+"""REMOVED 2026-09-11 (user request, see rewards.py's matching constant's
+docstring) -- was 0.05. Must match rewards.py's _get_foot_block_offset helper.
+With this at 0.0 the green sphere (foot-aim target) and the rod (real ball
+crossing_y) now sit at the exact same point -- verify against rewards.py if
+this ever changes."""
 
 _FOOT_TARGET_TOLERANCE_DEG = 5.0
 """inner_face_orientation_save's tolerance_deg -- the one-shot bonus fires when
@@ -1956,11 +2012,14 @@ def _patch_viewer_foot_restitution_plot(native_viewer: "NativeMujocoViewer", env
             # collapses and the plot looks flat/pinned regardless of
             # whether the underlying value is actually firing. Ranges are
             # each term's own curriculum peak weight (blue_ball_landed_
-            # curriculum/red_ball_landed_curriculum, goalkeeper_env_cfg.py):
-            # base_weight * 2.5 at cu=3 (reward_curriculum_ep_len's own
-            # formula) -- blue 10.0*2.5=25.0, red 5.0*2.5=12.5.
+            # curriculum/orange_ball_landed_curriculum/red_ball_landed_
+            # curriculum, goalkeeper_env_cfg.py): base_weight * 2.5 at
+            # cu=3 (reward_curriculum_ep_len's own formula) -- blue
+            # 10.0*2.5=25.0, orange/red 5.0*2.5=12.5 each.
             if "blue_ball_landed" in native_viewer._histories:
                 _write_fixed_range("blue_ball_landed", -0.5, 26.0)
+            if "orange_ball_landed" in native_viewer._histories:
+                _write_fixed_range("orange_ball_landed", -0.5, 13.0)
             if "red_ball_landed" in native_viewer._histories:
                 _write_fixed_range("red_ball_landed", -0.5, 13.0)
 

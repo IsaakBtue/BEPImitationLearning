@@ -590,14 +590,54 @@ def goalkeeper_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
                 "ep_len_divisor":  50,
             },
         )
-        # REMOVED 2026-09-11 (user request, "i dont want yellow ball/gold
-        # ball anymore"): orange_ball_landed_curriculum/orange_overshoot_
-        # penalty_curriculum/orange_stick_landing_curriculum deleted --
-        # orange waypoint no longer exists. See docs/BugFixes.md.
+        # RESTORED 2026-09-11 (user request, "revert the yellow ball i
+        # want it back... do this by means of git"): orange_ball_landed_
+        # curriculum/orange_overshoot_penalty_curriculum/orange_stick_
+        # landing_curriculum restored verbatim from git history (commit
+        # f0477c4) -- were deleted earlier this same session, see
+        # docs/BugFixes.md for both the removal and this restoration.
         #
-        # NEW 2026-08-15: "red" trailing-foot waypoint, active once blue is
-        # genuinely landed (see _get_red_reach_target_y). Weights kept at
-        # their prior orange-matched values (unchanged by the removal).
+        # NEW 2026-08-08: same curriculum shape as the blue_* terms above,
+        # base_weight halved (conservative first pass) -- see
+        # docs/superpowers/specs/2026-08-08-orange-ball-trailing-foot-design.md.
+        cfg.curriculum["orange_ball_landed_curriculum"] = CurriculumTermCfg(
+            func=gk_mdp.reward_curriculum_ep_len,
+            params={
+                "reward_name": "orange_ball_landed",
+                "base_weight": 5.0,
+                "update_interval": 500,
+                "ep_len_divisor":  50,
+            },
+        )
+        cfg.curriculum["orange_overshoot_penalty_curriculum"] = CurriculumTermCfg(
+            func=gk_mdp.reward_curriculum_ep_len,
+            params={
+                "reward_name": "orange_overshoot_penalty",
+                "base_weight": -30.0,
+                "update_interval": 500,
+                "ep_len_divisor":  50,
+            },
+        )
+        # FIX 2026-08-25 (user request, "faster blue/green approach" --
+        # balancing half of the "raise speed rewards" set): base_weight
+        # 4.0 -> 2.0 (peak 10.0 -> 5.0), same reasoning as
+        # blue_stick_landing above. orange_overshoot_penalty (-30.0
+        # curriculum) untouched, stays the backstop. See docs/BugFixes.md.
+        cfg.curriculum["orange_stick_landing_curriculum"] = CurriculumTermCfg(
+            func=gk_mdp.reward_curriculum_ep_len,
+            params={
+                "reward_name": "orange_stick_landing",
+                "base_weight": 2.0,
+                "update_interval": 500,
+                "ep_len_divisor":  50,
+            },
+        )
+        # NEW 2026-08-15: "red" second-stage trailing-foot waypoint, active
+        # only once both blue and orange are genuinely landed (see
+        # _get_red_reach_target_y). Weights equal to orange's own (user
+        # confirmed via AskUserQuestion -- red's extra landing-gate already
+        # limits false credit relative to orange's ungated single stage, so
+        # a further quarter-of-blue halving wasn't applied).
         cfg.curriculum["red_ball_landed_curriculum"] = CurriculumTermCfg(
             func=gk_mdp.reward_curriculum_ep_len,
             params={
@@ -619,7 +659,7 @@ def goalkeeper_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
         # FIX 2026-08-25 (user request, "faster blue/green approach" --
         # balancing half of the "raise speed rewards" set): base_weight
         # 4.0 -> 2.0 (peak 10.0 -> 5.0), same reasoning as
-        # blue_stick_landing above. red_overshoot_penalty
+        # blue_stick_landing/orange_stick_landing above. red_overshoot_penalty
         # (-30.0 curriculum) untouched, stays the backstop. See docs/BugFixes.md.
         cfg.curriculum["red_stick_landing_curriculum"] = CurriculumTermCfg(
             func=gk_mdp.reward_curriculum_ep_len,
@@ -1123,16 +1163,47 @@ def goalkeeper_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
             weight=20.0,
             params={"ball_name": BALL_NAME, "asset_cfg": _FEET_CFG},
         ),
-        # REMOVED 2026-09-11 (user request, "i dont want yellow ball/gold
-        # ball anymore"): orange_foot_proximity/orange_ball_landed/
-        # orange_overshoot_penalty/orange_stick_landing deleted -- orange
-        # waypoint no longer exists. See docs/BugFixes.md.
+        # RESTORED 2026-09-11 (user request, "revert the yellow ball i
+        # want it back... do this by means of git"): orange_foot_proximity/
+        # orange_ball_landed/orange_overshoot_penalty/orange_stick_landing
+        # restored verbatim from git history (commit f0477c4) -- were
+        # deleted earlier this same session. See docs/BugFixes.md for both
+        # the removal and this restoration.
         #
-        # --- trailing-foot waypoint ("red"), active once blue is genuinely
-        # landed (env._blue_landed_genuine, was blue AND orange). See
-        # rewards.py's _get_red_reach_target_y/red_ball_landed/
-        # red_overshoot_penalty/red_stick_landing docstrings. Weights kept
-        # at their prior orange-matched values. ---
+        # --- trailing-foot ("orange") mirror of the blue waypoint above,
+        # landing-focused subset (2026-08-08). See rewards.py's
+        # _get_orange_reach_target_y/orange_ball_landed/orange_overshoot_penalty/
+        # orange_stick_landing docstrings and
+        # docs/superpowers/specs/2026-08-08-orange-ball-trailing-foot-design.md.
+        # Weights are half of blue's own (conservative first pass, unvalidated). ---
+        "orange_foot_proximity": RewardTermCfg(
+            func=gk_mdp.orange_foot_proximity,
+            weight=2.5,
+            params={"ball_name": BALL_NAME, "sigma": 5.0, "asset_cfg": _FEET_CFG},
+        ),
+        "orange_ball_landed": RewardTermCfg(
+            func=gk_mdp.orange_ball_landed,
+            weight=5.0,
+            params={"ball_name": BALL_NAME, "asset_cfg": _FEET_CFG},
+        ),
+        "orange_overshoot_penalty": RewardTermCfg(
+            func=gk_mdp.orange_overshoot_penalty,
+            weight=-30.0,
+            params={"ball_name": BALL_NAME, "asset_cfg": _FEET_CFG},
+        ),
+        # FIX 2026-08-25 (user request, "faster blue/green approach"):
+        # weight 4.0 -> 2.0, matches curriculum's base_weight halving above.
+        "orange_stick_landing": RewardTermCfg(
+            func=gk_mdp.orange_stick_landing,
+            weight=2.0,
+            params={"ball_name": BALL_NAME, "asset_cfg": _FEET_CFG},
+        ),
+        # --- trailing-foot second waypoint ("red"), active only once both
+        # blue and orange are genuinely landed. See rewards.py's
+        # _get_red_reach_target_y/red_ball_landed/red_overshoot_penalty/
+        # red_stick_landing docstrings. Weights equal to orange's own
+        # (user-confirmed 2026-08-15, not a further halving -- red's own
+        # landing gate already limits false credit). ---
         "red_foot_proximity": RewardTermCfg(
             func=gk_mdp.red_foot_proximity,
             weight=2.5,
@@ -1157,31 +1228,33 @@ def goalkeeper_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
         ),
         # NEW 2026-08-15 (user request): trailing-foot analog of footreach's
         # urgency mechanism (sigmoid reach x up-to-10x velocity multiplier),
-        # targeting red directly (was auto-switching orange->red; orange
-        # removed 2026-09-11), WITHOUT footreach's ball-position
+        # auto-switching orange->red, WITHOUT footreach's ball-position
         # gating/live-ball-tracking (see rewards.py:trailing_foot_reach
         # docstring for the full reasoning). Weight 10.0 matches footreach's
         # own weight -- this is the direct trailing-foot analog of that
-        # term, not of the smaller flat red_foot_proximity term.
+        # term, not of the smaller flat foot_proximity/orange_foot_proximity
+        # terms.
         # FIX 2026-08-25 (user request, "faster blue/green approach"):
         # weight 10.0 -> 20.0 (flat, no curriculum on this term).
-        # FIX 2026-09-11 (user request): now active (at half strength, see
-        # rewards.py docstring) for the whole wide-crossing window, not just
-        # once red activates.
+        # RESTORED 2026-09-11 (user request, "revert the yellow ball i
+        # want it back"): the orange->red auto-switch (briefly replaced by
+        # a blue-only target + half-strength pre-landing scale while orange
+        # was deleted) is back -- see rewards.py:trailing_foot_reach
+        # docstring.
         "trailing_foot_reach": RewardTermCfg(
             func=gk_mdp.trailing_foot_reach,
             weight=20.0,
             params={"ball_name": BALL_NAME, "reach_th": 0.3, "sigma": 5.0, "asset_cfg": _FEET_CFG},
         ),
         # NEW 2026-08-15 (user request): one-shot bonus for completing the
-        # WHOLE blue->red->save relay with margin to spare, paid out
+        # WHOLE blue->orange->red->save relay with margin to spare, paid out
         # only at the save itself (not per-stage, deliberately -- see
         # rewards.py:sequence_promptness docstring for why). Registered
-        # AFTER stopball/blue/red's own terms above so
-        # env._sb_flag/_blue_landed_genuine/_red_landed_genuine are all
-        # fresh this tick. Weight 3.0 (user-confirmed via AskUserQuestion)
-        # -- a nudge on top of the existing landing/save bonuses, not a
-        # dominant signal.
+        # AFTER stopball/blue/orange/red's own terms above so
+        # env._sb_flag/_blue_landed_genuine/_orange_landed_genuine/
+        # _red_landed_genuine are all fresh this tick. Weight 3.0
+        # (user-confirmed via AskUserQuestion) -- a nudge on top of the
+        # existing landing/save bonuses, not a dominant signal.
         "sequence_promptness": RewardTermCfg(
             func=gk_mdp.sequence_promptness,
             weight=3.0,
@@ -1200,17 +1273,16 @@ def goalkeeper_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
             params={"ball_name": BALL_NAME, "target_height": 0.10, "asset_cfg": _FEET_CFG},
         ),
         # NEW 2026-08-17 (user request): "an incentive that raises the foot"
-        # for the TRAILING foot specifically during its journey toward red
-        # -- at the time, `foot_clearance` (this term's old name, renamed
-        # 2026-09-08) took max(both feet), fully satisfiable by the leading
-        # foot alone, leaving the trailing foot's own lift unrewarded during
-        # this journey. Same target height/weight as leading_foot_lift
-        # (0.10m / 2.0), scoped to one foot instead of max(both) -- see
-        # rewards.py:trailing_foot_lift. As of 2026-09-08, leading_foot_lift
-        # ALSO only ever reads the leading foot (no more max(both feet)) --
-        # the two terms are now fully non-overlapping by construction, not
-        # just in practice. Active the whole wide-crossing window (2026-09-11,
-        # user request, "trailing foot lift always stays active").
+        # for the TRAILING foot specifically during its start->orange and
+        # orange->red journey -- at the time, `foot_clearance` (this term's
+        # old name, renamed 2026-09-08) took max(both feet), fully
+        # satisfiable by the leading foot alone, leaving the trailing foot's
+        # own lift unrewarded during this journey. Same target height/weight
+        # as leading_foot_lift (0.10m / 2.0), scoped to one foot instead of
+        # max(both) -- see rewards.py:trailing_foot_lift. As of 2026-09-08,
+        # leading_foot_lift ALSO only ever reads the leading foot (no more
+        # max(both feet)) -- the two terms are now fully non-overlapping by
+        # construction, not just in practice.
         # FIX 2026-08-23 (user request): target_height 0.10 -> 0.05, same
         # change as leading_foot_lift above.
         # FIX 2026-08-29 (user request): reverted 0.05 -> 0.10, same reason
