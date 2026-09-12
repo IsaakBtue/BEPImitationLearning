@@ -528,20 +528,15 @@ class AnalyticsPolicy:
         # ground rings' relative sizes.
         #
         # UPDATE 2026-09-12 (user request, "orange ball do the variable -
-        # 0.03"): orange is now DELIBERATELY 0.03m tighter than blue, not
-        # identical -- "MATCH" would be the wrong label now. Checks
-        # BLUE_R - ORANGE_R == 0.03 (the expected derived offset) instead;
-        # still catches the same class of bug (something silently
-        # overwriting orange's radius independently of blue's), just
-        # against the new expected relationship rather than equality.
+        # 0.03"): orange was made DELIBERATELY 0.03m tighter than blue.
+        #
+        # REVERTED 2026-09-12 (same day, user request, "make orange ball
+        # just the landing radius not that making it smaller anymore"):
+        # the -0.03 offset is gone -- back to a plain equality check.
         _blue_r_dbg = getattr(env, "_blue_landing_radius_current", None)
         _orange_r_dbg = getattr(env, "_orange_landing_radius_current", None)
-        _ORANGE_RADIUS_OFFSET_DBG = 0.03
         if _blue_r_dbg is not None and _orange_r_dbg is not None:
-            _radius_match = (
-                "MATCH" if abs((_blue_r_dbg - _orange_r_dbg) - _ORANGE_RADIUS_OFFSET_DBG) < 1e-6
-                else "MISMATCH!"
-            )
+            _radius_match = "MATCH" if abs(_blue_r_dbg - _orange_r_dbg) < 1e-6 else "MISMATCH!"
             radius_cmp_dbg = f" | BLUE_R={_blue_r_dbg:.3f} ORANGE_R={_orange_r_dbg:.3f} {_radius_match}"
         else:
             radius_cmp_dbg = ""
@@ -750,9 +745,12 @@ def _patch_viewer_intercept_vis(native_viewer: "NativeMujocoViewer", env) -> Non
             # the blue ball location"): mirrors rewards.py's own reversion --
             # the smooth extra-margin/start-floor machinery is gone, back to
             # the plain midpoint.
+            # FIX 2026-09-12 (user request, "maximum distance of 0.35 from
+            # the center 0 0 point"): mirrors rewards.py's own 0.35m cap.
+            _BLUE_MAX_DIST_FROM_START = 0.4
             _delta = cross_y - start_y
             _sign = 1.0 if _delta >= 0.0 else -1.0
-            mid_y = start_y + _sign * abs(_delta) / 2.0
+            mid_y = start_y + _sign * min(abs(_delta) / 2.0, _BLUE_MAX_DIST_FROM_START)
             _add_sphere(goal_x, mid_y, sphere_z, 0.08, [0.15, 0.4, 1.0, 0.75])
             _add_line(
                 np.array([goal_x, mid_y, floor_z], dtype=np.float64),
@@ -838,8 +836,12 @@ def _patch_viewer_intercept_vis(native_viewer: "NativeMujocoViewer", env) -> Non
             # as blue's own distance-from-start minus a fixed 0.25m gap,
             # not an independent formula. Replaces the earlier 0.2m
             # smooth-floor mechanism entirely.
-            _ORANGE_BLUE_GAP = 0.30  # FIX 2026-09-12 (user request): 0.25 -> 0.30
-            blue_dist_from_start = abs(delta) / 2.0
+            _ORANGE_BLUE_GAP = 0.23  # FIX 2026-09-12 (user request, "make the distance of orange ball 0.23"): 0.25 -> 0.23
+            # FIX 2026-09-12 (same day, user request, "maximum distance of
+            # 0.35 from the center 0 0 point"): mirrors rewards.py's own
+            # 0.35m cap on this identical computation.
+            _BLUE_MAX_DIST_FROM_START = 0.4
+            blue_dist_from_start = min(abs(delta) / 2.0, _BLUE_MAX_DIST_FROM_START)
             orange_dist_from_start = max(blue_dist_from_start - _ORANGE_BLUE_GAP, 0.0)
             orange_y = start_y + sign * orange_dist_from_start
             orange_color = [1.0, 0.55, 0.0, 0.75]
@@ -1940,12 +1942,12 @@ def _compute_trunk_dive(env, env_idx: int) -> float:
 
 
 def _patch_viewer_foot_restitution_plot(native_viewer: "NativeMujocoViewer", env) -> None:
-    """Promote `blue_trunk_drive_vel`/`blue_trunk_drive_acc` (ordinary
-    registered reward terms) plus `contact_yield_velocity_x/y`/
-    `footreach`/`leading_foot_lift` into the always-visible front slots.
-    Also fixes the display-scale bug on `contact_yield_velocity` and
-    `cleanstop`'s own figures (see the FIX 2026-08-23 comment inside
-    `_patched_update_reward_figures` below for the full mechanism).
+    """Promote `blue_trunk_drive` (an ordinary registered reward term) plus
+    `contact_yield_velocity_x/y`/`footreach`/`leading_foot_lift` into the
+    always-visible front slots. Also fixes the display-scale bug on
+    `contact_yield_velocity` and `cleanstop`'s own figures (see the FIX
+    2026-08-23 comment inside `_patched_update_reward_figures` below for
+    the full mechanism).
 
     FIX 2026-09-11 (user request, "add blue_trunk_drive in the mujoco
     viewer for trunk_dive"): this patch's own front-slot plot swapped from
@@ -1961,6 +1963,12 @@ def _patch_viewer_foot_restitution_plot(native_viewer: "NativeMujocoViewer", env
     UPDATE 2026-09-11 (same day, user request, "call it blue_trunk_drive_vel
     and blue_trunk_drive_acc"): `blue_trunk_drive` split into these two
     siblings (rewards.py) -- both promoted here now, not just the one.
+
+    REVERTED 2026-09-12 (user report, "it is oscillating back and forth and
+    thus i think farming the acceleration term so maybe indeed remove it
+    and go back like it was before"): `blue_trunk_drive_acc` deleted
+    entirely (rewarding raw acceleration incentivized oscillating to farm
+    repeated payouts) -- back to promoting the single `blue_trunk_drive`.
 
     FIX 2026-09-11 (earlier same day, user request, "put trunk dive in the
     p mujoco viewer for footrestitution dampratio"): this patch's own
@@ -2046,11 +2054,12 @@ def _patch_viewer_foot_restitution_plot(native_viewer: "NativeMujocoViewer", env
     # FIX 2026-09-08 (user request, "put foot clearance in the mujoco
     # viewer"): added leading_foot_lift, same mechanism.
     # FIX 2026-09-11 (user request, "call it blue_trunk_drive_vel and
-    # blue_trunk_drive_acc"): "blue_trunk_drive" renamed/split into both
-    # -- promoting both siblings so the velocity and acceleration signals
-    # are both visible at once.
+    # blue_trunk_drive_acc"): "blue_trunk_drive" renamed/split into both.
+    # REVERTED 2026-09-12 (user report, "oscillating back and forth...
+    # farming the acceleration term"): _acc deleted entirely, back to
+    # promoting the single "blue_trunk_drive".
     _ALSO_PROMOTED = (
-        "blue_trunk_drive_vel", "blue_trunk_drive_acc",
+        "blue_trunk_drive",
         "contact_yield_velocity_x", "contact_yield_velocity_y",
         "footreach", "leading_foot_lift",
     )
@@ -2875,13 +2884,26 @@ def run_play(task_id: str, cfg: PlayConfig) -> None:
                 # real RewardManager doesn't evaluate any reward during reset(),
                 # only during step()) -- call it once here so this can safely
                 # write to them from _patched_blue_reset too, not just mid-step.
+                # NOT used as this demo's own `half_y` reference below (its
+                # return value switches to the live green target once
+                # env._blue_landed_genuine fires -- this demo deliberately
+                # keeps referencing BLUE's own position through every phase,
+                # including its "post-landing" ones, so a plain inline mirror
+                # is intentional here, not a duplicate to avoid).
                 _get_reach_target_y(raw_env_for_blue, "ball", asset_cfg=_blue_feet_cfg)
 
                 start_y = raw_env_for_blue.scene.env_origins[:, 1]
                 goal_x = raw_env_for_blue.scene.env_origins[:, 0]
                 floor_z = raw_env_for_blue.scene.env_origins[:, 2]
                 full_y = _get_ball_crossing_y(raw_env_for_blue, "ball")
-                half_y = start_y + (full_y - start_y) / 2.0
+                # FIX 2026-09-12 (user request, "maximum distance of 0.35
+                # from the center 0 0 point"): mirrors rewards.py's own
+                # 0.35m cap on this identical /2 computation.
+                _BLUE_MAX_DIST_FROM_START = 0.4
+                _blue_delta = full_y - start_y
+                _blue_sign = torch.sign(_blue_delta)
+                _blue_sign = torch.where(_blue_sign == 0, torch.ones_like(_blue_sign), _blue_sign)
+                half_y = start_y + _blue_sign * (_blue_delta.abs() / 2.0).clamp(max=_BLUE_MAX_DIST_FROM_START)
                 foot_idx = _get_correct_foot_idx(raw_env_for_blue, "ball")
 
                 t = int(raw_env_for_blue.episode_length_buf[0].item()) % _blue_period

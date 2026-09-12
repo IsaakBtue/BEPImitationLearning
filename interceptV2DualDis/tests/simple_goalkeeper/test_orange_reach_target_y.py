@@ -25,16 +25,12 @@ guarantees the gap by construction rather than approximating it. Also
 depends on `wide_threshold` (rewards.py:_get_reach_target_y) having moved
 0.5 -> 0.6 in the same change.
 
-UPDATE 2026-09-12 (same day, user request, "for orange ball landed have
-the distance 0.3 between it and blue ball"): GAP 0.25 -> 0.30. NOTE this
-reopens the exact degenerate case the 0.25 gap safely avoided: at the new
-wide_threshold minimum (delta=0.6), blue_dist_from_start=0.30 exactly
-EQUALS the new 0.30m gap, so orange_dist_from_start = max(0.30-0.30,0) = 0
--- orange sits exactly AT start_y again at the tightest wide crossing, the
-same geometry overlap that originally caused the "free landing"
-misclassification bug (see the earlier `_ORANGE_START_MIN` entry in
-docs/BugFixes.md). Not re-guarded here per explicit user instruction
-("nothing else" scoping from the original rewrite) -- flagged, not fixed.
+UPDATE 2026-09-12 (same day, several follow-up requests): GAP
+0.25 -> 0.30 -> 0.25 -> 0.30 -> 0.25 -> 0.23 (current). Blue's own
+distance-from-start (`_get_reach_target_y`) capped, also revised same day:
+0.35 -> 0.40 (current) -- mirrored here in `blue_dist_from_start`'s own
+computation, so orange's gap stays correct (derived from blue's ACTUAL,
+capped position) once the cap engages.
 """
 import torch
 
@@ -68,45 +64,52 @@ def _orange_y(crossing_delta: float) -> float:
     return result[0].item()
 
 
-_ORANGE_BLUE_GAP = 0.30
+_ORANGE_BLUE_GAP = 0.23
+_BLUE_MAX_DIST_FROM_START = 0.4  # 2026-09-12: mirrors _get_reach_target_y's own cap
 
 
 def _expected_dist_from_start(delta: float) -> float:
     """Reference implementation of the new blue-anchored formula."""
-    blue_dist_from_start = abs(delta) / 2.0
+    blue_dist_from_start = min(abs(delta) / 2.0, _BLUE_MAX_DIST_FROM_START)
     return max(blue_dist_from_start - _ORANGE_BLUE_GAP, 0.0)
 
 
-def test_orange_target_floors_at_start_y_exactly_at_wide_threshold():
-    # delta=+0.60m (the wide_threshold minimum) -> blue_dist=0.30, which
-    # EXACTLY equals the 0.30m gap -- orange collapses to exactly start_y
-    # (0.0) at the tightest real wide crossing. See module docstring's
-    # 2026-09-12 UPDATE note: this is a known, accepted degenerate case at
-    # this specific gap value, not a bug.
+def test_orange_target_at_wide_threshold():
+    # delta=+0.60m (the wide_threshold minimum) -> blue_dist=0.30,
+    # orange_dist=0.30-0.23=0.07.
     expected = _expected_dist_from_start(0.6)
-    assert expected == 0.0
-    assert abs(_orange_y(0.6) - 0.0) < 1e-6
+    assert abs(_orange_y(0.6) - expected) < 1e-6
+    assert abs(expected - 0.07) < 1e-6
 
 
 def test_orange_target_at_moderate_delta():
-    # delta=+0.70m -> blue_dist=0.35, orange_dist=0.35-0.30=0.05 -- the
-    # smallest delta with a genuinely positive orange distance.
+    # delta=+0.70m -> blue_dist=0.35, orange_dist=0.35-0.23=0.12.
     expected = _expected_dist_from_start(0.7)
     assert abs(_orange_y(0.7) - expected) < 1e-6
-    assert abs(expected - 0.05) < 1e-6
+    assert abs(expected - 0.12) < 1e-6
+
+
+def test_orange_target_at_blue_cap_boundary():
+    # delta=+0.80m -> blue_dist=0.40, exactly at its own cap boundary --
+    # orange_dist=0.40-0.23=0.17.
+    expected = _expected_dist_from_start(0.8)
+    assert abs(_orange_y(0.8) - expected) < 1e-6
+    assert abs(expected - 0.17) < 1e-6
 
 
 def test_orange_target_at_large_delta():
-    # delta=+1.00m -> blue_dist=0.50, orange_dist=0.50-0.30=0.20.
+    # delta=+1.00m -> raw blue_dist=0.50, but CAPPED at 0.40 -- identical
+    # to the 0.8m case above, since blue's own distance is flat past its
+    # cap.
     expected = _expected_dist_from_start(1.0)
     assert abs(_orange_y(1.0) - expected) < 1e-6
-    assert abs(expected - 0.20) < 1e-6
+    assert abs(expected - 0.17) < 1e-6
 
 
 def test_orange_target_floors_at_start_y_for_degenerate_small_delta():
     # delta=+0.40m (below wide_threshold=0.6, only reachable via a
-    # region-forced-wide degenerate case) -> blue_dist=0.20, well below the
-    # 0.30m gap -- orange collapses to exactly start_y (0).
+    # region-forced-wide degenerate case) -> blue_dist=0.20, below the
+    # 0.23m gap -- orange collapses to exactly start_y (0).
     expected = _expected_dist_from_start(0.4)
     assert expected == 0.0
     assert abs(_orange_y(0.4) - 0.0) < 1e-6
@@ -118,16 +121,16 @@ def test_orange_target_sign_safe_for_right_side_crossings():
     assert abs(_orange_y(-1.0) - (-expected)) < 1e-6
 
 
-def test_gap_between_blue_and_orange_is_at_least_030m_for_wide_crossings_above_threshold():
-    """Mirrors the original design intent: for delta STRICTLY above
-    wide_threshold, the blue-orange gap is always exactly 0.30m (once the
-    floor isn't binding). At exactly delta=wide_threshold (0.6) the floor
-    DOES bind (see test above) -- excluded here deliberately."""
-    for delta in [0.7, 0.8, 0.9, 1.0, 1.1]:
-        blue_dist = delta / 2.0
+def test_gap_between_blue_and_orange_is_at_least_023m_for_wide_crossings_above_wide_threshold():
+    """For every delta at/above wide_threshold (0.6), the blue-orange gap is
+    always exactly 0.23m, once the floor isn't binding -- true here for
+    every value in this range, since blue_dist=0.30 at delta=0.6 already
+    exceeds the 0.23m gap. Uses blue's ACTUAL (capped) distance-from-start."""
+    for delta in [0.6, 0.7, 0.8, 0.9, 1.0, 1.1]:
+        blue_dist = min(delta / 2.0, _BLUE_MAX_DIST_FROM_START)
         orange_dist = _expected_dist_from_start(delta)
         gap = blue_dist - orange_dist
-        assert abs(gap - _ORANGE_BLUE_GAP) < 1e-9, f"gap {gap} != 0.30 at delta={delta}"
+        assert abs(gap - _ORANGE_BLUE_GAP) < 1e-9, f"gap {gap} != 0.23 at delta={delta}"
 
 
 def test_trailing_idx_is_complement_of_leading_foot_idx():

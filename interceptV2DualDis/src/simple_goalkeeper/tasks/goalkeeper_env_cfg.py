@@ -609,26 +609,17 @@ def goalkeeper_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
         # 6144_yieldweightrescale_2026-08-25 run) exhibited. See
         # docs/BugFixes.md.
         # RENAMED 2026-09-11 (user request, "call it blue_trunk_drive_vel
-        # and blue_trunk_drive_acc"): was "blue_trunk_drive_curriculum" /
-        # reward_name "blue_trunk_drive" -- base_weight/mechanism unchanged.
-        cfg.curriculum["blue_trunk_drive_vel_curriculum"] = CurriculumTermCfg(
+        # and blue_trunk_drive_acc"), REVERTED 2026-09-12 (user report,
+        # "it is oscillating back and forth and thus i think farming the
+        # acceleration term so maybe indeed remove it and go back like it
+        # was before"): the split into "blue_trunk_drive_vel_curriculum"/
+        # "blue_trunk_drive_acc_curriculum" is undone -- back to the single
+        # original "blue_trunk_drive_curriculum" / reward_name
+        # "blue_trunk_drive". base_weight/mechanism unchanged throughout.
+        cfg.curriculum["blue_trunk_drive_curriculum"] = CurriculumTermCfg(
             func=gk_mdp.reward_curriculum_ep_len,
             params={
-                "reward_name": "blue_trunk_drive_vel",
-                "base_weight": 20.0,
-                "update_interval": 500,
-                "ep_len_divisor":  50,
-            },
-        )
-        # NEW 2026-09-11 (user request, "don't u want a reward for
-        # acceleration for blue_trunk_drive?... add it"): same curriculum
-        # shape/base_weight as the velocity term (user-confirmed via
-        # AskUserQuestion: same weight/clamp convention) -- see
-        # rewards.py:blue_trunk_drive_acc.
-        cfg.curriculum["blue_trunk_drive_acc_curriculum"] = CurriculumTermCfg(
-            func=gk_mdp.reward_curriculum_ep_len,
-            params={
-                "reward_name": "blue_trunk_drive_acc",
+                "reward_name": "blue_trunk_drive",
                 "base_weight": 20.0,
                 "update_interval": 500,
                 "ep_len_divisor":  50,
@@ -1194,7 +1185,7 @@ def goalkeeper_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
         # gap where footreach's own vel_sigma (foot velocity) only reactivates
         # once ball_x_local <= 1.5m, leaving no locomotion incentive for the
         # (often much longer) window between a genuine blue landing and the
-        # ball finally closing in. See rewards.py:blue_trunk_drive_vel docstring.
+        # ball finally closing in. See rewards.py:blue_trunk_drive docstring.
         # FIX 2026-08-12: weight 5.0 -> 10.0, matching the curriculum's
         # base_weight bump above (blue_trunk_drive_curriculum) -- keeps the
         # cu=0 static weight and the curriculum's cu=0 baseline in sync, per
@@ -1202,24 +1193,16 @@ def goalkeeper_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
         # play-mode weight").
         # FIX 2026-08-25 (user request, "faster blue/green approach"):
         # weight 10.0 -> 20.0, matching curriculum base_weight bump above.
-        # RENAMED 2026-09-11 (user request, "call it blue_trunk_drive_vel
-        # and blue_trunk_drive_acc"): was "blue_trunk_drive" -- weight/
-        # mechanism unchanged, only the name (to make room for the new
-        # acceleration sibling right below).
-        "blue_trunk_drive_vel": RewardTermCfg(
-            func=gk_mdp.blue_trunk_drive_vel,
-            weight=20.0,
-            params={"ball_name": BALL_NAME, "asset_cfg": _FEET_CFG},
-        ),
-        # NEW 2026-09-11 (user request, "don't u want a reward for
-        # acceleration for blue_trunk_drive? it is only velocity if so add
-        # it"): sibling of blue_trunk_drive_vel -- rewards the RATE OF
-        # CHANGE of trunk velocity toward the target, not the velocity
-        # itself. Same weight/clamp convention as the velocity term
-        # (user-confirmed via AskUserQuestion). See rewards.py:
-        # blue_trunk_drive_acc docstring.
-        "blue_trunk_drive_acc": RewardTermCfg(
-            func=gk_mdp.blue_trunk_drive_acc,
+        # RENAMED 2026-09-11 then REVERTED 2026-09-12 (user report, "it is
+        # oscillating back and forth and thus i think farming the
+        # acceleration term so maybe indeed remove it and go back like it
+        # was before"): briefly split into blue_trunk_drive_vel/_acc to add
+        # an acceleration-based sibling; the acceleration term was found to
+        # incentivize oscillating (speeding up repeatedly farms reward
+        # rather than just walking steadily) and was deleted entirely, so
+        # this reverts back to the single original "blue_trunk_drive" name.
+        "blue_trunk_drive": RewardTermCfg(
+            func=gk_mdp.blue_trunk_drive,
             weight=20.0,
             params={"ball_name": BALL_NAME, "asset_cfg": _FEET_CFG},
         ),
