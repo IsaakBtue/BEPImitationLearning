@@ -348,10 +348,18 @@ def goalkeeper_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
         # env._ball_difficulty (see the class's own docstring) -- no more
         # step_size/ep_len_divisor/update_interval, those were for the old
         # independent accumulator this class no longer has.
+        # FIX 2026-09-12 (user request, "make the narrow to wide range from
+        # 0.5 to 0.6" -- part of guaranteeing a 0.25m blue-orange gap, see
+        # rewards.py:_get_orange_reach_target_y): lo 0.5 -> 0.6, kept in
+        # sync with rewards.py's wide_threshold and regions.py's near/far
+        # boundary. The curriculum itself is unaffected in SHAPE -- it
+        # still seeds the far region's inner bound wider than lo and
+        # shrinks it down toward lo over training, "closing the gap
+        # towards" whatever lo is now (0.6, not 0.5).
         cfg.curriculum["far_travel"] = CurriculumTermCfg(
             func=gk_mdp.far_travel_curriculum,
             params={
-                "lo": 0.5,
+                "lo": 0.6,
                 "hi": 1.0,
             },
         )
@@ -1339,10 +1347,13 @@ def goalkeeper_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
         # change as leading_foot_lift above.
         # FIX 2026-08-29 (user request): reverted 0.05 -> 0.10, same reason
         # as leading_foot_lift above.
+        # FIX 2026-09-12 (user request, "do 5cm", then corrected "put the
+        # trailing foot height to 3 cm not 5"): target_height 0.10 -> 0.05
+        # -> 0.03.
         "trailing_foot_lift": RewardTermCfg(
             func=gk_mdp.trailing_foot_lift,
             weight=2.0,
-            params={"ball_name": BALL_NAME, "target_height": 0.10, "asset_cfg": _FEET_CFG},
+            params={"ball_name": BALL_NAME, "target_height": 0.03, "asset_cfg": _FEET_CFG},
         ),
         # NEW 2026-08-23 (user request): successor to the removed (2026-06-29)
         # airborne_at_save -- continuous (not one-shot binary), leading foot

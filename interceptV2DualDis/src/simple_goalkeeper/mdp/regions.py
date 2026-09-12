@@ -24,12 +24,21 @@ REGION_NAMES: tuple[str, ...] = ("left_near", "left_far", "right_near", "right_f
 
 # Per-region ball-spawn y_start_range / y_end_range. Side sign matches the
 # existing convention: positive Y crossing = left, negative Y crossing =
-# right (see rewards.py:_get_correct_foot_idx). |cross_y| < 0.5 = near,
-# >= 0.5 = far.
+# right (see rewards.py:_get_correct_foot_idx). |cross_y| < 0.6 = near,
+# >= 0.6 = far.
 # FIX 2026-08-01: near/far boundary narrowed 0.65 -> 0.5 (user request,
 # reverting the 2026-07-23 widening) -- keep in sync with rewards.py's
 # wide_threshold and far_travel_curriculum's `lo` default (events.py),
 # both of which encode this same boundary.
+# FIX 2026-09-12 (user request, "make the narrow to wide range from 0.5 to
+# 0.6" -- part of guaranteeing a 0.25m blue-orange gap, see rewards.py:
+# _get_orange_reach_target_y): 0.5 -> 0.6. The region_estimator (a plain
+# learned classifier, him_actor_critic.py) has no hardcoded boundary of
+# its own -- it trains against whatever env._region_id says (multi_disc_
+# amp_ppo.py's region_loss cross-entropy against critic_obs's region_id
+# column), so this move is safe for it as long as this dict, rewards.py's
+# wide_threshold, and far_travel_curriculum's registered "lo" (goalkeeper_
+# env_cfg.py) all stay in sync -- confirmed all three updated together.
 _REGION_Y_START_RANGE: dict[int, tuple[float, float]] = {
     0: (0.0, 0.3),     # left_near
     1: (0.0, 0.3),     # left_far
@@ -49,10 +58,10 @@ _REGION_Y_END_RANGE: dict[int, tuple[float, float]] = {
     # branch (the two-sided mechanism's random 50/50 side flip, which would
     # break region-conditioning). 1e-4 (0.1mm) is physically negligible but
     # keeps the sign-product check working with a large margin.
-    0: (1e-4, 0.5),    # left_near: crosses on the left, under 0.5 m
-    1: (0.5, 1.0),     # left_far: crosses on the left, at/above 0.5 m
-    2: (-0.5, -1e-4),  # right_near
-    3: (-1.0, -0.5),   # right_far
+    0: (1e-4, 0.6),    # left_near: crosses on the left, under 0.6 m
+    1: (0.6, 1.0),     # left_far: crosses on the left, at/above 0.6 m
+    2: (-0.6, -1e-4),  # right_near
+    3: (-1.0, -0.6),   # right_far
 }
 # FIX 2026-08-01: far outer bound narrowed 1.3 -> 1.1 (user request), kept
 # in sync with far_travel_curriculum's `hi` default (events.py) and

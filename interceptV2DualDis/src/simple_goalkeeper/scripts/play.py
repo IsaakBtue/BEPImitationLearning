@@ -525,16 +525,23 @@ class AnalyticsPolicy:
         # as blue_ball is really not overwritten somewhere and thus
         # 0.13?"): direct NUMERIC comparison of the two live radius
         # attributes, every tick -- more reliable than eyeballing the two
-        # ground rings' relative sizes. _orange_landing_radius_current is
-        # set fresh every tick by _get_orange_reach_target_y (reads
-        # env._blue_landing_radius_current directly, see that function's
-        # 2026-09-11 fix) -- if anything ever overwrites it independently,
-        # this line will show MISMATCH immediately instead of requiring a
-        # source-code read to notice.
+        # ground rings' relative sizes.
+        #
+        # UPDATE 2026-09-12 (user request, "orange ball do the variable -
+        # 0.03"): orange is now DELIBERATELY 0.03m tighter than blue, not
+        # identical -- "MATCH" would be the wrong label now. Checks
+        # BLUE_R - ORANGE_R == 0.03 (the expected derived offset) instead;
+        # still catches the same class of bug (something silently
+        # overwriting orange's radius independently of blue's), just
+        # against the new expected relationship rather than equality.
         _blue_r_dbg = getattr(env, "_blue_landing_radius_current", None)
         _orange_r_dbg = getattr(env, "_orange_landing_radius_current", None)
+        _ORANGE_RADIUS_OFFSET_DBG = 0.03
         if _blue_r_dbg is not None and _orange_r_dbg is not None:
-            _radius_match = "MATCH" if abs(_blue_r_dbg - _orange_r_dbg) < 1e-6 else "MISMATCH!"
+            _radius_match = (
+                "MATCH" if abs((_blue_r_dbg - _orange_r_dbg) - _ORANGE_RADIUS_OFFSET_DBG) < 1e-6
+                else "MISMATCH!"
+            )
             radius_cmp_dbg = f" | BLUE_R={_blue_r_dbg:.3f} ORANGE_R={_orange_r_dbg:.3f} {_radius_match}"
         else:
             radius_cmp_dbg = ""
@@ -631,8 +638,8 @@ def _patch_viewer_intercept_vis(native_viewer: "NativeMujocoViewer", env) -> Non
 
     Two-stage wide-crossing visualization (v2 reimplementation, 2026-07-23, of
     the blue-ball-waypoint branch's mechanism -- see rewards.py's
-    _get_reach_target_y). When |crossing_y - start_y| > wide_threshold (0.5
-    as of the 2026-08-01 revert -- kept symbolic here rather than
+    _get_reach_target_y). When |crossing_y - start_y| > wide_threshold (0.6
+    as of the 2026-09-12 update -- kept symbolic here rather than
     hardcoded so this comment can't drift out of sync with rewards.py's
     actual default again) or the region is a far region, and the assigned
     foot has not yet landed at the midpoint,
@@ -824,18 +831,16 @@ def _patch_viewer_intercept_vis(native_viewer: "NativeMujocoViewer", env) -> Non
             start_y = float(origins[1])
             delta = cross_y - start_y
             sign = 1.0 if delta >= 0 else -1.0
-            # FIX 2026-09-11 (user request, "put the spawn at 0.2 minimum"):
-            # mirrors rewards.py's own smooth 0.2m floor on distance-from-
-            # start (logsumexp smooth-max) -- see that file's
-            # _get_orange_reach_target_y for the full root-cause.
-            _ORANGE_START_MIN = 0.2
-            _ORANGE_START_SMOOTH_K = 15.0
-            _raw = (abs(delta) - 0.50) / 2.0 if abs(delta) > 0.50 else 0.0
-            _a = _raw * _ORANGE_START_SMOOTH_K
-            _b = _ORANGE_START_MIN * _ORANGE_START_SMOOTH_K
-            _m = max(_a, _b)
-            orange_dist_from_start = (_m + np.log(np.exp(_a - _m) + np.exp(_b - _m))) / _ORANGE_START_SMOOTH_K
-            orange_dist_from_start = min(orange_dist_from_start, abs(delta))
+            # FIX 2026-09-12 (user request, "just do this with 0.6 and also
+            # a new way of calculating only making sure of the 0.25m gap
+            # nothing else"): mirrors rewards.py's own rewritten
+            # _get_orange_reach_target_y exactly -- orange is now DEFINED
+            # as blue's own distance-from-start minus a fixed 0.25m gap,
+            # not an independent formula. Replaces the earlier 0.2m
+            # smooth-floor mechanism entirely.
+            _ORANGE_BLUE_GAP = 0.30  # FIX 2026-09-12 (user request): 0.25 -> 0.30
+            blue_dist_from_start = abs(delta) / 2.0
+            orange_dist_from_start = max(blue_dist_from_start - _ORANGE_BLUE_GAP, 0.0)
             orange_y = start_y + sign * orange_dist_from_start
             orange_color = [1.0, 0.55, 0.0, 0.75]
             orange_line_color = [1.0, 0.55, 0.0, 0.6]
@@ -2823,7 +2828,7 @@ def run_play(task_id: str, cfg: PlayConfig) -> None:
             n_blue = raw_env_for_blue.num_envs
             _blue_period = cfg.scripted_blue_approach_period_steps
             _FOOT_RESTING_HEIGHT_BLUE = 0.03  # must match leading_foot_lift's own constant
-            _FORCED_DELTA_BLUE = 0.8  # env-relative crossing offset, safely > wide_threshold (0.5)
+            _FORCED_DELTA_BLUE = 0.8  # env-relative crossing offset, safely > wide_threshold (0.6)
 
             def policy(obs: torch.Tensor) -> torch.Tensor:
                 return torch.zeros(action_shape, device=device)
@@ -3040,7 +3045,7 @@ def run_play(task_id: str, cfg: PlayConfig) -> None:
             _fr_feet_cfg.resolve(raw_env_fr.scene)
             n_fr = raw_env_fr.num_envs
             _fr_period = cfg.scripted_footreach_target_period_steps
-            _FORCED_DELTA_FR = 0.2  # safely < wide_threshold (0.5) -- narrow crossing
+            _FORCED_DELTA_FR = 0.2  # safely < wide_threshold (0.6) -- narrow crossing
             _BALL_X_LOCAL_FR = 0.3  # < 0.5 -- inside footreach's ball_close window
             _BALL_RADIUS_FR = 0.11  # matches events.py's own _BALL_RADIUS
 

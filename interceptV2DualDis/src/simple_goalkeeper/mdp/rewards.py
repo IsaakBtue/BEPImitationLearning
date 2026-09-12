@@ -575,8 +575,8 @@ def _get_reach_target_y(
     env: "ManagerBasedRlEnv",
     ball_name: str,
     asset_cfg: SceneEntityCfg = _DEFAULT_FEET_CFG,
-    wide_threshold: float = 0.5,  # FIX 2026-08-01: was 0.65, reverted to 0.5, kept in sync with regions.py's near/far boundary
-    landing_radius: float = 0.13,  # FIX 2026-09-11 (user request, "increase the landing radius by 0.01"): 0.12 -> 0.13, flat, no curriculum (still no easing -- see the flat assignment below). Was 0.12 (2026-09-11 earlier same day, "decrease the radius of blue ball with 0.02 it is too easy"), 0.14 before that (2026-09-09, "revert" back to the flat, no-curriculum real value after a 0.4 diagnostic bump), 0.13 hard/0.15 easy before that, 0.09 (briefly reverted), 0.4 (earlier diagnostic), 0.09->0.05 (2026-09-09 earlier same day), 0.20->0.18->0.15->0.13->0.09 before that (2026-07-24: was 0.08, too strict at full difficulty)
+    wide_threshold: float = 0.6,  # FIX 2026-09-12 (user request, "make the narrow to wide range from 0.5 to 0.6... so we can guarantee a 0.25m blue-orange gap"): 0.5 -> 0.6, kept in sync with regions.py's near/far boundary and events.py's far_travel_curriculum "lo". Was 0.65 (2026-07-23), reverted to 0.5 (2026-08-01), reverted again here.
+    landing_radius: float = 0.13,  # FIX 2026-09-12 (user correction, "no only for orange ball landed keep the variable landing_radius at 0.13 but orange ball do the variable - 0.03"): reverted the -0.03 shift back off blue's own default -- the -0.03 now applies ONLY inside _get_orange_reach_target_y, derived from this value, not hardcoded separately. Was 0.13 (2026-09-11, "increase the landing radius by 0.01"): 0.12 -> 0.13, flat, no curriculum (still no easing -- see the flat assignment below). Was 0.12 (2026-09-11 earlier same day, "decrease the radius of blue ball with 0.02 it is too easy"), 0.14 before that (2026-09-09, "revert" back to the flat, no-curriculum real value after a 0.4 diagnostic bump), 0.13 hard/0.15 easy before that, 0.09 (briefly reverted), 0.4 (earlier diagnostic), 0.09->0.05 (2026-09-09 earlier same day), 0.20->0.18->0.15->0.13->0.09 before that (2026-07-24: was 0.08, too strict at full difficulty)
     landing_speed_threshold: float = 1.0,  # FIX 2026-07-24: reverted to the pre-2026-07-23 value (was 0.15); see below
 ) -> torch.Tensor:
     """Two-stage reach target for wide crossings: v2 reimplementation of the
@@ -1018,24 +1018,41 @@ def _get_orange_reach_target_y(
     this reuses (leaky settle-count decrement, curriculum-eased landing
     radius/speed, free-landing classification).
 
-    Target formula (confirmed with user via worked examples, 2026-08-08
-    design spec; constant raised 0.30->0.60 same day per user request --
-    "the orange ball needs to be way further than the blue ball" -- then
-    adjusted 0.60->0.50 same day -- see docs/BugFixes.md):
-        delta = full_y - start_y                          (signed)
-        shrunk = sign(delta) * max(|delta| - 0.50, 0.0)    (50cm off the top, sign-safe)
-        orange_y = start_y + shrunk / 2.0
+    REWRITTEN 2026-09-12 (user request, "just do this with 0.6 and also a
+    new way of calculating only making sure of the 0.25m gap nothing
+    else"): every prior formula (the original 0.30->0.60->0.50 "shrink"
+    design, and the 2026-09-11 smooth 0.2m start-floor fix) is REPLACED.
+    Root problem investigated live: the user wanted a GUARANTEED >=0.25m
+    gap between blue and orange at all times. Measured live
+    (`probe_blue_orange_distance.py`) that the old formulas' gap shrank to
+    as little as 0.047m at the tightest wide crossing (delta=wide_threshold)
+    -- nowhere near 0.25m, and asymptotically approached 0.25m only in the
+    limit of delta->infinity, never reaching it within the task's real
+    delta range (max ~1.0m via far_travel_curriculum's hi).
 
-    UPDATE 2026-09-11 (user request, "put the spawn at 0.2 minimum"): the
-    `shrunk/2.0` distance-from-start above is now smoothly floored at 0.2m
-    (logsumexp smooth-max) rather than used raw -- see the code's own
-    comment for the full root-cause (orange sat exactly AT start_y for
-    every near-wide_threshold crossing, driving a large share of the
-    "free landing" misclassification rate).
+    New formula (blue-anchored, guarantees the gap by construction rather
+    than approximating it):
+        blue_dist_from_start = |delta| / 2.0     (mirrors _get_reach_target_y's own plain /2 formula exactly)
+        orange_dist_from_start = max(blue_dist_from_start - 0.25, 0.0)
+        orange_y = start_y + sign(delta) * orange_dist_from_start
 
-    Equivalently: blue's own midpoint, 25cm short of it in delta-magnitude
-    terms -- NOT a plain `delta - 0.50` (that would push the target further
-    OUT, not in, for right-side/negative-delta crossings).
+    Orange is now DEFINED as "exactly 0.25m closer to start than blue,"
+    not an independent formula that merely happens to usually be far from
+    blue. The `max(..., 0.0)` floor only matters in the degenerate
+    region-forced-wide-but-tiny-delta case (blue_dist_from_start < 0.25m)
+    -- for any REAL wide crossing (delta >= wide_threshold = 0.6, see that
+    function's own 2026-09-12 update raising it from 0.5 for this exact
+    purpose), blue_dist_from_start >= 0.3m > 0.25m, so this floor never
+    binds and the gap is genuinely, exactly 0.25m everywhere in practice.
+
+    Per explicit user instruction ("nothing else"), this deliberately does
+    NOT preserve the old 0.2m minimum-distance-from-start floor (the fix
+    for a "free landing" misclassification bug, docs/BugFixes.md
+    2026-09-11) -- at the tightest wide crossing (delta=0.6),
+    orange_dist_from_start = 0.3-0.25 = 0.05m, BELOW that old floor. This
+    reopens some of that free-landing risk at the tightest crossings as a
+    known, accepted trade for the guaranteed gap; not re-added here since
+    the user's own instruction was to optimize for the gap alone.
 
     Reuses env._blue_wide (set by _get_reach_target_y, which every existing
     wide-gated reward already calls first in the reward-manager's term
@@ -1065,29 +1082,13 @@ def _get_orange_reach_target_y(
     wide = getattr(env, "_blue_wide", torch.zeros_like(delta, dtype=torch.bool))
     env._orange_wide = wide
 
-    # FIX 2026-09-11 (user request, "put the spawn at 0.2 minimum to
-    # decrease the episodes that it happens to be free"): root cause of a
-    # large share of orange's "free" (suspiciously-early) landings --
-    # `orange_dist_from_start = (|delta|-0.50).clamp(min=0)/2` is EXACTLY 0
-    # at delta=wide_threshold(0.5), i.e. orange sits AT the robot's own
-    # spawn/start position for every near-threshold wide crossing. Any
-    # reasonable RSI donor pose or even a completely idle stance already
-    # satisfies "within landing_radius of orange" at reset for that whole
-    # band of crossings -- not RSI luck, a genuine geometry overlap, same
-    # class of bug already fixed for blue's own distance-from-start
-    # (_BLUE_START_MIN). Applied the identical smooth-floor technique
-    # (logsumexp smooth-max, not a hard clamp, so no kink is introduced):
-    # floors orange's distance from start at 0.2m, capped at |delta| for
-    # the same region-forced-wide-but-small-delta degenerate safety blue's
-    # own floor uses.
-    _ORANGE_START_MIN = 0.2
-    _ORANGE_START_SMOOTH_K = 15.0
-    orange_dist_from_start_raw = (delta.abs() - 0.50).clamp(min=0.0) / 2.0
-    _a = orange_dist_from_start_raw * _ORANGE_START_SMOOTH_K
-    _b = torch.full_like(_a, _ORANGE_START_MIN * _ORANGE_START_SMOOTH_K)
-    _m = torch.maximum(_a, _b)
-    orange_dist_from_start = (_m + torch.log(torch.exp(_a - _m) + torch.exp(_b - _m))) / _ORANGE_START_SMOOTH_K
-    orange_dist_from_start = torch.minimum(orange_dist_from_start, delta.abs())
+    # FIX 2026-09-12 (user request, "make sure of the 0.25m gap nothing
+    # else"): orange is now DEFINED relative to blue -- see docstring for
+    # the full derivation and why the old independent formula could never
+    # guarantee this gap.
+    _ORANGE_BLUE_GAP = 0.30  # FIX 2026-09-12 (user request): 0.25 -> 0.30
+    blue_dist_from_start = delta.abs() / 2.0  # mirrors _get_reach_target_y's own plain /2 formula
+    orange_dist_from_start = (blue_dist_from_start - _ORANGE_BLUE_GAP).clamp(min=0.0)
     sign = torch.sign(delta)
     sign = torch.where(sign == 0, torch.ones_like(sign), sign)
     orange_y = start_y + sign * orange_dist_from_start
@@ -1110,15 +1111,20 @@ def _get_orange_reach_target_y(
     # FIX 2026-09-11 (user request, "make sure the orange ball uses the
     # same landing radius variable as blue ball"): was its own independent
     # ball_difficulty-eased lerp (0.11 easy -> 0.09 hard) -- orange's own
-    # landing_radius param and easing removed entirely. Now reads
-    # env._blue_landing_radius_current directly (set fresh by
-    # _get_reach_target_y, which always runs before this function in the
-    # real term order -- same freshness guarantee this function already
-    # relies on for env._blue_wide). Blue's own radius has been flat, no
-    # curriculum, since 2026-09-09 -- so this is also a de-facto curriculum
-    # removal for orange, matching blue's current state exactly rather than
-    # independently re-deriving it.
-    landing_radius = float(getattr(env, "_blue_landing_radius_current", 0.12))
+    # landing_radius param and easing removed entirely. Now DERIVED from
+    # env._blue_landing_radius_current (set fresh by _get_reach_target_y,
+    # which always runs before this function in the real term order --
+    # same freshness guarantee this function already relies on for
+    # env._blue_wide), not an independently hardcoded value.
+    #
+    # UPDATE 2026-09-12 (user request, "for orange ball landed keep the
+    # variable landing_radius at 0.13 but orange ball do the variable -
+    # 0.03"): orange is now strictly tighter than blue by a fixed 0.03m --
+    # still reads blue's LIVE value first (so it can't drift out of sync if
+    # blue's own radius is retuned later), just offset from it, rather than
+    # literally identical to it.
+    _ORANGE_RADIUS_OFFSET = 0.03
+    landing_radius = float(getattr(env, "_blue_landing_radius_current", 0.13)) - _ORANGE_RADIUS_OFFSET
     env._orange_landing_radius_current = landing_radius
 
     d = float(min(max(getattr(env, "_ball_difficulty", 1.0), 0.0), 1.0))
@@ -1153,8 +1159,10 @@ def _get_orange_reach_target_y(
         # of a reported feet_slippage spike (model_3000.pt,
         # 6144_forcelandingfix run) -- a foot dragging at speed while
         # "in contact" is exactly what feet_slippage measures/penalizes.
-        # Same 40N threshold as blue, not independently recalibrated.
-        _LANDING_FORCE_THRESHOLD = 40.0  # Newtons; matches _get_reach_target_y's own value
+        # FIX 2026-09-12 (user request, "devide by 2 the necessary force
+        # needed for orange ball"): 40.0 -> 20.0N -- orange-only change, red
+        # and blue keep their own 40N threshold untouched.
+        _LANDING_FORCE_THRESHOLD = 20.0  # Newtons; was 40.0 (matched _get_reach_target_y's own value), halved per user request
         force_per_geom = feet_contact.data.force.norm(dim=-1)                 # (N, 8)
         left_force = force_per_geom[:, :4].max(dim=-1).values
         right_force = force_per_geom[:, 4:].max(dim=-1).values
@@ -2263,21 +2271,50 @@ def blue_trunk_drive_vel(
     # undetected contributor to "goes over blue toward the real ball."
     # Same UNCAPPED linear penalty shape as footreach's own 2026-09-09 fix
     # (user explicitly asked for "strict towards negative", not a hard
-    # zero) -- 0 at/before the kill threshold (env._blue_landing_radius_
-    # current), grows without bound past it. `reach_target_y` is safe to
-    # reuse as the "blue" reference here: it equals half_y (blue) for the
-    # entire window this penalty is active (overshoot_active requires
-    # ~env._blue_landed_genuine, the same phase1_active condition that
-    # keeps reach_target_y pinned at half_y).
+    # zero).
+    #
+    # FIX 2026-09-12 (user report, "the root like the chest where trunk
+    # drive is for goes passed the hip, so all the weight is on the
+    # leading foot, this causes the leading foot to not be lifted up
+    # again"): root cause verified directly in this code -- the overshoot
+    # penalty below used to require `~env._blue_landed_genuine`, i.e. it
+    # was HARD-DISABLED the instant blue landed, while `drive` itself
+    # stayed fully active (now targeting the live ball) for the entire
+    # post-landing-to-save window with ZERO constraint on how far the
+    # trunk could advance past the leading foot's own position. Nothing
+    # stopped the CoM from projecting past the single-foot base of
+    # support once landed, pinning all the weight onto that foot and
+    # making it physically hard to lift again -- exactly the reported
+    # mechanism.
+    #
+    # Fix: (1) the penalty is now active for the group's ENTIRE active
+    # window (just `active`, not a separate landed-genuine-gated flag) --
+    # protects the trunk-past-foot relation both pre- AND post-landing.
+    # (2) re-keyed from the frozen/live waypoint (`reach_target_y`) to the
+    # ASSIGNED (leading) foot's own LIVE Y position -- the actual
+    # physically-relevant reference ("how far past your own planted foot
+    # has your trunk gotten"), not an arbitrary target point that may not
+    # coincide with where the foot currently is. (3) user request, "make a
+    # buffer for the penalty so not exactly passed the location of the
+    # leading foot but before that already": the zero-penalty zone now
+    # ends BEFORE the foot's own line, not at/past it -- threshold is
+    # `-_TRUNK_FOOT_BUFFER` (0.10m), so the penalty starts ramping while
+    # the trunk is still 0.10m short of the foot, giving the policy an
+    # early cue to stop advancing rather than only correcting once already
+    # unstable.
+    foot_pos_w = robot.data.body_link_pos_w[:, asset_cfg.body_ids, :]  # (N, 2, 3)
+    foot_idx = _get_correct_foot_idx(env, ball_name)                   # (N,) leading foot
+    arange_n = torch.arange(env.num_envs, device=env.device)
+    assigned_foot_y = foot_pos_w[arange_n, foot_idx, 1]
+
     _TRUNK_OVERSHOOT_SLOPE = 10.0  # same slope as footreach's own fix, for consistency
-    overshoot_active = env._blue_wide & ~env._blue_landed_genuine
+    _TRUNK_FOOT_BUFFER = 0.10  # meters BEFORE the foot's own line where the penalty zone begins
     start_y = env.scene.env_origins[:, 1]
     direction = torch.sign(reach_target_y - start_y)
     direction = torch.where(direction == 0, torch.ones_like(direction), direction)
-    signed_progress = direction * (trunk_y - reach_target_y)
-    radius = env._blue_landing_radius_current
-    overshoot_excess = (signed_progress - radius).clamp(min=0.0)
-    overshoot_penalty = _TRUNK_OVERSHOOT_SLOPE * overshoot_excess * overshoot_active.float()
+    signed_progress_past_foot = direction * (trunk_y - assigned_foot_y)
+    overshoot_excess = (signed_progress_past_foot + _TRUNK_FOOT_BUFFER).clamp(min=0.0)
+    overshoot_penalty = _TRUNK_OVERSHOOT_SLOPE * overshoot_excess
 
     return drive * active.float() - overshoot_penalty * active.float()
 
@@ -2299,12 +2336,10 @@ def blue_trunk_drive_acc(
     3 m/s scores full marks on the velocity term but zero here -- this one
     specifically wants the ramp-up, not just the cruise).
 
-    Same active window, same clamp range [0, 3] m/s^2 (user-confirmed via
-    AskUserQuestion: same weight/clamp convention as the velocity term),
-    and the identical overshoot-penalty mechanism (same slope, same
-    direction-aware signed-progress metric, same kill threshold) --
-    carrying speed PAST blue while unlanded is exactly as wrong here as it
-    is for the velocity term, for the same reason.
+    Same active window and the identical overshoot-penalty mechanism (same
+    slope, same direction-aware signed-progress metric, same kill
+    threshold) -- carrying speed PAST blue while unlanded is exactly as
+    wrong here as it is for the velocity term, for the same reason.
 
     Computes its own `vel_toward` independently (not read from
     `blue_trunk_drive_vel`'s own computation) so this term has no call-
@@ -2317,6 +2352,36 @@ def blue_trunk_drive_acc(
     so the very first tick of an episode reads exactly 0 acceleration
     (nothing to compare against yet) rather than a spurious spike from
     comparing against a stale zero baseline.
+
+    FIX 2026-09-12 (user report, "blue_trunk_dive saturates a lot its
+    almost always either 0 reward or 50 in the mujoco p viewer shouldn't
+    we debug this"): measured live (real checkpoint rollout,
+    `probe_trunk_drive_distribution.py`) that this term genuinely DOES
+    saturate at its own ceiling ~53% of the ticks it's active -- NOT a
+    display bug (blue_trunk_drive_vel, checked the same way, is fine --
+    smooth distribution, only 3% near its own max). Root cause: `[0,3]`
+    m/s^2 was calibrated against a RAW, single-tick (0.02s) finite
+    difference of velocity -- over one physics step that only corresponds
+    to a 0.06 m/s velocity change, so any real push-off/weight-shift
+    trivially blows past it, making the term near-binary (0 or pinned at
+    the cap) rather than graded.
+    User-confirmed via AskUserQuestion: BOTH smooth AND widen. Measured the
+    real achieved range live at several EMA alphas before picking numbers
+    (`probe_raw_accel_range.py`, same checkpoint): raw (alpha=1.0, no
+    smoothing) already exceeds the OLD 3.0 clamp by its own 75th
+    percentile (p75=3.11); alpha=0.3 (EMA over roughly a 0.1s window)
+    brings p75 down to 2.59 and p95 to 4.04, with a genuine (not
+    degenerate) tail out to ~8.9. Picked alpha=0.3 (moderate smoothing --
+    filters single-frame noise while staying responsive) and widened the
+    clamp `[0,3] -> [0,6]` m/s^2 (covers roughly the 95th-97th percentile
+    of the real smoothed distribution, so the term can now discriminate
+    "just starting to accelerate" from "accelerating hard" across nearly
+    its whole practical range, only clipping genuine extremes).
+    `env._blue_trunk_drive_smoothed_accel` is this term's own EMA state
+    (separate from `_prev_vel_toward`, which still tracks the raw
+    finite-difference baseline) -- reset to the first tick's raw value on
+    episode start, same "no spurious first-tick spike" convention as
+    `_prev_vel_toward` above.
     """
     reach_target_y = _get_reach_target_y(env, ball_name, asset_cfg=asset_cfg)  # (N,) blue or green Y, phase-aware
 
@@ -2339,22 +2404,40 @@ def blue_trunk_drive_acc(
     accel_toward = (vel_toward - env._blue_trunk_drive_prev_vel_toward) / _DT
     env._blue_trunk_drive_prev_vel_toward = vel_toward.clone()
 
-    drive = accel_toward.clamp(0.0, 3.0)  # 0..3 m/s^2, same magnitude convention as blue_trunk_drive_vel's own m/s clamp
+    # FIX 2026-09-12: EMA-smooth the raw finite-difference before clamping
+    # -- see docstring for the full derivation and the live percentiles
+    # that picked alpha=0.3 and the widened [0,6] clamp.
+    _ACCEL_EMA_ALPHA = 0.3
+    if not hasattr(env, "_blue_trunk_drive_smoothed_accel"):
+        env._blue_trunk_drive_smoothed_accel = torch.zeros(n, device=env.device)
+    env._blue_trunk_drive_smoothed_accel = torch.where(
+        just_reset, accel_toward,
+        _ACCEL_EMA_ALPHA * accel_toward + (1.0 - _ACCEL_EMA_ALPHA) * env._blue_trunk_drive_smoothed_accel,
+    )
+
+    drive = env._blue_trunk_drive_smoothed_accel.clamp(0.0, 6.0)  # 0..6 m/s^2 (widened from 3.0), on the SMOOTHED signal
 
     behind = _ball_is_behind(env, ball_name)
     active = env._blue_wide & (~behind)
 
-    # Same overshoot penalty as blue_trunk_drive_vel -- see that function's
-    # own comment for the full reasoning, unchanged here.
+    # FIX 2026-09-12 (same root cause and fix as blue_trunk_drive_vel --
+    # see that function's own comment for the full derivation): overshoot
+    # penalty re-keyed to the leading foot's own live Y position (not the
+    # frozen/live waypoint), active for the term's ENTIRE window (not just
+    # pre-landing), with a buffer that starts BEFORE the foot's own line.
+    foot_pos_w = robot.data.body_link_pos_w[:, asset_cfg.body_ids, :]  # (N, 2, 3)
+    foot_idx = _get_correct_foot_idx(env, ball_name)                   # (N,) leading foot
+    arange_n = torch.arange(env.num_envs, device=env.device)
+    assigned_foot_y = foot_pos_w[arange_n, foot_idx, 1]
+
     _TRUNK_OVERSHOOT_SLOPE = 10.0
-    overshoot_active = env._blue_wide & ~env._blue_landed_genuine
+    _TRUNK_FOOT_BUFFER = 0.10  # meters BEFORE the foot's own line where the penalty zone begins
     start_y = env.scene.env_origins[:, 1]
     direction = torch.sign(reach_target_y - start_y)
     direction = torch.where(direction == 0, torch.ones_like(direction), direction)
-    signed_progress = direction * (trunk_y - reach_target_y)
-    radius = env._blue_landing_radius_current
-    overshoot_excess = (signed_progress - radius).clamp(min=0.0)
-    overshoot_penalty = _TRUNK_OVERSHOOT_SLOPE * overshoot_excess * overshoot_active.float()
+    signed_progress_past_foot = direction * (trunk_y - assigned_foot_y)
+    overshoot_excess = (signed_progress_past_foot + _TRUNK_FOOT_BUFFER).clamp(min=0.0)
+    overshoot_penalty = _TRUNK_OVERSHOOT_SLOPE * overshoot_excess
 
     return drive * active.float() - overshoot_penalty * active.float()
 
@@ -4951,7 +5034,7 @@ def foot_inner_face_continuous(
     # should just be the 70" (there IS no blue to wait for on a narrow
     # crossing). Wide crossings are unaffected -- same pre-landing ->
     # post-landing switch as before, just via the correct shared gate.
-    _PRE_LANDING_TARGET_ANGLE_DEG = 20.0
+    _PRE_LANDING_TARGET_ANGLE_DEG = 45.0  # FIX 2026-09-12 (user request): 20 -> 45
     blue_wide = getattr(env, "_blue_wide", torch.zeros(env.num_envs, dtype=torch.bool, device=env.device))
     blue_landed_genuine = getattr(env, "_blue_landed_genuine", torch.zeros(env.num_envs, dtype=torch.bool, device=env.device))
     targeting_green = (~blue_wide) | blue_landed_genuine
