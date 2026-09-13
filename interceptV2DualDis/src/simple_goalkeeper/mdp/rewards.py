@@ -2595,7 +2595,7 @@ def start_blue_transition_track(
     ball_name: str,
     asset_cfg: SceneEntityCfg = _DEFAULT_FEET_CFG,
     sigma: float = 5.0,
-    window_frac_of_remaining: float = 0.9,
+    window_frac_of_remaining: float = 0.5,
     min_window_steps: int = 5,
     lift_target_height: float = 0.10,
 ) -> torch.Tensor:
@@ -2617,21 +2617,23 @@ def start_blue_transition_track(
     third time (it's already computed there and in
     `_get_orange_reach_target_y`'s own copy).
 
-    `window_frac_of_remaining` defaults to 0.9 (ABOVE blue_green's own 0.8).
-    FIX 2026-09-13 (user report, "start_blue transition is really fast"):
-    was 0.5 originally -- a "budget half the total remaining time, leave the
-    rest for the blue->green leg" split that turned out too tight in
-    practice, since this leg alone covers the FULL start->blue distance (up
-    to 0.4m) against `remaining_t` captured essentially at episode start
-    (the largest remaining-time value either leg ever sees, so 0.5 of it
-    still produced a visibly rushed sweep). Deactivation is driven by
-    `extra_active_mask` (blue landing), not by this window elapsing early --
-    the window only controls how long the term stays patient before its own
-    target fully collapses onto blue and effectively goes idle -- so raising
-    this has no risk of cutting the transition off early, only of giving it
-    more slack. Not independently tuned beyond "clearly wider than the
-    fast-feeling 0.5, and a bit above blue_green's 0.8 since this leg
-    covers the larger distance."
+    `window_frac_of_remaining` defaults to 0.5 -- a "budget half the total
+    remaining time, leave the rest for the blue->green leg" split.
+    HISTORY 2026-09-13: was 0.5 at first, briefly raised to 0.9 same day
+    (user report, "start_blue transition is really fast") on the reasoning
+    that this leg covers the FULL start->blue distance against the largest
+    `remaining_t` value either leg ever sees, so 0.5 of it produced a
+    visibly rushed sweep -- confirmed live (real, non-forced resets across
+    16 envs) that short-`t_flight` episodes (as low as ~0.5s) still only
+    got a ~0.43s window even at 0.9. Separately confirmed the existing
+    ball-visibility "warmup" (`events.py::_init_visibility_state`,
+    `randint(1,4)` ticks = 0.02-0.06s) is unrelated (gates observation
+    visibility only, never read by this function) and far too short to be
+    a meaningful fix either way. User then explicitly asked to set this
+    back to 0.5 regardless. Deactivation is driven by `extra_active_mask`
+    (blue landing), not by this window elapsing -- the window only
+    controls how long the term stays patient before its own target fully
+    collapses onto blue and effectively goes idle.
 
     Deactivates the instant blue is genuinely landed (`extra_active_mask`),
     handing off cleanly to `blue_green_transition_track` with no overlap --
