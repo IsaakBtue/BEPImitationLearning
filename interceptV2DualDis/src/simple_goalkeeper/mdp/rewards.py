@@ -2453,23 +2453,27 @@ def blue_green_transition_track(
 
     NEW (user request, "make the distance of that moving target the
     leading_foot_lift height"): the moving target now also has a Z
-    (height) component, tracked with a SECOND call to the same generic
-    `_get_phase_transition_target_y` helper (distinct `state_prefix`, so
-    it doesn't collide with the Y-axis call's own cached state) -- captured
-    foot height at the landing instant, eased toward `lift_target_height`
-    (matching `leading_foot_lift`'s own `target_height` default, 0.10m: the
-    instant `_blue_landed_genuine` fires, that reward's own shrinking
-    `effective_target` already snaps back to this flat value -- see that
-    function's own `effective_target = where(wide & ~landed_genuine,
-    decayed_target, target_height)` line -- so reusing the plain parameter
-    here, rather than re-deriving leading_foot_lift's full pre-landing
-    decay machinery, is exact, not an approximation, for the window this
-    term is active in). Height measured with the identical convention
+    (height) component. Height measured with the identical convention
     `leading_foot_lift` uses (`_FOOT_RESTING_HEIGHT=0.03` baseline
     subtracted, clamped >=0) so a flat/grounded foot reads 0 in both
     places. Combined with the Y-axis distance via a plain Euclidean norm
     (matches HUSKY's own single combined-distance tracking reward over its
     multi-axis Bezier curve, not two independently-weighted terms).
+
+    UPDATE (user request, "it needs to go up sharply same kernal as the
+    leading foot lift circular drop off for blue ball but then upwards,
+    and then downwards again for greenball"): the height TARGET is no
+    longer a captured-value eased toward a flat plateau (that held at
+    `lift_target_height` for the rest of the window and never came back
+    down). It's now a genuine up-then-down arc reusing `leading_foot_lift`'s
+    own kernel shape (`_clearance_reward`: steep tanh rise from 0, Gaussian
+    falloff past the peak) verbatim, reparameterized over transition
+    PROGRESS (`s`, read from the Y-axis call's own `_btg_start_step`
+    timing state, not a second independent timer) instead of raw height --
+    peaks at `lift_target_height` (0.10) at the window's midpoint
+    (`_S_PEAK=0.5`), decays back toward 0 (grounded) by the time the
+    window ends (green arrival) -- matching a genuine step/dive arc: lift
+    off right after planting at blue, come back down landing at green.
 
     NEW (user request, "make it variable with t_flight time, so for faster
     balls the 0.5 need to be shorter"): `window_steps` is no longer a flat
@@ -2511,14 +2515,33 @@ def blue_green_transition_track(
         state_prefix="btg",
         window_steps=window_steps_t,
     )
-    target_height, _ = _get_phase_transition_target_y(
-        env,
-        phase_completed_flag=env._blue_landed_genuine,
-        body_y_now=foot_height_now,
-        next_target_y=torch.full_like(foot_height_now, lift_target_height),
-        state_prefix="btg_height",
-        window_steps=window_steps_t,
-    )
+
+    # NEW (user request, "it needs to go up sharply same kernal as the
+    # leading foot lift circular drop off for blue ball but then upwards,
+    # and then downwards again for greenball"): the height target is no
+    # longer a captured-value-eased-to-flat-target curve (that design held
+    # at lift_target_height for the rest of the window, never coming back
+    # down) -- it's now a genuine up-then-down ARC using leading_foot_lift's
+    # OWN kernel shape (`_clearance_reward`: steep tanh rise from 0, Gaussian
+    # "circular" falloff past the peak), reused verbatim but reparameterized
+    # over transition-progress `s` instead of raw height: `s_peak` (where the
+    # window's own timing state -- _btg_start_step -- was already set by the
+    # Y-axis call above, so this reads it directly rather than re-deriving
+    # a second independent timer) stands in for target_height, and the same
+    # rise_steepness=3.0 leading_foot_lift uses is reused unmodified. Peaks
+    # at lift_target_height (0.10) at the window's midpoint, decays back
+    # toward 0 (grounded, ready to make contact) by the time the window ends
+    # (green arrival) -- matches a genuine step/dive arc: lift off right
+    # after planting at blue, come back down landing at green.
+    _S_PEAK = 0.5
+    _FALL_SIGMA_TIME = 12.0  # first guess: brings the arc to ~5% of peak by s=1.0 (excess=0.5 past the peak)
+    elapsed = (env.episode_length_buf - env._btg_start_step).clamp(min=0)
+    s = (elapsed.float() / window_steps_t).clamp(0.0, 1.0)
+    rise = torch.tanh(3.0 * s / _S_PEAK)  # same rise_steepness=3.0 as leading_foot_lift's own kernel
+    excess = (s - _S_PEAK).clamp(min=0.0)
+    fall = torch.exp(-_FALL_SIGMA_TIME * excess ** 2)
+    target_height = lift_target_height * rise * fall
+
     env._btg_target_y_live = target_y      # viewer-only cache (play.py opaque green marker)
     env._btg_target_height_live = target_height
     env._btg_active_live = active

@@ -866,7 +866,17 @@ def _patch_viewer_intercept_vis(native_viewer: "NativeMujocoViewer", env) -> Non
         if _btg_active is not None and bool(_btg_active[0].item()):
             _btg_y = float(raw_env._btg_target_y_live[0].item())
             _btg_h = float(raw_env._btg_target_height_live[0].item())
-            _add_sphere(goal_x, _btg_y, floor_z + _btg_h, 0.05, [0.1, 1.0, 0.2, 1.0])
+            # FIX (user report, "no like 50% green opacity no fully oppaque
+            # i want to see it"): enlarged 0.05 -> 0.10 (bigger than the
+            # existing translucent green sphere at 0.08, so it visually
+            # dominates instead of blending into it) and switched to pure
+            # saturated green [0,1,0,1] -- alpha was already 1.0 (fully
+            # opaque per MuJoCo's rgba convention), unchanged from before,
+            # but the softer [0.1,1.0,0.2] color sitting right next to the
+            # existing 0.75-alpha marker at a similar position may have
+            # read as blended/translucent.
+            # FIX (user request, "make the ball smaller"): 0.10 -> 0.04.
+            _add_sphere(goal_x, _btg_y, floor_z + _btg_h, 0.04, [0.0, 1.0, 0.0, 1.0])
 
         # RESTORED 2026-09-11 (user request, "revert the yellow ball i
         # want it back... do this by means of git"): the orange sphere,
