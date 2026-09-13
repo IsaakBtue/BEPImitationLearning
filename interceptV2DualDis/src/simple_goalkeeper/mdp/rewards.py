@@ -5351,7 +5351,7 @@ def foot_inner_face_continuous(
     # should just be the 70" (there IS no blue to wait for on a narrow
     # crossing). Wide crossings are unaffected -- same pre-landing ->
     # post-landing switch as before, just via the correct shared gate.
-    _PRE_LANDING_TARGET_ANGLE_DEG = 45.0  # FIX 2026-09-12 (user request): 20 -> 45
+    _PRE_LANDING_TARGET_ANGLE_DEG = 20.0  # FIX 2026-09-13 (user request): 45 -> 20 (back to the 2026-09-11 value)
     blue_wide = getattr(env, "_blue_wide", torch.zeros(env.num_envs, dtype=torch.bool, device=env.device))
     blue_landed_genuine = getattr(env, "_blue_landed_genuine", torch.zeros(env.num_envs, dtype=torch.bool, device=env.device))
     targeting_green = (~blue_wide) | blue_landed_genuine

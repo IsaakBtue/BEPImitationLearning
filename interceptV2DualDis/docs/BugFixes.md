@@ -4696,3 +4696,13 @@ An earlier version of test #4 appeared to show the window "frozen" (target never
 **Fix (`rewards.py`):** `start_blue_transition_track`'s `window_frac_of_remaining` `0.3 -> 0.4`. `blue_green_transition_track`'s `window_frac_of_remaining` `0.8 -> 0.56` (`0.8 * 0.7`).
 
 **Evidence:** `ast.parse` clean. `start_blue_transition_track` live re-verified against real (non-forced) resets: captured window matches `0.4*t_flight/dt` exactly (e.g. `t_flight=0.571 -> captured=11.43`, expected `11.42`). `blue_green_transition_track` re-run through the same forced-mid-episode-landing regression probe used to check the episode-ordering fix earlier today (6 episodes x 4 envs, expected recomputed against the new `0.56` frac): 24/24 correct, confirms the new value took effect and the term still windows correctly across repeated episodes. Not yet validated against a live training run.
+
+---
+
+## 2026-09-13 (later same day): foot_inner_face_continuous pre-landing target angle set to 20 deg
+
+**Context:** user request, "make it 20 deg" -- following a discussion identifying `_PRE_LANDING_TARGET_ANGLE_DEG`'s current value (45, set 2026-09-12) versus its history (0 -> 20 -> 45), checked directly against the launch commits of two specific checkpoints the user referenced.
+
+**Fix (`rewards.py:foot_inner_face_continuous`):** `_PRE_LANDING_TARGET_ANGLE_DEG` `45.0 -> 20.0` (back to its 2026-09-11 value).
+
+**Evidence:** `ast.parse` clean. Live-verified against the real registered term (`env.reward_manager.get_term_cfg('foot_inner_face_continuous')`): pulled the function's own source via `inspect.getsource` on the actual registered `func` and confirmed `_PRE_LANDING_TARGET_ANGLE_DEG = 20.0` is genuinely present in the live code path (not a stale import or shadowed copy), and a forced pre-landing/wide-crossing call returned a real reward value (0.804) with no crash. Not yet validated against a live training run.
