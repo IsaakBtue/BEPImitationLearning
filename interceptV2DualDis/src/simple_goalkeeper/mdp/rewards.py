@@ -2640,7 +2640,7 @@ def start_blue_transition_track(
     ball_name: str,
     asset_cfg: SceneEntityCfg = _DEFAULT_FEET_CFG,
     sigma: float = 5.0,
-    window_frac_of_remaining: float = 0.45,
+    window_frac_of_remaining: float = 0.55,
     min_window_steps: int = 5,
     lift_target_height: float = 0.10,
 ) -> torch.Tensor:
