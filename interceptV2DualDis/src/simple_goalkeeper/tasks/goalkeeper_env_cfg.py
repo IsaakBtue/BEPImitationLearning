@@ -1332,11 +1332,11 @@ def goalkeeper_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
         # as leading_foot_lift above.
         # FIX 2026-09-12 (user request, "do 5cm", then corrected "put the
         # trailing foot height to 3 cm not 5"): target_height 0.10 -> 0.05
-        # -> 0.03.
+        # -> 0.03. FIX (user request, "put it at 5 cm"): 0.03 -> 0.05.
         "trailing_foot_lift": RewardTermCfg(
             func=gk_mdp.trailing_foot_lift,
             weight=2.0,
-            params={"ball_name": BALL_NAME, "target_height": 0.03, "asset_cfg": _FEET_CFG},
+            params={"ball_name": BALL_NAME, "target_height": 0.05, "asset_cfg": _FEET_CFG},
         ),
         # NEW 2026-08-23 (user request): successor to the removed (2026-06-29)
         # airborne_at_save -- continuous (not one-shot binary), leading foot

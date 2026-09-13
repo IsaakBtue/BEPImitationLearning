@@ -700,6 +700,31 @@ def _patch_viewer_intercept_vis(native_viewer: "NativeMujocoViewer", env) -> Non
                 to=to,
             )
 
+        def _add_ground_rect(
+            cx: float, cy: float, z: float,
+            x_neg: float, x_pos: float, y_half: float,
+            width: float, rgba,
+        ) -> None:
+            """Outline-only rectangle on the ground, same 4-line-segment style
+            as _add_ground_circle below (outer edges only, not filled) --
+            UPDATED (user request, "use the same style as the other landing
+            radius the rectangular so only the outer edges"): replaces the
+            earlier solid mjGEOM_BOX fill. Asymmetric in X per user request
+            ("5 cm in the positive x direction and 20 cm to the negative x
+            direction"): x_neg/x_pos are the two DIFFERENT extents from
+            center (not a symmetric half-width), y_half is symmetric.
+            """
+            corners = [
+                (cx - x_neg, cy - y_half),
+                (cx + x_pos, cy - y_half),
+                (cx + x_pos, cy + y_half),
+                (cx - x_neg, cy + y_half),
+            ]
+            for i in range(4):
+                p0 = np.array([*corners[i], z], dtype=np.float64)
+                p1 = np.array([*corners[(i + 1) % 4], z], dtype=np.float64)
+                _add_line(p0, p1, width, rgba)
+
         def _add_ground_circle(cx: float, cy: float, z: float, r: float, width: float, rgba, n_segments: int = 32) -> None:
             """Draw a circle outline on the ground as N connected line
             segments -- mujoco has no native ring/annulus decor geom, so this
@@ -806,6 +831,25 @@ def _patch_viewer_intercept_vis(native_viewer: "NativeMujocoViewer", env) -> Non
                 np.array([goal_x, cross_y, sphere_z], dtype=np.float64),
                 0.008, [0.1, 1.0, 0.2, 0.6],
             )
+            # NEW (user request): green box at the same target --
+            # diagnostic-only, to see the acceptance zone shape.
+            # FIX (user request, "make the width landing_radius times 2"):
+            # Y half-width now reads the SAME live env._blue_landing_radius_
+            # current field the blue ring above already uses (width = 2x
+            # landing_radius means half-width = landing_radius directly),
+            # instead of a hardcoded 0.10 -- stays in sync with any future
+            # landing_radius retune with no separate constant to update.
+            # FIX (user correction, "i only wanted -0.04 from the
+            # rectangular beam... landing radius untouched"): -0.04 applies
+            # only to this marker's own Y half-width, mirroring
+            # success()'s identical rewards.py trim -- landing_radius
+            # itself (the blue ring above) is unaffected.
+            _live_radius_green = float(getattr(raw_env, "_blue_landing_radius_current", 0.12)) - 0.04
+            # +X extent: was 0.05 -> briefly 0.0 (user request, "remove 0.05
+            # from the width") -> RESTORED to 0.05 (user correction, "still
+            # have 5 cm of the rectangular beam in the +x direction") -- that
+            # earlier request meant the Y half-width trim above, not this.
+            _add_ground_rect(goal_x, foot_target_y, floor_z + 0.002, 0.30, 0.05, _live_radius_green, 0.006, [0.1, 1.0, 0.2, 0.9])
 
         # RESTORED 2026-09-11 (user request, "revert the yellow ball i
         # want it back... do this by means of git"): the orange sphere,
@@ -2058,10 +2102,12 @@ def _patch_viewer_foot_restitution_plot(native_viewer: "NativeMujocoViewer", env
     # REVERTED 2026-09-12 (user report, "oscillating back and forth...
     # farming the acceleration term"): _acc deleted entirely, back to
     # promoting the single "blue_trunk_drive".
+    # FIX (user request, "put trailing foot lift in the mujoco p viewer
+    # instead of leading foot lift"): swapped.
     _ALSO_PROMOTED = (
         "blue_trunk_drive",
         "contact_yield_velocity_x", "contact_yield_velocity_y",
-        "footreach", "leading_foot_lift",
+        "footreach", "trailing_foot_lift",
     )
     _DEMOTED = ("trailing_foot_forward_continuous", "wrong_foot_ball_contact")
 

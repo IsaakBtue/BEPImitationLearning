@@ -576,7 +576,7 @@ def _get_reach_target_y(
     ball_name: str,
     asset_cfg: SceneEntityCfg = _DEFAULT_FEET_CFG,
     wide_threshold: float = 0.6,  # FIX 2026-09-12 (user request, "make the narrow to wide range from 0.5 to 0.6... so we can guarantee a 0.25m blue-orange gap"): 0.5 -> 0.6, kept in sync with regions.py's near/far boundary and events.py's far_travel_curriculum "lo". Was 0.65 (2026-07-23), reverted to 0.5 (2026-08-01), reverted again here.
-    landing_radius: float = 0.13,  # FIX 2026-09-12 (user correction, "no only for orange ball landed keep the variable landing_radius at 0.13 but orange ball do the variable - 0.03"): reverted the -0.03 shift back off blue's own default -- the -0.03 now applies ONLY inside _get_orange_reach_target_y, derived from this value, not hardcoded separately. Was 0.13 (2026-09-11, "increase the landing radius by 0.01"): 0.12 -> 0.13, flat, no curriculum (still no easing -- see the flat assignment below). Was 0.12 (2026-09-11 earlier same day, "decrease the radius of blue ball with 0.02 it is too easy"), 0.14 before that (2026-09-09, "revert" back to the flat, no-curriculum real value after a 0.4 diagnostic bump), 0.13 hard/0.15 easy before that, 0.09 (briefly reverted), 0.4 (earlier diagnostic), 0.09->0.05 (2026-09-09 earlier same day), 0.20->0.18->0.15->0.13->0.09 before that (2026-07-24: was 0.08, too strict at full difficulty)
+    landing_radius: float = 0.12,  # REVERTED (user correction, "i only wanted -0.04 from the rectangular beam... landing radius untouched") -- the -0.04 belongs only to success()'s rectangle Y half-width, not this real blue/orange/red landing-gate parameter. FIX (user request, "decrease landing radius with 0.01 for everything"): 0.13 -> 0.12. Applies to blue directly; orange/red derive from env._blue_landing_radius_current so they follow automatically. FIX 2026-09-12 (user correction, "no only for orange ball landed keep the variable landing_radius at 0.13 but orange ball do the variable - 0.03"): reverted the -0.03 shift back off blue's own default -- the -0.03 now applies ONLY inside _get_orange_reach_target_y, derived from this value, not hardcoded separately. Was 0.13 (2026-09-11, "increase the landing radius by 0.01"): 0.12 -> 0.13, flat, no curriculum (still no easing -- see the flat assignment below). Was 0.12 (2026-09-11 earlier same day, "decrease the radius of blue ball with 0.02 it is too easy"), 0.14 before that (2026-09-09, "revert" back to the flat, no-curriculum real value after a 0.4 diagnostic bump), 0.13 hard/0.15 easy before that, 0.09 (briefly reverted), 0.4 (earlier diagnostic), 0.09->0.05 (2026-09-09 earlier same day), 0.20->0.18->0.15->0.13->0.09 before that (2026-07-24: was 0.08, too strict at full difficulty)
     landing_speed_threshold: float = 1.0,  # FIX 2026-07-24: reverted to the pre-2026-07-23 value (was 0.15); see below
 ) -> torch.Tensor:
     """Two-stage reach target for wide crossings: v2 reimplementation of the
@@ -3165,16 +3165,63 @@ def success(
 
     goal_x_w = env.scene.env_origins[:, 0]
     env_z    = env.scene.env_origins[:, 2]
-    ball_close = ball_x_local < 0.5
+    # FIX (user request): G1's own end_target only tracks the live ball while
+    # NOT yet deflected (legged_robot.py:204, "ball_states[:,7]-ball_vel <
+    # 2.0" -- excludes envs that have already been caught). Once deflected,
+    # G1's target freezes at the last pre-catch position instead of chasing
+    # the ball afterward. This function's own `ball_close` was missing that
+    # exclusion -- it kept tracking the live (now-reversing) ball even after
+    # softstop/cleanstop fired, so `dist` blew past strict_th almost
+    # immediately post-save. `env._sb_flag` (stopball's own persistent
+    # deflection latch, already fresh here -- stopball is registered before
+    # success) is the SGK equivalent of G1's delta_vx-threshold check.
+    sb_flag = getattr(env, "_sb_flag", torch.zeros(env.num_envs, dtype=torch.bool, device=env.device))
+    ball_close = (ball_x_local < 0.5) & ~sb_flag
     target_y = torch.where(ball_close, ball_pos_w[:, 1], crossing_y)
-    target_z = torch.where(ball_close, ball_pos_w[:, 2], env_z + 0.10)
+    # FIX (user request, live-probe verified): the `else` Z target (0.10m)
+    # was calibrated for "ball still arriving" (this project's own arrival-
+    # height convention), a different physical case than "foot resting after
+    # a genuine save" -- which now also routes through this branch via the
+    # `~sb_flag` exclusion above. Measured on 2788 real saves: dz was a
+    # near-constant ~0.07m (0.10 target vs the real ~0.03m resting height),
+    # costing success ~12% of otherwise-clean saves for a reason unrelated to
+    # landing quality. _FOOT_RESTING_HEIGHT matches the same constant used
+    # elsewhere in this file (leading_foot_lift, trailing_foot_lift, etc.).
+    _FOOT_RESTING_HEIGHT = 0.03
+    target_z = torch.where(
+        ball_close, ball_pos_w[:, 2], torch.where(sb_flag, env_z + _FOOT_RESTING_HEIGHT, env_z + 0.10)
+    )
     crossing_point = torch.stack([goal_x_w, target_y, target_z], dim=-1)  # (N, 3)
 
     foot_pos_w = robot.data.body_link_pos_w[:, asset_cfg.body_ids, :]     # (N, 2, 3)
     foot_idx = _get_correct_foot_idx(env, ball_name)                       # (N,)
     arange = torch.arange(env.num_envs, device=env.device)
     foot_pos_active = foot_pos_w[arange, foot_idx]
-    dist = torch.norm(foot_pos_active - crossing_point, dim=-1)            # (N,)
+
+    # FIX (user request, "use the rectangle for the shape"): the acceptance
+    # zone is now the SAME asymmetric rectangle drawn in play.py's green
+    # marker (-30cm/+5cm in X from the goal line, +-landing_radius in Y),
+    # X/Y only (no Z check) -- replaces the old circular 3D
+    # `dist < strict_th` sphere. `strict_th` param kept (harmless,
+    # goalkeeper_env_cfg.py still passes it explicitly) but no longer read.
+    _RECT_X_NEG = 0.30  # meters behind the goal line (toward the robot)
+    # meters past the goal line. Was 0.05 -> briefly 0.0 (user request,
+    # "remove 0.05 from the width") -> RESTORED to 0.05 (user correction,
+    # "still have 5 cm of the rectangular beam in the +x direction") -- the
+    # earlier "remove 0.05 from the width" request actually meant the Y
+    # half-width trim (now _RECT_Y_TRIM below), not this X extent.
+    _RECT_X_POS = 0.05
+    # FIX (user correction, "i only wanted -0.04 from the rectangular
+    # beam... landing radius untouched"): the -0.04 is subtracted HERE only
+    # (this rectangle's own Y half-width), not from landing_radius itself --
+    # env._blue_landing_radius_current (the real blue/orange/red landing
+    # gate) stays at its true value.
+    _RECT_Y_TRIM = 0.04
+    landing_radius_live = float(getattr(env, "_blue_landing_radius_current", 0.12))
+    rect_y_half = landing_radius_live - _RECT_Y_TRIM
+    dx = foot_pos_active[:, 0] - goal_x_w
+    dy = foot_pos_active[:, 1] - target_y
+    in_rect = (dx >= -_RECT_X_NEG) & (dx <= _RECT_X_POS) & (dy.abs() <= rect_y_half)
 
     # FIX 2026-07-27 (user request): retiered off stopball (env._sb_flag) --
     # stopball is just the initial deflection, the easiest/loosest event in
@@ -3199,8 +3246,12 @@ def success(
     softstop_flag = getattr(
         env, "_softstop_flag", torch.zeros(env.num_envs, dtype=torch.bool, device=env.device)
     )
+    # FIX (user request): a violent/kicked cleanstop (negative `scale`)
+    # used to earn the SAME 3x tier as a genuinely clean one -- gate on
+    # env._cleanstop_was_positive (window closed AND scored positive), not
+    # the bare fired-latch. See cleanstop()'s own comment for the flag.
     cleanstop_flag = getattr(
-        env, "_cleanstop_flag", torch.zeros(env.num_envs, dtype=torch.bool, device=env.device)
+        env, "_cleanstop_was_positive", torch.zeros(env.num_envs, dtype=torch.bool, device=env.device)
     )
     multiplier = 1.0 + softstop_flag.float() + cleanstop_flag.float()
     # FIX 2026-07-24: reuses env._blue_landed_genuine (== env._blue_landed &
@@ -3208,7 +3259,7 @@ def success(
     # already called above this line) instead of recomputing the same
     # expression locally -- pure dedup, same value as before.
     landing_ok = ~env._blue_wide | env._blue_landed_genuine
-    return multiplier * (dist < strict_th).float() * landing_ok.float()
+    return multiplier * in_rect.float() * landing_ok.float()
 
 
 def single_foot_save(
@@ -5691,9 +5742,18 @@ def cleanstop(
         env._cleanstop_since = torch.full((env.num_envs,), -1, dtype=torch.long, device=env.device)
         env._cleanstop_speed_sum = torch.zeros(env.num_envs, device=env.device)
         env._cleanstop_speed_count = torch.zeros(env.num_envs, dtype=torch.long, device=env.device)
+        # FIX (user request): _cleanstop_flag alone only means "the fixed-
+        # delay window closed" -- it latches True even when `scale` (below)
+        # came out NEGATIVE (a violent/kicked deflection). success()'s own
+        # 1x/2x/3x tiering reads this flag to decide its cleanstop tier, so
+        # without this, a bad stop earned the SAME 3x credit as a genuinely
+        # clean one. This second flag only latches True when the window
+        # closed AND scored positive.
+        env._cleanstop_was_positive = torch.zeros(env.num_envs, dtype=torch.bool, device=env.device)
 
     just_reset = env.episode_length_buf <= 1
     env._cleanstop_flag[just_reset] = False
+    env._cleanstop_was_positive[just_reset] = False
     env._cleanstop_prev_softstop[just_reset] = False
     env._cleanstop_since[just_reset] = -1
     env._cleanstop_speed_sum[just_reset] = 0.0
@@ -5729,6 +5789,7 @@ def cleanstop(
     scale = torch.tanh(steepness * (speed_threshold - avg_speed))
 
     env._cleanstop_flag |= fired
+    env._cleanstop_was_positive |= fired & (scale > 0)
     env._cleanstop_since[fired] = -1
     return fired.float() * scale
 
