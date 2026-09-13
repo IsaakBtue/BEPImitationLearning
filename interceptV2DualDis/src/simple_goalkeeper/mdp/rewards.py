@@ -2417,7 +2417,18 @@ def _get_phase_transition_target_y(
     elapsed = (env.episode_length_buf - start_step).clamp(min=0)
     window_steps_t = window_steps if isinstance(window_steps, torch.Tensor) else float(window_steps)
     s = (elapsed.float() / window_steps_t).clamp(0.0, 1.0)
-    ease = s * s * (3.0 - 2.0 * s)  # smoothstep == 1D cubic Bezier, colinear control points
+    # FIX (user report, "can you have some acceleration and deacceleration
+    # in the trajectory because it almost seems impossible"): plain cubic
+    # smoothstep (`3s^2-2s^3`) already has zero VELOCITY at both endpoints,
+    # but its ACCELERATION still jumps discontinuously there (its 2nd
+    # derivative is nonzero at s=0/s=1) -- a real accelerate/cruise/
+    # decelerate motion needs smooth acceleration too, not just smooth
+    # velocity. Upgraded to quintic "smootherstep" (`6s^5-15s^4+10s^3`,
+    # Ken Perlin's improved ease curve) -- zero velocity AND zero
+    # acceleration at both endpoints, C^2 continuous, genuinely gentler
+    # accelerate-cruise-decelerate shape instead of a velocity peak with a
+    # sharp acceleration kink at either end.
+    ease = s * s * s * (s * (s * 6.0 - 15.0) + 10.0)
 
     target_y = torch.where(armed, captured_y + (next_target_y - captured_y) * ease, next_target_y)
     active = armed & (s < 1.0)
