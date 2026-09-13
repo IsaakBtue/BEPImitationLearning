@@ -146,6 +146,13 @@ class MotionResetManager:
         self.frames: dict[str, torch.Tensor] = {}
         # Per-type pools keyed by (side, steps): side ∈ {left, right}, steps ∈ {single, double, triple, wide}
         self.pools: dict[tuple[str, str], dict[str, torch.Tensor]] = {}
+        # NEW (user request, "true motion sampling RSI"): per-region pools
+        # keyed by the CURRENT 4-region system's env._region_id (0-3), built
+        # lazily from goalkeeper_multidisc_amp_cfg.REGION_MOTION_FILES --
+        # separate from the dormant `self.pools` tier system above (which
+        # uses an OLDER, unrelated 6-tier/single-double-triple-wide file
+        # naming convention that doesn't match today's 4-region setup).
+        self.region_pools: dict[int, dict[str, torch.Tensor]] = {}
 
     @classmethod
     def get(cls) -> "MotionResetManager":
@@ -222,12 +229,31 @@ class MotionResetManager:
         joint_pos.clamp_(limits[..., 0], limits[..., 1])
         robot.write_joint_state_to_sim(joint_pos, joint_vel, env_ids=ids)
 
+    def _get_region_pool(
+        self, region_id: int, files: list[str], dev: str
+    ) -> dict[str, torch.Tensor]:
+        """Lazily load (and cache) the real-motion-frame pool for one of the
+        current 4 regions, reusing the exact same `_load_pool` helper the
+        dormant tier-pool system above already uses. Called from `reset()`
+        with `region_motion_files[region_id]` -- the SAME file list each
+        region's own AMP discriminator trains against
+        (goalkeeper_multidisc_amp_cfg.REGION_MOTION_FILES), so "true motion
+        sampling RSI" and "what AMP calls natural for this region" are
+        guaranteed to agree by construction.
+        """
+        if region_id not in self.region_pools:
+            self.region_pools[region_id] = _load_pool(files, dev)
+            n = self.region_pools[region_id]["joint_pos"].shape[0]
+            print(f"[MotionResetManager] region_pools[{region_id}]: {n} frames from {len(files)} file(s)")
+        return self.region_pools[region_id]
+
     def reset(
         self,
         env: "ManagerBasedRlEnv",
         env_ids: torch.Tensor | None,
         asset_cfg: SceneEntityCfg = _DEFAULT_ROBOT_CFG,
         rsi_fraction: float = 0.8,
+        region_motion_files: dict[int, list[str]] | None = None,
     ) -> None:
         """Literal port of Humanoid-Goalkeeper G1's continue_keep mechanism.
 
@@ -298,6 +324,44 @@ class MotionResetManager:
         n = len(env_ids)
 
         if torch.rand(1, device=env.device).item() > (1.0 - rsi_fraction):
+            # NEW (user request, "true motion sampling RSI... 80% region
+            # based motion sampling 20% standing pose"): when a real
+            # per-region motion-file mapping is supplied (the multi-disc
+            # task, via goalkeeper_multidisc_amp_cfg.REGION_MOTION_FILES),
+            # this branch now samples a genuine, coherent frame from the
+            # resetting env's own region's real reference clips -- root Z/
+            # orientation/velocity AND joint pos/vel all from the SAME
+            # frame, via `_write_rsi_state` (already used by the dormant
+            # tier-pool system above; same mechanism, region-keyed pools
+            # instead of the old side/tier ones). This is structurally the
+            # same technique DeepMimic's own RSI ablation validated
+            # (Peng et al. 2018, Table 5: -57% to -58% on hard dynamic
+            # skills without it) -- a real point in the actual reference
+            # motion, not an arbitrary other env's current live pose.
+            # Falls through to the donor-copy scheme below (region-scoped
+            # as of the prior fix, itself falling back further to G1's
+            # literal unscoped behavior for the single-disc task) when
+            # region_motion_files isn't supplied.
+            region_id_all = getattr(env, "_region_id", None)
+            if region_motion_files is not None and region_id_all is not None:
+                region_id_resetting = region_id_all[env_ids.long()]
+                for r in torch.unique(region_id_resetting).tolist():
+                    mask = region_id_resetting == r
+                    if not mask.any():
+                        continue
+                    ids_r = env_ids[mask]
+                    files = region_motion_files.get(r)
+                    if not files:
+                        continue
+                    pool = self._get_region_pool(r, files, env.device)
+                    self._write_rsi_state(env, ids_r, pool, robot)
+                # Root state + joint state were already written directly to
+                # sim above (write_root_link_pose_to_sim/write_joint_state_
+                # to_sim inside _write_rsi_state) -- return early, skipping
+                # the generic joint_pos/joint_vel write path below, which
+                # would otherwise overwrite the joint state just written and
+                # (being unaware of root) never touch root at all.
+                return
             # FIX (user request, deliberate SGK divergence from the literal
             # G1 port above -- NOT a parity fix): G1's own donor sampling
             # (Humanoid-Goalkeeper/legged_gym/.../legged_robot.py:670,
@@ -321,7 +385,6 @@ class MotionResetManager:
             # conditioned task); falls back to G1's literal unscoped
             # behavior otherwise (the plain single-disc task has no region
             # concept to scope against).
-            region_id_all = getattr(env, "_region_id", None)
             if region_id_all is not None:
                 region_id_resetting = region_id_all[env_ids.long()]
                 donor_idx = torch.empty(n, dtype=torch.long, device=env.device)
@@ -361,6 +424,7 @@ def reset_from_motion_data(
     env: "ManagerBasedRlEnv",
     env_ids: torch.Tensor | None,
     asset_cfg: SceneEntityCfg = _DEFAULT_ROBOT_CFG,
+    region_motion_files: dict[int, list[str]] | None = None,
 ) -> None:
     """Reset event: continue_keep-style donor copy vs default pose.
 
@@ -369,10 +433,18 @@ def reset_from_motion_data(
     legged_robot.py:669) and this project's own reset()/CLAUDE.md-documented
     80/20 intent. Caught by an independent fidelity audit — see
     docs/superpowers/plans/2026-07-01-live-env-rsi.md.
+
+    NEW (user request, "true motion sampling RSI... 80% region based motion
+    sampling 20% standing pose"): `region_motion_files` passthrough to
+    `MotionResetManager.reset()` -- see that method's own docstring for the
+    full mechanism. Wired from `goalkeeper_multidisc_amp_cfg.py` (multi-disc
+    task only), which is the only place `REGION_MOTION_FILES` and this event
+    registration can meet without a circular import between `mdp/events.py`
+    and `tasks/`.
     """
     mgr = MotionResetManager.get()
     mgr.init(env)
-    mgr.reset(env, env_ids, asset_cfg, rsi_fraction=0.8)
+    mgr.reset(env, env_ids, asset_cfg, rsi_fraction=0.8, region_motion_files=region_motion_files)
 
 
 def reset_ball_local_frame(
