@@ -2595,7 +2595,7 @@ def blue_green_transition_track(
     ball_name: str,
     asset_cfg: SceneEntityCfg = _DEFAULT_FEET_CFG,
     sigma: float = 5.0,
-    window_frac_of_remaining: float = 0.8,
+    window_frac_of_remaining: float = 0.56,  # FIX 2026-09-13 (user request, "do x0.7"): 0.8 * 0.7 = 0.56.
     min_window_steps: int = 5,
     lift_target_height: float = 0.10,
 ) -> torch.Tensor:
@@ -2640,7 +2640,7 @@ def start_blue_transition_track(
     ball_name: str,
     asset_cfg: SceneEntityCfg = _DEFAULT_FEET_CFG,
     sigma: float = 5.0,
-    window_frac_of_remaining: float = 0.3,
+    window_frac_of_remaining: float = 0.4,
     min_window_steps: int = 5,
     lift_target_height: float = 0.10,
 ) -> torch.Tensor:
@@ -2662,7 +2662,7 @@ def start_blue_transition_track(
     third time (it's already computed there and in
     `_get_orange_reach_target_y`'s own copy).
 
-    `window_frac_of_remaining` defaults to 0.3 -- genuinely means 30% of the
+    `window_frac_of_remaining` defaults to 0.4 -- genuinely means 40% of the
     sampled `t_flight` now (see `window_reference_time` below), unlike
     earlier same-day 0.5/0.75 attempts which silently meant something else
     due to two compounding bugs since fixed: (1) the window was sized off a
@@ -2677,9 +2677,10 @@ def start_blue_transition_track(
     docstring/BUG FIX comment). HISTORY 2026-09-13 (all same day, iterated
     live against user reports of "too fast"/"too slow"): 0.5 -> 0.9 -> 0.5
     -> 0.75 -> 0.9 (each retuning attempt before the two bugs above were
-    found) -> 0.5 -> **0.3** (user requests, after both bugs fixed and
-    verified -- these later moves are genuine retuning, not compensating
-    for a bug). Full detail in `docs/BugFixes.md`, 2026-09-13 entries.
+    found) -> 0.5 -> 0.3 -> **0.4** (user requests, after both bugs fixed
+    and verified -- these later moves are genuine retuning, not
+    compensating for a bug). Full detail in `docs/BugFixes.md`, 2026-09-13
+    entries.
 
     Deactivates the instant blue is genuinely landed (`extra_active_mask`),
     handing off cleanly to `blue_green_transition_track` with no overlap --

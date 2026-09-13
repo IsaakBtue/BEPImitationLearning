@@ -4686,3 +4686,13 @@ An earlier version of test #4 appeared to show the window "frozen" (target never
 **Fix (`rewards.py:start_blue_transition_track`):** `window_frac_of_remaining` `0.5 -> 0.3`.
 
 **Evidence:** `ast.parse` clean. Live re-verified against real (non-forced) resets across 16 envs: captured window matches `0.3 * t_flight / dt` exactly (e.g. `t_flight=0.941 -> captured=14.12`, expected `0.941*0.3/0.02=14.115`; `t_flight=0.978 -> captured=14.67`, expected `14.67`). Not yet validated against a live training run.
+
+---
+
+## 2026-09-13 (later same day): start_blue_transition_track to 0.4; blue_green_transition_track to 0.56 (x0.7)
+
+**Context:** user request, "do 0.4 and also for the blue green do x0.7." The "x0.7" phrasing for `blue_green_transition_track` (unlike the plain numbers used for every `start_blue_transition_track` retune this same day) was read as MULTIPLY the current value by 0.7, not set-to-0.7 -- flagged to the user in case that reading is wrong.
+
+**Fix (`rewards.py`):** `start_blue_transition_track`'s `window_frac_of_remaining` `0.3 -> 0.4`. `blue_green_transition_track`'s `window_frac_of_remaining` `0.8 -> 0.56` (`0.8 * 0.7`).
+
+**Evidence:** `ast.parse` clean. `start_blue_transition_track` live re-verified against real (non-forced) resets: captured window matches `0.4*t_flight/dt` exactly (e.g. `t_flight=0.571 -> captured=11.43`, expected `11.42`). `blue_green_transition_track` re-run through the same forced-mid-episode-landing regression probe used to check the episode-ordering fix earlier today (6 episodes x 4 envs, expected recomputed against the new `0.56` frac): 24/24 correct, confirms the new value took effect and the term still windows correctly across repeated episodes. Not yet validated against a live training run.
