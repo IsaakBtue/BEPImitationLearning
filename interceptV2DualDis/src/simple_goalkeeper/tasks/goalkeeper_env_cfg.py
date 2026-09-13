@@ -1206,6 +1206,22 @@ def goalkeeper_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
             weight=20.0,
             params={"ball_name": BALL_NAME, "asset_cfg": _FEET_CFG},
         ),
+        # NEW (user request, "make something similar to HUSKY's transition
+        # mechanism... mostly blue->green, try to match husky as best as
+        # possible"): HUSKY-inspired trajectory-guided transition reward
+        # (arXiv 2602.03205) -- see rewards.py:blue_green_transition_track
+        # and _get_phase_transition_target_y docstrings for the full
+        # mechanism and why it's not redundant with footreach/
+        # blue_trunk_drive above (neither enforces PACE through the
+        # transition, only eventual proximity or constant-direction pull).
+        # Weight 5.0, sigma=5.0/window_steps=25 (~0.5s) are first-guess
+        # defaults, not yet tuned from data -- same convention as every
+        # other new term in this table.
+        "blue_green_transition_track": RewardTermCfg(
+            func=gk_mdp.blue_green_transition_track,
+            weight=5.0,
+            params={"ball_name": BALL_NAME, "asset_cfg": _FEET_CFG},
+        ),
         # RESTORED 2026-09-11 (user request, "revert the yellow ball i
         # want it back... do this by means of git"): orange_foot_proximity/
         # orange_ball_landed/orange_overshoot_penalty/orange_stick_landing

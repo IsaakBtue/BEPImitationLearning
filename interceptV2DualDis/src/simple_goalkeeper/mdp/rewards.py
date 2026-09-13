@@ -2347,6 +2347,130 @@ def blue_trunk_drive(
     return drive * active.float() - overshoot_penalty * active.float()
 
 
+def _get_phase_transition_target_y(
+    env: "ManagerBasedRlEnv",
+    phase_completed_flag: torch.Tensor,
+    body_y_now: torch.Tensor,
+    next_target_y: torch.Tensor,
+    state_prefix: str,
+    window_steps: int,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """NEW (user request, "make something similar to HUSKY's transition
+    mechanism... make it very generic, but mostly blue->green, try to match
+    husky as best as possible"): generic, phase-pair-agnostic version of
+    HUSKY's trajectory-guided transition mechanism (arXiv 2602.03205,
+    Section III-D, "Trajectory Planning for Phase Transition").
+
+    HUSKY's real mechanism: at the instant a phase completes, capture the
+    relevant key body's ONLINE (actual, current) pose; define a fixed
+    reference pose for the next phase; connect the two with a Bezier curve
+    (position) / slerp (orientation) over a short window; reward tracking
+    that curve, not just the endpoint. Simplified here for a 1D scalar (Y
+    position only -- every waypoint in this file, blue/orange/red/green, is
+    already a pure Y coordinate; X is separately held by `stayonline`, Z by
+    `leading_foot_lift`/`clearance_at_save`, and orientation by
+    `foot_inner_face_continuous` -- duplicating those axes here would fight
+    them, not complement them). For a scalar quantity, a cubic Bezier
+    between two COLINEAR control points reduces exactly to the standard
+    smoothstep ease curve (`3s^2 - 2s^3`) used below -- not an approximation,
+    the same math, simplified because there's only one axis to blend.
+
+    `state_prefix` scopes the cached env attributes (`_<prefix>_captured_y`,
+    `_<prefix>_start_step`) so multiple transition instances (e.g. a future
+    orange->red one) never collide with each other's state -- this is the
+    "generic" part: this function knows nothing about blue/green/orange/red
+    specifically, only "a phase completed, here's where the tracked body was,
+    here's where it should end up."
+
+    Returns (target_y, active). `active` is False before the phase
+    completes (nothing captured yet) and once the window has fully elapsed
+    (callers should stop paying out once the target reaches its final
+    value, to avoid double-crediting green targeting that other terms
+    like `footreach`/`foot_proximity` already cover long-term).
+    """
+    n = env.num_envs
+    captured_attr = f"_{state_prefix}_captured_y"
+    start_attr = f"_{state_prefix}_start_step"
+    if not hasattr(env, captured_attr):
+        setattr(env, captured_attr, torch.zeros(n, device=env.device))
+        setattr(env, start_attr, torch.full((n,), -1, dtype=torch.long, device=env.device))
+
+    just_reset = env.episode_length_buf <= 1
+    getattr(env, start_attr)[just_reset] = -1
+
+    start_step = getattr(env, start_attr)
+    captured_y = getattr(env, captured_attr)
+
+    newly_completed = phase_completed_flag & (start_step < 0)
+    captured_y[newly_completed] = body_y_now[newly_completed]
+    start_step[newly_completed] = env.episode_length_buf[newly_completed]
+
+    armed = start_step >= 0
+    elapsed = (env.episode_length_buf - start_step).clamp(min=0)
+    s = (elapsed.float() / float(window_steps)).clamp(0.0, 1.0)
+    ease = s * s * (3.0 - 2.0 * s)  # smoothstep == 1D cubic Bezier, colinear control points
+
+    target_y = torch.where(armed, captured_y + (next_target_y - captured_y) * ease, next_target_y)
+    active = armed & (s < 1.0)
+    return target_y, active
+
+
+def blue_green_transition_track(
+    env: "ManagerBasedRlEnv",
+    ball_name: str,
+    asset_cfg: SceneEntityCfg = _DEFAULT_FEET_CFG,
+    sigma: float = 5.0,
+    window_steps: int = 25,
+) -> torch.Tensor:
+    """HUSKY-inspired trajectory-guided transition reward, blue->green.
+
+    NEW (user request): the concrete, primary instance of
+    `_get_phase_transition_target_y` above -- the leading foot's own
+    Y position, captured the instant `env._blue_landed_genuine` first
+    fires, eased toward green (`_get_ball_crossing_y`, the same frozen
+    target `blue`/`orange`/`red` all key off) over `window_steps` real
+    ticks (~0.5s at the default, a first-guess duration -- not yet
+    tuned from data, same "document now, tune later" convention this
+    project already uses throughout).
+
+    Deliberately does NOT replace `footreach`/`foot_proximity`
+    (fixed-target, long-running) or `blue_trunk_drive` (undecayed
+    trunk-velocity pull, no schedule) -- this is a narrower, time-scheduled
+    addition specifically for the transition window right after blue
+    lands, where neither of those enforces PACE (see the conversation's
+    own comparison: footreach's vel_sigma boost doesn't activate until the
+    ball is within 1.5m, which can be long after blue lands on far
+    crossings; blue_trunk_drive rewards moving the right direction but has
+    no notion of "how far along should I be by now").
+
+    Zero on narrow crossings (blue_landed_genuine never fires there, so
+    the transition never arms) and once the ball is behind (mirrors
+    footreach's own gate).
+    """
+    _get_reach_target_y(env, ball_name, asset_cfg=asset_cfg)  # ensure _blue_landed_genuine fresh this tick
+
+    robot: Entity = env.scene[asset_cfg.name]
+    foot_idx = _get_correct_foot_idx(env, ball_name)
+    arange = torch.arange(env.num_envs, device=env.device)
+    foot_pos_w = robot.data.body_link_pos_w[:, asset_cfg.body_ids, :]
+    foot_y_now = foot_pos_w[arange, foot_idx, 1]
+
+    green_y = _get_ball_crossing_y(env, ball_name)
+    target_y, active = _get_phase_transition_target_y(
+        env,
+        phase_completed_flag=env._blue_landed_genuine,
+        body_y_now=foot_y_now,
+        next_target_y=green_y,
+        state_prefix="btg",
+        window_steps=window_steps,
+    )
+
+    dist = (foot_y_now - target_y).abs()
+    reward = torch.exp(-sigma * dist)
+    behind = _ball_is_behind(env, ball_name)
+    return reward * active.float() * (~behind).float()
+
+
 # RESTORED 2026-09-11 (user request, "revert the yellow ball i want it
 # back... do this by means of git") -- restored verbatim from git history
 # (commit f0477c4) via `git show`, not retyped from memory. See
