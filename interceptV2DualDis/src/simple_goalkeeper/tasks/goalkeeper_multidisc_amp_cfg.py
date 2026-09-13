@@ -197,20 +197,6 @@ def goalkeeper_multidisc_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
         },
     )
     if reset_from_motion_data_cfg is not None:
-        # NEW (user request, "true motion sampling RSI... 80% region based
-        # motion sampling 20% standing pose"): pass this task's own
-        # REGION_MOTION_FILES through so MotionResetManager.reset() (mdp/
-        # events.py) can sample real per-region reference frames for RSI,
-        # instead of copying another live env's current pose. Keyed by
-        # int region_id (0-3), matching regions.py's own REGION_NAMES order
-        # -- the exact same order env._region_id/assign_static_regions use,
-        # so region 1's pool is guaranteed to be left_far's own files, etc.
-        reset_from_motion_data_cfg.params = {
-            **reset_from_motion_data_cfg.params,
-            "region_motion_files": {
-                i: REGION_MOTION_FILES[name] for i, name in enumerate(gk_regions.REGION_NAMES)
-            },
-        }
         cfg.events["reset_from_motion_data"] = reset_from_motion_data_cfg
     if tick_catchstep_cfg is not None:
         cfg.events["tick_catchstep"] = tick_catchstep_cfg
