@@ -4628,3 +4628,13 @@ Confirmed again, directly: `self.num_envs` is the full population across all 6 o
 **Fix (`rewards.py:start_blue_transition_track`):** `window_frac_of_remaining` `0.9 -> 0.5`. This is a reversal of the earlier same-day widening -- explicitly flagged to the user at the time as making the window SHORTER (faster), the opposite direction of the "too fast" report, in case it was a direction mix-up; user's instruction stood as given.
 
 **Evidence:** `ast.parse` clean. Live re-verified against the real registered term (same forced-wide-crossing setup): behavior matches the original pre-widening config exactly -- `active` goes False by tick 20 with `target_y` fully collapsed onto blue (0.400), same as the first (0.5) entry in this file. Not yet validated against a live training run.
+
+---
+
+## 2026-09-13 (later same day): start_blue_transition_track raised to 0.75 -- 0.5 wasn't genuinely 50% of t_flight
+
+**Context:** user report, "0.5 is not 50% of the flight time it seems." Correct, and already knowable from this same day's earlier live diagnostic (the 0.9-raise entry above): `window_frac_of_remaining` scales the ball's LIVE remaining time-to-arrival (`remaining_t_now = ball_x_local / closing_speed`), captured at the exact tick `_blue_wide` first fires -- essentially episode start, but AFTER at least one physics step has already run, not the raw `t_flight` sampled at spawn. So the actual window always comes out a bit below the nominal fraction of `t_flight` -- confirmed at frac=0.9, the captured window was ~94% of the naive `0.9*t_flight/dt` estimate. At frac=0.5 this small gap compounds with the value already being a smaller number, so the visible effect ("0.5 doesn't feel like half the flight") is real and expected, not a bug -- there is no code fix here, since `window_frac_of_remaining` was never meant to be an exact fraction of `t_flight`, only of the LIVE remaining time at trigger (deliberately, so a policy that reacts late still gets a window sized to what's actually left, not to a stale spawn-time estimate).
+
+**Fix (`rewards.py:start_blue_transition_track`):** `window_frac_of_remaining` `0.5 -> 0.75` (user request) -- splits the difference between the "too fast"-feeling 0.5 and the same-day 0.9 that was found unnecessary.
+
+**Evidence:** `ast.parse` clean. Live re-verified against the real registered term (same forced-wide-crossing setup as the previous two entries in this section): at tick 20, `target_y=0.384` (96% of the way to blue, `active=True`) -- between the 0.5 config's fully-collapsed-by-tick-20 behavior and the 0.9 config's 61%-at-tick-20, as expected for a value between them. Not yet validated against a live training run.

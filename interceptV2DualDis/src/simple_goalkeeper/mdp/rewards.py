@@ -2595,7 +2595,7 @@ def start_blue_transition_track(
     ball_name: str,
     asset_cfg: SceneEntityCfg = _DEFAULT_FEET_CFG,
     sigma: float = 5.0,
-    window_frac_of_remaining: float = 0.5,
+    window_frac_of_remaining: float = 0.75,
     min_window_steps: int = 5,
     lift_target_height: float = 0.10,
 ) -> torch.Tensor:
@@ -2617,8 +2617,7 @@ def start_blue_transition_track(
     third time (it's already computed there and in
     `_get_orange_reach_target_y`'s own copy).
 
-    `window_frac_of_remaining` defaults to 0.5 -- a "budget half the total
-    remaining time, leave the rest for the blue->green leg" split.
+    `window_frac_of_remaining` defaults to 0.75.
     HISTORY 2026-09-13: was 0.5 at first, briefly raised to 0.9 same day
     (user report, "start_blue transition is really fast") on the reasoning
     that this leg covers the FULL start->blue distance against the largest
@@ -2629,11 +2628,19 @@ def start_blue_transition_track(
     ball-visibility "warmup" (`events.py::_init_visibility_state`,
     `randint(1,4)` ticks = 0.02-0.06s) is unrelated (gates observation
     visibility only, never read by this function) and far too short to be
-    a meaningful fix either way. User then explicitly asked to set this
-    back to 0.5 regardless. Deactivation is driven by `extra_active_mask`
-    (blue landing), not by this window elapsing -- the window only
-    controls how long the term stays patient before its own target fully
-    collapses onto blue and effectively goes idle.
+    a meaningful fix either way. Set back to 0.5, then (user report, "0.5
+    is not 50% of the flight time it seems") -- correct: `remaining_t_now`
+    is the ball's LIVE remaining time-to-arrival at the moment `_blue_wide`
+    first fires (essentially episode start, but after at least one physics
+    step has already elapsed), not the raw `t_flight` sampled at spawn, so
+    the effective fraction of `t_flight` this window actually spans is
+    always a bit BELOW the nominal `window_frac_of_remaining` value (live
+    diagnostic at frac=0.9: captured window came out to ~94% of the naive
+    `0.9*t_flight/dt` estimate -- a small, expected gap, not a bug). Raised
+    to 0.75 to compensate and give more real margin. Deactivation is driven
+    by `extra_active_mask` (blue landing), not by this window elapsing --
+    the window only controls how long the term stays patient before its
+    own target fully collapses onto blue and effectively goes idle.
 
     Deactivates the instant blue is genuinely landed (`extra_active_mask`),
     handing off cleanly to `blue_green_transition_track` with no overlap --
