@@ -2447,6 +2447,7 @@ def _husky_transition_track(
     min_window_steps: int,
     lift_target_height: float,
     extra_active_mask: torch.Tensor,
+    window_reference_time: torch.Tensor | None = None,
 ) -> torch.Tensor:
     """Shared HUSKY-inspired trajectory-guided transition mechanism (arXiv
     2602.03205, Section III-D) -- extracted (user request, "make it also
@@ -2487,6 +2488,28 @@ def _husky_transition_track(
     instance's own viewer-cache attributes (`_<prefix>_target_y_live`/
     `_target_height_live`/`_active_live`) for `play.py`'s opaque green
     marker to read.
+
+    `window_reference_time`: NEW (user request, "can't we use the sampled
+    t_flight variable?"). When `None` (default, `blue_green_transition_track`'s
+    own usage -- UNCHANGED, deliberately kept, see FIX 2026-09-13 in
+    `docs/BugFixes.md` "window sizing fixed -- ball's REMAINING time-to-
+    arrival, not total t_flight"), the window is sized off the ball's LIVE
+    remaining time-to-arrival at the trigger tick, same as before. When
+    given a tensor (`start_blue_transition_track`'s own usage, passing
+    `env._t_flight`), that value is used INSTEAD, for callers that trigger
+    close enough to spawn (`_blue_wide`'s rising edge fires essentially at
+    episode start) that the ball's sampled total flight time and its live
+    remaining time are meant to be nearly the same quantity -- using the
+    sampled value directly makes `window_frac_of_remaining` genuinely mean
+    "this fraction of `t_flight`," matching the user's own expectation,
+    rather than a live recomputation that's ALWAYS a little below `t_flight`
+    purely from elapsed-tick noise (confirmed live: ~94% of the naive
+    estimate at frac=0.9). NOT applied to `blue_green_transition_track`,
+    whose trigger (blue landing) happens meaningfully later in the episode,
+    where `t_flight` and remaining time genuinely diverge -- swapping that
+    one back to `t_flight` would reintroduce the exact bug already fixed
+    there (window "way too slow" because blue routinely lands well before
+    the ball is actually close).
     """
     _get_reach_target_y(env, ball_name, asset_cfg=asset_cfg)  # ensure env._blue_* fresh this tick
 
@@ -2505,6 +2528,7 @@ def _husky_transition_track(
     ball_x_local = ball.data.root_link_pos_w[:, 0] - env.scene.env_origins[:, 0]
     ball_closing_speed = (-ball.data.root_link_lin_vel_w[:, 0]).clamp(min=0.05)  # >0 while approaching
     remaining_t_now = (ball_x_local / ball_closing_speed).clamp(min=0.0)
+    window_ref_time = window_reference_time if window_reference_time is not None else remaining_t_now
 
     ticks_attr = f"_{state_prefix}_window_ticks"
     start_attr = f"_{state_prefix}_start_step"
@@ -2514,7 +2538,7 @@ def _husky_transition_track(
     getattr(env, ticks_attr)[just_reset] = float(min_window_steps)
     prev_start_step = getattr(env, start_attr, torch.full((env.num_envs,), -1, dtype=torch.long, device=env.device))
     just_triggered = phase_completed_flag & (prev_start_step < 0)
-    fresh_window = (remaining_t_now * window_frac_of_remaining / _DT).clamp(min=float(min_window_steps))
+    fresh_window = (window_ref_time * window_frac_of_remaining / _DT).clamp(min=float(min_window_steps))
     setattr(env, ticks_attr, torch.where(just_triggered, fresh_window, getattr(env, ticks_attr)))
     window_steps_t = getattr(env, ticks_attr)
 
@@ -2595,7 +2619,7 @@ def start_blue_transition_track(
     ball_name: str,
     asset_cfg: SceneEntityCfg = _DEFAULT_FEET_CFG,
     sigma: float = 5.0,
-    window_frac_of_remaining: float = 0.75,
+    window_frac_of_remaining: float = 0.9,
     min_window_steps: int = 5,
     lift_target_height: float = 0.10,
 ) -> torch.Tensor:
@@ -2617,30 +2641,22 @@ def start_blue_transition_track(
     third time (it's already computed there and in
     `_get_orange_reach_target_y`'s own copy).
 
-    `window_frac_of_remaining` defaults to 0.75.
-    HISTORY 2026-09-13: was 0.5 at first, briefly raised to 0.9 same day
-    (user report, "start_blue transition is really fast") on the reasoning
-    that this leg covers the FULL start->blue distance against the largest
-    `remaining_t` value either leg ever sees, so 0.5 of it produced a
-    visibly rushed sweep -- confirmed live (real, non-forced resets across
-    16 envs) that short-`t_flight` episodes (as low as ~0.5s) still only
-    got a ~0.43s window even at 0.9. Separately confirmed the existing
-    ball-visibility "warmup" (`events.py::_init_visibility_state`,
-    `randint(1,4)` ticks = 0.02-0.06s) is unrelated (gates observation
-    visibility only, never read by this function) and far too short to be
-    a meaningful fix either way. Set back to 0.5, then (user report, "0.5
-    is not 50% of the flight time it seems") -- correct: `remaining_t_now`
-    is the ball's LIVE remaining time-to-arrival at the moment `_blue_wide`
-    first fires (essentially episode start, but after at least one physics
-    step has already elapsed), not the raw `t_flight` sampled at spawn, so
-    the effective fraction of `t_flight` this window actually spans is
-    always a bit BELOW the nominal `window_frac_of_remaining` value (live
-    diagnostic at frac=0.9: captured window came out to ~94% of the naive
-    `0.9*t_flight/dt` estimate -- a small, expected gap, not a bug). Raised
-    to 0.75 to compensate and give more real margin. Deactivation is driven
-    by `extra_active_mask` (blue landing), not by this window elapsing --
-    the window only controls how long the term stays patient before its
-    own target fully collapses onto blue and effectively goes idle.
+    `window_frac_of_remaining` defaults to 0.9. HISTORY 2026-09-13 (all
+    same day, iterated live against user reports of the transition feeling
+    too fast/too slow): 0.5 -> 0.9 -> 0.5 -> 0.75 -> back to **0.9**, this
+    time paired with a genuine fix underneath rather than just retuning the
+    number -- see `window_reference_time` below, which is the actual reason
+    0.5/0.75 never felt like "50%/75% of the flight time": this leg now
+    passes `env._t_flight` (the SAMPLED total flight time, captured once at
+    ball spawn) as `_husky_transition_track`'s `window_reference_time`,
+    instead of that helper's own default (a LIVE remaining-time
+    recomputation that's always a bit below `t_flight` from elapsed-tick
+    noise -- confirmed live: ~94% of the naive estimate at frac=0.9). Since
+    `t_flight` and live remaining time are nearly identical at THIS leg's
+    trigger point (essentially episode start), using the sampled value
+    directly is exact for this call site (not an approximation) and makes
+    `window_frac_of_remaining` genuinely mean what it says. Full detail in
+    `docs/BugFixes.md`, 2026-09-13 entries.
 
     Deactivates the instant blue is genuinely landed (`extra_active_mask`),
     handing off cleanly to `blue_green_transition_track` with no overlap --
@@ -2664,6 +2680,7 @@ def start_blue_transition_track(
         min_window_steps=min_window_steps,
         lift_target_height=lift_target_height,
         extra_active_mask=~env._blue_landed_genuine,
+        window_reference_time=env._t_flight,
     )
 
 
