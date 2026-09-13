@@ -4706,3 +4706,13 @@ An earlier version of test #4 appeared to show the window "frozen" (target never
 **Fix (`rewards.py:foot_inner_face_continuous`):** `_PRE_LANDING_TARGET_ANGLE_DEG` `45.0 -> 20.0` (back to its 2026-09-11 value).
 
 **Evidence:** `ast.parse` clean. Live-verified against the real registered term (`env.reward_manager.get_term_cfg('foot_inner_face_continuous')`): pulled the function's own source via `inspect.getsource` on the actual registered `func` and confirmed `_PRE_LANDING_TARGET_ANGLE_DEG = 20.0` is genuinely present in the live code path (not a stale import or shadowed copy), and a forced pre-landing/wide-crossing call returned a real reward value (0.804) with no crash. Not yet validated against a live training run.
+
+---
+
+## 2026-09-13 (later same day): start_blue_transition_track to 0.45; pre-landing target angle to 15 deg
+
+**Context:** user request, "do 0.45 for start to blue and also do landing ang deg 15 instead of 20."
+
+**Fix (`rewards.py`):** `start_blue_transition_track`'s `window_frac_of_remaining` `0.4 -> 0.45`. `foot_inner_face_continuous`'s `_PRE_LANDING_TARGET_ANGLE_DEG` `20.0 -> 15.0`.
+
+**Evidence:** `ast.parse` clean. Both live-verified against the real registered functions in one combined test (16 real, non-forced resets): `_PRE_LANDING_TARGET_ANGLE_DEG = 15.0` confirmed present via `inspect.getsource` on the actual registered `foot_inner_face_continuous.func`; `start_blue_transition_track`'s captured window matched `0.45*t_flight/dt` exactly for all 7 envs that went wide (e.g. `t_flight=0.621 -> captured=13.97`, expected `13.97`; `t_flight=0.993 -> captured=22.34`, expected `22.34`). Not yet validated against a live training run.

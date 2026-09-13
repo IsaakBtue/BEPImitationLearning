@@ -2640,7 +2640,7 @@ def start_blue_transition_track(
     ball_name: str,
     asset_cfg: SceneEntityCfg = _DEFAULT_FEET_CFG,
     sigma: float = 5.0,
-    window_frac_of_remaining: float = 0.4,
+    window_frac_of_remaining: float = 0.45,
     min_window_steps: int = 5,
     lift_target_height: float = 0.10,
 ) -> torch.Tensor:
@@ -2677,8 +2677,8 @@ def start_blue_transition_track(
     docstring/BUG FIX comment). HISTORY 2026-09-13 (all same day, iterated
     live against user reports of "too fast"/"too slow"): 0.5 -> 0.9 -> 0.5
     -> 0.75 -> 0.9 (each retuning attempt before the two bugs above were
-    found) -> 0.5 -> 0.3 -> **0.4** (user requests, after both bugs fixed
-    and verified -- these later moves are genuine retuning, not
+    found) -> 0.5 -> 0.3 -> 0.4 -> **0.45** (user requests, after both bugs
+    fixed and verified -- these later moves are genuine retuning, not
     compensating for a bug). Full detail in `docs/BugFixes.md`, 2026-09-13
     entries.
 
@@ -5351,7 +5351,7 @@ def foot_inner_face_continuous(
     # should just be the 70" (there IS no blue to wait for on a narrow
     # crossing). Wide crossings are unaffected -- same pre-landing ->
     # post-landing switch as before, just via the correct shared gate.
-    _PRE_LANDING_TARGET_ANGLE_DEG = 20.0  # FIX 2026-09-13 (user request): 45 -> 20 (back to the 2026-09-11 value)
+    _PRE_LANDING_TARGET_ANGLE_DEG = 15.0  # FIX 2026-09-13 (user request): 20 -> 15
     blue_wide = getattr(env, "_blue_wide", torch.zeros(env.num_envs, dtype=torch.bool, device=env.device))
     blue_landed_genuine = getattr(env, "_blue_landed_genuine", torch.zeros(env.num_envs, dtype=torch.bool, device=env.device))
     targeting_green = (~blue_wide) | blue_landed_genuine
