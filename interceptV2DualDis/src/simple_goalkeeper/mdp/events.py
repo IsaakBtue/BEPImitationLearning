@@ -298,7 +298,42 @@ class MotionResetManager:
         n = len(env_ids)
 
         if torch.rand(1, device=env.device).item() > (1.0 - rsi_fraction):
-            donor_idx = torch.randint(0, env.num_envs, (n,), device=env.device)
+            # FIX (user request, deliberate SGK divergence from the literal
+            # G1 port above -- NOT a parity fix): G1's own donor sampling
+            # (Humanoid-Goalkeeper/legged_gym/.../legged_robot.py:670,
+            # `torch.randint(0, self.num_envs, ...)`) is confirmed, directly
+            # from source, to be completely unscoped by G1's own 6 motion-
+            # type regions (lefthand/leftjump/leftstep/right*) -- a
+            # hand-catch env can copy a mid-jump donor pose with zero
+            # region/type matching. User pushback ("isn't that wrong... you
+            # want rsi donor from the same region") argued this defeats
+            # RSI's own purpose (starting from a state representative of
+            # THIS episode's own reference motion) regardless of what G1
+            # does -- confirmed as a real, not made-up, design issue: RSI
+            # existing to give exposure to genuine mid-motion states, a
+            # donor from an unrelated region's motion isn't a representative
+            # mid-motion state for the resetting episode's own task.
+            # Symmetric across left/right by construction, so this alone
+            # cannot explain the right_far-vs-left_far asymmetry -- it is a
+            # general far/double-step training-quality fix, not a targeted
+            # one. Only scopes donors within a resetting env's OWN region
+            # when env._region_id exists (the multi-disc, region-
+            # conditioned task); falls back to G1's literal unscoped
+            # behavior otherwise (the plain single-disc task has no region
+            # concept to scope against).
+            region_id_all = getattr(env, "_region_id", None)
+            if region_id_all is not None:
+                region_id_resetting = region_id_all[env_ids.long()]
+                donor_idx = torch.empty(n, dtype=torch.long, device=env.device)
+                for r in torch.unique(region_id_all).tolist():
+                    mask = region_id_resetting == r
+                    if not mask.any():
+                        continue
+                    members = torch.where(region_id_all == r)[0]
+                    pick = members[torch.randint(0, len(members), (int(mask.sum()),), device=env.device)]
+                    donor_idx[mask] = pick
+            else:
+                donor_idx = torch.randint(0, env.num_envs, (n,), device=env.device)
             joint_pos = robot.data.joint_pos[donor_idx].clone()
         else:
             default_pos = robot.data.default_joint_pos[env_ids]
