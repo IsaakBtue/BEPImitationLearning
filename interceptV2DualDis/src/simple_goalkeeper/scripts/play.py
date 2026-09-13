@@ -851,6 +851,23 @@ def _patch_viewer_intercept_vis(native_viewer: "NativeMujocoViewer", env) -> Non
             # earlier request meant the Y half-width trim above, not this.
             _add_ground_rect(goal_x, foot_target_y, floor_z + 0.002, 0.30, 0.05, _live_radius_green, 0.006, [0.1, 1.0, 0.2, 0.9])
 
+        # NEW (user request, "make it visual in the play script with obaque
+        # green ball"): opaque (alpha=1.0, unlike every other translucent
+        # marker in this function) solid sphere at the LIVE blue->green
+        # transition target -- rewards.py:blue_green_transition_track
+        # caches its own per-tick target (Y + height) on env._btg_target_
+        # y_live/_btg_target_height_live/_btg_active_live specifically for
+        # this marker, so it can never drift out of sync with what the
+        # reward actually tracks. Only drawn while genuinely active (after
+        # blue_landed_genuine fires, before the transition window elapses)
+        # -- otherwise it would just sit on top of the plain green sphere
+        # above, showing nothing new.
+        _btg_active = getattr(raw_env, "_btg_active_live", None)
+        if _btg_active is not None and bool(_btg_active[0].item()):
+            _btg_y = float(raw_env._btg_target_y_live[0].item())
+            _btg_h = float(raw_env._btg_target_height_live[0].item())
+            _add_sphere(goal_x, _btg_y, floor_z + _btg_h, 0.05, [0.1, 1.0, 0.2, 1.0])
+
         # RESTORED 2026-09-11 (user request, "revert the yellow ball i
         # want it back... do this by means of git"): the orange sphere,
         # restored verbatim from git history (commit f0477c4) -- was

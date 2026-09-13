@@ -2353,7 +2353,7 @@ def _get_phase_transition_target_y(
     body_y_now: torch.Tensor,
     next_target_y: torch.Tensor,
     state_prefix: str,
-    window_steps: int,
+    window_steps: int | torch.Tensor,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """NEW (user request, "make something similar to HUSKY's transition
     mechanism... make it very generic, but mostly blue->green, try to match
@@ -2377,10 +2377,18 @@ def _get_phase_transition_target_y(
 
     `state_prefix` scopes the cached env attributes (`_<prefix>_captured_y`,
     `_<prefix>_start_step`) so multiple transition instances (e.g. a future
-    orange->red one) never collide with each other's state -- this is the
-    "generic" part: this function knows nothing about blue/green/orange/red
-    specifically, only "a phase completed, here's where the tracked body was,
-    here's where it should end up."
+    orange->red one, or a SECOND call for a different scalar axis of the
+    SAME transition -- see `blue_green_transition_track`'s own Z-height call
+    with a distinct prefix) never collide with each other's state -- this is
+    the "generic" part: this function knows nothing about blue/green/orange/
+    red specifically, only "a phase completed, here's where the tracked
+    quantity was, here's where it should end up." Despite the "_y" in the
+    name (kept for historical/call-site-familiarity reasons), it works for
+    ANY scalar -- Y position, height, or any other single number.
+
+    `window_steps` may be a per-env tensor (not just a flat int) so callers
+    can vary the transition duration per episode (e.g. scaled by that
+    episode's own ball reaction time).
 
     Returns (target_y, active). `active` is False before the phase
     completes (nothing captured yet) and once the window has fully elapsed
@@ -2407,7 +2415,8 @@ def _get_phase_transition_target_y(
 
     armed = start_step >= 0
     elapsed = (env.episode_length_buf - start_step).clamp(min=0)
-    s = (elapsed.float() / float(window_steps)).clamp(0.0, 1.0)
+    window_steps_t = window_steps if isinstance(window_steps, torch.Tensor) else float(window_steps)
+    s = (elapsed.float() / window_steps_t).clamp(0.0, 1.0)
     ease = s * s * (3.0 - 2.0 * s)  # smoothstep == 1D cubic Bezier, colinear control points
 
     target_y = torch.where(armed, captured_y + (next_target_y - captured_y) * ease, next_target_y)
@@ -2420,7 +2429,9 @@ def blue_green_transition_track(
     ball_name: str,
     asset_cfg: SceneEntityCfg = _DEFAULT_FEET_CFG,
     sigma: float = 5.0,
-    window_steps: int = 25,
+    window_frac_of_t_flight: float = 0.5,
+    min_window_steps: int = 5,
+    lift_target_height: float = 0.10,
 ) -> torch.Tensor:
     """HUSKY-inspired trajectory-guided transition reward, blue->green.
 
@@ -2428,10 +2439,7 @@ def blue_green_transition_track(
     `_get_phase_transition_target_y` above -- the leading foot's own
     Y position, captured the instant `env._blue_landed_genuine` first
     fires, eased toward green (`_get_ball_crossing_y`, the same frozen
-    target `blue`/`orange`/`red` all key off) over `window_steps` real
-    ticks (~0.5s at the default, a first-guess duration -- not yet
-    tuned from data, same "document now, tune later" convention this
-    project already uses throughout).
+    target `blue`/`orange`/`red` all key off).
 
     Deliberately does NOT replace `footreach`/`foot_proximity`
     (fixed-target, long-running) or `blue_trunk_drive` (undecayed
@@ -2442,6 +2450,37 @@ def blue_green_transition_track(
     ball is within 1.5m, which can be long after blue lands on far
     crossings; blue_trunk_drive rewards moving the right direction but has
     no notion of "how far along should I be by now").
+
+    NEW (user request, "make the distance of that moving target the
+    leading_foot_lift height"): the moving target now also has a Z
+    (height) component, tracked with a SECOND call to the same generic
+    `_get_phase_transition_target_y` helper (distinct `state_prefix`, so
+    it doesn't collide with the Y-axis call's own cached state) -- captured
+    foot height at the landing instant, eased toward `lift_target_height`
+    (matching `leading_foot_lift`'s own `target_height` default, 0.10m: the
+    instant `_blue_landed_genuine` fires, that reward's own shrinking
+    `effective_target` already snaps back to this flat value -- see that
+    function's own `effective_target = where(wide & ~landed_genuine,
+    decayed_target, target_height)` line -- so reusing the plain parameter
+    here, rather than re-deriving leading_foot_lift's full pre-landing
+    decay machinery, is exact, not an approximation, for the window this
+    term is active in). Height measured with the identical convention
+    `leading_foot_lift` uses (`_FOOT_RESTING_HEIGHT=0.03` baseline
+    subtracted, clamped >=0) so a flat/grounded foot reads 0 in both
+    places. Combined with the Y-axis distance via a plain Euclidean norm
+    (matches HUSKY's own single combined-distance tracking reward over its
+    multi-axis Bezier curve, not two independently-weighted terms).
+
+    NEW (user request, "make it variable with t_flight time, so for faster
+    balls the 0.5 need to be shorter"): `window_steps` is no longer a flat
+    default -- it's `t_flight * window_frac_of_t_flight`, per-env, read
+    from `env._t_flight` (cached at ball spawn, `events.py:
+    reset_ball_rolling`). `window_frac_of_t_flight=0.5` is chosen so the
+    OLD flat default (25 ticks / 0.5s) is recovered exactly at t_flight=1.0s
+    (this task's typical mid-range reaction time) -- faster balls
+    (shorter t_flight) get a proportionally shorter transition window,
+    slower balls a longer one. `min_window_steps=5` guards against a
+    degenerate near-zero window at the fastest possible balls.
 
     Zero on narrow crossings (blue_landed_genuine never fires there, so
     the transition never arms) and once the ball is behind (mirrors
@@ -2455,6 +2494,14 @@ def blue_green_transition_track(
     foot_pos_w = robot.data.body_link_pos_w[:, asset_cfg.body_ids, :]
     foot_y_now = foot_pos_w[arange, foot_idx, 1]
 
+    floor_z = env.scene.env_origins[:, 2]
+    _FOOT_RESTING_HEIGHT = 0.03  # matches leading_foot_lift's own baseline exactly
+    foot_height_now = (foot_pos_w[arange, foot_idx, 2] - floor_z - _FOOT_RESTING_HEIGHT).clamp(min=0.0)
+
+    _DT = 0.02
+    t_flight = getattr(env, "_t_flight", torch.ones(env.num_envs, device=env.device))
+    window_steps_t = (t_flight * window_frac_of_t_flight / _DT).clamp(min=float(min_window_steps))
+
     green_y = _get_ball_crossing_y(env, ball_name)
     target_y, active = _get_phase_transition_target_y(
         env,
@@ -2462,10 +2509,21 @@ def blue_green_transition_track(
         body_y_now=foot_y_now,
         next_target_y=green_y,
         state_prefix="btg",
-        window_steps=window_steps,
+        window_steps=window_steps_t,
     )
+    target_height, _ = _get_phase_transition_target_y(
+        env,
+        phase_completed_flag=env._blue_landed_genuine,
+        body_y_now=foot_height_now,
+        next_target_y=torch.full_like(foot_height_now, lift_target_height),
+        state_prefix="btg_height",
+        window_steps=window_steps_t,
+    )
+    env._btg_target_y_live = target_y      # viewer-only cache (play.py opaque green marker)
+    env._btg_target_height_live = target_height
+    env._btg_active_live = active
 
-    dist = (foot_y_now - target_y).abs()
+    dist = torch.sqrt((foot_y_now - target_y) ** 2 + (foot_height_now - target_height) ** 2)
     reward = torch.exp(-sigma * dist)
     behind = _ball_is_behind(env, ball_name)
     return reward * active.float() * (~behind).float()

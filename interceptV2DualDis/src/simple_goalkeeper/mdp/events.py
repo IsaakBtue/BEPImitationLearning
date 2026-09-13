@@ -1353,6 +1353,14 @@ def reset_ball_rolling(
     domain_rand_d = float(min(max(getattr(env, "_domain_rand_curriculum", 1.0), 0.0), 1.0))
     t_flight_r = _lerp_range(_EASY_T_FLIGHT_RANGE, t_flight_range, domain_rand_d)
     t_flight = sample_uniform(*t_flight_r, (n,), env.device)
+    # NEW (user request, "make it variable with t_flight time, so for
+    # faster balls the 0.5 need to be shorter"): cached so reward terms
+    # (blue_green_transition_track) can read this episode's own sampled
+    # reaction time later -- not previously stored anywhere past this
+    # local variable's scope.
+    if not hasattr(env, "_t_flight"):
+        env._t_flight = torch.full((env.num_envs,), float(t_flight_range[1]), device=env.device)
+    env._t_flight[env_ids] = t_flight
 
     if y_end_range[0] * y_end_range[1] > 0:
         # One-sided range (region-conditioned calls via reset_ball_rolling_by_region,
