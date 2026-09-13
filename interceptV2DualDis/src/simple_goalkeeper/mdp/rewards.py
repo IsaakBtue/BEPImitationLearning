@@ -2640,7 +2640,7 @@ def start_blue_transition_track(
     ball_name: str,
     asset_cfg: SceneEntityCfg = _DEFAULT_FEET_CFG,
     sigma: float = 5.0,
-    window_frac_of_remaining: float = 0.9,
+    window_frac_of_remaining: float = 0.5,
     min_window_steps: int = 5,
     lift_target_height: float = 0.10,
 ) -> torch.Tensor:
@@ -2662,22 +2662,23 @@ def start_blue_transition_track(
     third time (it's already computed there and in
     `_get_orange_reach_target_y`'s own copy).
 
-    `window_frac_of_remaining` defaults to 0.9. HISTORY 2026-09-13 (all
-    same day, iterated live against user reports of the transition feeling
-    too fast/too slow): 0.5 -> 0.9 -> 0.5 -> 0.75 -> back to **0.9**, this
-    time paired with a genuine fix underneath rather than just retuning the
-    number -- see `window_reference_time` below, which is the actual reason
-    0.5/0.75 never felt like "50%/75% of the flight time": this leg now
-    passes `env._t_flight` (the SAMPLED total flight time, captured once at
-    ball spawn) as `_husky_transition_track`'s `window_reference_time`,
-    instead of that helper's own default (a LIVE remaining-time
-    recomputation that's always a bit below `t_flight` from elapsed-tick
-    noise -- confirmed live: ~94% of the naive estimate at frac=0.9). Since
+    `window_frac_of_remaining` defaults to 0.5 -- genuinely means 50% of the
+    sampled `t_flight` now (see `window_reference_time` below), unlike
+    earlier same-day 0.5/0.75 attempts which silently meant something else
+    due to two compounding bugs since fixed: (1) the window was sized off a
+    LIVE remaining-time recomputation instead of the sampled `env._t_flight`
+    -- fixed by passing `env._t_flight` directly as `_husky_transition_
+    track`'s `window_reference_time` (exact for this call site, since
     `t_flight` and live remaining time are nearly identical at THIS leg's
-    trigger point (essentially episode start), using the sampled value
-    directly is exact for this call site (not an approximation) and makes
-    `window_frac_of_remaining` genuinely mean what it says. Full detail in
-    `docs/BugFixes.md`, 2026-09-13 entries.
+    trigger point, essentially episode start); (2) a state-ordering bug
+    that collapsed the window to `min_window_steps` (5 ticks) on any
+    episode after an env's first-ever trigger -- fixed in
+    `_husky_transition_track`'s own `just_triggered` check (see its
+    docstring/BUG FIX comment). HISTORY 2026-09-13 (all same day, iterated
+    live against user reports of "too fast"/"too slow"): 0.5 -> 0.9 -> 0.5
+    -> 0.75 -> 0.9 (each retuning attempt before the two bugs above were
+    found) -> **0.5** (user request, after both bugs fixed and verified).
+    Full detail in `docs/BugFixes.md`, 2026-09-13 entries.
 
     Deactivates the instant blue is genuinely landed (`extra_active_mask`),
     handing off cleanly to `blue_green_transition_track` with no overlap --

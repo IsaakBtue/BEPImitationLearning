@@ -4668,3 +4668,13 @@ Confirmed again, directly: `self.num_envs` is the full population across all 6 o
 4. `probe_stb_behavior_ep2.py`: full behavioral confirmation on a REAL, properly-stepped 2nd episode (not just the tick-count check) -- `window_ticks` correctly captured at 42.4 (matching `0.9*0.942/0.02`), `target_y` genuinely eased smoothly from -3.891 to -3.600 over the window (real motion, not frozen), `active` stayed True through step 40 and correctly went False at step 44 (expected ~42) -- i.e. the full transition now genuinely spans ~90% of the flight time on a second episode, not ~10%.
 
 An earlier version of test #4 appeared to show the window "frozen" (target never moving, active never deactivating) -- traced to a bug in the TEST SCRIPT itself (a missing `env.step()` call in the tracking loop, so the env was never actually advancing), not the reward code; noted here since it could otherwise look like a second real bug. Not yet validated against a live training run.
+
+---
+
+## 2026-09-13 (later same day): start_blue_transition_track set to 0.5 (user request, both underlying bugs now fixed)
+
+**Context:** user request, "use 0.5" -- now that both the sampled-vs-live-time bug and the episode-ordering bug are fixed, this is the first time 0.5 has been set with both fixes already in place.
+
+**Fix (`rewards.py:start_blue_transition_track`):** `window_frac_of_remaining` `0.9 -> 0.5`.
+
+**Evidence:** `ast.parse` clean. Live re-verified against real (non-forced) resets across 16 envs: captured window now matches `0.5 * t_flight / dt` exactly for every wide-crossing env (e.g. `t_flight=0.805 -> captured=20.12`, expected `0.805*0.5/0.02=20.125`; `t_flight=0.949 -> captured=23.74`, expected `23.725`) -- confirms `window_frac_of_remaining=0.5` now genuinely means 50% of the sampled flight time, on top of the episode-ordering fix from the previous entry (so this holds on repeated episodes too, not just an env's first). Not yet validated against a live training run.
