@@ -2537,7 +2537,28 @@ def _husky_transition_track(
     just_reset = env.episode_length_buf <= 1
     getattr(env, ticks_attr)[just_reset] = float(min_window_steps)
     prev_start_step = getattr(env, start_attr, torch.full((env.num_envs,), -1, dtype=torch.long, device=env.device))
-    just_triggered = phase_completed_flag & (prev_start_step < 0)
+    # BUG FIX 2026-09-13 (user report, "it literally is done within 10% of
+    # the flight time"): `prev_start_step` is read HERE, BEFORE
+    # `_get_phase_transition_target_y` (called below) resets `start_attr`
+    # to -1 for a newly-reset episode -- so on any episode AFTER an env's
+    # first-ever trigger of this term, `prev_start_step` is still the STALE
+    # value left over from a PRIOR episode (>= 0, not -1), permanently
+    # blocking `just_triggered` from ever firing again for that env. This
+    # collapsed `fresh_window` to never being applied -- `ticks_attr` stayed
+    # stuck at whatever the `just_reset` line just above set it to
+    # (`min_window_steps`, 5 ticks = 0.1s) forever, for every episode after
+    # the first. Reproduced live: identical (env, t_flight) pairs on a 2nd/
+    # 3rd real reset showed `captured_ticks=5.00` for envs that had
+    # triggered in a prior episode, vs. the correct `0.9*t_flight/dt` value
+    # for envs that hadn't -- exactly matching the "~10% of flight time"
+    # report (5 ticks against an intended ~30-45 tick window). Fixed by
+    # also treating the reset tick itself as "not yet armed," regardless of
+    # `prev_start_step`'s stale value -- safe for `blue_green_transition_
+    # track` too, since its own `phase_completed_flag` (blue landing) is
+    # always False on the reset tick anyway (nothing can be landed yet),
+    # so the OR only ever changes behavior for a flag that's already True
+    # at episode start (`start_blue_transition_track`'s own case).
+    just_triggered = phase_completed_flag & ((prev_start_step < 0) | just_reset)
     fresh_window = (window_ref_time * window_frac_of_remaining / _DT).clamp(min=float(min_window_steps))
     setattr(env, ticks_attr, torch.where(just_triggered, fresh_window, getattr(env, ticks_attr)))
     window_steps_t = getattr(env, ticks_attr)
