@@ -1222,6 +1222,15 @@ def goalkeeper_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
             weight=5.0,
             params={"ball_name": BALL_NAME, "asset_cfg": _FEET_CFG},
         ),
+        # NEW (user request, "make it also for starting->blue ball") --
+        # second instance of the shared _husky_transition_track mechanism.
+        # Was implemented but never actually registered here -- caught
+        # while adding its viewer marker.
+        "start_blue_transition_track": RewardTermCfg(
+            func=gk_mdp.start_blue_transition_track,
+            weight=5.0,
+            params={"ball_name": BALL_NAME, "asset_cfg": _FEET_CFG},
+        ),
         # RESTORED 2026-09-11 (user request, "revert the yellow ball i
         # want it back... do this by means of git"): orange_foot_proximity/
         # orange_ball_landed/orange_overshoot_penalty/orange_stick_landing

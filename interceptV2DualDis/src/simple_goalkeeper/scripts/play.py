@@ -878,6 +878,23 @@ def _patch_viewer_intercept_vis(native_viewer: "NativeMujocoViewer", env) -> Non
             # FIX (user request, "make the ball smaller"): 0.10 -> 0.04.
             _add_sphere(goal_x, _btg_y, floor_z + _btg_h, 0.04, [0.0, 1.0, 0.0, 1.0])
 
+        # NEW (user request, "make also a visualisation of the transition
+        # from starting to blue ball with a small blue ball same fashion as
+        # the green one"): opaque solid sphere at the LIVE start->blue
+        # transition target -- rewards.py:start_blue_transition_track caches
+        # its own per-tick target (Y + height) on env._stb_target_y_live/
+        # _stb_target_height_live/_stb_active_live, mirroring the green
+        # marker above exactly (same _husky_transition_track mechanism,
+        # "stb" prefix instead of "btg"). Colored blue to match this file's
+        # existing blue-marker convention (the blue midpoint sphere above
+        # uses [0.15, 0.4, 1.0, ...]); fully opaque and same 0.04 size as
+        # the green marker for visual consistency between the two phases.
+        _stb_active = getattr(raw_env, "_stb_active_live", None)
+        if _stb_active is not None and bool(_stb_active[0].item()):
+            _stb_y = float(raw_env._stb_target_y_live[0].item())
+            _stb_h = float(raw_env._stb_target_height_live[0].item())
+            _add_sphere(goal_x, _stb_y, floor_z + _stb_h, 0.04, [0.15, 0.4, 1.0, 1.0])
+
         # RESTORED 2026-09-11 (user request, "revert the yellow ball i
         # want it back... do this by means of git"): the orange sphere,
         # restored verbatim from git history (commit f0477c4) -- was

@@ -2435,82 +2435,60 @@ def _get_phase_transition_target_y(
     return target_y, active
 
 
-def blue_green_transition_track(
+def _husky_transition_track(
     env: "ManagerBasedRlEnv",
     ball_name: str,
-    asset_cfg: SceneEntityCfg = _DEFAULT_FEET_CFG,
-    sigma: float = 5.0,
-    window_frac_of_remaining: float = 0.8,
-    min_window_steps: int = 5,
-    lift_target_height: float = 0.10,
+    asset_cfg: SceneEntityCfg,
+    phase_completed_flag: torch.Tensor,
+    next_target_y: torch.Tensor,
+    state_prefix: str,
+    sigma: float,
+    window_frac_of_remaining: float,
+    min_window_steps: int,
+    lift_target_height: float,
+    extra_active_mask: torch.Tensor,
 ) -> torch.Tensor:
-    """HUSKY-inspired trajectory-guided transition reward, blue->green.
+    """Shared HUSKY-inspired trajectory-guided transition mechanism (arXiv
+    2602.03205, Section III-D) -- extracted (user request, "make it also
+    for starting->blue ball") so `blue_green_transition_track` and
+    `start_blue_transition_track` share ONE implementation instead of two
+    independently-drifting copies (this project's own reward-shaping-
+    scene-entity-cfg skill, Pitfall 9: a new mechanism silently duplicating
+    an existing one).
 
-    NEW (user request): the concrete, primary instance of
-    `_get_phase_transition_target_y` above -- the leading foot's own
-    Y position, captured the instant `env._blue_landed_genuine` first
-    fires, eased toward green (`_get_ball_crossing_y`, the same frozen
-    target `blue`/`orange`/`red` all key off).
+    Full mechanism (see the git history of `blue_green_transition_track`
+    for the incremental design/verification trail this was built up
+    through):
+      - Y-axis target: captured foot Y at the instant `phase_completed_flag`
+        first fires, eased toward `next_target_y` via quintic smootherstep
+        (zero velocity AND acceleration at both window endpoints -- a real
+        accelerate/cruise/decelerate profile, not a velocity ramp with a
+        sharp acceleration kink at the boundaries).
+      - Height target: an up-then-down ARC reusing `leading_foot_lift`'s
+        own kernel shape (`_clearance_reward`: steep tanh rise, Gaussian
+        fall) reparameterized over transition progress instead of raw
+        height -- peaks at `lift_target_height` at the window's midpoint,
+        back to ~0 (grounded) by the window's end.
+      - Window duration: the ball's ACTUAL remaining time-to-arrival
+        (`ball_x_local / closing_speed`, live), captured ONCE at the
+        `phase_completed_flag` rising edge, times `window_frac_of_remaining`
+        -- NOT the ball's total flight time (systematically too long,
+        since the triggering event routinely happens well before the ball
+        is actually close).
+      - Combined Y+height distance via Euclidean norm -> `exp(-sigma*dist)`.
+      - `extra_active_mask`: an additional caller-supplied gate (e.g. "not
+        yet behind" for blue->green, "not yet landed at blue" for
+        start->blue) multiplied in on top of the window's own active flag,
+        so each leg hands off cleanly to whatever comes next.
 
-    Deliberately does NOT replace `footreach`/`foot_proximity`
-    (fixed-target, long-running) or `blue_trunk_drive` (undecayed
-    trunk-velocity pull, no schedule) -- this is a narrower, time-scheduled
-    addition specifically for the transition window right after blue
-    lands, where neither of those enforces PACE (see the conversation's
-    own comparison: footreach's vel_sigma boost doesn't activate until the
-    ball is within 1.5m, which can be long after blue lands on far
-    crossings; blue_trunk_drive rewards moving the right direction but has
-    no notion of "how far along should I be by now").
-
-    NEW (user request, "make the distance of that moving target the
-    leading_foot_lift height"): the moving target now also has a Z
-    (height) component. Height measured with the identical convention
-    `leading_foot_lift` uses (`_FOOT_RESTING_HEIGHT=0.03` baseline
-    subtracted, clamped >=0) so a flat/grounded foot reads 0 in both
-    places. Combined with the Y-axis distance via a plain Euclidean norm
-    (matches HUSKY's own single combined-distance tracking reward over its
-    multi-axis Bezier curve, not two independently-weighted terms).
-
-    UPDATE (user request, "it needs to go up sharply same kernal as the
-    leading foot lift circular drop off for blue ball but then upwards,
-    and then downwards again for greenball"): the height TARGET is no
-    longer a captured-value eased toward a flat plateau (that held at
-    `lift_target_height` for the rest of the window and never came back
-    down). It's now a genuine up-then-down arc reusing `leading_foot_lift`'s
-    own kernel shape (`_clearance_reward`: steep tanh rise from 0, Gaussian
-    falloff past the peak) verbatim, reparameterized over transition
-    PROGRESS (`s`, read from the Y-axis call's own `_btg_start_step`
-    timing state, not a second independent timer) instead of raw height --
-    peaks at `lift_target_height` (0.10) at the window's midpoint
-    (`_S_PEAK=0.5`), decays back toward 0 (grounded) by the time the
-    window ends (green arrival) -- matching a genuine step/dive arc: lift
-    off right after planting at blue, come back down landing at green.
-
-    FIX (user report, "t_flight is for the full thing so why are you using
-    full t_flight? because i see in play script that it is way too slow"):
-    the ORIGINAL version of this (see git history) sized the window off
-    `env._t_flight` -- the ball's TOTAL flight time from spawn. That's the
-    wrong reference: blue routinely lands well before the ball is actually
-    close (that gap is precisely why `blue_trunk_drive` exists), so a
-    window sized off the FULL flight duration is systematically too long
-    relative to how much time is genuinely left. Fixed: the window is now
-    sized off the ball's REMAINING time-to-arrival, computed live from its
-    actual current position/velocity (`ball_x_local / closing_speed`) and
-    CAPTURED ONCE at the exact instant blue genuinely lands (same
-    "captured at the event, fixed for the rest of the window" pattern the
-    Y/height axes already use) -- not recomputed every tick, so `s`'s
-    denominator stays constant through the window, same as before.
-    `window_frac_of_remaining=0.8` (was `window_frac_of_t_flight=0.5` off
-    the wrong reference) leaves a small buffer so the arc finishes slightly
-    before the ball is actually due, rather than exactly as time runs out.
-    `min_window_steps=5` guards against a degenerate near-zero window for
-    a ball that's already very close when blue lands.
-
-    Zero on narrow crossings (blue_landed_genuine never fires there, so
-    the transition never arms) and once the ball is behind (mirrors
-    footreach's own gate).
+    `state_prefix` scopes ALL cached env state (`_<prefix>_window_ticks`,
+    plus whatever `_get_phase_transition_target_y` caches under the same
+    prefix) so the two callers never collide, and also names this
+    instance's own viewer-cache attributes (`_<prefix>_target_y_live`/
+    `_target_height_live`/`_active_live`) for `play.py`'s opaque green
+    marker to read.
     """
-    _get_reach_target_y(env, ball_name, asset_cfg=asset_cfg)  # ensure _blue_landed_genuine fresh this tick
+    _get_reach_target_y(env, ball_name, asset_cfg=asset_cfg)  # ensure env._blue_* fresh this tick
 
     robot: Entity = env.scene[asset_cfg.name]
     foot_idx = _get_correct_foot_idx(env, ball_name)
@@ -2528,60 +2506,147 @@ def blue_green_transition_track(
     ball_closing_speed = (-ball.data.root_link_lin_vel_w[:, 0]).clamp(min=0.05)  # >0 while approaching
     remaining_t_now = (ball_x_local / ball_closing_speed).clamp(min=0.0)
 
-    if not hasattr(env, "_btg_window_ticks"):
-        env._btg_window_ticks = torch.full((env.num_envs,), float(min_window_steps), device=env.device)
+    ticks_attr = f"_{state_prefix}_window_ticks"
+    start_attr = f"_{state_prefix}_start_step"
+    if not hasattr(env, ticks_attr):
+        setattr(env, ticks_attr, torch.full((env.num_envs,), float(min_window_steps), device=env.device))
     just_reset = env.episode_length_buf <= 1
-    env._btg_window_ticks[just_reset] = float(min_window_steps)
-    prev_start_step = getattr(env, "_btg_start_step", torch.full((env.num_envs,), -1, dtype=torch.long, device=env.device))
-    just_landed = env._blue_landed_genuine & (prev_start_step < 0)
+    getattr(env, ticks_attr)[just_reset] = float(min_window_steps)
+    prev_start_step = getattr(env, start_attr, torch.full((env.num_envs,), -1, dtype=torch.long, device=env.device))
+    just_triggered = phase_completed_flag & (prev_start_step < 0)
     fresh_window = (remaining_t_now * window_frac_of_remaining / _DT).clamp(min=float(min_window_steps))
-    env._btg_window_ticks = torch.where(just_landed, fresh_window, env._btg_window_ticks)
-    window_steps_t = env._btg_window_ticks
+    setattr(env, ticks_attr, torch.where(just_triggered, fresh_window, getattr(env, ticks_attr)))
+    window_steps_t = getattr(env, ticks_attr)
 
-    green_y = _get_ball_crossing_y(env, ball_name)
     target_y, active = _get_phase_transition_target_y(
         env,
-        phase_completed_flag=env._blue_landed_genuine,
+        phase_completed_flag=phase_completed_flag,
         body_y_now=foot_y_now,
-        next_target_y=green_y,
-        state_prefix="btg",
+        next_target_y=next_target_y,
+        state_prefix=state_prefix,
         window_steps=window_steps_t,
     )
 
-    # NEW (user request, "it needs to go up sharply same kernal as the
-    # leading foot lift circular drop off for blue ball but then upwards,
-    # and then downwards again for greenball"): the height target is no
-    # longer a captured-value-eased-to-flat-target curve (that design held
-    # at lift_target_height for the rest of the window, never coming back
-    # down) -- it's now a genuine up-then-down ARC using leading_foot_lift's
-    # OWN kernel shape (`_clearance_reward`: steep tanh rise from 0, Gaussian
-    # "circular" falloff past the peak), reused verbatim but reparameterized
-    # over transition-progress `s` instead of raw height: `s_peak` (where the
-    # window's own timing state -- _btg_start_step -- was already set by the
-    # Y-axis call above, so this reads it directly rather than re-deriving
-    # a second independent timer) stands in for target_height, and the same
-    # rise_steepness=3.0 leading_foot_lift uses is reused unmodified. Peaks
-    # at lift_target_height (0.10) at the window's midpoint, decays back
-    # toward 0 (grounded, ready to make contact) by the time the window ends
-    # (green arrival) -- matches a genuine step/dive arc: lift off right
-    # after planting at blue, come back down landing at green.
     _S_PEAK = 0.5
     _FALL_SIGMA_TIME = 12.0  # first guess: brings the arc to ~5% of peak by s=1.0 (excess=0.5 past the peak)
-    elapsed = (env.episode_length_buf - env._btg_start_step).clamp(min=0)
+    elapsed = (env.episode_length_buf - getattr(env, start_attr)).clamp(min=0)
     s = (elapsed.float() / window_steps_t).clamp(0.0, 1.0)
     rise = torch.tanh(3.0 * s / _S_PEAK)  # same rise_steepness=3.0 as leading_foot_lift's own kernel
     excess = (s - _S_PEAK).clamp(min=0.0)
     fall = torch.exp(-_FALL_SIGMA_TIME * excess ** 2)
     target_height = lift_target_height * rise * fall
 
-    env._btg_target_y_live = target_y      # viewer-only cache (play.py opaque green marker)
-    env._btg_target_height_live = target_height
-    env._btg_active_live = active
+    setattr(env, f"_{state_prefix}_target_y_live", target_y)          # viewer-only (play.py opaque green marker)
+    setattr(env, f"_{state_prefix}_target_height_live", target_height)
+    setattr(env, f"_{state_prefix}_active_live", active & extra_active_mask)
 
     dist = torch.sqrt((foot_y_now - target_y) ** 2 + (foot_height_now - target_height) ** 2)
     reward = torch.exp(-sigma * dist)
-    behind = _ball_is_behind(env, ball_name)
-    return reward * active.float() * (~behind).float()
+    return reward * active.float() * extra_active_mask.float()
+
+
+def blue_green_transition_track(
+    env: "ManagerBasedRlEnv",
+    ball_name: str,
+    asset_cfg: SceneEntityCfg = _DEFAULT_FEET_CFG,
+    sigma: float = 5.0,
+    window_frac_of_remaining: float = 0.8,
+    min_window_steps: int = 5,
+    lift_target_height: float = 0.10,
+) -> torch.Tensor:
+    """HUSKY-inspired trajectory-guided transition reward, blue->green -- the
+    original, primary instance of `_husky_transition_track` (see that
+    function's own docstring for the full mechanism). Triggers on
+    `env._blue_landed_genuine`'s rising edge, targets green
+    (`_get_ball_crossing_y`, the same frozen target `blue`/`orange`/`red`
+    all key off), gated off once the ball is behind (mirrors `footreach`'s
+    own gate) on top of the window's own active flag.
+
+    Deliberately does NOT replace `footreach`/`foot_proximity`
+    (fixed-target, long-running) or `blue_trunk_drive` (undecayed
+    trunk-velocity pull, no schedule) -- this is a narrower, time-scheduled
+    addition specifically for the transition window right after blue
+    lands, where neither of those enforces PACE (footreach's vel_sigma
+    boost doesn't activate until the ball is within 1.5m, which can be
+    long after blue lands on far crossings; blue_trunk_drive rewards
+    moving the right direction but has no notion of "how far along should
+    I be by now").
+
+    Zero on narrow crossings (blue_landed_genuine never fires there, so
+    the transition never arms).
+    """
+    _get_reach_target_y(env, ball_name, asset_cfg=asset_cfg)
+    green_y = _get_ball_crossing_y(env, ball_name)
+    return _husky_transition_track(
+        env, ball_name, asset_cfg,
+        phase_completed_flag=env._blue_landed_genuine,
+        next_target_y=green_y,
+        state_prefix="btg",
+        sigma=sigma,
+        window_frac_of_remaining=window_frac_of_remaining,
+        min_window_steps=min_window_steps,
+        lift_target_height=lift_target_height,
+        extra_active_mask=~_ball_is_behind(env, ball_name),
+    )
+
+
+def start_blue_transition_track(
+    env: "ManagerBasedRlEnv",
+    ball_name: str,
+    asset_cfg: SceneEntityCfg = _DEFAULT_FEET_CFG,
+    sigma: float = 5.0,
+    window_frac_of_remaining: float = 0.5,
+    min_window_steps: int = 5,
+    lift_target_height: float = 0.10,
+) -> torch.Tensor:
+    """NEW (user request, "make it also for starting->blue ball"): second
+    instance of `_husky_transition_track` (see that function's own
+    docstring for the full mechanism), covering the FIRST leg of a wide
+    crossing's journey.
+
+    Triggers on `env._blue_wide`'s own rising edge -- since region/crossing
+    geometry is fixed from spawn, `_blue_wide` is already known and stays
+    constant for the whole episode once computed, so this fires exactly
+    once, on the very first tick of a wide-crossing episode (the same
+    "newly_completed = flag & (start_step<0)" mechanism the generic helper
+    already uses correctly handles a flag that's continuously true from
+    tick 1, not just a genuine rising edge mid-episode). Captures the
+    leading foot's STARTING Y, targets blue -- reusing `_get_reach_target_y`'s
+    own already-computed `env._blue_dbg_half_off` debug cache (`half_y -
+    start_y`) rather than re-deriving blue's capped-midpoint formula a
+    third time (it's already computed there and in
+    `_get_orange_reach_target_y`'s own copy).
+
+    `window_frac_of_remaining` defaults to 0.5, not blue_green's 0.8 -- the
+    window is captured essentially at episode start (remaining_t ~= the
+    ball's full flight time then), and this leg is only the FIRST of two;
+    budgeting half the total remaining time to reach blue, leaving the
+    rest for the blue->green leg plus the save itself, is a first-guess
+    even split, not independently derived or tuned.
+
+    Deactivates the instant blue is genuinely landed (`extra_active_mask`),
+    handing off cleanly to `blue_green_transition_track` with no overlap --
+    the two terms' own windows are independent and NOT required to sum to
+    exactly the ball's total remaining time; if genuine blue landing
+    happens before this leg's own window elapses, this term simply stops
+    early via that mask, same handoff discipline `foot_inner_face_
+    continuous`/`inner_face_orientation_save` already use elsewhere in this
+    file. Zero on narrow crossings (`_blue_wide` never fires there).
+    """
+    _get_reach_target_y(env, ball_name, asset_cfg=asset_cfg)
+    start_y = env.scene.env_origins[:, 1]
+    blue_y = start_y + env._blue_dbg_half_off
+    return _husky_transition_track(
+        env, ball_name, asset_cfg,
+        phase_completed_flag=env._blue_wide,
+        next_target_y=blue_y,
+        state_prefix="stb",
+        sigma=sigma,
+        window_frac_of_remaining=window_frac_of_remaining,
+        min_window_steps=min_window_steps,
+        lift_target_height=lift_target_height,
+        extra_active_mask=~env._blue_landed_genuine,
+    )
 
 
 # RESTORED 2026-09-11 (user request, "revert the yellow ball i want it
