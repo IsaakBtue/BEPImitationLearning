@@ -4678,3 +4678,11 @@ An earlier version of test #4 appeared to show the window "frozen" (target never
 **Fix (`rewards.py:start_blue_transition_track`):** `window_frac_of_remaining` `0.9 -> 0.5`.
 
 **Evidence:** `ast.parse` clean. Live re-verified against real (non-forced) resets across 16 envs: captured window now matches `0.5 * t_flight / dt` exactly for every wide-crossing env (e.g. `t_flight=0.805 -> captured=20.12`, expected `0.805*0.5/0.02=20.125`; `t_flight=0.949 -> captured=23.74`, expected `23.725`) -- confirms `window_frac_of_remaining=0.5` now genuinely means 50% of the sampled flight time, on top of the episode-ordering fix from the previous entry (so this holds on repeated episodes too, not just an env's first). Not yet validated against a live training run.
+
+---
+
+## 2026-09-13 (later same day): start_blue_transition_track set to 0.3 (user request, "0.5 too slow")
+
+**Fix (`rewards.py:start_blue_transition_track`):** `window_frac_of_remaining` `0.5 -> 0.3`.
+
+**Evidence:** `ast.parse` clean. Live re-verified against real (non-forced) resets across 16 envs: captured window matches `0.3 * t_flight / dt` exactly (e.g. `t_flight=0.941 -> captured=14.12`, expected `0.941*0.3/0.02=14.115`; `t_flight=0.978 -> captured=14.67`, expected `14.67`). Not yet validated against a live training run.
