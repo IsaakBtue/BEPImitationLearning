@@ -2429,7 +2429,7 @@ def blue_green_transition_track(
     ball_name: str,
     asset_cfg: SceneEntityCfg = _DEFAULT_FEET_CFG,
     sigma: float = 5.0,
-    window_frac_of_t_flight: float = 0.5,
+    window_frac_of_remaining: float = 0.8,
     min_window_steps: int = 5,
     lift_target_height: float = 0.10,
 ) -> torch.Tensor:
@@ -2475,16 +2475,25 @@ def blue_green_transition_track(
     window ends (green arrival) -- matching a genuine step/dive arc: lift
     off right after planting at blue, come back down landing at green.
 
-    NEW (user request, "make it variable with t_flight time, so for faster
-    balls the 0.5 need to be shorter"): `window_steps` is no longer a flat
-    default -- it's `t_flight * window_frac_of_t_flight`, per-env, read
-    from `env._t_flight` (cached at ball spawn, `events.py:
-    reset_ball_rolling`). `window_frac_of_t_flight=0.5` is chosen so the
-    OLD flat default (25 ticks / 0.5s) is recovered exactly at t_flight=1.0s
-    (this task's typical mid-range reaction time) -- faster balls
-    (shorter t_flight) get a proportionally shorter transition window,
-    slower balls a longer one. `min_window_steps=5` guards against a
-    degenerate near-zero window at the fastest possible balls.
+    FIX (user report, "t_flight is for the full thing so why are you using
+    full t_flight? because i see in play script that it is way too slow"):
+    the ORIGINAL version of this (see git history) sized the window off
+    `env._t_flight` -- the ball's TOTAL flight time from spawn. That's the
+    wrong reference: blue routinely lands well before the ball is actually
+    close (that gap is precisely why `blue_trunk_drive` exists), so a
+    window sized off the FULL flight duration is systematically too long
+    relative to how much time is genuinely left. Fixed: the window is now
+    sized off the ball's REMAINING time-to-arrival, computed live from its
+    actual current position/velocity (`ball_x_local / closing_speed`) and
+    CAPTURED ONCE at the exact instant blue genuinely lands (same
+    "captured at the event, fixed for the rest of the window" pattern the
+    Y/height axes already use) -- not recomputed every tick, so `s`'s
+    denominator stays constant through the window, same as before.
+    `window_frac_of_remaining=0.8` (was `window_frac_of_t_flight=0.5` off
+    the wrong reference) leaves a small buffer so the arc finishes slightly
+    before the ball is actually due, rather than exactly as time runs out.
+    `min_window_steps=5` guards against a degenerate near-zero window for
+    a ball that's already very close when blue lands.
 
     Zero on narrow crossings (blue_landed_genuine never fires there, so
     the transition never arms) and once the ball is behind (mirrors
@@ -2503,8 +2512,20 @@ def blue_green_transition_track(
     foot_height_now = (foot_pos_w[arange, foot_idx, 2] - floor_z - _FOOT_RESTING_HEIGHT).clamp(min=0.0)
 
     _DT = 0.02
-    t_flight = getattr(env, "_t_flight", torch.ones(env.num_envs, device=env.device))
-    window_steps_t = (t_flight * window_frac_of_t_flight / _DT).clamp(min=float(min_window_steps))
+    ball: Entity = env.scene[ball_name]
+    ball_x_local = ball.data.root_link_pos_w[:, 0] - env.scene.env_origins[:, 0]
+    ball_closing_speed = (-ball.data.root_link_lin_vel_w[:, 0]).clamp(min=0.05)  # >0 while approaching
+    remaining_t_now = (ball_x_local / ball_closing_speed).clamp(min=0.0)
+
+    if not hasattr(env, "_btg_window_ticks"):
+        env._btg_window_ticks = torch.full((env.num_envs,), float(min_window_steps), device=env.device)
+    just_reset = env.episode_length_buf <= 1
+    env._btg_window_ticks[just_reset] = float(min_window_steps)
+    prev_start_step = getattr(env, "_btg_start_step", torch.full((env.num_envs,), -1, dtype=torch.long, device=env.device))
+    just_landed = env._blue_landed_genuine & (prev_start_step < 0)
+    fresh_window = (remaining_t_now * window_frac_of_remaining / _DT).clamp(min=float(min_window_steps))
+    env._btg_window_ticks = torch.where(just_landed, fresh_window, env._btg_window_ticks)
+    window_steps_t = env._btg_window_ticks
 
     green_y = _get_ball_crossing_y(env, ball_name)
     target_y, active = _get_phase_transition_target_y(
