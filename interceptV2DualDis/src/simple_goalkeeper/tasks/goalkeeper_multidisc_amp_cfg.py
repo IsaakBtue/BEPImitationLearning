@@ -458,6 +458,11 @@ def goalkeeper_multidisc_amp_runner_cfg() -> dict:
             "desired_kl": 0.01,
             "max_grad_norm": 1.0,
             "amp_replay_buffer_size": 250_000,
+            # ADD 2026-09-14 (AMP-discriminator-collapse investigation):
+            # matches NVIDIA's official ASE/IsaacGymEnvs `disc_logit_reg`
+            # default range (0.01-0.05) -- see multi_disc_amp_ppo.py's
+            # ADD 2026-09-14 comment for the full mechanism/rationale.
+            "disc_logit_reg_coef": 0.05,
             # FIX 2026-07-20 (item 24, obs/PPO audit): policy/value
             # smoothness regularizer, previously deferred (MultiDiscAMPPPO's
             # storage couldn't support it -- see _mini_batch_generator_with_

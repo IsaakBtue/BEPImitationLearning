@@ -31,6 +31,18 @@ Push at ~2026-09-14T21:04 should trigger the remote GPU watchdog (checks every ~
    - Full context/evidence for all of the above: `docs/BugFixes.md`'s two 2026-09-14 entries (search for "AMP discriminator health" and "expert-vs-policy AMP discriminator tell").
 6. **If it works**, update this file's own entry to say so (don't just delete it -- future sessions benefit from knowing this was actually validated, not just attempted), and consider whether `docs/superpowers/specs/2026-07-18-doublestep-research-and-plan.md` needs a status update given double-stepping was this project's original, still-open research question.
 
+### UPDATE 2026-09-14 (later same night) -- arm-masking alone confirmed insufficient; 2 more fixes pushed (see `git log` on `multi_disc_amp_ppo.py` for the exact commit)
+
+Arm-masking (above) was tested live (`6144_watchdog`, ~250 iterations) and confirmed **insufficient alone** by the user. A `num_steps_per_env=100` test crashed after 38 iterations (OOM) before being conclusive.
+
+Researched further: cloned NVIDIA's own official AMP repos (`ASE`, `IsaacGymEnvs`) and found 2 mechanisms present there and missing here:
+1. **Persistent replay buffer for policy-side discriminator samples** -- ours was being cleared every update (a 2026-07-08 "G1-parity" fix); official implementations never clear theirs. Fixed: removed the clear call, `amp_storages` (already a 250k-capacity FIFO `ReplayBuffer` per region) now genuinely persists. Live-verified the buffer actually grows/persists across updates instead of resetting (synthetic harness, not yet a real training run).
+2. **`disc_logit_reg`** -- explicit L2 penalty on the discriminator's final logit-layer weights (official default 0.01-0.05, we used 0.05), directly bounding how large a raw logit can get. New param `disc_logit_reg_coef` in `multi_disc_amp_ppo.py`.
+
+Full detail/evidence: `docs/BugFixes.md`'s "arm-masking alone confirmed insufficient live" entry, same date.
+
+**Add to the test list above:** same headline metric (`mean_discri_logits` vs the -82.7@1249 baseline) and same pass/fail signal (`red_ball_landed`), but now on a run that has BOTH the arm-masking fix AND the replay-buffer/logit-reg fix. If discriminator logits still collapse just as fast even with a genuinely persistent buffer and bounded logits, that's strong evidence the bottleneck is somewhere else entirely (not batch composition or logit magnitude) -- worth stepping back to reconsider `num_steps_per_env` (try smaller increments than 24->100 to avoid OOM, e.g. 24->48->64) or the discriminator input features themselves.
+
 ## 2026-08-23 (later same day) -- cleanstop settle-counter leaky decrement + new one-shot `contact_yield_velocity` reward
 
 **None of this has been validated against a live training run yet** — both

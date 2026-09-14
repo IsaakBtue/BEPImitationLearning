@@ -37,7 +37,16 @@ class ReplayBuffer:
         self.step = (self.step + num_states) % self.buffer_size
 
     def clear(self):
-        """Discard all stored transitions. FIX 2026-07-08 (interceptV2DualDis):
+        """Discard all stored transitions.
+
+        NOTE 2026-09-14 (interceptV2DualDis): MultiDiscAMPPPO.update() no
+        longer calls this every update -- see multi_disc_amp_ppo.py's
+        REVERT 2026-09-14 comment. This method is kept available (e.g. for
+        a fresh task-registration reset) but the persistent-buffer behavior
+        below (FIX 2026-07-08's own original rationale for NOT calling this
+        every update) is once again this project's live configuration.
+
+        FIX 2026-07-08 (interceptV2DualDis):
         G1's AMP discriminator (Humanoid-Goalkeeper/rsl_rl/rsl_rl/algorithms/
         him_ppo.py) has no persistent replay buffer at all -- its "policy"
         sample for the discriminator loss is drawn directly from the same

@@ -46,6 +46,7 @@ class MultiDiscAMPPPO:
         desired_kl: float = 0.01,
         device: str = "cpu",
         amp_replay_buffer_size: int = 100_000,
+        disc_logit_reg_coef: float = 0.05,
         min_std=None,
         # FIX 2026-07-20 (item 24, obs/PPO audit): policy/value smoothness
         # regularizer, ported from Humanoid-Goalkeeper/rsl_rl/rsl_rl/
@@ -64,6 +65,7 @@ class MultiDiscAMPPPO:
         self.desired_kl = desired_kl
         self.schedule = schedule
         self.learning_rate = learning_rate
+        self.disc_logit_reg_coef = disc_logit_reg_coef
         self.min_std = min_std
         self.value_smoothness_coef = value_smoothness_coef
         self.smoothness_upper_bound = smoothness_upper_bound
@@ -516,8 +518,33 @@ class MultiDiscAMPPPO:
                 # Reverting to G1-exact lambda_=5 (effective 0.5) as part of a
                 # broader discriminator-health investigation (see docs/BugFixes.md).
                 grad_pen = discr.compute_grad_pen(expert_state_n, expert_next_state_n, lambda_=5) * 0.1
+
+                # ADD 2026-09-14 (AMP-discriminator-collapse investigation):
+                # explicit L2 penalty on the discriminator's own final logit-
+                # layer weights, matching NVIDIA's official multi-clip AMP
+                # implementations (ASE/IsaacGymEnvs, amp_network_builder.py's
+                # `disc_logit_reg` -- typical coefficient 0.01-0.05, applied
+                # ON TOP OF the existing Adam weight_decay on amp_linear, not
+                # instead of it). Neither G1 nor this project had this term
+                # before -- it directly bounds how large a logit can get for
+                # a given hidden vector, targeting the exact symptom observed
+                # live (mean_discri_logits running unbounded to -50/-85).
+                # Deliberate divergence beyond G1, not a parity fix -- see
+                # docs/BugFixes.md.
+                # discr.amp_linear is wrapped in this project's own SpectralNorm
+                # (amp_discriminator.py, added 2026-09-05) -- that wrapper
+                # re-derives `weight` on its wrapped `.module` each forward
+                # pass (see SpectralNorm._update_u_v's `setattr(self.module,
+                # ...)`), not on itself, so the real weight tensor lives at
+                # `.module.weight`, not `discr.amp_linear.weight` directly.
+                logit_reg = self.disc_logit_reg_coef * discr.amp_linear.module.weight.pow(2).sum()
+
                 amp_loss = amp_loss + expert_loss + policy_loss
-                grad_pen_loss = grad_pen_loss + grad_pen
+                # grad_pen_loss now combines the R1 gradient penalty AND the
+                # logit L2 reg above -- both are discriminator-regularization
+                # terms with no separate logging slot in this method's return
+                # tuple; see the comment above for what each component is.
+                grad_pen_loss = grad_pen_loss + grad_pen + logit_reg
                 expert_preds.append(expert_d.mean().item())
                 policy_preds.append(policy_d.mean().item())
                 normalizer_states.append((policy_state, policy_next_state, expert_state, expert_next_state))
@@ -577,18 +604,26 @@ class MultiDiscAMPPPO:
 
         num_updates = self.num_learning_epochs * self.num_mini_batches
         self.storage.clear()
-        # FIX 2026-07-08: match G1's on-policy-only AMP discriminator training
-        # (Humanoid-Goalkeeper/rsl_rl/rsl_rl/algorithms/him_ppo.py -- its
-        # "policy" sample for the discriminator loss comes directly from the
-        # same HIMRolloutStorage minibatch as everything else, cleared every
-        # update). This port previously left amp_storages as a persistent
-        # 250k-transition FIFO buffer, training the discriminator against a
-        # stale mix of past-policy behavior across many updates instead of
-        # strictly the current on-policy rollout. Clearing here makes each
-        # amp_storages[name] hold only the transitions collected since the
-        # last update, matching G1's semantics exactly. See docs/BugFixes.md.
-        for rb in self.amp_storages.values():
-            rb.clear()
+        # REVERT 2026-09-14 (AMP-discriminator-collapse investigation,
+        # deliberate divergence from G1 -- not a parity fix): the FIX
+        # 2026-07-08 comment this replaces cleared amp_storages every update
+        # to match G1's on-policy-only discriminator training. That parity
+        # holds for G1 itself, but G1's per-discriminator rollout share is
+        # ~2.8x larger than this project's (num_steps_per_env=100 vs 24,
+        # 6 regions vs 4) -- G1 can get away with a fresh, narrow on-policy
+        # batch every update; this project's smaller per-region batch is
+        # more exposed to exactly the failure a replay buffer exists to
+        # prevent (discriminator trivially overfitting a narrow, easily-
+        # separable batch). Checked against NVIDIA's own official multi-clip
+        # AMP implementations (ASE, IsaacGymEnvs) -- both mix a large,
+        # PERSISTENT replay buffer (100k-1M transitions, low keep-probability
+        # per new sample) into the discriminator's policy-side batch every
+        # update, never clearing it. amp_storages' ReplayBuffer class already
+        # implements exactly this (fixed-size FIFO, insert() called every
+        # process_env_step) -- clearing it here was the only thing defeating
+        # it. No longer clearing: amp_storages now behaves as the persistent,
+        # naturally-diverse buffer official AMP implementations use. See
+        # docs/BugFixes.md.
         return (mean_value_loss / num_updates, mean_surrogate_loss / num_updates,
                 mean_amp_loss / num_updates, mean_grad_pen_loss / num_updates,
                 mean_est_loss / num_updates, mean_region_loss / num_updates,
