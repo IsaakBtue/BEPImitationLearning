@@ -208,10 +208,21 @@ def ball_pos_xy_b(
       term (mjlab applies manager noise after the term returns, which turns
       the hidden ball into a phantom ball near the robot's feet).
 
-    Neither hide condition can fire while the ball is still approaching, so
-    visibility during the approach and save is preserved by construction.
-    G1's warmup blackout, random vanish, and approach/cone checks are
-    intentionally NOT ported (user constraint: no pre-save blindness).
+    CORRECTED 2026-09-14 (was stale/wrong): the paragraph below describes
+    this function's behavior ONLY when always_visible=True. The actor's
+    real registration (`goalkeeper_env_cfg.py:818`) passes
+    always_visible=False, so `_compute_ball_visibility`'s full
+    flying/random_vanish mask (warmup blackout, random vanish, approach/cone
+    checks -- the mechanism this paragraph claims is "intentionally NOT
+    ported") DOES apply, in addition to hide_behind_torso/hide_after_steps
+    below. See CLAUDE.md's "Actor ball-observation visibility gate"
+    divergence-table row for the full correction.
+
+    Neither hide_behind_torso nor hide_after_steps can fire while the ball
+    is still approaching, so THOSE TWO conditions specifically don't cut
+    visibility during approach/save -- but the flying/random_vanish mask
+    (active whenever always_visible=False, which is the actor's real
+    setting) can and does.
     """
     robot: Entity = env.scene["robot"]
     ball: Entity = env.scene[ball_name]
