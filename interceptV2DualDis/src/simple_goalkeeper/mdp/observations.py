@@ -9,6 +9,11 @@ from mjlab.entity import Entity
 from mjlab.managers.scene_entity_config import SceneEntityCfg
 from mjlab.utils.lab_api.math import quat_apply, quat_inv
 
+# Matches events.py's own _DT -- kept as a separate literal (not a cross-module
+# import) following this project's existing dist_range train/play duplication
+# convention rather than introducing a new shared-constants module.
+_DT = 0.02
+
 if TYPE_CHECKING:
     from mjlab.envs import ManagerBasedRlEnv
 
@@ -20,7 +25,7 @@ def _compute_ball_visibility(env: "ManagerBasedRlEnv", ball_name: str) -> torch.
 
     Three gates (all must be True for visibility):
       initial_vanish: catchstep < startstep  (warmup countdown ~1s after reset)
-      flying:         ball in robot body frame: x∈(0.05,3.4), |y|<2.0, z<1.8, approaching
+      flying:         ball in robot body frame: x∈(0.05,5.5), |y|<2.0, z<1.8, approaching
       ~random_vanish: ball_visible_step <= vanish_step  (random mid-flight disappearance)
     """
     if getattr(env, "_ball_vis_step", -1) == env.common_step_counter:
@@ -59,9 +64,18 @@ def _compute_ball_visibility(env: "ManagerBasedRlEnv", ball_name: str) -> torch.
     approaching = (x_b < env._ball_obs_last_x) | (env._ball_obs_last_x == 0.0)
     env._ball_obs_last_x = x_b.clone()
 
+    # FIX 2026-09-14 (bug fix): was hardcoded 3.4, a literal G1 port
+    # (Humanoid-Goalkeeper/legged_gym/.../legged_robot.py:401) that went stale
+    # when `dist_range` was widened to (2.0, 5.0) in ce48072 (2026-09-07) --
+    # for any spawn beyond 3.4m (up to ~60% of the range), the ball started
+    # outside this gate, so the actor's ball observation stayed hard-zeroed
+    # until it closed the gap -- confirmed live as the exact cause of a
+    # ~25-step standstill at play/train start on far spawns. Raised to 5.5
+    # (dist_range's current 5.0 max + margin). Must stay >= dist_range's max
+    # or this drifts stale again.
     flying = (
         (x_b > 0.05) &
-        (x_b < 3.4) &
+        (x_b < 5.5) &
         (y_b.abs() < 2.0) &
         (z_w < 1.8) &
         catchstep_positive &
@@ -95,15 +109,36 @@ def _compute_ball_visibility(env: "ManagerBasedRlEnv", ball_name: str) -> torch.
     domain_rand = float(getattr(env, "_domain_rand_curriculum", 1.0))
     vanish_floor = int(round(20.0 * (1.0 - domain_rand)))
 
+    # FIX 2026-09-14 (bug fix): the upper bound used to be a flat 30 for every
+    # env regardless of that env's own flight length -- fine for a ~0.6s
+    # flight but on a far/slow (double-step-relevant) episode with a much
+    # longer flying phase, this let the ball vanish long before the second
+    # step's decision point, every time, not just randomly. Now derived per
+    # env from `env._t_flight` (its own sampled flight duration, set in
+    # events.py), so the window scales with how long the ball is actually
+    # going to be relevant instead of a fixed cap.
+    if hasattr(env, "_t_flight"):
+        vanish_ceiling = torch.clamp(
+            torch.ceil(env._t_flight / _DT).long(), min=vanish_floor + 1
+        )
+    else:
+        vanish_ceiling = torch.full((env.num_envs,), 30, dtype=torch.long, device=env.device)
+
+    def _sample_vanish_step(n_ids: torch.Tensor) -> torch.Tensor:
+        ceiling = vanish_ceiling[n_ids].float()
+        span = torch.clamp(ceiling - vanish_floor, min=1.0)
+        return (vanish_floor + torch.rand(n_ids.numel(), device=env.device) * span).long()
+
     if not hasattr(env, "_vanish_step"):
-        env._vanish_step = torch.randint(vanish_floor, 30, (env.num_envs,), device=env.device)
+        all_ids = torch.arange(env.num_envs, device=env.device)
+        env._vanish_step = _sample_vanish_step(all_ids)
     if not hasattr(env, "_ball_visible_step"):
         env._ball_visible_step = torch.zeros(env.num_envs, dtype=torch.long, device=env.device)
 
     just_reset = env.episode_length_buf <= 1
     if just_reset.any():
-        n_reset = int(just_reset.sum().item())
-        env._vanish_step[just_reset] = torch.randint(vanish_floor, 30, (n_reset,), device=env.device)
+        reset_ids = just_reset.nonzero(as_tuple=True)[0]
+        env._vanish_step[reset_ids] = _sample_vanish_step(reset_ids)
 
     env._ball_visible_step = torch.where(
         flying,

@@ -507,7 +507,15 @@ class MultiDiscAMPPPO:
                 # help, revert and pursue the task-complexity-mismatch
                 # hypothesis instead (richer discriminator input features,
                 # discriminator capacity, or per-motion-type granularity).
-                grad_pen = discr.compute_grad_pen(expert_state_n, expert_next_state_n, lambda_=100) * 0.1
+                # REVERT 2026-09-14 (user request, full G1-parity push after a
+                # live AMP-health check on the 6144_phase3final run): the
+                # effective-10 penalty raised above on 2026-07-21 did NOT fix
+                # saturation -- `mean_discri_logits` was confirmed pinned at
+                # -50 to -85 for the entire ~28,000-iteration combined history
+                # of phase2+phase3, i.e. the stronger penalty bought nothing.
+                # Reverting to G1-exact lambda_=5 (effective 0.5) as part of a
+                # broader discriminator-health investigation (see docs/BugFixes.md).
+                grad_pen = discr.compute_grad_pen(expert_state_n, expert_next_state_n, lambda_=5) * 0.1
                 amp_loss = amp_loss + expert_loss + policy_loss
                 grad_pen_loss = grad_pen_loss + grad_pen
                 expert_preds.append(expert_d.mean().item())
