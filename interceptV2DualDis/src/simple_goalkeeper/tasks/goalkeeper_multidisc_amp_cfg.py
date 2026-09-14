@@ -125,17 +125,36 @@ def goalkeeper_multidisc_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
     # motion-dataset (expert) side already supported this generically --
     # MotionDatasetCfg.freeze_joint_names zeroes whichever amp_obs_terms are
     # configured, joint_vel included, with no code changes needed there.
+    # FIX 2026-09-14 (AMP-discriminator-collapse investigation, user request
+    # "let's try"): far_region_ids explicitly set to ALL 4 regions (0,1,2,3),
+    # re-enabling arm-column masking everywhere -- reverses the 2026-08-04
+    # "unmask everyone" change, and goes further than the 2026-07-16 "far
+    # only" config. Root cause found live: real expert (reference-clip) vs
+    # policy (live-rollout) AMP observations were pulled and compared
+    # per-dimension -- 5 of 21 joint_pos dims (all arm joints: L/R
+    # Shoulder_Pitch, L/R Elbow_Pitch, L_Elbow_Yaw, R_Elbow_Yaw) had ZERO
+    # range overlap between expert and policy, in BOTH near and far regions
+    # (every reference clip locks arms into one fixed near-static
+    # counterbalance pose; a live policy's arms swing across a much wider
+    # range). This is a trivial, hyperparameter-independent linear-separable
+    # tell -- the discriminator can win on arm pose alone regardless of grad
+    # penalty/architecture/batch size, which plausibly explains near-instant
+    # saturation even after this session's G1-parity fixes. Masking arm
+    # columns to a constant default pose removes this tell from AMP without
+    # touching the actual arm-recovery reward terms (postupperdofpos etc.),
+    # which don't go through AMP at all. Not yet validated against a live
+    # training run -- see docs/BugFixes.md.
     cfg.observations["amp"] = ObservationGroupCfg(
         terms={
             "joint_pos": ObservationTermCfg(
                 func=gk_obs.joint_pos_abs_arms_masked_by_region,
                 noise=None,
-                params={},
+                params={"far_region_ids": (0, 1, 2, 3)},
             ),
             "joint_vel": ObservationTermCfg(
                 func=gk_obs.joint_vel_abs_arms_masked_by_region,
                 noise=None,
-                params={},
+                params={"far_region_ids": (0, 1, 2, 3)},
             ),
         },
         concatenate_terms=True,
@@ -353,12 +372,19 @@ def goalkeeper_multidisc_amp_runner_cfg() -> dict:
     # (freeze_joint_names now always None) -- matches
     # observations.py's joint_pos_abs_arms_masked_by_region/
     # joint_vel_abs_arms_masked_by_region far_region_ids default changing
-    # (1, 3) -> () in the same commit. _FAR_REGION_NAMES kept (not deleted)
-    # since motion_weights below still uses it for an unrelated purpose
-    # (per-motion AMP sampling weight, not arm-freezing). See that
-    # function's docstring and docs/BugFixes.md for the full rationale --
-    # both sides (expert and policy) must still agree per region, now on
-    # "unmasked everywhere" instead of "far masked, near live".
+    # (1, 3) -> () in the same commit.
+    #
+    # FIX 2026-09-14 (AMP-discriminator-collapse investigation, matches the
+    # "amp" observation group's far_region_ids=(0,1,2,3) change above): ALL
+    # regions' reference clips now get their arm columns frozen too, not
+    # just far -- real expert-vs-policy AMP obs comparison found near
+    # region clips are just as arm-pose-narrow as far's (both essentially
+    # lock arms to one fixed counterbalance pose), so masking only far would
+    # leave the same trivial discriminator tell live in near. Both sides
+    # (expert and policy) must still agree per region -- now "masked
+    # everywhere" instead of "unmasked everywhere". _FAR_REGION_NAMES kept
+    # for its unrelated use below (per-motion AMP sampling weight, not
+    # arm-freezing). Not yet validated against a live training run.
     _FAR_REGION_NAMES = {"left_far", "right_far"}
     amp_data = {
         name: MotionDatasetCfg(
@@ -366,7 +392,7 @@ def goalkeeper_multidisc_amp_runner_cfg() -> dict:
             body_names=GOALKEEPER_KEY_BODY_NAMES,
             amp_obs_terms=_MULTIDISC_AMP_OBS_TERMS,
             anchor_name=GOALKEEPER_ANCHOR_NAME,
-            freeze_joint_names=None,
+            freeze_joint_names=list(gk_obs._ARM_JOINT_NAMES),
             motion_weights=list(_FAR_REGION_MOTION_WEIGHTS) if name in _FAR_REGION_NAMES else None,
         )
         for name, paths in REGION_MOTION_FILES.items()
