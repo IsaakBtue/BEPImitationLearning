@@ -199,6 +199,14 @@ class HimAMPOnPolicyRunner:
         # averages alongside under new names instead of silently changing
         # what an existing metric name means.
         discri_per_step_buffer, amp_reward_per_step_buffer = deque(maxlen=100), deque(maxlen=100)
+        # FIX 2026-09-15 (AMP double-step investigation): the global buffers
+        # above are one number averaged across all 4 regions -- if near
+        # (single-step) converged fine and far (double-step) is still stuck,
+        # the global average just looks like "slow overall progress" and
+        # hides the split entirely. Per-region breakdown of the exact same
+        # per-step ratio, keyed by REGION_NAMES.
+        discri_per_step_buffer_by_region = {name: deque(maxlen=100) for name in REGION_NAMES}
+        amp_reward_per_step_buffer_by_region = {name: deque(maxlen=100) for name in REGION_NAMES}
         cur_reward_sum = torch.zeros(self.env.num_envs, device=self.device)
         cur_amp_sum = torch.zeros(self.env.num_envs, device=self.device)
         cur_discri_sum = torch.zeros(self.env.num_envs, device=self.device)
@@ -278,6 +286,22 @@ class HimAMPOnPolicyRunner:
                             (cur_discri_sum[new_ids][:, 0] / ep_len_for_norm).cpu().numpy().tolist())
                         amp_reward_per_step_buffer.extend(
                             (cur_amp_sum[new_ids][:, 0] / ep_len_for_norm).cpu().numpy().tolist())
+                        # FIX 2026-09-15: see discri_per_step_buffer_by_region's
+                        # own comment above -- region_id is env._region_id
+                        # directly (permanent/static during training, see
+                        # regions.assign_static_regions), not self.alg.
+                        # _pending_region, so this stays correct regardless of
+                        # any reward-routing timing subtlety.
+                        per_step_discri = cur_discri_sum[new_ids][:, 0] / ep_len_for_norm
+                        per_step_amp = cur_amp_sum[new_ids][:, 0] / ep_len_for_norm
+                        new_region_ids = self.env.unwrapped._region_id[new_ids[:, 0]]
+                        for r, rname in enumerate(REGION_NAMES):
+                            rmask = new_region_ids == r
+                            if rmask.any():
+                                discri_per_step_buffer_by_region[rname].extend(
+                                    per_step_discri[rmask].cpu().numpy().tolist())
+                                amp_reward_per_step_buffer_by_region[rname].extend(
+                                    per_step_amp[rmask].cpu().numpy().tolist())
                         cur_reward_sum[new_ids] = 0
                         cur_amp_sum[new_ids] = 0
                         cur_discri_sum[new_ids] = 0
@@ -367,6 +391,17 @@ class HimAMPOnPolicyRunner:
                 "Train/mean_amp_reward_per_step", statistics.mean(locs["amp_reward_per_step_buffer"]), locs["it"])
             self.writer.add_scalar(
                 "Train/mean_discri_logits_per_step", statistics.mean(locs["discri_per_step_buffer"]), locs["it"])
+            # FIX 2026-09-15: per-region breakdown -- see
+            # discri_per_step_buffer_by_region's own comment in learn().
+            for rname in REGION_NAMES:
+                rbuf_d = locs["discri_per_step_buffer_by_region"][rname]
+                rbuf_a = locs["amp_reward_per_step_buffer_by_region"][rname]
+                if len(rbuf_d) > 0:
+                    self.writer.add_scalar(
+                        f"Train/mean_discri_logits_per_step/{rname}", statistics.mean(rbuf_d), locs["it"])
+                if len(rbuf_a) > 0:
+                    self.writer.add_scalar(
+                        f"Train/mean_amp_reward_per_step/{rname}", statistics.mean(rbuf_a), locs["it"])
 
         header = f" \033[1m Learning iteration {locs['it']}/{self.current_learning_iteration + locs['num_learning_iterations']} \033[0m "
 

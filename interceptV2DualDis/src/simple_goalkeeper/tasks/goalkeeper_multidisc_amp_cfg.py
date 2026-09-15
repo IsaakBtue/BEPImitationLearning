@@ -185,6 +185,12 @@ def goalkeeper_multidisc_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
         },
         concatenate_terms=True,
         enable_corruption=False,
+        # FIX 2026-09-15: see _AMP_OBS_HISTORY_LENGTH's own comment above --
+        # mjlab's own CircularBuffer mechanism (already used by "actor")
+        # stacks the last N raw frames oldest->newest; must match
+        # MotionDatasetCfg.amp_obs_history_length exactly.
+        history_length=_AMP_OBS_HISTORY_LENGTH,
+        flatten_history_dim=True,
     )
 
     # (c) Region assignment. Training keeps the permanent per-env split (the
@@ -300,6 +306,20 @@ from simple_goalkeeper.tasks.goalkeeper_amp_cfg import (
 # the same discriminator and must produce identically-shaped, identically-
 # ordered concatenated vectors.
 _MULTIDISC_AMP_OBS_TERMS: list[str] = ["joint_pos"]
+
+# FIX 2026-09-15 (AMP double-step investigation): HUSKY-style (arXiv
+# 2602.03205) multi-frame causal position window, replacing the buggy
+# joint_vel mechanism removed above as the discriminator's source of
+# dynamics/temporal context. A single (s_t, s_{t+1}) position pair ~0.02-0.1s
+# apart cannot distinguish a genuine committed step (foot swinging through)
+# from a passive weight-shift that happens to pass through similar joint
+# angles at that instant -- see goalkeeper_multidisc_amp_cfg's own "amp"
+# ObservationGroupCfg comment above (2026-09-15 entry) for the full
+# reasoning. Must stay in sync between the "amp" ObservationGroupCfg's
+# history_length (policy side, below) and MotionDatasetCfg's
+# amp_obs_history_length (expert side, goalkeeper_multidisc_amp_runner_cfg)
+# -- a mismatch silently desyncs expert/policy AMP observation dimensions.
+_AMP_OBS_HISTORY_LENGTH: int = 5
 
 _MOTIONS_DIR = Path(__file__).parents[1] / "motions" / "data"
 
@@ -420,6 +440,7 @@ def goalkeeper_multidisc_amp_runner_cfg() -> dict:
             anchor_name=GOALKEEPER_ANCHOR_NAME,
             freeze_joint_names=list(gk_obs._ARM_JOINT_NAMES),
             motion_weights=list(_FAR_REGION_MOTION_WEIGHTS) if name in _FAR_REGION_NAMES else None,
+            amp_obs_history_length=_AMP_OBS_HISTORY_LENGTH,
         )
         for name, paths in REGION_MOTION_FILES.items()
     }

@@ -152,13 +152,21 @@ class MotionDataset:
         # threading extra state through sample_batch()'s (t, tp1) contract.
         frame_fps_list = []
         frame_traj_max_idx_list = []
+        # FIX 2026-09-15 (AMP double-step investigation): per-frame trajectory
+        # LOWER bound, mirroring _frame_traj_max_idx -- needed by
+        # build_transition's multi-frame history window (amp_obs_history_length)
+        # to clamp early-in-clip window offsets to this frame's own trajectory
+        # start instead of bleeding into the previous concatenated motion file.
+        frame_traj_min_idx_list = []
         offset = 0
         for L, f in zip(traj_lengths, fps_list):
             frame_fps_list.append(torch.full((L,), float(f), dtype=torch.float32))
             frame_traj_max_idx_list.append(torch.full((L,), float(offset + L - 1), dtype=torch.float32))
+            frame_traj_min_idx_list.append(torch.full((L,), float(offset), dtype=torch.float32))
             offset += L
         self._frame_fps = torch.cat(frame_fps_list).to(self.device)
         self._frame_traj_max_idx = torch.cat(frame_traj_max_idx_list).to(self.device)
+        self._frame_traj_min_idx = torch.cat(frame_traj_min_idx_list).to(self.device)
 
     # ----------------------- Property API -----------------------
 
@@ -416,6 +424,28 @@ class MotionDataset:
         cheaply available per-frame and avoids that cross-motion bleed
         without changing the sampled distribution anywhere in a trajectory's
         interior.
+
+        FIX 2026-09-15 (AMP double-step investigation): ``cfg.amp_obs_
+        history_length`` (default 1, exactly this function's old single-frame
+        behavior) optionally builds each of state_t/state_next as a
+        multi-frame CAUSAL window (oldest -> newest) instead of one instant,
+        replacing joint_vel as the discriminator's source of dynamics/
+        temporal context (HUSKY, arXiv 2602.03205: o_amp = theta_t, uses a
+        5-frame position window tau_t instead of position+velocity). Window
+        offsets are computed the exact same way as the existing single-frame
+        logic (integer lookup for the t side, randomized-ratio floor/ceil
+        interpolation for the next side), just repeated at k=window-1..0
+        frames further back, each independently clamped to this frame's own
+        trajectory bounds (``_frame_traj_min_idx``/``_frame_traj_max_idx``).
+        Concatenation is term-major, oldest-to-newest within each term
+        (``torch.cat([A_t0..A_tH-1, B_t0..B_tH-1, ...])``), matching mjlab's
+        own ``CircularBuffer``/``ObservationManager`` flatten convention
+        exactly (see ``ObservationGroupCfg.flatten_history_dim`` docstring)
+        so the policy side's history-stacked "amp" observation group and this
+        expert side stay dimension- and order-consistent. Clamping early-clip
+        offsets to the trajectory start reproduces the same "backfill with
+        first frame" behavior mjlab's own CircularBuffer applies to a
+        just-reset env, rather than bleeding into an unrelated motion file.
         """
         del tp1  # retained for signature compatibility; see docstring
 
@@ -424,20 +454,26 @@ class MotionDataset:
         next_pos = t.to(fps.dtype) + ratio
 
         max_idx = self._frame_traj_max_idx[t]
-        floor_idx = torch.floor(next_pos)
-        floor_idx = torch.minimum(floor_idx, max_idx)
-        ceil_idx = torch.minimum(floor_idx + 1, max_idx)
-        linear_ratio = (next_pos - floor_idx).clamp(min=0.0, max=1.0).unsqueeze(-1)
-
-        floor_idx = floor_idx.long()
-        ceil_idx = ceil_idx.long()
+        min_idx = self._frame_traj_min_idx[t]
+        window = getattr(self.cfg, "amp_obs_history_length", 1)
 
         res_t, res_tp1 = [], []
         for term in self.observation_terms:
             values = getattr(self, term)
-            _t = values[t]
-            _tp1 = values[floor_idx] * (1 - linear_ratio) + values[ceil_idx] * linear_ratio
-            res_t.append(_t); res_tp1.append(_tp1)
+            term_t_frames, term_tp1_frames = [], []
+            for k in range(window - 1, -1, -1):  # oldest -> newest
+                idx_t_k = torch.maximum(t.to(fps.dtype) - k, min_idx).long()
+                term_t_frames.append(values[idx_t_k])
+
+                pos_k = (next_pos - k).clamp(min=min_idx)
+                floor_idx = torch.maximum(torch.minimum(torch.floor(pos_k), max_idx), min_idx)
+                ceil_idx = torch.minimum(floor_idx + 1, max_idx)
+                linear_ratio = (pos_k - floor_idx).clamp(min=0.0, max=1.0).unsqueeze(-1)
+                term_tp1_frames.append(
+                    values[floor_idx.long()] * (1 - linear_ratio) + values[ceil_idx.long()] * linear_ratio
+                )
+            res_t.append(torch.cat(term_t_frames, dim=-1))
+            res_tp1.append(torch.cat(term_tp1_frames, dim=-1))
         res_t, res_tp1 = torch.cat(res_t, dim=-1), torch.cat(res_tp1, dim=-1)
         return res_t, res_tp1
         
@@ -464,3 +500,9 @@ class MotionDatasetCfg:
     # for these joints (e.g. arms kept live for "near" regions, frozen/
     # uninformative for "far" regions in the same multi-disc setup).
     freeze_joint_names  : Union[List[str], None] = None
+    # FIX 2026-09-15 (AMP double-step investigation): number of causal frames
+    # (oldest->newest) build_transition() stacks into each of state_t/
+    # state_next. 1 = old, exact single-frame behavior. Must match whatever
+    # history_length the corresponding policy-side "amp" ObservationGroupCfg
+    # uses, or expert/policy dimensions and frame ordering diverge silently.
+    amp_obs_history_length : int = 1
