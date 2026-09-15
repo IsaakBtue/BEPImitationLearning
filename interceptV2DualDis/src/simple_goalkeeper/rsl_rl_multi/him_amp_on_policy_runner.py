@@ -184,6 +184,21 @@ class HimAMPOnPolicyRunner:
         ep_infos = []
         rewbuffer, lenbuffer = deque(maxlen=100), deque(maxlen=100)
         ampbuffer, discribuffer = deque(maxlen=100), deque(maxlen=100)
+        # FIX 2026-09-15: discribuffer/ampbuffer hold per-EPISODE SUMS
+        # (cur_discri_sum/cur_amp_sum accumulate every step, reset only at
+        # episode end) -- Train/mean_discri_logits and Train/mean_amp_reward
+        # were consequently never actually "mean per-step" values despite
+        # the name, just episode length times the true per-step mean. Found
+        # this session by noticing the logged value divided by
+        # Train/mean_episode_length sat at a near-constant ratio (~-0.95 to
+        # -1.0) across an entire run's history, while the raw number kept
+        # drifting more negative purely because episodes got longer (a GOOD
+        # sign, misread as the discriminator "getting worse"). Keeping the
+        # existing raw-sum metrics unchanged (some historical/external
+        # comparisons may still expect them) and adding true per-step
+        # averages alongside under new names instead of silently changing
+        # what an existing metric name means.
+        discri_per_step_buffer, amp_reward_per_step_buffer = deque(maxlen=100), deque(maxlen=100)
         cur_reward_sum = torch.zeros(self.env.num_envs, device=self.device)
         cur_amp_sum = torch.zeros(self.env.num_envs, device=self.device)
         cur_discri_sum = torch.zeros(self.env.num_envs, device=self.device)
@@ -254,6 +269,15 @@ class HimAMPOnPolicyRunner:
                         ampbuffer.extend(cur_amp_sum[new_ids][:, 0].cpu().numpy().tolist())
                         discribuffer.extend(cur_discri_sum[new_ids][:, 0].cpu().numpy().tolist())
                         lenbuffer.extend(cur_episode_length[new_ids][:, 0].cpu().numpy().tolist())
+                        # FIX 2026-09-15: see discri_per_step_buffer's own
+                        # comment above -- true per-step average for each
+                        # just-finished episode (sum / that episode's own
+                        # length), not conflated with episode-length growth.
+                        ep_len_for_norm = cur_episode_length[new_ids][:, 0].clamp(min=1)
+                        discri_per_step_buffer.extend(
+                            (cur_discri_sum[new_ids][:, 0] / ep_len_for_norm).cpu().numpy().tolist())
+                        amp_reward_per_step_buffer.extend(
+                            (cur_amp_sum[new_ids][:, 0] / ep_len_for_norm).cpu().numpy().tolist())
                         cur_reward_sum[new_ids] = 0
                         cur_amp_sum[new_ids] = 0
                         cur_discri_sum[new_ids] = 0
@@ -335,6 +359,14 @@ class HimAMPOnPolicyRunner:
             self.writer.add_scalar("Train/mean_discri_logits", statistics.mean(locs["discribuffer"]), locs["it"])
             self.writer.add_scalar("Train/mean_amp_reward/time", statistics.mean(locs["ampbuffer"]), self.tot_time)
             self.writer.add_scalar("Train/mean_discri_logits/time", statistics.mean(locs["discribuffer"]), self.tot_time)
+            # FIX 2026-09-15: true per-step averages -- see
+            # discri_per_step_buffer's own comment in learn() for why the
+            # two metrics above are NOT mean-per-step despite their names
+            # (they're per-episode sums, confounded by episode length).
+            self.writer.add_scalar(
+                "Train/mean_amp_reward_per_step", statistics.mean(locs["amp_reward_per_step_buffer"]), locs["it"])
+            self.writer.add_scalar(
+                "Train/mean_discri_logits_per_step", statistics.mean(locs["discri_per_step_buffer"]), locs["it"])
 
         header = f" \033[1m Learning iteration {locs['it']}/{self.current_learning_iteration + locs['num_learning_iterations']} \033[0m "
 

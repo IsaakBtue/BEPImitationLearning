@@ -100,6 +100,13 @@ def test_predict_amp_reward_noise_is_independent_per_sample():
     next_state = torch.randn(5, discr.input_dim // 2)
     task_reward = torch.zeros(5)
 
+    # Let the spectral-norm power-iteration estimate converge first (a
+    # freshly-initialized discriminator's sigma estimate is wildly off,
+    # producing huge/unstable raw logits that clamp amp_reward to 0
+    # regardless of noise -- not what this test is about).
+    for _ in range(50):
+        discr(torch.randn(4, discr.input_dim))
+
     reward1, d1, amp1 = discr.predict_amp_reward(state, next_state, task_reward, num_samples=20, sigma=0.3)
     reward2, d2, amp2 = discr.predict_amp_reward(state, next_state, task_reward, num_samples=20, sigma=0.3)
 
@@ -109,30 +116,32 @@ def test_predict_amp_reward_noise_is_independent_per_sample():
     # unlikely with real random noise, would indicate a frozen/shared-noise
     # bug if it ever matches exactly.
     assert not torch.allclose(amp1, amp2, atol=1e-8)
-    # NOTE: d (the "raw, unperturbed" logit) is NOT actually identical across
-    # back-to-back calls with unchanged input/weights, despite the intent --
-    # see test_spectral_norm_mutates_state_even_during_eval below for why.
+    # d (the raw, unperturbed logit) IS identical across back-to-back calls
+    # with unchanged input/weights -- only true since the SpectralNorm
+    # eval-mode fix (test_spectral_norm_freezes_state_during_eval below);
+    # before that fix this assertion failed (state drifted between calls).
+    assert torch.allclose(d1, d2, atol=1e-5)
 
 
-def test_spectral_norm_mutates_state_even_during_eval():
-    """FINDING (2026-09-15, independent verification pass): SpectralNorm.
-    forward() calls self._update_u_v() unconditionally -- there is no
-    `if self.training:` guard, unlike the canonical spectral-norm technique
-    (Miyato et al. 2018) and PyTorch's own torch.nn.utils.parametrizations.
-    spectral_norm, both of which freeze u/v and skip the power-iteration
-    update during eval mode specifically so inference-only forward passes
-    don't perturb an estimate that's supposed to track TRAINING statistics.
+def test_spectral_norm_freezes_state_during_eval():
+    """FIX 2026-09-15 (found + fixed via this independent verification
+    pass): SpectralNorm.forward() used to call self._update_u_v()
+    unconditionally -- no `if self.training:` guard, unlike the canonical
+    spectral-norm technique (Miyato et al. 2018) and PyTorch's own
+    torch.nn.utils.parametrizations.spectral_norm, both of which freeze u/v
+    during eval mode specifically so inference-only forward passes don't
+    perturb an estimate that's supposed to track TRAINING statistics.
 
     Concretely: AMPDiscriminator.predict_amp_reward wraps its forward calls
-    in self.eval()/self.train() (amp_discriminator.py:172,204) -- clearly
-    signaling "this is a read-only, non-training use" -- but because
-    SpectralNorm ignores that mode entirely, every reward-computation call
-    (which happens every rollout step, independent of and far more often
-    than actual discriminator training updates) still nudges the power-
-    iteration estimate, and that state change persists into the next
-    genuine training forward pass. Not proven to be a dominant contributor
-    to the AMP discriminator's saturation, but a real, previously-unknown
-    divergence from the canonical technique worth having on record.
+    in self.eval()/self.train() (amp_discriminator.py) -- clearly signaling
+    "this is a read-only, non-training use" -- but SpectralNorm previously
+    ignored that mode entirely, so every reward-computation call (happens
+    every rollout step, independent of and far more often than actual
+    discriminator training updates) still nudged the power-iteration
+    estimate, and that state change persisted into the next genuine
+    training forward pass. Now fixed: u/v are frozen during eval, only
+    sigma (and therefore the differentiable normalized weight) still tracks
+    live changes to w_bar.
     """
     torch.manual_seed(0)
     discr = _make_discr()
@@ -140,8 +149,8 @@ def test_spectral_norm_mutates_state_even_during_eval():
 
     # amp_linear maps hidden_dim -> 1, so its u vector is 1-D and converges
     # in a single call trivially -- use a trunk layer instead, which has a
-    # genuine multi-dimensional u vector where power iteration actually
-    # takes several calls to settle, so a real mutation is observable.
+    # genuine multi-dimensional u vector where power iteration would
+    # otherwise keep visibly changing across calls if not frozen.
     first_trunk_sn = discr.trunk[0]
     assert isinstance(first_trunk_sn, SpectralNorm)
 
@@ -153,11 +162,20 @@ def test_spectral_norm_mutates_state_even_during_eval():
         discr(x)
     u_after = first_trunk_sn.module.weight_u.clone()
 
-    assert not torch.equal(u_before, u_after), (
-        "expected SpectralNorm's power-iteration state to keep changing "
-        "even in eval() mode (the actual, currently-live behavior) -- if "
-        "this now holds, SpectralNorm has been fixed to respect eval mode "
-        "and this test (and the finding it documents) is stale"
+    assert torch.equal(u_before, u_after), (
+        "SpectralNorm's power-iteration state changed during eval() mode -- "
+        "the eval-mode guard regressed"
+    )
+
+    # Training mode must still refine u/v as before (the actual mechanism
+    # SpectralNorm exists for) -- only eval-mode calls are frozen.
+    discr.train()
+    u_before_train = first_trunk_sn.module.weight_u.clone()
+    discr(x)
+    u_after_train = first_trunk_sn.module.weight_u.clone()
+    assert not torch.equal(u_before_train, u_after_train), (
+        "power-iteration refinement stopped happening in training mode too "
+        "-- the eval-mode guard is too broad"
     )
 
 

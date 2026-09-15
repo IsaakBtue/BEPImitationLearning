@@ -64,14 +64,33 @@ class SpectralNorm(nn.Module):
             self._make_params()
 
     def _update_u_v(self):
+        # FIX 2026-09-15 (AMP-discriminator-collapse investigation, found via
+        # test_spectral_norm_mutates_state_even_during_eval): the power-
+        # iteration refinement of u/v now only runs in training mode,
+        # matching the canonical technique (Miyato et al. 2018) and
+        # torch.nn.utils.parametrizations.spectral_norm, both of which
+        # freeze u/v during eval specifically so inference-only forward
+        # passes don't perturb an estimate meant to track TRAINING
+        # statistics. Previously this ran unconditionally, so every AMP
+        # reward-computation call (predict_amp_reward wraps its forward
+        # passes in self.eval()/self.train(), explicitly signaling
+        # "read-only") still nudged the estimate, and that state change
+        # persisted into the next genuine training forward pass -- live-
+        # confirmed (two back-to-back predict_amp_reward calls with
+        # identical input previously returned different raw logits). sigma
+        # is still recomputed every call from the CURRENT weight against
+        # whichever u/v are live, so the returned normalized weight remains
+        # differentiable and tracks live training updates to w_bar even in
+        # eval mode -- only the u/v refinement itself is gated.
         u = getattr(self.module, self.name + "_u")
         v = getattr(self.module, self.name + "_v")
         w = getattr(self.module, self.name + "_bar")
 
         height = w.data.shape[0]
-        for _ in range(self.power_iterations):
-            v.data = _l2normalize(torch.mv(torch.t(w.view(height, -1).data), u.data))
-            u.data = _l2normalize(torch.mv(w.view(height, -1).data, v.data))
+        if self.training:
+            for _ in range(self.power_iterations):
+                v.data = _l2normalize(torch.mv(torch.t(w.view(height, -1).data), u.data))
+                u.data = _l2normalize(torch.mv(w.view(height, -1).data, v.data))
 
         sigma = u.dot(w.view(height, -1).mv(v))
         setattr(self.module, self.name, w / sigma.expand_as(w))
