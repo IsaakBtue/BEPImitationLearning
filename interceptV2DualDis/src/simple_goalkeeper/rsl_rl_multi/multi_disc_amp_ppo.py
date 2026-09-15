@@ -169,7 +169,7 @@ class MultiDiscAMPPPO:
         self._pending_region = critic_obs[:, self.region_id_critic_obs_index].long()
         return self.transition_actions
 
-    def process_env_step(self, rewards, dones, infos, amp_obs):
+    def process_env_step(self, rewards, dones, infos, amp_obs, softstop_flag=None):
         transition = RolloutStorage.Transition()
         transition.observations = self._pending_obs
         transition.critic_observations = self._pending_critic_obs
@@ -185,9 +185,56 @@ class MultiDiscAMPPPO:
                 transition.values * infos["time_outs"].unsqueeze(1).to(self.device), 1)
         self.storage.add_transitions(transition)
 
+        # FIX 2026-09-15: mjlab's auto_reset=True (this project's only mode --
+        # see manager_based_rl_env.py's own docstring) means env.step() always
+        # returns the POST-reset observation for any env that terminates this
+        # step; there is no code path anywhere (mjlab, mjlab's own RL
+        # wrapper, or beyondAMP's AMPEnvWrapper) that ever captures the true
+        # pre-reset terminal state. AMPEnvWrapper's "terminal_amp_states" is
+        # consequently a no-op -- live-verified (test_mjlab_amp_pipeline.py):
+        # terminal_amp_states == post-reset amp_obs, byte-identical, for
+        # 64/64 forced terminations. Every episode boundary was therefore
+        # feeding the discriminator a (real terminal pose -> randomized reset
+        # pose) transition mislabeled as a genuine one-step transition -- an
+        # artificial "teleport" concentrated exactly at fall/failure moments
+        # (bad_orientation/base_height terminations), not random noise.
+        # Rather than trying to properly capture the true terminal state
+        # (would require subclassing mjlab's monolithic step(), real
+        # engineering, not a quick patch), simplest correct fix: never insert
+        # a transition whose "next_state" is known-wrong. Bounded to
+        # ~1/mean_episode_length of all transitions (~1-2%), not yet proven
+        # to be the dominant driver of the AMP discriminator collapse this
+        # investigation is chasing -- see docs/BugFixes.md.
+        #
+        # FIX 2026-09-15 (2nd, same investigation): also exclude post-softstop
+        # -frozen transitions. joint_pos_abs/joint_vel_abs (observations.py)
+        # freeze the ENTIRE amp obs to a constant (default_joint_pos / zero)
+        # for every step after env._softstop_flag fires (sticky for the rest
+        # of the episode) -- a deliberate design choice so the discriminator
+        # REWARD isn't dragged down by recovery-phase motion no reference
+        # clip covers. But it also means these frozen steps get INSERTED as
+        # discriminator TRAINING data: live-measured this session (the arm-
+        # tell investigation's region-split probe), 53-55% of near-region
+        # policy transitions were exactly this one recurring constant point
+        # -- a linearly-separable, massively overrepresented "fake" cluster
+        # no expert data can match at that density, regardless of whether
+        # it's geometrically close to real data (a live NN-distance check
+        # this session found it IS reasonably close -- this is a density/
+        # frequency argument, not a distance one: thousands of identical
+        # copies every update dominate the LSGAN loss's gradient regardless).
+        # softstop_flag is monotonic per-episode (sticky once True), so
+        # "true after this step" correctly excludes both the pure frozen-
+        # to-frozen tail AND the one real-to-frozen "snap" transition at the
+        # exact save instant. The reward-side freeze (predict_region_routed_
+        # amp_reward, called before this method, on the ungated amp_obs) is
+        # untouched -- this only stops frozen steps from training the
+        # discriminator, not from getting a defined reward each step.
+        not_done = dones == 0
+        not_frozen = softstop_flag == 0 if softstop_flag is not None else not_done.new_ones(not_done.shape, dtype=torch.bool)
+        valid = not_done & not_frozen
         region = self._pending_region
         for r, name in enumerate(REGION_NAMES):
-            mask = region == r
+            mask = (region == r) & valid
             if mask.any():
                 self.amp_storages[name].insert(self._pending_amp_obs[mask], amp_obs[mask])
 

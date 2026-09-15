@@ -144,15 +144,41 @@ def goalkeeper_multidisc_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
     # touching the actual arm-recovery reward terms (postupperdofpos etc.),
     # which don't go through AMP at all. Not yet validated against a live
     # training run -- see docs/BugFixes.md.
+    # FIX 2026-09-15 (AMP-discriminator-collapse investigation): joint_vel
+    # removed from AMP obs, reverting the 2026-07-22 fix above back to G1
+    # parity. Root cause found: MotionDataset.build_transition()'s
+    # randomized-playback-speed sampling (ratio ~ U(0.25,1.25), ported from
+    # G1's get_expert_obs) interpolates joint_vel's VALUE at the sampled
+    # fractional frame instead of scaling it by ratio, while joint_pos is
+    # correctly sampled at the ratio-shifted position -- so expert
+    # transitions have Delta(pos) inconsistent with vel*dt for any ratio!=1
+    # (87.5% of draws), while real policy transitions always satisfy
+    # Delta(pos)=vel*dt exactly (physics enforces it, live-verified ratio
+    # 0.997). This is a permanent, ~0.75-mean/wide-spread linear tell no
+    # amount of policy improvement can ever close -- confirmed live
+    # (q=Delta(pos)/(vel*dt): expert mean 0.76 spread [-0.08,1.76] vs
+    # policy pinned ~1.0) and explains the near-instant, un-recoverable
+    # discriminator saturation better than every other hypothesis tried
+    # this investigation (arm masking, grad penalty, spectral norm, batch
+    # size, replay buffer -- none of which touch training-data
+    # consistency). Independently confirmed neither of this project's own
+    # two reference implementations need velocity here: G1
+    # (Humanoid-Goalkeeper/legged_gym/legged_gym/envs/g1/g1_utils.py, joint
+    # positions only) and HUSKY (arXiv 2602.03205, o_amp = theta_t only,
+    # uses a 5-frame position WINDOW instead of position+velocity for
+    # temporal/dynamics context). Task reward already has explicit
+    # velocity-shaping terms (footreach's vel_sigma, blue_trunk_drive,
+    # etc.) independent of AMP, per user request removing velocity from
+    # AMP entirely rather than fixing the ratio-scaling bug in place --
+    # the double-step-distinguishability problem joint_vel was added to
+    # solve (2026-07-22) is a real, still-open concern, but the fix for it
+    # should not be a mechanism with this large a correctness bug baked
+    # in; a HUSKY-style multi-frame position window is a candidate
+    # follow-up, not implemented here. See docs/BugFixes.md.
     cfg.observations["amp"] = ObservationGroupCfg(
         terms={
             "joint_pos": ObservationTermCfg(
                 func=gk_obs.joint_pos_abs_arms_masked_by_region,
-                noise=None,
-                params={"far_region_ids": (0, 1, 2, 3)},
-            ),
-            "joint_vel": ObservationTermCfg(
-                func=gk_obs.joint_vel_abs_arms_masked_by_region,
                 noise=None,
                 params={"far_region_ids": (0, 1, 2, 3)},
             ),
@@ -266,14 +292,14 @@ from simple_goalkeeper.tasks.goalkeeper_amp_cfg import (
 # which SimpleGoalKeeper's single-disc AMP track (goalkeeper_amp_cfg.py) and
 # several other beyondAMP example tasks still use unmodified.
 #
-# FIX 2026-07-22: joint_vel added back -- see the matching FIX comment on
-# the "amp" observation group override above for the full rationale
-# (deliberate divergence from the 2026-07-08 G1-parity decision, not a
-# reversal of that decision's correctness as a parity statement). Must stay
-# in sync with the "amp" group's terms= dict above -- both sides feed the
-# same discriminator and must produce identically-shaped, identically-
+# FIX 2026-09-15: joint_vel removed again -- see the matching FIX comment on
+# the "amp" observation group override above for the full rationale (the
+# 2026-07-22 re-add exposed a real velocity/position consistency bug in
+# MotionDataset.build_transition()'s randomized-playback sampling). Must
+# stay in sync with the "amp" group's terms= dict above -- both sides feed
+# the same discriminator and must produce identically-shaped, identically-
 # ordered concatenated vectors.
-_MULTIDISC_AMP_OBS_TERMS: list[str] = ["joint_pos", "joint_vel"]
+_MULTIDISC_AMP_OBS_TERMS: list[str] = ["joint_pos"]
 
 _MOTIONS_DIR = Path(__file__).parents[1] / "motions" / "data"
 
@@ -525,7 +551,11 @@ def goalkeeper_multidisc_amp_runner_cfg() -> dict:
         # oversampling, see replay_buffer.py's feed_forward_generator fix,
         # same commit) is tested instead. See docs/BugFixes.md.
         "num_steps_per_env": 24,
-        "max_iterations": 50_000,
+        # 2026-07-26: capped 50_000 -> 20_000. User-requested hardcoded default
+        # (not a G1-parity item -- this is a run-duration cap, not a reward/
+        # observation/spawn hyperparameter) so future launches of this task
+        # don't need a --agent.max-iterations override.
+        "max_iterations": 20_000,
         "save_interval": 250,
         # 2026-07-05: "intercept_" prefix on both experiment_name (top-level
         # local log folder + W&B group) and run_name (per-run folder suffix +

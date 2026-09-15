@@ -217,12 +217,28 @@ class HimAMPOnPolicyRunner:
                     next_amp_obs_with_term = torch.clone(next_amp_obs)
                     next_amp_obs_with_term[reset_env_ids] = terminal_amp_states
 
-                    region_id = critic_obs[:, self.alg.region_id_critic_obs_index].long()
+                    # FIX 2026-09-15: was `critic_obs[:, self.alg.
+                    # region_id_critic_obs_index].long()` -- but `critic_obs`
+                    # was JUST reassigned above (a few lines up) to this
+                    # step's POST-step value. For any env that reset this
+                    # step, region_id gets reassigned as part of reset, so
+                    # that read silently scored the OLD episode's final
+                    # transition against the NEW episode's discriminator --
+                    # inconsistent with process_env_step's own routing
+                    # (self.alg._pending_region, captured pre-step in act()).
+                    # Use the same pre-step region alg.act() already cached,
+                    # so reward-routing and storage-routing always agree.
+                    region_id = self.alg._pending_region
                     rewards, d_logits, amp_rewards = self.alg.predict_region_routed_amp_reward(
                         amp_obs, next_amp_obs_with_term, region_id, raw_rewards
                     )
                     amp_obs = torch.clone(next_amp_obs)
-                    self.alg.process_env_step(rewards, dones, infos, next_amp_obs_with_term)
+                    # FIX 2026-09-15: see multi_disc_amp_ppo.py's matching FIX
+                    # comment -- excludes post-softstop-frozen transitions
+                    # from discriminator training data, not from the reward
+                    # (predict_region_routed_amp_reward above already ran).
+                    softstop_flag = getattr(self.env.unwrapped, "_softstop_flag", None)
+                    self.alg.process_env_step(rewards, dones, infos, next_amp_obs_with_term, softstop_flag)
 
                     if self.log_dir is not None:
                         if "episode" in infos:
