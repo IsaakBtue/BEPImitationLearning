@@ -758,7 +758,7 @@ def _get_reach_target_y(
     # 0.30m orange-blue gap it derives stays correct once blue itself is
     # capped (see that function's own comment).
     _BLUE_MAX_DIST_FROM_START = 0.4
-    blue_dist_from_start = (delta.abs() / 2.0).clamp(max=_BLUE_MAX_DIST_FROM_START)
+    blue_dist_from_start = _BLUE_MAX_DIST_FROM_START * torch.tanh(delta.abs() / (2.0 * _BLUE_MAX_DIST_FROM_START))
 
     half_y = start_y + sign * blue_dist_from_start
 
@@ -1096,7 +1096,7 @@ def _get_orange_reach_target_y(
     # else"): orange is now DEFINED relative to blue -- see docstring for
     # the full derivation and why the old independent formula could never
     # guarantee this gap.
-    _ORANGE_BLUE_GAP = 0.23  # FIX 2026-09-12 (user request, "make the distance of orange ball 0.23"): 0.25 -> 0.23
+    _ORANGE_BLUE_GAP = 0.20  # FIX 2026-09-15 (user request, "put it at 0.20"): 0.23 -> 0.20
     # FIX 2026-09-12 (same day, user request, "have blue ball landed a
     # maximum distance of 0.35 from the center 0 0 point"): mirrors
     # _get_reach_target_y's own 0.35m cap on this identical computation --
@@ -1104,7 +1104,7 @@ def _get_orange_reach_target_y(
     # (derived from an uncapped copy) would silently diverge for any
     # delta > 0.7m, shrinking or even inverting the intended 0.30m gap.
     _BLUE_MAX_DIST_FROM_START = 0.4
-    blue_dist_from_start = (delta.abs() / 2.0).clamp(max=_BLUE_MAX_DIST_FROM_START)
+    blue_dist_from_start = _BLUE_MAX_DIST_FROM_START * torch.tanh(delta.abs() / (2.0 * _BLUE_MAX_DIST_FROM_START))
     orange_dist_from_start = (blue_dist_from_start - _ORANGE_BLUE_GAP).clamp(min=0.0)
     sign = torch.sign(delta)
     sign = torch.where(sign == 0, torch.ones_like(sign), sign)
