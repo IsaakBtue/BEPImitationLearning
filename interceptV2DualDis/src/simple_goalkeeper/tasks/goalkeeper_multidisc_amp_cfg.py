@@ -319,7 +319,14 @@ _MULTIDISC_AMP_OBS_TERMS: list[str] = ["joint_pos"]
 # history_length (policy side, below) and MotionDatasetCfg's
 # amp_obs_history_length (expert side, goalkeeper_multidisc_amp_runner_cfg)
 # -- a mismatch silently desyncs expert/policy AMP observation dimensions.
-_AMP_OBS_HISTORY_LENGTH: int = 5
+_AMP_OBS_HISTORY_LENGTH: int = 1
+# FIX 2026-09-16 (reverted from 5, per user request after the ~8600-
+# iteration checkpoint): the windowed run's per-region discri_logits didn't
+# show a clear enough win over single-frame to justify the added
+# complexity/dimension -- see docs/BugFixes.md. history_length=1 reproduces
+# the exact old single-frame behavior on both sides (verified this session
+# in test_motion_dataset_build_transition.py's window_length=1 test), so
+# this single-line change is sufficient; nothing else needs to revert.
 
 _MOTIONS_DIR = Path(__file__).parents[1] / "motions" / "data"
 
