@@ -504,7 +504,21 @@ def goalkeeper_multidisc_amp_runner_cfg() -> dict:
             "lam": 0.95,
             "desired_kl": 0.01,
             "max_grad_norm": 1.0,
-            "amp_replay_buffer_size": 250_000,
+            # FIX 2026-09-16: 250_000 -> 100_000, matching HUSKY's ACTUAL
+            # code (not just the paper text, which is silent on this --
+            # cloned TeleHuman/humanoid_skateboarding and found
+            # rsl_rl/storage/replay_buffer_multi.py: ReplayBufferMulti,
+            # default amp_replay_buffer_size=100_000, never overridden in
+            # their configs, ONE global buffer for their one discriminator).
+            # 250_000 (set 2026-09-14, bfe9f4a) was "well within the
+            # official ASE/IsaacGymEnvs 100k-1M range" but not derived from
+            # any specific working reference -- 100k/region is. Safe to
+            # resume through: the replay buffer is never part of a saved
+            # checkpoint (him_amp_on_policy_runner.py's save()/load() only
+            # touch actor_critic/optimizer/discriminator state_dicts), so
+            # this is a pure constructor parameter change, not an
+            # architecture change like the AMP window was.
+            "amp_replay_buffer_size": 100_000,
             # ADD 2026-09-14 (AMP-discriminator-collapse investigation):
             # matches NVIDIA's official ASE/IsaacGymEnvs `disc_logit_reg`
             # default range (0.01-0.05) -- see multi_disc_amp_ppo.py's
