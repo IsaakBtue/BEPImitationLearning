@@ -319,14 +319,23 @@ _MULTIDISC_AMP_OBS_TERMS: list[str] = ["joint_pos"]
 # history_length (policy side, below) and MotionDatasetCfg's
 # amp_obs_history_length (expert side, goalkeeper_multidisc_amp_runner_cfg)
 # -- a mismatch silently desyncs expert/policy AMP observation dimensions.
-_AMP_OBS_HISTORY_LENGTH: int = 1
-# FIX 2026-09-16 (reverted from 5, per user request after the ~8600-
-# iteration checkpoint): the windowed run's per-region discri_logits didn't
+#
+# REVERTED 2026-09-16 (user request, "we dont use that 5 stack for amp",
+# after the ~8600-iteration windowed checkpoint): 5 -> 1, restoring old
+# single-frame 84-dim (joint_pos+joint_vel) behavior everywhere this
+# constant is read -- per this same block's own note, amp_obs_history_
+# length=1 IS the old single-frame behavior, so this is a clean revert, not
+# a new code path (verified in test_motion_dataset_build_transition.py's
+# window_length=1 test). The windowed run's per-region discri_logits didn't
 # show a clear enough win over single-frame to justify the added
-# complexity/dimension -- see docs/BugFixes.md. history_length=1 reproduces
-# the exact old single-frame behavior on both sides (verified this session
-# in test_motion_dataset_build_transition.py's window_length=1 test), so
-# this single-line change is sufficient; nothing else needs to revert.
+# complexity/dimension -- see docs/BugFixes.md. Checkpoints trained under
+# the 5-frame window (210-dim discriminator input, e.g. anything from the
+# 6144_huskywindow_9d574a9 lineage) are no longer loadable after this --
+# expected, that lineage is abandoned by this same request. Per-region
+# discriminator metrics logging from the same original commit is unrelated
+# and stays. Made independently in two parallel sessions same day/value --
+# reconciled during rebase, no functional difference.
+_AMP_OBS_HISTORY_LENGTH: int = 1
 
 _MOTIONS_DIR = Path(__file__).parents[1] / "motions" / "data"
 

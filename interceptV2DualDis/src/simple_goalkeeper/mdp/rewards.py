@@ -576,7 +576,7 @@ def _get_reach_target_y(
     ball_name: str,
     asset_cfg: SceneEntityCfg = _DEFAULT_FEET_CFG,
     wide_threshold: float = 0.6,  # FIX 2026-09-12 (user request, "make the narrow to wide range from 0.5 to 0.6... so we can guarantee a 0.25m blue-orange gap"): 0.5 -> 0.6, kept in sync with regions.py's near/far boundary and events.py's far_travel_curriculum "lo". Was 0.65 (2026-07-23), reverted to 0.5 (2026-08-01), reverted again here.
-    landing_radius: float = 0.14,  # FIX 2026-09-16 (user request, "increase landing radius to 0.14"): 0.12 -> 0.14. Prior: REVERTED (user correction, "i only wanted -0.04 from the rectangular beam... landing radius untouched") -- the -0.04 belongs only to success()'s rectangle Y half-width, not this real blue/orange/red landing-gate parameter. FIX (user request, "decrease landing radius with 0.01 for everything"): 0.13 -> 0.12. Applies to blue directly; orange/red derive from env._blue_landing_radius_current so they follow automatically. FIX 2026-09-12 (user correction, "no only for orange ball landed keep the variable landing_radius at 0.13 but orange ball do the variable - 0.03"): reverted the -0.03 shift back off blue's own default -- the -0.03 now applies ONLY inside _get_orange_reach_target_y, derived from this value, not hardcoded separately. Was 0.13 (2026-09-11, "increase the landing radius by 0.01"): 0.12 -> 0.13, flat, no curriculum (still no easing -- see the flat assignment below). Was 0.12 (2026-09-11 earlier same day, "decrease the radius of blue ball with 0.02 it is too easy"), 0.14 before that (2026-09-09, "revert" back to the flat, no-curriculum real value after a 0.4 diagnostic bump), 0.13 hard/0.15 easy before that, 0.09 (briefly reverted), 0.4 (earlier diagnostic), 0.09->0.05 (2026-09-09 earlier same day), 0.20->0.18->0.15->0.13->0.09 before that (2026-07-24: was 0.08, too strict at full difficulty)
+    landing_radius: float = 0.14,  # FIX 2026-09-16 (user request, "increase landing radius with 0.02 so we have more exploration option for our training"): 0.12 -> 0.14. Applies to blue directly; orange/red derive from env._blue_landing_radius_current so they follow automatically. Made independently in two parallel sessions same day/value -- reconciled during rebase, no functional difference. Prior history: REVERTED (user correction, "i only wanted -0.04 from the rectangular beam... landing radius untouched") -- the -0.04 belongs only to success()'s rectangle Y half-width, not this real blue/orange/red landing-gate parameter. FIX (user request, "decrease landing radius with 0.01 for everything"): 0.13 -> 0.12. FIX 2026-09-12 (user correction, "no only for orange ball landed keep the variable landing_radius at 0.13 but orange ball do the variable - 0.03"): reverted the -0.03 shift back off blue's own default -- the -0.03 now applies ONLY inside _get_orange_reach_target_y, derived from this value, not hardcoded separately. Was 0.13 (2026-09-11, "increase the landing radius by 0.01"): 0.12 -> 0.13, flat, no curriculum (still no easing -- see the flat assignment below). Was 0.12 (2026-09-11 earlier same day, "decrease the radius of blue ball with 0.02 it is too easy"), 0.14 before that (2026-09-09, "revert" back to the flat, no-curriculum real value after a 0.4 diagnostic bump), 0.13 hard/0.15 easy before that, 0.09 (briefly reverted), 0.4 (earlier diagnostic), 0.09->0.05 (2026-09-09 earlier same day), 0.20->0.18->0.15->0.13->0.09 before that (2026-07-24: was 0.08, too strict at full difficulty)
     landing_speed_threshold: float = 1.0,  # FIX 2026-07-24: reverted to the pre-2026-07-23 value (was 0.15); see below
 ) -> torch.Tensor:
     """Two-stage reach target for wide crossings: v2 reimplementation of the
@@ -758,7 +758,13 @@ def _get_reach_target_y(
     # 0.30m orange-blue gap it derives stays correct once blue itself is
     # capped (see that function's own comment).
     _BLUE_MAX_DIST_FROM_START = 0.4
-    blue_dist_from_start = _BLUE_MAX_DIST_FROM_START * torch.tanh(delta.abs() / (2.0 * _BLUE_MAX_DIST_FROM_START))
+    # FIX 2026-09-16 (user request, "make the tanh of blue ball a bit
+    # steeper meaning i want closer to the start"): denominator scale
+    # 2.0 -> 2.25 (i.e. 0.8 -> 0.9) -- slower rise, so blue_dist_from_start
+    # is smaller for the same delta everywhere, still saturating at the
+    # same 0.4m cap. Small, deliberate shift (~2.2cm max difference across
+    # the real delta range) -- plotted and confirmed before applying.
+    blue_dist_from_start = _BLUE_MAX_DIST_FROM_START * torch.tanh(delta.abs() / (2.25 * _BLUE_MAX_DIST_FROM_START))
 
     half_y = start_y + sign * blue_dist_from_start
 
@@ -1104,7 +1110,9 @@ def _get_orange_reach_target_y(
     # (derived from an uncapped copy) would silently diverge for any
     # delta > 0.7m, shrinking or even inverting the intended 0.30m gap.
     _BLUE_MAX_DIST_FROM_START = 0.4
-    blue_dist_from_start = _BLUE_MAX_DIST_FROM_START * torch.tanh(delta.abs() / (2.0 * _BLUE_MAX_DIST_FROM_START))
+    # FIX 2026-09-16: mirrors _get_reach_target_y's own same-day steepness
+    # change (2.0 -> 2.25 denominator scale) -- see that function's comment.
+    blue_dist_from_start = _BLUE_MAX_DIST_FROM_START * torch.tanh(delta.abs() / (2.25 * _BLUE_MAX_DIST_FROM_START))
     orange_dist_from_start = (blue_dist_from_start - _ORANGE_BLUE_GAP).clamp(min=0.0)
     sign = torch.sign(delta)
     sign = torch.where(sign == 0, torch.ones_like(sign), sign)

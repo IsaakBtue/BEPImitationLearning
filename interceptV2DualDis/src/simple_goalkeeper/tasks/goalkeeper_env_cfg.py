@@ -653,6 +653,22 @@ def goalkeeper_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
                 "ep_len_divisor":  50,
             },
         )
+        # NEW 2026-09-16 (user request, "put in curriculum with orange
+        # ball"): trailing_foot_reach was flat (weight=20.0, no curriculum)
+        # -- probe_trailing_foot_reach.py found it correctly wired but the
+        # policy barely using it (far-zone approach velocity toward target
+        # ~0, vel_sigma averaging only 1.19x). Same curriculum shape as
+        # orange_ball_landed_curriculum above; base_weight matches its
+        # existing flat weight (20.0) as the starting point.
+        cfg.curriculum["trailing_foot_reach_curriculum"] = CurriculumTermCfg(
+            func=gk_mdp.reward_curriculum_ep_len,
+            params={
+                "reward_name": "trailing_foot_reach",
+                "base_weight": 20.0,
+                "update_interval": 500,
+                "ep_len_divisor":  50,
+            },
+        )
         # FIX 2026-08-25 (user request, "faster blue/green approach" --
         # balancing half of the "raise speed rewards" set): base_weight
         # 4.0 -> 2.0 (peak 10.0 -> 5.0), same reasoning as
@@ -1355,13 +1371,15 @@ def goalkeeper_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
         # change as leading_foot_lift above.
         # FIX 2026-08-29 (user request): reverted 0.05 -> 0.10, same reason
         # as leading_foot_lift above.
+        # FIX 2026-09-16 (user request, "use the standard 0.10"): target_height
+        # 0.05 -> 0.10, matching leading_foot_lift's own default. Prior history:
         # FIX 2026-09-12 (user request, "do 5cm", then corrected "put the
         # trailing foot height to 3 cm not 5"): target_height 0.10 -> 0.05
         # -> 0.03. FIX (user request, "put it at 5 cm"): 0.03 -> 0.05.
         "trailing_foot_lift": RewardTermCfg(
             func=gk_mdp.trailing_foot_lift,
             weight=2.0,
-            params={"ball_name": BALL_NAME, "target_height": 0.05, "asset_cfg": _FEET_CFG},
+            params={"ball_name": BALL_NAME, "target_height": 0.10, "asset_cfg": _FEET_CFG},
         ),
         # NEW 2026-08-23 (user request): successor to the removed (2026-06-29)
         # airborne_at_save -- continuous (not one-shot binary), leading foot
