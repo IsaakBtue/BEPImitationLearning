@@ -576,7 +576,7 @@ def _get_reach_target_y(
     ball_name: str,
     asset_cfg: SceneEntityCfg = _DEFAULT_FEET_CFG,
     wide_threshold: float = 0.6,  # FIX 2026-09-12 (user request, "make the narrow to wide range from 0.5 to 0.6... so we can guarantee a 0.25m blue-orange gap"): 0.5 -> 0.6, kept in sync with regions.py's near/far boundary and events.py's far_travel_curriculum "lo". Was 0.65 (2026-07-23), reverted to 0.5 (2026-08-01), reverted again here.
-    landing_radius: float = 0.14,  # FIX 2026-09-16 (user request, "increase landing radius with 0.02 so we have more exploration option for our training"): 0.12 -> 0.14. Applies to blue directly; orange/red derive from env._blue_landing_radius_current so they follow automatically. Made independently in two parallel sessions same day/value -- reconciled during rebase, no functional difference. Prior history: REVERTED (user correction, "i only wanted -0.04 from the rectangular beam... landing radius untouched") -- the -0.04 belongs only to success()'s rectangle Y half-width, not this real blue/orange/red landing-gate parameter. FIX (user request, "decrease landing radius with 0.01 for everything"): 0.13 -> 0.12. FIX 2026-09-12 (user correction, "no only for orange ball landed keep the variable landing_radius at 0.13 but orange ball do the variable - 0.03"): reverted the -0.03 shift back off blue's own default -- the -0.03 now applies ONLY inside _get_orange_reach_target_y, derived from this value, not hardcoded separately. Was 0.13 (2026-09-11, "increase the landing radius by 0.01"): 0.12 -> 0.13, flat, no curriculum (still no easing -- see the flat assignment below). Was 0.12 (2026-09-11 earlier same day, "decrease the radius of blue ball with 0.02 it is too easy"), 0.14 before that (2026-09-09, "revert" back to the flat, no-curriculum real value after a 0.4 diagnostic bump), 0.13 hard/0.15 easy before that, 0.09 (briefly reverted), 0.4 (earlier diagnostic), 0.09->0.05 (2026-09-09 earlier same day), 0.20->0.18->0.15->0.13->0.09 before that (2026-07-24: was 0.08, too strict at full difficulty)
+    landing_radius: float = 0.19,  # FIX 2026-09-16 (same day, user request, "make it +0.02"): 0.17 -> 0.19. No longer drives the actual landing gate (square, side=0.30, independent) or leading_foot_lift's decay (fixed at 0.06) -- still feeds footreach's overshoot-kill, blue_overshoot_penalty's clamp, blue_stick_landing's decel zone, and leading_foot_lift's own overshoot tolerance. Prior: "make it 0.17 blue ball"): 0.18 -> 0.17. Was 0.18, matching the "visibilityrevert" run's blue value (user request, "make orange ball 0.14 and blue ball 0.18"): 0.14 -> 0.18. Orange no longer mirrors this value (see _get_orange_reach_target_y, now its own fixed 0.14) -- red now tracks orange instead of blue (see _get_red_reach_target_y). Prior history: REVERTED (user correction, "i only wanted -0.04 from the rectangular beam... landing radius untouched") -- the -0.04 belongs only to success()'s rectangle Y half-width, not this real blue/orange/red landing-gate parameter. FIX (user request, "decrease landing radius with 0.01 for everything"): 0.13 -> 0.12. FIX 2026-09-12 (user correction, "no only for orange ball landed keep the variable landing_radius at 0.13 but orange ball do the variable - 0.03"): reverted the -0.03 shift back off blue's own default -- the -0.03 now applies ONLY inside _get_orange_reach_target_y, derived from this value, not hardcoded separately. Was 0.13 (2026-09-11, "increase the landing radius by 0.01"): 0.12 -> 0.13, flat, no curriculum (still no easing -- see the flat assignment below). Was 0.12 (2026-09-11 earlier same day, "decrease the radius of blue ball with 0.02 it is too easy"), 0.14 before that (2026-09-09, "revert" back to the flat, no-curriculum real value after a 0.4 diagnostic bump), 0.13 hard/0.15 easy before that, 0.09 (briefly reverted), 0.4 (earlier diagnostic), 0.09->0.05 (2026-09-09 earlier same day), 0.20->0.18->0.15->0.13->0.09 before that (2026-07-24: was 0.08, too strict at full difficulty)
     landing_speed_threshold: float = 1.0,  # FIX 2026-07-24: reverted to the pre-2026-07-23 value (was 0.15); see below
 ) -> torch.Tensor:
     """Two-stage reach target for wide crossings: v2 reimplementation of the
@@ -872,6 +872,71 @@ def _get_reach_target_y(
         currently_airborne = ~foot_in_contact
         env._blue_was_airborne |= currently_airborne
 
+        # FIX 2026-09-16 (user report, "blue ball still get confirmed
+        # towards green ball without real levitation and downward movement
+        # again"): `env._blue_was_airborne` above is a whole-episode sticky
+        # flag -- true forever once the foot has EVER dipped below the
+        # force threshold, anywhere, even far from blue (normal gait swing
+        # during approach, a reset-time settling blip). A foot that
+        # satisfied it once early, then slides/settles into the blue zone
+        # on the ground without ever really leaving the floor again near
+        # blue, still passes `candidate` below. Fixed with two REAL,
+        # kinematic checks scoped to the airborne stretch immediately
+        # preceding THIS landing (not "ever in the episode"):
+        #   1. real clearance -- floor-relative foot height, corrected for
+        #      the known ~0.03m foot-body-link-vs-ground-contact baseline
+        #      (_FOOT_CONTACT_BELOW_BODY convention, matches leading_foot_
+        #      lift's own baseline fix) -- must peak above
+        #      _MIN_GENUINE_LIFT_HEIGHT during that stretch.
+        #   2. real descent -- the foot's own vertical velocity must have
+        #      gone genuinely negative (moving DOWN) at some point during
+        #      that same stretch, not just resting at a fixed height then
+        #      being carried sideways into the zone.
+        # Peak clearance / most-negative vel_z reset at the START of each
+        # new airborne stretch (rising edge of currently_airborne), so a
+        # stale value from an old, unrelated stretch can't linger.
+        if not hasattr(env, "_blue_prev_airborne"):
+            env._blue_prev_airborne = torch.zeros(n, dtype=torch.bool, device=env.device)
+            env._blue_peak_clearance = torch.zeros(n, device=env.device)
+            env._blue_min_vel_z = torch.zeros(n, device=env.device)
+        env._blue_prev_airborne[just_reset] = False
+        env._blue_peak_clearance[just_reset] = 0.0
+        env._blue_min_vel_z[just_reset] = 0.0
+
+        _FOOT_CONTACT_BELOW_BODY = 0.030  # matches events.py's own convention (foot body-link sits ~3cm above the true ground-contact surface)
+        floor_z_w = env.scene.env_origins[:, 2]
+        clearance = (assigned_foot_pos[:, 2] - floor_z_w - _FOOT_CONTACT_BELOW_BODY).clamp(min=0.0)
+        vel_z = assigned_foot_vel[:, 2]
+
+        newly_airborne = currently_airborne & ~env._blue_prev_airborne
+        env._blue_peak_clearance = torch.where(newly_airborne, clearance, env._blue_peak_clearance)
+        env._blue_min_vel_z = torch.where(newly_airborne, vel_z, env._blue_min_vel_z)
+        env._blue_peak_clearance = torch.where(
+            currently_airborne, torch.maximum(env._blue_peak_clearance, clearance), env._blue_peak_clearance
+        )
+        env._blue_min_vel_z = torch.where(
+            currently_airborne, torch.minimum(env._blue_min_vel_z, vel_z), env._blue_min_vel_z
+        )
+        env._blue_prev_airborne = currently_airborne.clone()
+
+        # FIX 2026-09-16 (same day, user request, "just reset everytime we
+        # reach clearance 0.02 reached so it can just always go"): dropped
+        # the min_vel_z/downward-descent requirement -- a genuine, soft,
+        # controlled landing (exactly what leading_foot_lift's own
+        # near-zero final-approach target trains for) can have very little
+        # downward velocity throughout, so requiring BOTH conditions
+        # together was blocking real landings the same way the height
+        # requirement alone did before the decay-zone fix. Now gates on
+        # peak clearance alone: once _MIN_GENUINE_LIFT_HEIGHT is reached at
+        # any point during the current airborne stretch, this stays True
+        # for the rest of that stretch/landing (env._blue_peak_clearance
+        # itself already only resets on the NEXT liftoff, see above) --
+        # "always go" once a real lift happened, no extra condition to
+        # re-block it. env._blue_min_vel_z is still tracked (kept for any
+        # future diagnostic use) but no longer read here.
+        _MIN_GENUINE_LIFT_HEIGHT = 0.02  # FIX 2026-09-16 (same day, user request, "have the treshold 0.2 again not 0.04" -- read as 0.02, the prior value, since 0.2 exceeds the 0.10 standard target and makes no physical sense here): 0.04 -> 0.02
+        genuinely_lifted_and_descended = env._blue_peak_clearance > _MIN_GENUINE_LIFT_HEIGHT
+
         goal_x_w = env.scene.env_origins[:, 0]
         target_point_xy = torch.stack([goal_x_w, half_y], dim=-1)  # (N, 2)
         # Horizontal-only distance -- foot_in_contact already guarantees ground
@@ -883,7 +948,25 @@ def _get_reach_target_y(
         # plant) satisfies this alongside the position check.
         foot_speed = torch.norm(assigned_foot_vel[:, :2], dim=-1)
 
-        candidate = wide & env._blue_was_airborne & foot_in_contact & (dist_to_blue < landing_radius)
+        # FIX 2026-09-16 (user request, "make it square instead of circular
+        # so i want 0.32 sides"): landing gate switched from a circular
+        # radius (dist_to_blue < landing_radius) to an axis-aligned square
+        # box, side=0.32m (half_side=0.16m each direction), independent of
+        # `landing_radius` (which stays 0.17, still used by the OTHER
+        # consumers of dist_to_blue below -- debug printout and
+        # leading_foot_lift's own approach-zone decay -- neither touched by
+        # this request). within_blue_square only gates this function's own
+        # "genuine landing" candidate.
+        _BLUE_LANDING_SIDE = 0.32  # FIX 2026-09-16 (same day, user request, "then do side 0.32"): 0.30 -> 0.32. Prior: "decrease sides of blue_ball to 0.3 instead of 0.32"): 0.32 -> 0.30
+        _blue_half_side = _BLUE_LANDING_SIDE / 2.0
+        env._blue_landing_half_side_current = _blue_half_side  # live readout for play.py's ground marker
+        within_blue_square = (
+            (assigned_foot_pos[:, 0] - target_point_xy[:, 0]).abs() < _blue_half_side
+        ) & (
+            (assigned_foot_pos[:, 1] - target_point_xy[:, 1]).abs() < _blue_half_side
+        )
+
+        candidate = wide & env._blue_was_airborne & genuinely_lifted_and_descended & foot_in_contact & within_blue_square
         # Memoization guard: this function is called up to 7x/step by
         # different reward terms sharing one unchanged post-physics
         # snapshot -- without this, the settle count would increment/decay
@@ -930,8 +1013,8 @@ def _get_reach_target_y(
                 f"[wide={bool(wide[0].item())} "
                 f"airborne={bool(env._blue_was_airborne[0].item())} "
                 f"contact={bool(foot_in_contact[0].item())} "
-                f"distOk={bool((dist_to_blue[0] < landing_radius).item())} "
-                f"dist={dist_to_blue[0].item():.2f} radius={landing_radius:.2f}] "
+                f"distOk={bool(within_blue_square[0].item())} "
+                f"dist={dist_to_blue[0].item():.2f} half_side={_blue_half_side:.2f}] "
                 f"first_call={bool(is_first_call_this_tick[0].item())} "
                 f"settle_before={_settle_before} settle_after={env._blue_settle_count[0].item()} "
                 f"foot_idx={foot_idx[0].item()} body_ids={list(asset_cfg.body_ids)} "
@@ -1146,12 +1229,14 @@ def _get_orange_reach_target_y(
     # variable landing_radius at 0.13 but orange ball do the variable -
     # 0.03"): orange was made strictly tighter than blue by a fixed 0.03m.
     #
-    # REVERTED 2026-09-12 (same day, user request, "make orange ball just
-    # the landing radius not that making it smaller anymore"): the -0.03
-    # offset is removed -- orange now reads blue's live radius directly,
-    # literally identical again (matches the original 2026-09-11 fix's
-    # intent before the offset was added).
-    landing_radius = float(getattr(env, "_blue_landing_radius_current", 0.13))
+    # FIX 2026-09-16 (user request, "something wrong the landing raduis of
+    # blue and orange ball is the same" -> "make orange ball 0.14 and blue
+    # ball 0.18"): orange no longer mirrors blue's live radius -- own fixed
+    # value instead, independent of blue's (now 0.18). Prior state (REVERTED
+    # 2026-09-12, "make orange ball just the landing radius not that making
+    # it smaller anymore"): orange read blue's live radius directly,
+    # literally identical -- that's the exact bug the user flagged here.
+    landing_radius = 0.14
     env._orange_landing_radius_current = landing_radius
 
     d = float(min(max(getattr(env, "_ball_difficulty", 1.0), 0.0), 1.0))
@@ -1204,7 +1289,22 @@ def _get_orange_reach_target_y(
         dist_to_orange = torch.norm(assigned_foot_pos[:, :2] - target_point_xy, dim=-1)
         foot_speed = torch.norm(assigned_foot_vel[:, :2], dim=-1)
 
-        candidate = wide & env._orange_was_airborne & foot_in_contact & (dist_to_orange < landing_radius)
+        # FIX 2026-09-16 (user request, "do this also for orange ball but i
+        # think 0.12 x 2 so 0.24 sides"): same square-gate mechanism as
+        # blue's own 2026-09-16 fix (_get_reach_target_y) -- axis-aligned
+        # square, side=0.24m (half_side=0.12m), independent of
+        # `landing_radius` (0.14, still used elsewhere -- debug/other
+        # consumers of dist_to_orange, untouched by this request).
+        _ORANGE_LANDING_SIDE = 0.24
+        _orange_half_side = _ORANGE_LANDING_SIDE / 2.0
+        env._orange_landing_half_side_current = _orange_half_side  # live readout for play.py's ground marker
+        within_orange_square = (
+            (assigned_foot_pos[:, 0] - target_point_xy[:, 0]).abs() < _orange_half_side
+        ) & (
+            (assigned_foot_pos[:, 1] - target_point_xy[:, 1]).abs() < _orange_half_side
+        )
+
+        candidate = wide & env._orange_was_airborne & foot_in_contact & within_orange_square
         is_first_call_this_tick = env.episode_length_buf != env._orange_last_settle_step
         env._orange_last_settle_step = env.episode_length_buf.clone()
         _ORANGE_SETTLE_STEPS = 3
@@ -1420,7 +1520,12 @@ def _get_red_reach_target_y(
     # kept (unused) purely so existing callers/tests passing it explicitly
     # don't break; the curriculum-eased value it used to seed is gone.
     d = float(min(max(getattr(env, "_ball_difficulty", 1.0), 0.0), 1.0))
-    landing_radius = float(getattr(env, "_blue_landing_radius_current", 0.13))
+    # FIX 2026-09-16 (user request, "i want red ball to be the same radius
+    # as orange ball"): now tracks env._orange_landing_radius_current
+    # (0.14) instead of blue's (now 0.18, independently different) -- red
+    # is the trailing foot's second waypoint, same foot/mechanism as
+    # orange, so it makes more sense grouped with orange than with blue.
+    landing_radius = float(getattr(env, "_orange_landing_radius_current", 0.14))
     env._red_landing_radius_current = landing_radius
 
     _EASY_LANDING_SPEED_THRESHOLD = 2.0
@@ -6570,7 +6675,7 @@ def leading_foot_lift(
     # line), but keeps a real, learnable gradient across most of the zone
     # instead of flattening out immediately.
     _BLUE_APPROACH_OUTER_ZONE = 0.20
-    _DECAY_STEEPNESS = 1.0
+    _DECAY_STEEPNESS = 0.3  # FIX 2026-09-16 (user request, "make it lelss exponential then"): 1.0 -> 0.3 -- flatter, closer to linear (picked a value clearly less convex than 1.0, not fully linear; adjust if this isn't flat enough). At dist=0.12 (midway through the 0.06-0.20 span), decayed_target goes from ~1.7cm (k=1.0) to ~2.7cm (k=0.3).
     # FIX 2026-09-09 (user request, "put the perfect hegiht at the
     # centerpoint of blue_ball_landed at h=-0.02 because of the hovering
     # problem"): floor lowered from 0.0 to -0.02 -- leading_height is
@@ -6582,7 +6687,23 @@ def leading_foot_lift(
     # the gradient keeps pointing toward height=0 all the way down.
     _MIN_TARGET_HEIGHT = -0.02
     dist_to_blue = env._blue_dbg_dist
-    radius = env._blue_landing_radius_current
+    # FIX 2026-09-16 (user request, "have it less steep so have a minimum
+    # radius of 0.10 and anything higher than that have it in the slope"):
+    # was `env._blue_landing_radius_current` (0.17, dynamic) -- with
+    # outer_zone fixed at 0.20, that left only a 3cm decay span, so the
+    # target collapsed to near-0 almost immediately, well before the real
+    # landing gate (0.02m/2cm genuine-lift threshold, see this same day's
+    # genuine-lift-gate fix) could ever be satisfied at a comfortable
+    # height -- confirmed live (probe_blue_genuine_lift_gate.py): 82.3% of
+    # what used to count as landings got blocked, blocked events' median
+    # peak clearance 0.2mm. Fixed decay inner radius = 0.10 (independent of
+    # the actual landing gate's own radius/side) widens the span to a full
+    # 10cm (0.10 -> outer_zone 0.20), a much gentler slope -- distances
+    # closer than 0.10 still get the fully-decayed (near-0) target;
+    # anything from 0.10 to 0.20 follows the same exponential slope shape
+    # as before, just spread over more distance.
+    _DECAY_INNER_RADIUS = 0.06  # FIX 2026-09-16 (same day, user request, "no have it decay inner radius 0.06"): 0.10 -> 0.06
+    radius = _DECAY_INNER_RADIUS
     x = ((dist_to_blue - radius) / (_BLUE_APPROACH_OUTER_ZONE - radius)).clamp(0.0, 1.0)
     shrink_frac = (torch.exp(_DECAY_STEEPNESS * x) - 1.0) / (math.exp(_DECAY_STEEPNESS) - 1.0)
     decayed_target = _MIN_TARGET_HEIGHT + (target_height - _MIN_TARGET_HEIGHT) * shrink_frac  # target_height at 0.20m -> -0.02 at the landing radius
@@ -6613,7 +6734,13 @@ def leading_foot_lift(
     direction = torch.sign(full_y - start_y)
     assigned_foot_y = foot_pos_w[arange_n, foot_idx, 1]
     signed_progress = direction * (assigned_foot_y - half_y)
-    overshot = signed_progress > radius
+    # Deliberately NOT `radius` (now the fixed 0.10 decay-zone inner bound
+    # above, per the 2026-09-16 fix) -- overshoot tolerance stays tied to
+    # the REAL landing gate's own radius, unaffected by that decay-shape
+    # change (two different uses of a distance that used to share one
+    # variable; separated here so fixing one doesn't silently move the
+    # other).
+    overshot = signed_progress > env._blue_landing_radius_current
     decayed_target = torch.where(overshot, torch.full_like(decayed_target, _MIN_TARGET_HEIGHT), decayed_target)
 
     effective_target = torch.where(

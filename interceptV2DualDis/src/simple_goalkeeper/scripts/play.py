@@ -802,8 +802,16 @@ def _patch_viewer_intercept_vis(native_viewer: "NativeMujocoViewer", env) -> Non
             # so the visible ring always matches whatever landing_radius
             # actually is right now, including this session's own 0.4
             # diagnostic value.
-            _live_radius = float(getattr(raw_env, "_blue_landing_radius_current", 0.09))
-            _add_ground_circle(goal_x, mid_y, floor_z + 0.002, _live_radius, 0.006, [0.15, 0.4, 1.0, 0.9])
+            # FIX 2026-09-16 (user request, "make it square instead of
+            # circular so i want 0.32 sides"): the actual landing gate in
+            # rewards.py switched from circular (landing_radius) to an
+            # axis-aligned square (env._blue_landing_half_side_current) --
+            # this marker now draws that same square, live, instead of the
+            # stale circle (same "went stale" risk the 2026-09-09 fix above
+            # already flagged for the old radius readout -- reading the
+            # live cached half-side here avoids repeating it).
+            _live_half_side = float(getattr(raw_env, "_blue_landing_half_side_current", 0.16))
+            _add_ground_rect(goal_x, mid_y, floor_z + 0.002, _live_half_side, _live_half_side, _live_half_side, 0.006, [0.15, 0.4, 1.0, 0.9])
         else:
             # Phase 2 (or narrow crossing): GREEN sphere at the foot's aim point
             # (the true crossing point + a small outward offset, see
@@ -845,11 +853,18 @@ def _patch_viewer_intercept_vis(native_viewer: "NativeMujocoViewer", env) -> Non
             # success()'s identical rewards.py trim -- landing_radius
             # itself (the blue ring above) is unaffected.
             _live_radius_green = float(getattr(raw_env, "_blue_landing_radius_current", 0.12)) - 0.04
-            # +X extent: was 0.05 -> briefly 0.0 (user request, "remove 0.05
+            # +X extent: 0.10 -> 0.15 (2026-09-16, user request, "move to
+            # 0.15"). -X extent: 0.30 -> 0.35 (same request, "and make it
+            # 0.05 longer" -- read as the other/-X side of this same beam,
+            # growing its total length by 0.05m; flag and correct if this
+            # guessed the wrong side). Prior history: +X extent was 0.05 ->
+            # 0.10 (2026-09-16 earlier same day, "move the green square to
+            # 0.10 not 0.05") -> briefly 0.0 (user request, "remove 0.05
             # from the width") -> RESTORED to 0.05 (user correction, "still
-            # have 5 cm of the rectangular beam in the +x direction") -- that
-            # earlier request meant the Y half-width trim above, not this.
-            _add_ground_rect(goal_x, foot_target_y, floor_z + 0.002, 0.30, 0.05, _live_radius_green, 0.006, [0.1, 1.0, 0.2, 0.9])
+            # have 5 cm of the rectangular beam in the +x direction") --
+            # that earlier request meant the Y half-width trim above, not
+            # this.
+            _add_ground_rect(goal_x, foot_target_y, floor_z + 0.002, 0.35, 0.15, _live_radius_green, 0.006, [0.1, 1.0, 0.2, 0.9])
 
         # NEW (user request, "make it visual in the play script with obaque
         # green ball"): opaque (alpha=1.0, unlike every other translucent
@@ -951,8 +966,14 @@ def _patch_viewer_intercept_vis(native_viewer: "NativeMujocoViewer", env) -> Non
             # overwritten to something other than blue's, this ring's
             # visible size (and the printed value below) will show it
             # directly instead of requiring a source read.
-            _orange_live_radius = float(getattr(raw_env, "_orange_landing_radius_current", 0.13))
-            _add_ground_circle(goal_x, orange_y, floor_z + 0.002, _orange_live_radius, 0.006, [1.0, 0.55, 0.0, 0.9])
+            # FIX 2026-09-16 (user request, "do this also for orange ball
+            # but i think 0.12 x 2 so 0.24 sides"): same square-marker
+            # switch as blue's own 2026-09-16 fix above -- mirrors
+            # env._orange_landing_half_side_current instead of the stale
+            # circular radius, same live-readout discipline this ring's
+            # own 2026-09-11 comment already committed to.
+            _orange_live_half_side = float(getattr(raw_env, "_orange_landing_half_side_current", 0.12))
+            _add_ground_rect(goal_x, orange_y, floor_z + 0.002, _orange_live_half_side, _orange_live_half_side, _orange_live_half_side, 0.006, [1.0, 0.55, 0.0, 0.9])
 
         # NEW 2026-08-15: red sphere -- trailing-foot waypoint, recomputed
         # inline (not read from a cached env attribute) so this marker can't
@@ -1882,11 +1903,47 @@ def _patch_viewer_sole_contact_and_stop_plots(native_viewer: "NativeMujocoViewer
     # FIX 2026-09-11 (user request, "put softstop instead of redball
     # landed"): red_ball_landed swapped out for softstop -- viewer-visibility
     # swap only, red_ball_landed itself is untouched as an active reward term.
+    # FIX 2026-09-16 (user request, "could u add that clearance flag in
+    # the plot in mujoco instead of assigned foot contact"): new front-slot
+    # FIX 2026-09-16 (later same day, user correction, "really make sure
+    # you replace assigned_foot_contact force because you didn't replace
+    # that one this time when i asked"): the earlier "swap priority order"
+    # fix only REORDERED _FORCE_RAW_NAME, it didn't actually remove it --
+    # since both plots fit under the 12-slot cap, nothing got pushed off
+    # and the force plot kept showing. Actually removed from _PROMOTED this
+    # time (its figure/histories/per-tick update below are left in place,
+    # just not linked into native_viewer._term_names, so it's genuinely not
+    # rendered -- same "don't delete the underlying config" spirit as the
+    # project's existing panels, just not shown).
+    _CLEARANCE_RAW_NAME = "assigned_foot_clearance_m"
     _PROMOTED = (
-        _FORCE_RAW_NAME, "blue_ball_landed", "feet_slippage", "softstop",
+        _CLEARANCE_RAW_NAME, "blue_ball_landed", "feet_slippage", "softstop",
         "success", "cleanstop", "wrong_foot_ball_contact", "shin_contact",
         _RAW_NAME,
     )
+
+    def _compute_assigned_foot_clearance(env, env_idx: int) -> float:
+        """Real, live foot clearance (m) above the floor, corrected for the
+        same ~0.03m foot-body-link-vs-ground-contact baseline offset
+        rewards.py's genuine-lift gate uses (_get_reach_target_y's own
+        `clearance` computation) -- shows exactly what that gate sees, not
+        a proxy. Green reference line marks _MIN_GENUINE_LIFT_HEIGHT (0.04m,
+        rewards.py), the real threshold a landing's peak clearance during
+        its airborne stretch must clear to count as genuine."""
+        raw_env = env.unwrapped if hasattr(env, "unwrapped") else env
+        from simple_goalkeeper.mdp.rewards import _get_correct_foot_idx
+        asset_cfg = raw_env.reward_manager.get_term_cfg("blue_ball_landed").params["asset_cfg"]
+        robot = raw_env.scene[asset_cfg.name]
+        foot_pos_w = robot.data.body_link_pos_w[:, asset_cfg.body_ids, :]
+        foot_idx = _get_correct_foot_idx(raw_env, "ball")
+        floor_z = raw_env.scene.env_origins[:, 2]
+        _FOOT_CONTACT_BELOW_BODY = 0.030
+        foot_z = foot_pos_w[env_idx, foot_idx[env_idx], 2]
+        clearance = max(0.0, float(foot_z.item()) - float(floor_z[env_idx].item()) - _FOOT_CONTACT_BELOW_BODY)
+        return clearance
+
+    _CLEARANCE_LO, _CLEARANCE_HI = 0.0, 0.15
+    _CLEARANCE_THRESHOLD_M = 0.02  # matches rewards.py's _MIN_GENUINE_LIFT_HEIGHT
 
     def _compute_assigned_foot_force(env, env_idx: int) -> float:
         """Real ground-reaction force (Newtons) on the assigned/leading
@@ -1927,6 +1984,19 @@ def _patch_viewer_sole_contact_and_stop_plots(native_viewer: "NativeMujocoViewer
         )
         native_viewer._histories[_FORCE_RAW_NAME] = deque(maxlen=cfg.history)
         native_viewer._scale[_FORCE_RAW_NAME] = 1.0
+        native_viewer._figures[_CLEARANCE_RAW_NAME] = make_empty_figure(
+            f"{_CLEARANCE_RAW_NAME} (m, assigned foot; green=0.02m genuine-lift threshold)",
+            cfg.grid_size, (_CLEARANCE_LO, _CLEARANCE_HI), cfg.history, cfg.background_alpha,
+        )
+        native_viewer._histories[_CLEARANCE_RAW_NAME] = deque(maxlen=cfg.history)
+        native_viewer._scale[_CLEARANCE_RAW_NAME] = 1.0
+        fig_clear = native_viewer._figures[_CLEARANCE_RAW_NAME]
+        fig_clear.linepnt[1] = 2
+        fig_clear.linedata[1][0] = -float(cfg.history)
+        fig_clear.linedata[1][1] = _CLEARANCE_THRESHOLD_M
+        fig_clear.linedata[1][2] = 0.0
+        fig_clear.linedata[1][3] = _CLEARANCE_THRESHOLD_M
+        fig_clear.linergb[1] = (0.0, 1.0, 0.0)
         # FIX 2026-09-09 (user request, "put a green line at the 40N
         # mark"): a flat reference line at the landing-force threshold, so
         # you can read "above/below 40N" directly off the plot instead of
@@ -1948,7 +2018,7 @@ def _patch_viewer_sole_contact_and_stop_plots(native_viewer: "NativeMujocoViewer
         fig.linedata[1][3] = _FORCE_THRESHOLD_N
         fig.linergb[1] = (0.0, 1.0, 0.0)
         rest = [n for n in native_viewer._term_names if n not in _PROMOTED]
-        promoted = [n for n in _PROMOTED if n in native_viewer._term_names or n in (_RAW_NAME, _FORCE_RAW_NAME)]
+        promoted = [n for n in _PROMOTED if n in native_viewer._term_names or n in (_RAW_NAME, _FORCE_RAW_NAME, _CLEARANCE_RAW_NAME)]
         native_viewer._term_names = promoted + rest
 
     def _write_force_fixed_range() -> None:
@@ -1968,6 +2038,20 @@ def _patch_viewer_sole_contact_and_stop_plots(native_viewer: "NativeMujocoViewer
         fig.range[1][1] = _FORCE_HI
         fig.title = f"{_FORCE_RAW_NAME} (Newtons, assigned foot; green=40N landing threshold)"
 
+    def _write_clearance_fixed_range() -> None:
+        """Same fixed-range write pattern as _write_force_fixed_range --
+        keeps the 0.04m threshold line visually stable."""
+        fig = native_viewer._figures[_CLEARANCE_RAW_NAME]
+        hist = native_viewer._histories[_CLEARANCE_RAW_NAME]
+        n = min(len(hist), native_viewer._plot_cfg.history)
+        fig.linepnt[0] = n
+        for i in range(n):
+            fig.linedata[0][2 * i] = float(-i)
+            fig.linedata[0][2 * i + 1] = float(hist[-1 - i])
+        fig.range[1][0] = _CLEARANCE_LO
+        fig.range[1][1] = _CLEARANCE_HI
+        fig.title = f"{_CLEARANCE_RAW_NAME} (m, assigned foot; green=0.02m genuine-lift threshold)"
+
     def _patched_update_reward_figures(viewer_handle: "mujoco.viewer.Handle") -> None:
         if native_viewer._show_plots and native_viewer._term_names and not native_viewer._is_paused:
             contact = _compute_sole_ball_contact(env, native_viewer.env_idx)
@@ -1976,6 +2060,9 @@ def _patch_viewer_sole_contact_and_stop_plots(native_viewer: "NativeMujocoViewer
             force = _compute_assigned_foot_force(env, native_viewer.env_idx)
             native_viewer._append_point(_FORCE_RAW_NAME, force)
             _write_force_fixed_range()
+            clearance = _compute_assigned_foot_clearance(env, native_viewer.env_idx)
+            native_viewer._append_point(_CLEARANCE_RAW_NAME, clearance)
+            _write_clearance_fixed_range()
         orig_update_reward_figures(viewer_handle)
 
     native_viewer.setup = _patched_setup
