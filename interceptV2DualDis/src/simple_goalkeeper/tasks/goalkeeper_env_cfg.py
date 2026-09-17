@@ -1351,10 +1351,14 @@ def goalkeeper_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
         # showed the 5cm target clipping the floor; wants more clearance.
         # clearance_at_save (below) intentionally NOT reverted -- user
         # explicitly asked to keep that one at 5cm.
+        # FIX 2026-09-17 (user request, "change to 0.07"): target_height
+        # 0.10 -> 0.07, same change mirrored below in trailing_foot_lift.
+        # FIX 2026-09-17 (user request, "make leading_foot_lift target 0.06"):
+        # 0.07 -> 0.06. trailing_foot_lift left at 0.07 (not mentioned).
         "leading_foot_lift": RewardTermCfg(
             func=gk_mdp.leading_foot_lift,
             weight=2.0,
-            params={"ball_name": BALL_NAME, "target_height": 0.10, "asset_cfg": _FEET_CFG},
+            params={"ball_name": BALL_NAME, "target_height": 0.06, "asset_cfg": _FEET_CFG},
         ),
         # NEW 2026-08-17 (user request): "an incentive that raises the foot"
         # for the TRAILING foot specifically during its start->orange and
@@ -1376,10 +1380,12 @@ def goalkeeper_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
         # FIX 2026-09-12 (user request, "do 5cm", then corrected "put the
         # trailing foot height to 3 cm not 5"): target_height 0.10 -> 0.05
         # -> 0.03. FIX (user request, "put it at 5 cm"): 0.03 -> 0.05.
+        # FIX 2026-09-17 (user request, "change to 0.07"): target_height
+        # 0.10 -> 0.07, same change as leading_foot_lift above.
         "trailing_foot_lift": RewardTermCfg(
             func=gk_mdp.trailing_foot_lift,
             weight=2.0,
-            params={"ball_name": BALL_NAME, "target_height": 0.10, "asset_cfg": _FEET_CFG},
+            params={"ball_name": BALL_NAME, "target_height": 0.07, "asset_cfg": _FEET_CFG},
         ),
         # NEW 2026-08-23 (user request): successor to the removed (2026-06-29)
         # airborne_at_save -- continuous (not one-shot binary), leading foot
