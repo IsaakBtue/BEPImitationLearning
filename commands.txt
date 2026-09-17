@@ -1,1 +1,1 @@
-uv run python /tmp/claude-1000/-home-isaak-BEPImitationlearning/52b1b2ad-cdce-454a-9bf0-f2a66683f8ab/scratchpad/probe_region_accuracy_by_step.py --checkpoint logs/rsl_rl/intercept_simple_goalkeeper_multidisc/2026-09-12_22-23-04_6144_accremoved_90b4cee_2026-09-12_22-23/model_14250.pt --num-envs 512 --steps 1500
+uv run sgk_play Mjlab-BeyondAMP-Goalkeeper-T1-MultiDisc-WithOverlay --checkpoint-file logs/rsl_rl/intercept_simple_goalkeeper_multidisc/2026-09-14_03-19-41_6144_phase3final_ba53bc0_2026-09-14_03-19/model_18250.pt --difficulty 1.0 --domain-rand 0 --force-region left_far

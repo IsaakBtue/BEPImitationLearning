@@ -576,7 +576,7 @@ def _get_reach_target_y(
     ball_name: str,
     asset_cfg: SceneEntityCfg = _DEFAULT_FEET_CFG,
     wide_threshold: float = 0.6,  # FIX 2026-09-12 (user request, "make the narrow to wide range from 0.5 to 0.6... so we can guarantee a 0.25m blue-orange gap"): 0.5 -> 0.6, kept in sync with regions.py's near/far boundary and events.py's far_travel_curriculum "lo". Was 0.65 (2026-07-23), reverted to 0.5 (2026-08-01), reverted again here.
-    landing_radius: float = 0.19,  # FIX 2026-09-16 (same day, user request, "make it +0.02"): 0.17 -> 0.19. No longer drives the actual landing gate (square, side=0.30, independent) or leading_foot_lift's decay (fixed at 0.06) -- still feeds footreach's overshoot-kill, blue_overshoot_penalty's clamp, blue_stick_landing's decel zone, and leading_foot_lift's own overshoot tolerance. Prior: "make it 0.17 blue ball"): 0.18 -> 0.17. Was 0.18, matching the "visibilityrevert" run's blue value (user request, "make orange ball 0.14 and blue ball 0.18"): 0.14 -> 0.18. Orange no longer mirrors this value (see _get_orange_reach_target_y, now its own fixed 0.14) -- red now tracks orange instead of blue (see _get_red_reach_target_y). Prior history: REVERTED (user correction, "i only wanted -0.04 from the rectangular beam... landing radius untouched") -- the -0.04 belongs only to success()'s rectangle Y half-width, not this real blue/orange/red landing-gate parameter. FIX (user request, "decrease landing radius with 0.01 for everything"): 0.13 -> 0.12. FIX 2026-09-12 (user correction, "no only for orange ball landed keep the variable landing_radius at 0.13 but orange ball do the variable - 0.03"): reverted the -0.03 shift back off blue's own default -- the -0.03 now applies ONLY inside _get_orange_reach_target_y, derived from this value, not hardcoded separately. Was 0.13 (2026-09-11, "increase the landing radius by 0.01"): 0.12 -> 0.13, flat, no curriculum (still no easing -- see the flat assignment below). Was 0.12 (2026-09-11 earlier same day, "decrease the radius of blue ball with 0.02 it is too easy"), 0.14 before that (2026-09-09, "revert" back to the flat, no-curriculum real value after a 0.4 diagnostic bump), 0.13 hard/0.15 easy before that, 0.09 (briefly reverted), 0.4 (earlier diagnostic), 0.09->0.05 (2026-09-09 earlier same day), 0.20->0.18->0.15->0.13->0.09 before that (2026-07-24: was 0.08, too strict at full difficulty)
+    landing_radius: float = 0.30,  # FIX 2026-09-17 (user request, "use 0.30 landing radius"): 0.19 -> 0.30. Does NOT drive the actual landing gate (square, side=0.32, independent) or leading_foot_lift's decay (fixed at 0.06) -- still feeds footreach's overshoot-kill, blue_overshoot_penalty's clamp, blue_stick_landing's decel zone, and leading_foot_lift's own overshoot tolerance. Prior: FIX 2026-09-16 (same day, user request, "make it +0.02"): 0.17 -> 0.19. Prior: "make it 0.17 blue ball"): 0.18 -> 0.17. Was 0.18, matching the "visibilityrevert" run's blue value (user request, "make orange ball 0.14 and blue ball 0.18"): 0.14 -> 0.18. Orange no longer mirrors this value (see _get_orange_reach_target_y, now its own fixed 0.14) -- red now tracks orange instead of blue (see _get_red_reach_target_y). Prior history: REVERTED (user correction, "i only wanted -0.04 from the rectangular beam... landing radius untouched") -- the -0.04 belongs only to success()'s rectangle Y half-width, not this real blue/orange/red landing-gate parameter. FIX (user request, "decrease landing radius with 0.01 for everything"): 0.13 -> 0.12. FIX 2026-09-12 (user correction, "no only for orange ball landed keep the variable landing_radius at 0.13 but orange ball do the variable - 0.03"): reverted the -0.03 shift back off blue's own default -- the -0.03 now applies ONLY inside _get_orange_reach_target_y, derived from this value, not hardcoded separately. Was 0.13 (2026-09-11, "increase the landing radius by 0.01"): 0.12 -> 0.13, flat, no curriculum (still no easing -- see the flat assignment below). Was 0.12 (2026-09-11 earlier same day, "decrease the radius of blue ball with 0.02 it is too easy"), 0.14 before that (2026-09-09, "revert" back to the flat, no-curriculum real value after a 0.4 diagnostic bump), 0.13 hard/0.15 easy before that, 0.09 (briefly reverted), 0.4 (earlier diagnostic), 0.09->0.05 (2026-09-09 earlier same day), 0.20->0.18->0.15->0.13->0.09 before that (2026-07-24: was 0.08, too strict at full difficulty)
     landing_speed_threshold: float = 1.0,  # FIX 2026-07-24: reverted to the pre-2026-07-23 value (was 0.15); see below
 ) -> torch.Tensor:
     """Two-stage reach target for wide crossings: v2 reimplementation of the
@@ -908,33 +908,32 @@ def _get_reach_target_y(
         clearance = (assigned_foot_pos[:, 2] - floor_z_w - _FOOT_CONTACT_BELOW_BODY).clamp(min=0.0)
         vel_z = assigned_foot_vel[:, 2]
 
-        newly_airborne = currently_airborne & ~env._blue_prev_airborne
-        env._blue_peak_clearance = torch.where(newly_airborne, clearance, env._blue_peak_clearance)
-        env._blue_min_vel_z = torch.where(newly_airborne, vel_z, env._blue_min_vel_z)
+        # FIX 2026-09-17 (user request, "in order to get blue_ball_landed it
+        # needs to surpass once in the env after step 5 once 0.02 height for
+        # leading foot and only then you can get blue_ball_landed"):
+        # env._blue_peak_clearance is now a WHOLE-EPISODE running max (only
+        # reset at just_reset above), not per-airborne-stretch -- once the
+        # foot clears 0.02m ONE time, it stays cleared for the rest of the
+        # episode, so a later landing attempt (even after an intervening
+        # touch-down elsewhere) still counts. Sampling is gated to
+        # episode_length_buf > 5 -- confirmed live (2026-09-17 zero-action
+        # probe) that both was_airborne AND real clearance can register a
+        # false positive from the reset-settling blip in the first couple
+        # of steps, before any real motion has happened; 5 steps is a
+        # cheap, deliberate margin past that.
+        _BLUE_LIFT_MEASURE_MIN_STEP = 5
+        past_lift_warmup = env.episode_length_buf > _BLUE_LIFT_MEASURE_MIN_STEP
         env._blue_peak_clearance = torch.where(
-            currently_airborne, torch.maximum(env._blue_peak_clearance, clearance), env._blue_peak_clearance
+            currently_airborne & past_lift_warmup,
+            torch.maximum(env._blue_peak_clearance, clearance),
+            env._blue_peak_clearance,
         )
         env._blue_min_vel_z = torch.where(
             currently_airborne, torch.minimum(env._blue_min_vel_z, vel_z), env._blue_min_vel_z
         )
         env._blue_prev_airborne = currently_airborne.clone()
 
-        # FIX 2026-09-16 (same day, user request, "just reset everytime we
-        # reach clearance 0.02 reached so it can just always go"): dropped
-        # the min_vel_z/downward-descent requirement -- a genuine, soft,
-        # controlled landing (exactly what leading_foot_lift's own
-        # near-zero final-approach target trains for) can have very little
-        # downward velocity throughout, so requiring BOTH conditions
-        # together was blocking real landings the same way the height
-        # requirement alone did before the decay-zone fix. Now gates on
-        # peak clearance alone: once _MIN_GENUINE_LIFT_HEIGHT is reached at
-        # any point during the current airborne stretch, this stays True
-        # for the rest of that stretch/landing (env._blue_peak_clearance
-        # itself already only resets on the NEXT liftoff, see above) --
-        # "always go" once a real lift happened, no extra condition to
-        # re-block it. env._blue_min_vel_z is still tracked (kept for any
-        # future diagnostic use) but no longer read here.
-        _MIN_GENUINE_LIFT_HEIGHT = 0.02  # FIX 2026-09-16 (same day, user request, "have the treshold 0.2 again not 0.04" -- read as 0.02, the prior value, since 0.2 exceeds the 0.10 standard target and makes no physical sense here): 0.04 -> 0.02
+        _MIN_GENUINE_LIFT_HEIGHT = 0.02
         genuinely_lifted_and_descended = env._blue_peak_clearance > _MIN_GENUINE_LIFT_HEIGHT
 
         goal_x_w = env.scene.env_origins[:, 0]
@@ -966,7 +965,18 @@ def _get_reach_target_y(
             (assigned_foot_pos[:, 1] - target_point_xy[:, 1]).abs() < _blue_half_side
         )
 
-        candidate = wide & env._blue_was_airborne & genuinely_lifted_and_descended & foot_in_contact & within_blue_square
+        # FIX 2026-09-17 (user request, "let's try again to make that mask"):
+        # re-added, this time gated to only sample peak clearance after step
+        # 5 (see env._blue_peak_clearance's own comment above) -- the
+        # earlier attempt's 82.3%-blocked measurement (see
+        # probe_blue_genuine_lift_gate.py) was taken WITHOUT that warmup
+        # gate, so it's not known yet whether it still blocks that much;
+        # re-verify live before trusting this doesn't just reopen the same
+        # problem.
+        candidate = (
+            wide & env._blue_was_airborne & genuinely_lifted_and_descended
+            & foot_in_contact & within_blue_square
+        )
         # Memoization guard: this function is called up to 7x/step by
         # different reward terms sharing one unchanged post-physics
         # snapshot -- without this, the settle count would increment/decay
@@ -1046,6 +1056,7 @@ def _get_reach_target_y(
         env._blue_dbg_dist = dist_to_blue
         env._blue_dbg_speed = foot_speed
         env._blue_dbg_contact = foot_in_contact
+        env._blue_dbg_within_square = within_blue_square  # NEW 2026-09-17 (user request, viewer flags for every blue_ball_landed condition) -- isolated out of `candidate` so the viewer can show it on its own
         env._blue_dbg_candidate = candidate
         env._blue_dbg_first_call = is_first_call_this_tick
         env._blue_dbg_wide = wide
@@ -1200,6 +1211,16 @@ def _get_orange_reach_target_y(
     sign = torch.sign(delta)
     sign = torch.where(sign == 0, torch.ones_like(sign), sign)
     orange_y = start_y + sign * orange_dist_from_start
+    # NEW 2026-09-17 (user report, "visualisation vs what is rewarded" bug):
+    # play.py's orange marker used to recompute its own copy of this exact
+    # formula for rendering -- it had drifted stale (still using the plain
+    # |delta|/2 pre-tanh formula and the old 0.23m gap, not this function's
+    # real tanh formula and 0.20m gap), so the drawn marker sat at a
+    # different Y than what orange_foot_proximity/orange_ball_landed/etc.
+    # actually target. Exposed here (mirrors env._blue_dbg_half_off's exact
+    # pattern) so play.py can read the live, real value instead of keeping
+    # its own copy that can silently desync again.
+    env._orange_dbg_offset = orange_y - start_y
 
     n = env.num_envs
     if not hasattr(env, "_orange_was_airborne"):
@@ -1295,7 +1316,7 @@ def _get_orange_reach_target_y(
         # square, side=0.24m (half_side=0.12m), independent of
         # `landing_radius` (0.14, still used elsewhere -- debug/other
         # consumers of dist_to_orange, untouched by this request).
-        _ORANGE_LANDING_SIDE = 0.24
+        _ORANGE_LANDING_SIDE = 0.32  # FIX 2026-09-17 (user request, "make the orange ball landed the same square size as blue ball"): 0.24 -> 0.32, matching blue's _BLUE_LANDING_SIDE
         _orange_half_side = _ORANGE_LANDING_SIDE / 2.0
         env._orange_landing_half_side_current = _orange_half_side  # live readout for play.py's ground marker
         within_orange_square = (
@@ -1569,9 +1590,22 @@ def _get_red_reach_target_y(
         dist_to_red = torch.norm(assigned_foot_pos[:, :2] - target_point_xy, dim=-1)
         foot_speed = torch.norm(assigned_foot_vel[:, :2], dim=-1)
 
+        # FIX 2026-09-17 (user request, "make red ball landed the same
+        # square size as blue ball"): same square-gate mechanism as
+        # blue's/orange's own, side=0.32m, independent of `landing_radius`
+        # (still used elsewhere -- debug printout only for red).
+        _RED_LANDING_SIDE = 0.32
+        _red_half_side = _RED_LANDING_SIDE / 2.0
+        env._red_landing_half_side_current = _red_half_side  # live readout for play.py's ground marker
+        within_red_square = (
+            (assigned_foot_pos[:, 0] - target_point_xy[:, 0]).abs() < _red_half_side
+        ) & (
+            (assigned_foot_pos[:, 1] - target_point_xy[:, 1]).abs() < _red_half_side
+        )
+
         candidate = (
             wide & red_active & env._red_was_airborne & foot_in_contact
-            & (dist_to_red < landing_radius)
+            & within_red_square
         )
         is_first_call_this_tick = env.episode_length_buf != env._red_last_settle_step
         env._red_last_settle_step = env.episode_length_buf.clone()
@@ -2708,7 +2742,7 @@ def blue_green_transition_track(
     ball_name: str,
     asset_cfg: SceneEntityCfg = _DEFAULT_FEET_CFG,
     sigma: float = 5.0,
-    window_frac_of_remaining: float = 0.56,  # FIX 2026-09-13 (user request, "do x0.7"): 0.8 * 0.7 = 0.56.
+    window_frac_of_remaining: float = 0.45,  # FIX 2026-09-17 (user request, "i just wan't it to only eat up 45% instead of 56%... i want it to be faster"): 0.56 -> 0.45. Prior: FIX 2026-09-13 (user request, "do x0.7"): 0.8 * 0.7 = 0.56.
     min_window_steps: int = 5,
     lift_target_height: float = 0.10,
 ) -> torch.Tensor:
@@ -2854,7 +2888,12 @@ def orange_foot_proximity(
     dist = torch.norm(foot_pos_active - target_point, dim=-1)
 
     behind = _ball_is_behind(env, ball_name)
-    return torch.exp(-sigma * dist) * env._orange_wide.float() * (~behind).float()
+    # FIX 2026-09-17 (user request, "enable orange ball footreach only
+    # after 40 steps the env started"): gated off for the first 40 steps of
+    # every episode, on top of the existing wide/behind gates.
+    _ORANGE_FOOT_PROXIMITY_MIN_STEP = 40
+    after_warmup = env.episode_length_buf > _ORANGE_FOOT_PROXIMITY_MIN_STEP
+    return torch.exp(-sigma * dist) * env._orange_wide.float() * (~behind).float() * after_warmup.float()
 
 
 def orange_ball_landed(
@@ -3678,24 +3717,34 @@ def success(
     # X/Y only (no Z check) -- replaces the old circular 3D
     # `dist < strict_th` sphere. `strict_th` param kept (harmless,
     # goalkeeper_env_cfg.py still passes it explicitly) but no longer read.
-    _RECT_X_NEG = 0.30  # meters behind the goal line (toward the robot)
-    # meters past the goal line. Was 0.05 -> briefly 0.0 (user request,
-    # "remove 0.05 from the width") -> RESTORED to 0.05 (user correction,
-    # "still have 5 cm of the rectangular beam in the +x direction") -- the
-    # earlier "remove 0.05 from the width" request actually meant the Y
-    # half-width trim (now _RECT_Y_TRIM below), not this X extent.
-    _RECT_X_POS = 0.05
-    # FIX (user correction, "i only wanted -0.04 from the rectangular
-    # beam... landing radius untouched"): the -0.04 is subtracted HERE only
-    # (this rectangle's own Y half-width), not from landing_radius itself --
-    # env._blue_landing_radius_current (the real blue/orange/red landing
-    # gate) stays at its true value.
-    _RECT_Y_TRIM = 0.04
-    landing_radius_live = float(getattr(env, "_blue_landing_radius_current", 0.12))
-    rect_y_half = landing_radius_live - _RECT_Y_TRIM
+    # FIX 2026-09-17 (user request, "have the square of the green ball in
+    # the middle"): was asymmetric (-0.30 behind the goal line, +0.05 past
+    # it), which put the green target sphere right at the front edge of the
+    # zone instead of its center. Centered, symmetric ever since.
+    # FIX 2026-09-17 (same day, user request, "make it both 0.4 total"):
+    # both X and Y now fixed at +-0.2m (0.4m total each) -- a true square.
+    # Y used to be DERIVED from env._blue_landing_radius_current (a live,
+    # scaling value, minus a fixed 0.04 trim) so it tracked blue's own
+    # radius automatically; that relationship is dropped here per this
+    # explicit fixed-value request -- if blue's landing_radius changes
+    # later, this Y half-width will no longer follow it.
+    _RECT_X_NEG = 0.2  # meters behind the goal line (toward the robot)
+    _RECT_X_POS = 0.2  # meters past the goal line
+    rect_y_half = 0.2
     dx = foot_pos_active[:, 0] - goal_x_w
     dy = foot_pos_active[:, 1] - target_y
     in_rect = (dx >= -_RECT_X_NEG) & (dx <= _RECT_X_POS) & (dy.abs() <= rect_y_half)
+
+    # NEW 2026-09-17 (user report, "why does green_ball have a square? it
+    # doesn't use it for calculations" -- it DOES, this is that rectangle,
+    # but play.py's drawn marker had drifted stale: -0.35/+0.15 hardcoded
+    # there vs the real -0.30/+0.05 here, same "duplicated formula desyncs"
+    # bug class as blue/orange's own 2026-09-17 fix). Exposed live so
+    # play.py can read the real values instead of keeping its own copy.
+    env._success_rect_x_neg = _RECT_X_NEG
+    env._success_rect_x_pos = _RECT_X_POS
+    env._success_rect_y_half = rect_y_half
+    env._success_center_y = target_y
 
     # FIX 2026-07-27 (user request): retiered off stopball (env._sb_flag) --
     # stopball is just the initial deflection, the easiest/loosest event in

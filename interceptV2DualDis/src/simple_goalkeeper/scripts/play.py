@@ -766,16 +766,26 @@ def _patch_viewer_intercept_vis(native_viewer: "NativeMujocoViewer", env) -> Non
 
         if wide and not landed:
             # Phase 1: BLUE sphere at the midpoint — half the distance, half as far.
-            # REVERTED 2026-09-11 (same day, user request, "lets try /2 for
-            # the blue ball location"): mirrors rewards.py's own reversion --
-            # the smooth extra-margin/start-floor machinery is gone, back to
-            # the plain midpoint.
-            # FIX 2026-09-12 (user request, "maximum distance of 0.35 from
-            # the center 0 0 point"): mirrors rewards.py's own 0.35m cap.
-            _BLUE_MAX_DIST_FROM_START = 0.4
-            _delta = cross_y - start_y
-            _sign = 1.0 if _delta >= 0.0 else -1.0
-            mid_y = start_y + _sign * min(abs(_delta) / 2.0, _BLUE_MAX_DIST_FROM_START)
+            # FIX 2026-09-17 (user report, "visualisation vs what is
+            # rewarded" bug -- flag turned on with only the toes in, and
+            # turned off before the foot reached the far edge of the drawn
+            # square): this used to recompute its own copy of blue's
+            # target-Y formula (plain |delta|/2, capped at 0.4) -- stale
+            # since rewards.py's 2026-09-16 steepened-tanh fix
+            # (_get_reach_target_y's blue_dist_from_start), so the drawn
+            # marker sat several cm further from center than the REAL
+            # target the landing gate checks against (confirmed: ~6.7cm gap
+            # at delta=0.6m, ~7.8cm at delta=1.0m -- both larger than half
+            # the box's own half-side). Now reads the live value
+            # rewards.py already caches (env._blue_dbg_half_off =
+            # half_y - start_y, set fresh every tick by
+            # _get_reach_target_y, which every wide-gated reward term
+            # already calls first) instead of keeping a second copy that
+            # can silently desync again -- same discipline this function's
+            # own docstring already claims for wide/landed, just not
+            # previously applied to the Y formula itself.
+            _blue_off_t = getattr(raw_env, "_blue_dbg_half_off", None)
+            mid_y = start_y + (float(_blue_off_t[0].item()) if _blue_off_t is not None else 0.0)
             _add_sphere(goal_x, mid_y, sphere_z, 0.08, [0.15, 0.4, 1.0, 0.75])
             _add_line(
                 np.array([goal_x, mid_y, floor_z], dtype=np.float64),
@@ -852,19 +862,40 @@ def _patch_viewer_intercept_vis(native_viewer: "NativeMujocoViewer", env) -> Non
             # only to this marker's own Y half-width, mirroring
             # success()'s identical rewards.py trim -- landing_radius
             # itself (the blue ring above) is unaffected.
-            _live_radius_green = float(getattr(raw_env, "_blue_landing_radius_current", 0.12)) - 0.04
-            # +X extent: 0.10 -> 0.15 (2026-09-16, user request, "move to
-            # 0.15"). -X extent: 0.30 -> 0.35 (same request, "and make it
-            # 0.05 longer" -- read as the other/-X side of this same beam,
-            # growing its total length by 0.05m; flag and correct if this
-            # guessed the wrong side). Prior history: +X extent was 0.05 ->
-            # 0.10 (2026-09-16 earlier same day, "move the green square to
-            # 0.10 not 0.05") -> briefly 0.0 (user request, "remove 0.05
-            # from the width") -> RESTORED to 0.05 (user correction, "still
-            # have 5 cm of the rectangular beam in the +x direction") --
-            # that earlier request meant the Y half-width trim above, not
-            # this.
-            _add_ground_rect(goal_x, foot_target_y, floor_z + 0.002, 0.35, 0.15, _live_radius_green, 0.006, [0.1, 1.0, 0.2, 0.9])
+            # FIX 2026-09-17 (user report, "why does green_ball have a
+            # square? it doesn't use it for calculations"): it DOES --
+            # success() (rewards.py) gates its payout on this exact
+            # rectangle -- but this marker's own X extents (0.35/0.15) and
+            # Y-half (via _blue_landing_radius_current-0.04, a second copy)
+            # had drifted stale vs. success()'s real, current values
+            # (-0.30/+0.05 in X). Now reads success()'s own live X/Y-half
+            # values (env._success_rect_x_neg/_x_pos/_y_half, set fresh
+            # every tick by success() itself) instead of a second copy that
+            # can silently desync -- same fix pattern as blue's mid_y /
+            # orange's orange_y above.
+            #
+            # REVERTED 2026-09-17 (user report, "green_ball square is
+            # moving btw that shouldn't be the case it should be calculated
+            # based on the green sphere location"): briefly centered this on
+            # env._success_center_y (success()'s own live-ball-tracking
+            # target once the ball is within 0.5m and not yet caught) to
+            # exactly match what success() checks at that instant -- but
+            # that made the box visibly jitter with the live ball instead of
+            # sitting still at the green sphere. Back to foot_target_y (the
+            # same fixed point the sphere itself is drawn at). Known,
+            # accepted tradeoff: in that brief close-and-uncaught window,
+            # the drawn box's position can differ slightly from success()'s
+            # real live-tracked target -- stable-and-sphere-aligned was
+            # explicitly chosen over exact-instant-accuracy here.
+            _x_neg = float(getattr(raw_env, "_success_rect_x_neg", 0.30))
+            _x_pos = float(getattr(raw_env, "_success_rect_x_pos", 0.05))
+            # env._success_rect_y_half is a plain Python float scalar
+            # (rewards.py: rect_y_half = landing_radius_live - _RECT_Y_TRIM,
+            # already float(...)'d there), not a per-env tensor -- read
+            # directly, no [0] indexing.
+            _y_half_raw = getattr(raw_env, "_success_rect_y_half", None)
+            _y_half = float(_y_half_raw) if _y_half_raw is not None else 0.08
+            _add_ground_rect(goal_x, foot_target_y, floor_z + 0.002, _x_neg, _x_pos, _y_half, 0.006, [0.1, 1.0, 0.2, 0.9])
 
         # NEW (user request, "make it visual in the play script with obaque
         # green ball"): opaque (alpha=1.0, unlike every other translucent
@@ -930,23 +961,19 @@ def _patch_viewer_intercept_vis(native_viewer: "NativeMujocoViewer", env) -> Non
         red_active = bool(red_active_t[0].item()) if red_active_t is not None else False
         if wide and not red_active:
             start_y = float(origins[1])
-            delta = cross_y - start_y
-            sign = 1.0 if delta >= 0 else -1.0
-            # FIX 2026-09-12 (user request, "just do this with 0.6 and also
-            # a new way of calculating only making sure of the 0.25m gap
-            # nothing else"): mirrors rewards.py's own rewritten
-            # _get_orange_reach_target_y exactly -- orange is now DEFINED
-            # as blue's own distance-from-start minus a fixed 0.25m gap,
-            # not an independent formula. Replaces the earlier 0.2m
-            # smooth-floor mechanism entirely.
-            _ORANGE_BLUE_GAP = 0.23  # FIX 2026-09-12 (user request, "make the distance of orange ball 0.23"): 0.25 -> 0.23
-            # FIX 2026-09-12 (same day, user request, "maximum distance of
-            # 0.35 from the center 0 0 point"): mirrors rewards.py's own
-            # 0.35m cap on this identical computation.
-            _BLUE_MAX_DIST_FROM_START = 0.4
-            blue_dist_from_start = min(abs(delta) / 2.0, _BLUE_MAX_DIST_FROM_START)
-            orange_dist_from_start = max(blue_dist_from_start - _ORANGE_BLUE_GAP, 0.0)
-            orange_y = start_y + sign * orange_dist_from_start
+            # FIX 2026-09-17 (user report, "visualisation vs what is
+            # rewarded" bug): this used to recompute its own copy of
+            # orange's target-Y formula -- stale on TWO counts vs. the real
+            # rewards.py:_get_orange_reach_target_y (plain |delta|/2 instead
+            # of the real tanh formula, AND gap=0.23 instead of the real
+            # current 0.20), so the drawn marker didn't match what
+            # orange_foot_proximity/orange_ball_landed/etc. actually target
+            # -- same class of bug as blue's own mid_y fix right above. Now
+            # reads the live value rewards.py caches
+            # (env._orange_dbg_offset = orange_y - start_y, set fresh every
+            # tick) instead of a second copy that can silently desync.
+            _orange_offset_t = getattr(raw_env, "_orange_dbg_offset", None)
+            orange_y = start_y + (float(_orange_offset_t[0].item()) if _orange_offset_t is not None else 0.0)
             orange_color = [1.0, 0.55, 0.0, 0.75]
             orange_line_color = [1.0, 0.55, 0.0, 0.6]
             _add_sphere(goal_x, orange_y, sphere_z, 0.08, orange_color)
@@ -999,6 +1026,14 @@ def _patch_viewer_intercept_vis(native_viewer: "NativeMujocoViewer", env) -> Non
                 np.array([goal_x, red_y, sphere_z], dtype=np.float64),
                 0.008, [0.9, 0.1, 0.1, 0.6],
             )
+            # FIX 2026-09-17 (user report, "i dont see the red ball square
+            # do we still use it?"): red's own square landing gate exists
+            # and is live in rewards.py (_get_red_reach_target_y's
+            # within_red_square, side=0.32, added same session as blue's/
+            # orange's) -- it just never got a matching marker here, unlike
+            # blue/orange. Same live-readout pattern as orange's own ring.
+            _red_live_half_side = float(getattr(raw_env, "_red_landing_half_side_current", 0.16))
+            _add_ground_rect(goal_x, red_y, floor_z + 0.002, _red_live_half_side, _red_live_half_side, _red_live_half_side, 0.006, [0.9, 0.1, 0.1, 0.9])
 
     native_viewer._update_debug_visualizers = _patched_update
 
@@ -1427,6 +1462,103 @@ def _patch_viewer_landing_ok_plot(native_viewer: "NativeMujocoViewer", env) -> N
         if native_viewer._show_plots and native_viewer._term_names and not native_viewer._is_paused:
             native_viewer._append_point(_NAME, _compute_landing_ok(env, native_viewer.env_idx))
             native_viewer._write_history_to_figure(_NAME)
+        orig_update_reward_figures(viewer_handle)
+
+    native_viewer.setup = _patched_setup
+    native_viewer._update_reward_figures = _patched_update_reward_figures
+
+
+def _compute_blue_landing_conditions(env, env_idx: int) -> tuple[float, float, float, float, float, float, float, float]:
+    """Every condition feeding blue_ball_landed/landing_ok (rewards.py:
+    _get_reach_target_y), read straight off this tick's already-populated
+    env._blue_dbg_* attributes -- viewer-only, no separate computation.
+
+    NEW 2026-09-17 (user request, "what are all the conditions of blue ball
+    landed... put it in the mujoco p viewer all of them as flags"):
+      - wide: env._blue_wide -- this is even a blue-waypoint (wide) crossing
+      - was_airborne: env._blue_was_airborne -- foot has been airborne at
+        some point this episode (sticky)
+      - foot_in_contact: current foot contact force > 40N
+      - within_square: foot inside blue's 0.32m landing box
+      - settle_ok: candidate held for >=3 consecutive real ticks
+        (env._blue_settle_count, aka env._blue_dbg_settle)
+      - speed_ok: foot_speed < landing_speed_threshold
+      - landed_genuine: the final one-shot result (env._blue_landed_genuine)
+      - landed_was_free: informational disqualifier -- True if the landing
+        that DID fire happened suspiciously early (episode_length_buf < 10),
+        which is why landed_genuine can stay 0 even after a landing fires
+    """
+    raw_env = env.unwrapped if hasattr(env, "unwrapped") else env
+    wide_t = getattr(raw_env, "_blue_dbg_wide", None)
+    if wide_t is None:
+        return (0.0,) * 8
+    was_airborne_t = raw_env._blue_dbg_was_airborne
+    contact_t = raw_env._blue_dbg_contact
+    within_square_t = raw_env._blue_dbg_within_square
+    settle_t = raw_env._blue_dbg_settle
+    speed_t = raw_env._blue_dbg_speed
+    speed_th = raw_env._blue_dbg_speed_th
+    genuine_t = raw_env._blue_landed_genuine
+    was_free_t = raw_env._blue_landed_was_free
+
+    _BLUE_SETTLE_STEPS = 3  # mirrors rewards.py's own literal
+    return (
+        float(wide_t[env_idx].item()),
+        float(was_airborne_t[env_idx].item()),
+        float(contact_t[env_idx].item()),
+        float(within_square_t[env_idx].item()),
+        float((settle_t[env_idx] >= _BLUE_SETTLE_STEPS).item()),
+        float((speed_t[env_idx] < speed_th).item()),
+        float(genuine_t[env_idx].item()),
+        float(was_free_t[env_idx].item()),
+    )
+
+
+def _patch_viewer_blue_landing_conditions_plot(native_viewer: "NativeMujocoViewer", env) -> None:
+    """Add one P-panel plot per blue_ball_landed condition (see
+    _compute_blue_landing_conditions) -- NEW 2026-09-17 (user request, "what
+    are all the conditions of blue ball landed... put it in the mujoco p
+    viewer all of them as flags so i can watch if they are met"). Same
+    auto-created-figure + front-of-list-promotion mechanism as every other
+    panel patch in this file (e.g. _patch_viewer_wrong_foot_contact_plot).
+    """
+    orig_setup = native_viewer.setup
+    orig_update_reward_figures = native_viewer._update_reward_figures
+
+    _TERM_NAMES = (
+        "blue_cond_wide",
+        "blue_cond_was_airborne",
+        "blue_cond_foot_in_contact",
+        "blue_cond_within_square",
+        "blue_cond_settle_ok",
+        "blue_cond_speed_ok",
+        "blue_landed_genuine",
+        "blue_landed_was_free",
+    )
+
+    def _patched_setup() -> None:
+        orig_setup()
+        from mjlab.viewer.native.viewer import make_empty_figure
+        cfg = native_viewer._plot_cfg
+        for name in _TERM_NAMES:
+            native_viewer._figures[name] = make_empty_figure(
+                name, cfg.grid_size, cfg.init_yrange, cfg.history, cfg.background_alpha,
+            )
+            native_viewer._histories[name] = deque(maxlen=cfg.history)
+            native_viewer._yrange[name] = cfg.init_yrange
+            native_viewer._scale[name] = 1.0
+        # Front of the list -- same reasoning as every other promotion in
+        # this file: this task's 61 active reward terms exceed max_viewports
+        # (12), so anything not moved to the front is silently never rendered.
+        rest = [n for n in native_viewer._term_names]
+        native_viewer._term_names = list(_TERM_NAMES) + rest
+
+    def _patched_update_reward_figures(viewer_handle: "mujoco.viewer.Handle") -> None:
+        if native_viewer._show_plots and native_viewer._term_names and not native_viewer._is_paused:
+            values = _compute_blue_landing_conditions(env, native_viewer.env_idx)
+            for name, value in zip(_TERM_NAMES, values):
+                native_viewer._append_point(name, value)
+                native_viewer._write_history_to_figure(name)
         orig_update_reward_figures(viewer_handle)
 
     native_viewer.setup = _patched_setup
@@ -3513,6 +3645,7 @@ def run_play(task_id: str, cfg: PlayConfig) -> None:
         _patch_viewer_foot_restitution_plot(native_viewer, env)
         _patch_viewer_contact_yield_vis(native_viewer, env)
         _patch_viewer_landing_ok_plot(native_viewer, env)
+        _patch_viewer_blue_landing_conditions_plot(native_viewer, env)
         native_viewer.run()
     elif resolved_viewer == "viser":
         ViserPlayViewer(env, final_policy).run()
