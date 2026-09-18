@@ -565,7 +565,17 @@ class AnalyticsPolicy:
             first_call_t = getattr(env, "_blue_dbg_first_call", None)
             gate_wide_t = getattr(env, "_blue_dbg_wide", None)
             ep_len_t = getattr(env, "_blue_dbg_ep_len", None)
-            last_settle_before_t = getattr(env, "_blue_dbg_last_settle_step_before", None)
+            # NEW 2026-09-19 (user request, "sometimes it seems correct but
+            # it doesn't get it"): peak_clearance/genuine_lift and speed_ok
+            # were missing from this panel entirely -- both are real gates
+            # in blue_ball_landed's candidate, so a case where dist/contact/
+            # airborne all look satisfied could still silently fail on
+            # either one with no visibility here. was_free/genuine added so
+            # a landing that DID fire but got disqualified is visible too.
+            peak_clear_t = getattr(env, "_blue_peak_clearance", None)
+            genuine_lift_t = getattr(env, "_blue_dbg_genuine_lift", None)
+            was_free_t = getattr(env, "_blue_landed_was_free", None)
+            genuine_t = getattr(env, "_blue_landed_genuine", None)
             blue_dbg = (
                 f" | BLUE dist={dist_t[0].item() if dist_t is not None else float('nan'):.2f}"
                 f"(<{radius:.2f}) "
@@ -585,7 +595,10 @@ class AnalyticsPolicy:
                 f"firstCallThisTick={bool(first_call_t[0].item()) if first_call_t is not None else None} "
                 f"gateWide={bool(gate_wide_t[0].item()) if gate_wide_t is not None else None} || "
                 f"epLen={ep_len_t[0].item() if ep_len_t is not None else None} "
-                f"lastSettleStepBefore={last_settle_before_t[0].item() if last_settle_before_t is not None else None}"
+                f"peakClearance={peak_clear_t[0].item() if peak_clear_t is not None else float('nan'):.3f}"
+                f"(genuineLift={bool(genuine_lift_t[0].item()) if genuine_lift_t is not None else None}) "
+                f"wasFree={bool(was_free_t[0].item()) if was_free_t is not None else None} "
+                f"genuine={bool(genuine_t[0].item()) if genuine_t is not None else None}"
             )
 
         # DEBUG 2026-07-23 (TEMPORARY): epLen/settle/candidate moved to the

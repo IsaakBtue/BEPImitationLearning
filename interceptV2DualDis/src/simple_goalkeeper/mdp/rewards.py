@@ -982,56 +982,14 @@ def _get_reach_target_y(
         # snapshot -- without this, the settle count would increment/decay
         # once PER CALL instead of once per real physics tick.
         is_first_call_this_tick = env.episode_length_buf != env._blue_last_settle_step
-        # DEBUG 2026-07-23 (TEMPORARY): snapshot the PRE-update stored value
-        # so we can see what episode_length_buf was actually compared
-        # against, not just the post-update value (which trivially always
-        # matches episode_length_buf after the line below runs).
-        env._blue_dbg_last_settle_step_before = env._blue_last_settle_step.clone()
         env._blue_last_settle_step = env.episode_length_buf.clone()
         # FIX (branch mechanism #9, "leaky" decrement): on a miss, decrement
         # by 1 (floored at 0) instead of hard-reset to 0 -- see docstring.
-        _settle_before = env._blue_settle_count[0].item()
         env._blue_settle_count = torch.where(
             candidate,
             torch.where(is_first_call_this_tick, env._blue_settle_count + 1, env._blue_settle_count),
             torch.where(is_first_call_this_tick, (env._blue_settle_count - 1).clamp(min=0), env._blue_settle_count),
         )
-        # DEBUG 2026-07-23 (TEMPORARY): raw, unconditional, per-CALL (not
-        # per-tick) print of every single call to this function for env 0 --
-        # settle appears stuck at 0 despite candidate=True for many
-        # consecutive real ticks in play, which the display (only showing
-        # the last of ~7 same-tick calls) can't fully explain. This prints
-        # every call so we can see the actual call-by-call sequence.
-        if bool(wide[0].item()) and dist_to_blue[0].item() < 0.3:
-            import sys as _sys
-            import inspect as _inspect
-            _caller = _inspect.currentframe().f_back.f_code.co_name
-            # DEBUG 2026-07-24: dist/radius/foot_pos/target_xy trimmed to 2
-            # decimals (were 4 decimals / raw float64 .tolist(), e.g.
-            # "0.0071395160630345345" -- unreadable noise for a live debug
-            # trace). asset_cfg_id shortened to id(asset_cfg) % 1_000_000 --
-            # the full id() is a full memory address (naturally a huge,
-            # arbitrary number on 64-bit systems), but this print only ever
-            # needs it as a same-vs-different fingerprint across calls (see
-            # the FIX 2026-07-23 comment above), not a real identifier.
-            _foot_pos_r = [round(v, 2) for v in assigned_foot_pos[0].tolist()]
-            _target_xy_r = [round(v, 2) for v in target_point_xy[0].tolist()]
-            print(
-                f"[RAWSETTLE] ep_len={env.episode_length_buf[0].item()} "
-                f"caller={_caller} "
-                f"cand={bool(candidate[0].item())} "
-                f"[wide={bool(wide[0].item())} "
-                f"airborne={bool(env._blue_was_airborne[0].item())} "
-                f"contact={bool(foot_in_contact[0].item())} "
-                f"distOk={bool(within_blue_square[0].item())} "
-                f"dist={dist_to_blue[0].item():.2f} half_side={_blue_half_side:.2f}] "
-                f"first_call={bool(is_first_call_this_tick[0].item())} "
-                f"settle_before={_settle_before} settle_after={env._blue_settle_count[0].item()} "
-                f"foot_idx={foot_idx[0].item()} body_ids={list(asset_cfg.body_ids)} "
-                f"asset_cfg_id={id(asset_cfg) % 1_000_000} "
-                f"foot_pos={_foot_pos_r} target_xy={_target_xy_r}",
-                file=_sys.stderr,
-            )
         _BLUE_SETTLE_STEPS = 3
         newly_landed = (
             (env._blue_settle_count >= _BLUE_SETTLE_STEPS)
@@ -1050,6 +1008,37 @@ def _get_reach_target_y(
             env._blue_landed_was_free,
         )
 
+        # DEBUG 2026-09-19 (user request, "clean the diagnostics ... only
+        # output the blue_ball_landing requirements because sometimes it
+        # seems correct but it doesn't get it"): replaces the old per-CALL
+        # [RAWSETTLE] print. That one fired up to 7x/tick (once per reward
+        # term sharing this call) and, critically, never showed the
+        # genuine-lift gate or the speed gate -- exactly the two conditions
+        # that can make wide/airborne/contact/within_square all look
+        # satisfied while the landing still doesn't fire. Gated to ONE
+        # print per real physics tick (is_first_call_this_tick) and lists
+        # every requirement blue_ball_landed actually checks, in order.
+        if bool(wide[0].item()) and dist_to_blue[0].item() < 0.3 and bool(is_first_call_this_tick[0].item()):
+            import sys as _sys
+            genuine_now = bool((env._blue_landed & ~env._blue_landed_was_free)[0].item())
+            print(
+                f"[BLUE_LANDED] ep_len={env.episode_length_buf[0].item()} "
+                f"wide={bool(wide[0].item())} "
+                f"was_airborne={bool(env._blue_was_airborne[0].item())} "
+                f"genuine_lift={bool(genuinely_lifted_and_descended[0].item())}"
+                f"(peak_clearance={env._blue_peak_clearance[0].item():.3f}>{_MIN_GENUINE_LIFT_HEIGHT:.2f}) "
+                f"foot_in_contact={bool(foot_in_contact[0].item())} "
+                f"within_square={bool(within_blue_square[0].item())}"
+                f"(dist={dist_to_blue[0].item():.2f}, half_side={_blue_half_side:.2f}) "
+                f"settle={env._blue_settle_count[0].item()}/{_BLUE_SETTLE_STEPS} "
+                f"speed_ok={bool((foot_speed[0] < landing_speed_threshold).item())}"
+                f"(foot_speed={foot_speed[0].item():.2f}<{landing_speed_threshold:.2f}) "
+                f"-> landed={bool(env._blue_landed[0].item())} "
+                f"was_free={bool(env._blue_landed_was_free[0].item())} "
+                f"genuine={genuine_now}",
+                file=_sys.stderr,
+            )
+
         # DEBUG 2026-07-23 (TEMPORARY, remove after landing-gate investigation):
         # expose per-step internals for play.py's analytics printer so the
         # failing condition can be read directly instead of guessed at.
@@ -1057,6 +1046,7 @@ def _get_reach_target_y(
         env._blue_dbg_speed = foot_speed
         env._blue_dbg_contact = foot_in_contact
         env._blue_dbg_within_square = within_blue_square  # NEW 2026-09-17 (user request, viewer flags for every blue_ball_landed condition) -- isolated out of `candidate` so the viewer can show it on its own
+        env._blue_dbg_genuine_lift = genuinely_lifted_and_descended  # NEW 2026-09-19 (user request) -- was missing from every diagnostic view, the actual gate most likely to fail while dist/contact/airborne all look fine
         env._blue_dbg_candidate = candidate
         env._blue_dbg_first_call = is_first_call_this_tick
         env._blue_dbg_wide = wide
@@ -2787,7 +2777,7 @@ def start_blue_transition_track(
     ball_name: str,
     asset_cfg: SceneEntityCfg = _DEFAULT_FEET_CFG,
     sigma: float = 5.0,
-    window_frac_of_remaining: float = 0.55,
+    window_frac_of_remaining: float = 0.3,  # FIX 2026-09-19 (user request): 0.55 -> 0.05 -> 0.3.
     min_window_steps: int = 5,
     lift_target_height: float = 0.10,
 ) -> torch.Tensor:
@@ -2889,9 +2879,10 @@ def orange_foot_proximity(
 
     behind = _ball_is_behind(env, ball_name)
     # FIX 2026-09-17 (user request, "enable orange ball footreach only
-    # after 40 steps the env started"): gated off for the first 40 steps of
+    # after 40 steps the env started"): gated off for the first N steps of
     # every episode, on top of the existing wide/behind gates.
-    _ORANGE_FOOT_PROXIMITY_MIN_STEP = 40
+    # FIX 2026-09-19 (user request, "let it turn on at step 25 already"): 40 -> 25.
+    _ORANGE_FOOT_PROXIMITY_MIN_STEP = 25
     after_warmup = env.episode_length_buf > _ORANGE_FOOT_PROXIMITY_MIN_STEP
     return torch.exp(-sigma * dist) * env._orange_wide.float() * (~behind).float() * after_warmup.float()
 
