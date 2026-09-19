@@ -949,12 +949,19 @@ class ball_difficulty_curriculum:
 
         self._last_update = env.common_step_counter
 
-        # Fraction of just-completed (resetting) episodes that had a genuine
-        # save (env._softstop_flag), EMA-smoothed on this class's OWN fast
-        # track (_smoothed_softstop_success_fast) -- domain_rand_curriculum
+        # FIX 2026-09-19 (user request, "change it [to stopball]... i think
+        # it is better"): success signal switched from env._softstop_flag
+        # (strict: correct foot + full velocity reversal + landing-gate) to
+        # env._sb_flag (stopball's own flag: any correct-foot deflection
+        # past delta_vx > 1.0, no landing-gate/reversal requirement) --
+        # same per-episode sticky-latch semantics (reset on episode start,
+        # OR'd in when fired), so this is a drop-in swap of WHICH condition
+        # counts as "success," not a change to the EMA/running-max mechanism
+        # itself. EMA-smoothed on this class's OWN fast track
+        # (_smoothed_softstop_success_fast) -- domain_rand_curriculum
         # smooths the same raw signal on its own, separately-slower track,
         # see that class's docstring.
-        softstop_flag = getattr(env, "_softstop_flag", None)
+        softstop_flag = getattr(env, "_sb_flag", None)
         if len(env_ids) > 0 and softstop_flag is not None:
             raw_success_rate = softstop_flag[env_ids].float().mean().item()
         else:
@@ -1056,7 +1063,11 @@ class domain_rand_curriculum:
 
         self._last_update = env.common_step_counter
 
-        softstop_flag = getattr(env, "_softstop_flag", None)
+        # FIX 2026-09-19 (user request, matching ball_difficulty_curriculum's
+        # own same-day change): success signal switched from
+        # env._softstop_flag to env._sb_flag (stopball's own flag) -- see
+        # that class's matching comment for the full reasoning.
+        softstop_flag = getattr(env, "_sb_flag", None)
         if len(env_ids) > 0 and softstop_flag is not None:
             raw_success_rate = softstop_flag[env_ids].float().mean().item()
         else:

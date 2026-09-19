@@ -321,12 +321,18 @@ def goalkeeper_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
         # skew_power=1), and the EMA itself responds faster (alpha_scale
         # 0.35 vs 0.2), so domain_rand should spend meaningfully less time
         # pinned near 0.
+        # FIX 2026-09-19 (user request, "make domain rand linear again same
+        # as ball difficulty basically"): skew_power 2.0 -> 1.0, i.e. no
+        # power-law skew at all -- skewed_success_rate == smoothed_success_rate,
+        # matching ball_difficulty_curriculum's own plain (unskewed)
+        # running-max pass-through. alpha_scale left at 0.35 (pacing, not
+        # shape -- not what was asked).
         cfg.curriculum["domain_rand"] = CurriculumTermCfg(
             func=gk_mdp.domain_rand_curriculum,
             params={
                 "update_interval": 500,
                 "alpha_scale":     0.35,
-                "skew_power":      2.0,
+                "skew_power":      1.0,
             },
         )
         # RE-REGISTERED 2026-09-07 (user request, "make curriculum for that"):
