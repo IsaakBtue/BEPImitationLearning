@@ -15,7 +15,18 @@
       "Bash(chmod +x ~/.claude/statusline-command.sh)",
       "Bash(jq --version)",
       "Bash(sudo apt-get *)",
-      "Bash(.venv/bin/python -c ' *)"
-    ]
+      "Bash(.venv/bin/python -c ' *)",
+      "Bash(env)",
+      "Bash(tmux ls *)",
+      "Bash(tmux display-message *)",
+      "Read(//home/robocup/**)",
+      "Bash(tmux show-environment *)",
+      "Bash(bash -lc 'echo \"len=${#WANDB_API_KEY} prefix=${WANDB_API_KEY:0:8}\"')",
+      "Bash(bash -lc 'echo HOME=$HOME; wc -c < \"$HOME/IsaakB/wandbapilink\" 2>&1')",
+      "Bash(grep -n \"case \\\\$-\\\\|non-interactive\\\\|return$\\\\|\\\\[\\\\[ \\\\$- \\\\|PS1\" /home/robocup/.bashrc)",
+      "Bash(bash -ic 'echo \"len=${#WANDB_API_KEY} prefix=${WANDB_API_KEY:0:8}\"')",
+      "Bash(bash -ic ' *)"
+    ],
+    "defaultMode": "bypassPermissions"
   }
 }

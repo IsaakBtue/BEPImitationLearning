@@ -1,1 +1,1 @@
-uv run sgk_play Mjlab-BeyondAMP-Goalkeeper-T1-MultiDisc-WithOverlay --checkpoint-file logs/rsl_rl/intercept_simple_goalkeeper_multidisc/2026-09-14_03-19-41_6144_phase3final_ba53bc0_2026-09-14_03-19/model_18250.pt --difficulty 1.0 --domain-rand 0 --force-region left_far
+uv run sgk_train Mjlab-BeyondAMP-Goalkeeper-T1-MultiDisc --num-envs 6144 --agent.max-iterations 20000 --agent.run-name 6144_forcestart_35165d5_2026-09-19

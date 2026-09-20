@@ -15,7 +15,10 @@ Adaptation of `Humanoid-Goalkeeper/` to target **Booster Robotics T1** using **I
 ### `SimpleGoalKeeper/` — Foot-only goalkeeper (MuJoCo-Warp + beyondAMP)
 A new, simplified goalkeeper experiment targeting **Booster T1** with **feet only** (no hand catching). Uses **mjlab** (MuJoCo-Warp) and **beyondAMP** instead of Isaac Gym. The goal is to achieve robust foot-based ball interception before adding arm motions. This track diverges intentionally from the paper approach: it uses a simpler single-discriminator AMP, MuJoCo physics, and foot-only rewards.
 
-**Key distinction**: `Humanoid-Goalkeeper/` and `Imitationlearningbooster/` use hands; `SimpleGoalKeeper/` uses feet only. When reading patterns from the upstream paper code, check whether a decision (reward weight, spawn range, observation term) was designed for hands and needs adaptation for feet.
+### `interceptV2DualDis/` — SimpleGoalKeeper v2 experiment (git worktree, `v2-blue-ball-waypoint` branch)
+Not a separate track — a second working checkout of the same `simple-goalkeeper` package as `SimpleGoalKeeper/`, checked out on the `v2-blue-ball-waypoint` branch. Same Phase 1 foot-only scope and "verify against G1 first" rule as `SimpleGoalKeeper/` (see `interceptV2DualDis/CLAUDE.md` for the full divergence log). Used for the two-stage blue/green waypoint interception mechanism and dual-discriminator (region-conditioned AMP) experiments that would otherwise conflict with `SimpleGoalKeeper/`'s own in-progress training runs on `master`.
+
+**Key distinction**: `Humanoid-Goalkeeper/` and `Imitationlearningbooster/` use hands; `SimpleGoalKeeper/` and `interceptV2DualDis/` use feet only. When reading patterns from the upstream paper code, check whether a decision (reward weight, spawn range, observation term) was designed for hands and needs adaptation for feet.
 
 ---
 
